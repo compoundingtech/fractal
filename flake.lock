@@ -7,17 +7,17 @@
         "tsgo": "tsgo"
       },
       "locked": {
-        "lastModified": 1793249746,
-        "narHash": "sha256-0jklcur3TLRMeIwSl64QWBz+bfyuJOkqlB/4nS11kAQ=",
+        "lastModified": 1794266620,
+        "narHash": "sha256-jslM3CWhsKRRA3zFqEUKlR+4z8wvshbSP0kgA6QIqAk=",
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "d883d18e3ad7609602db0ec8687c14a77625b905",
+        "rev": "15ff7fa8968469c2c99a647888a999f9d62ffde5",
         "type": "github"
       },
       "original": {
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "d883d18e3ad7609602db0ec8687c14a77625b905",
+        "rev": "15ff7fa8968469c2c99a647888a999f9d62ffde5",
         "type": "github"
       }
     },
@@ -52,17 +52,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1792912755,
-        "narHash": "sha256-Zs+3vv/BbQTFVbuMpC3+ENdnjVIDiOwlrPjyhP23RUk=",
+        "lastModified": 1793742712,
+        "narHash": "sha256-xQ0Fh8c+Ujf2BbSzs00rURaPRC9MNukbSBx89itl/SM=",
         "owner": "compoundingtech",
         "repo": "fabric",
-        "rev": "1e6e93e9a662a40749f91d63eeecc4e98de114bd",
+        "rev": "19e7f8964ce8305aeb8c200fb717967aa03f738f",
         "type": "github"
       },
       "original": {
         "owner": "compoundingtech",
         "repo": "fabric",
-        "rev": "1e6e93e9a662a40749f91d63eeecc4e98de114bd",
+        "rev": "19e7f8964ce8305aeb8c200fb717967aa03f738f",
         "type": "github"
       }
     },
@@ -138,6 +138,49 @@
       "original": {
         "owner": "numtide",
         "repo": "flake-utils",
+        "type": "github"
+      }
+    },
+    "fractal-fixture": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794265163,
+        "narHash": "sha256-pGJRiUHcongVBrYEWT2w3TZTS8UdcZJjHRJvTDhrpYg=",
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "e2721e52463428b4ff655addee129cecd2839763",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "e2721e52463428b4ff655addee129cecd2839763",
+        "type": "github"
+      }
+    },
+    "mergemaster": {
+      "inputs": {
+        "effect-utils": [
+          "effect-utils"
+        ],
+        "fractal-fixture": "fractal-fixture",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "python-oracle": "python-oracle"
+      },
+      "locked": {
+        "lastModified": 1794298270,
+        "narHash": "sha256-UeHYs08Nzqy50cvlWu1n5Z0bR2I/J2Ectj7ztd5gfNI=",
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "cff667cd53bdb6c024f9d7a06259b8f9a3fbb0cb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "ref": "v0.6.0",
+        "repo": "mergemaster",
         "type": "github"
       }
     },
@@ -262,17 +305,34 @@
         ]
       },
       "locked": {
-        "lastModified": 1792793749,
-        "narHash": "sha256-SvBLC5XDieiklYrFq4WlCQCYB+UHA2QGg2n5kzXPNvU=",
+        "lastModified": 1794522227,
+        "narHash": "sha256-vn24EWrRzI89Se1gyygo3adqzc9iQaJtpotGHuPAvd4=",
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
+        "rev": "d0e816ac4129c97f39473855bb4fe527701ea07c",
         "type": "github"
       },
       "original": {
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
+        "rev": "d0e816ac4129c97f39473855bb4fe527701ea07c",
+        "type": "github"
+      }
+    },
+    "python-oracle": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793953851,
+        "narHash": "sha256-NL/NWSn+YfpwP7h+CGZkeNmRh9hnQOH3OkF9GtyPXgM=",
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "1392a516e969be46d9516d904b76a4db98c55030",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "mergemaster",
+        "rev": "1392a516e969be46d9516d904b76a4db98c55030",
         "type": "github"
       }
     },
@@ -282,6 +342,7 @@
         "fabric": "fabric",
         "fenix": "fenix",
         "flake-utils": "flake-utils_2",
+        "mergemaster": "mergemaster",
         "nixpkgs": "nixpkgs_3",
         "pty": "pty"
       }

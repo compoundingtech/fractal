@@ -12,6 +12,7 @@
           const saved = JSON.parse(localStorage.getItem('wf.ui@1') ?? 'null')
           const entry = saved?.version === 1 ? saved.entries?.['round2.scheme'] : undefined
           if (entry?.version === 1 && (entry.value === 'dark' || entry.value === 'light')) scheme = entry.value
+          if (entry?.version === 1 && entry.value === 'system') scheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
         } catch {}
         const root = document.documentElement
         root.dataset.scheme = scheme
@@ -55,6 +56,7 @@
         const url = new URL('/v1/client/collections/stream', location.href)
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
         url.searchParams.set('traceparent', traceparent)
+        url.searchParams.set('client', "__FRACTAL_WEB_CLIENT__")
         let socket
         try {
           // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: deploy only after every receiver runs #3430; sunset 2026-11-01.

@@ -9,6 +9,7 @@ pub mod adapt;
 mod alerts;
 mod answers;
 mod attach;
+mod availability;
 mod clickable;
 mod content;
 mod context;
@@ -33,6 +34,7 @@ mod terminal_tab;
 #[cfg(test)]
 #[path = "../../tests/support/attach_default.rs"]
 mod attach_default;
+pub(crate) mod freshness;
 pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
 pub use lastrun::note_exit as lastrun_note_exit;
@@ -40,16 +42,19 @@ pub use lastrun::terminal_gone as lastrun_terminal_gone;
 mod glass_store;
 mod lastrun;
 pub(crate) mod open_timing;
+pub(crate) mod attach_trace;
 pub mod layout;
 pub mod live;
 pub(crate) mod slo;
 pub mod pane;
 pub mod playback;
 mod drafts_store;
+mod read_store;
 mod prefs;
 mod recent;
 mod resource_sidebar;
-mod arrangement_keys;
+#[allow(dead_code)] // PR 17 activates the complete v2 path together.
+mod sidebar_store;
 mod observed_resources;
 mod pty;
 pub mod requests;
@@ -91,7 +96,7 @@ use fractal_conversation_ui::pane::order;
 use fractal_conversation_ui::{PaneIntent, PaneState, Selection};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{self, Write},
     rc::Rc,
     time::{Duration, Instant},
@@ -223,6 +228,9 @@ pub enum Effect {
         reason: Option<String>,
         /// A structured request's named answer, by id.
         answer: Option<String>,
+        /// Notes on named answers other than `answer`, as `(answer id, text)`; sent only to a
+        /// Fractal that takes them (`person-answer-option-notes`).
+        option_notes: Vec<(String, String)>,
     },
     LaunchRevise {
         id: String,
@@ -297,7 +305,30 @@ pub enum Effect {
     Forget {
         entry: String,
     },
+    /// Move the person's read position for a conversation in st (st keeps the larger); queued by
+    /// `Ui::queue_read_advances`, coalesced per conversation.
+    AdvanceReadPosition {
+        conversation: String,
+        at_ms: i64,
+    },
+    /// Put one of the person's attention rows off until `until`, an RFC 3339 instant, or bring
+    /// it back with `None` (`attention.snooze`): every device of theirs hides it meanwhile.
+    Snooze {
+        id: String,
+        until: Option<String>,
+    },
+    /// Set an ask aside with the person's own dismissal (`attention.dismiss`): its asker reads
+    /// `dismissed`, with `text` when the person wrote some.
+    Dismiss {
+        id: String,
+        text: Option<String>,
+    },
 }
+
+/// How long l puts an item off for.
+pub(crate) const SNOOZE: chrono::TimeDelta = chrono::TimeDelta::hours(3);
+/// The l button's words, naming how long [`SNOOZE`] is.
+pub(crate) const SNOOZE_LABEL: &str = "Remind me in 3h";
 
 /// How much longer than the usual flash a refusal's reason stays up.
 pub(crate) const FLASH_REFUSAL: Duration = Duration::from_secs(20);
@@ -417,9 +448,13 @@ pub struct Ui {
     resource_sidebar: resource_sidebar::Sidebar,
     /// Documents read so far, the list, and the documents missions name.
     documents: documents::Documents,
+    /// The person's own availability and directive note, as last read.
+    availability: availability::Availability,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
+    /// Sidebar columns chosen in this terminal UI; absent follows the responsive default.
+    sidebar_width: Option<u16>,
     /// Reply context follows the conversation draft through navigation.
     replies: HashMap<String, String>,
     /// A menu owns its press through release, even after an action closes it.
@@ -461,8 +496,9 @@ pub struct Ui {
     pub(crate) said: Option<(String, Result<fractal_client::ConversationSearch, String>)>,
     /// The named answer chosen on the focused structured request, before Enter sends it.
     answering: Option<usize>,
-    /// A decision's "request changes" answer, chosen: its id goes with the words typed next.
-    changes_answer: Option<String>,
+    /// Note bindings belong to requests, not to the transient highlighted row.
+    note_answers: HashMap<String, String>,
+    answer_errors: HashMap<String, String>,
     /// Voice mode: the speech helper listening for one input.
     pub(crate) voice: Option<voice::VoiceState>,
     /// Inputs whose text came from voice; their next message is tagged `dictated`.
@@ -498,10 +534,11 @@ pub struct Ui {
     new_mission: Option<([String; 4], usize)>,
     /// A device awaiting a confirmed revoke.
     revoke: Option<String>,
-    /// Home items put off until later. Demo only: kept in memory on this machine.
-    snoozed: HashSet<String>,
     /// Where this device keeps unsent drafts: none in tests and the demo, which touch nothing.
     pub(crate) drafts_path: Option<std::path::PathBuf>,
+    /// Where the person last read each conversation: st's positions merged with this device's,
+    /// cached on the device; nothing is written without a file (tests and the demo).
+    pub(crate) reads: read_store::ReadPositions,
     /// The drafts as last read from or written to that file.
     drafts_saved: HashMap<String, String>,
     /// When they were last written, and until when to leave a failing write alone.
@@ -696,6 +733,72 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
+    /// Call only after terminal presentation succeeds. Advance through visible prose entries,
+    /// resolving their absolute timestamps from the transcript rather than the newer roster.
+    pub(crate) fn read_presented_conversations(
+        &mut self,
+        timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>,
+    ) {
+        if self.help || self.popover.is_some() || self.glasses.palette_open() {
+            return;
+        }
+        let shown: Vec<(String, i64)> = {
+            let frame = self.frame.borrow();
+            frame
+                .panes
+                .iter()
+                .filter_map(|pane| {
+                    let id = pane.key.strip_prefix("chat:")?;
+                    let entries = self.world.conversations.get(id)?.ready()?;
+                    let timeline = timelines.get(id)?;
+                    let at = pane.entries.iter().enumerate().filter_map(|(index, (entry_id, start))| {
+                        let end = pane.entries.get(index + 1).map_or(pane.total, |(_, line)| *line);
+                        if !pane.entry_visible(*start, end, &frame.covers) {
+                            return None;
+                        }
+                        let entry = entries.iter().find(|entry| entry.id == *entry_id)?;
+                        match &entry.body {
+                            Body::Assistant(text) if !text.is_empty() => {}
+                            Body::Mail { .. } => {}
+                            _ => return None,
+                        }
+                        let source = timeline.items.iter().find(|source| {
+                            entry_id == &source.id
+                                || entry_id.strip_prefix(&source.id).is_some_and(|suffix| suffix.starts_with('#'))
+                                || matches!(&source.body, fractal_client::TimelineBody::Message(message) if &message.message_id == entry_id)
+                        })?;
+                        match &source.body {
+                            fractal_client::TimelineBody::Content(_) if source.role == fractal_client::TimelineRole::Assistant => {}
+                            fractal_client::TimelineBody::Message(message)
+                                if source.role != fractal_client::TimelineRole::User
+                                    && !message.from.as_deref().is_some_and(|from| from.starts_with("person/"))
+                                    && !message.author.as_deref().is_some_and(|author| author.starts_with("person/")) => {}
+                            _ => return None,
+                        }
+                        read_store::at_ms(&source.timestamp)
+                    }).max()?;
+                    Some((id.to_owned(), at))
+                })
+                .collect()
+        };
+        let mut moved = false;
+        for (id, at) in shown {
+            moved |= self.reads.advance(&id, at);
+        }
+        if moved {
+            self.refresh_tab_statuses();
+        }
+    }
+
+    /// Queue the read positions st should hear about now: what this device read beyond what st
+    /// confirmed, one in flight and one every `read_store::COALESCE` per conversation, and only
+    /// while live against a daemon that keeps positions.
+    pub(crate) fn queue_read_advances(&mut self, now: Instant, live: bool) {
+        for (conversation, at_ms) in self.reads.due(now, live) {
+            self.effects.push(Effect::AdvanceReadPosition { conversation, at_ms });
+        }
+    }
+
     /// Release the pixels of every image more than a screen away from what the last frame
     /// showed, in every pane; an image in a tab not drawn is released too.
     pub(crate) fn release_far_images(&mut self) {
@@ -773,7 +876,7 @@ impl Ui {
         let mut resource_sidebar = resource_sidebar::Sidebar::default();
         resource_sidebar.observe(&world);
         Self {
-            tab_statuses: glass::TabStatuses::new(&world, &HashSet::new(), &HashSet::new()),
+            tab_statuses: glass::TabStatuses::new(&world, &HashSet::new()),
             world,
             selected: [0; 6],
             keyboard_enhanced: false,
@@ -792,9 +895,11 @@ impl Ui {
             help: false,
             resource_sidebar,
             documents: documents::Documents::default(),
+            availability: availability::Availability::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
+            sidebar_width: None,
             replies: HashMap::new(),
             context_button: None,
             middle_tab: None,
@@ -819,7 +924,8 @@ impl Ui {
             said: None,
             voice: None,
             answering: None,
-            changes_answer: None,
+            note_answers: HashMap::new(),
+            answer_errors: HashMap::new(),
             dictated: HashSet::new(),
             agent_details: true,
             kdl: false,
@@ -834,8 +940,8 @@ impl Ui {
             leader: false,
             new_mission: None,
             revoke: None,
-            snoozed: HashSet::new(),
             drafts_path: None,
+            reads: read_store::ReadPositions::default(),
             drafts_saved: HashMap::new(),
             drafts_wrote: Instant::now(),
             drafts_backoff: None,
@@ -875,7 +981,8 @@ impl Ui {
         match effect {
             Effect::Attention { id, .. }
             | Effect::LaunchRevise { id, .. }
-            | Effect::Reply { id, .. } => {
+            | Effect::Reply { id, .. }
+            | Effect::Dismiss { id, .. } => {
                 self.acted.insert(id.clone());
             }
             _ => {}
@@ -1013,14 +1120,16 @@ impl Ui {
     /// This device's remembered choices, read once when Fractal TUI starts.
     pub(crate) fn load_prefs(&mut self) {
         if let Some(path) = prefs::path() {
-            // Simplified is the default, as on the phone (Nathan, 2026-10-04); a device that
-            // chose the full view keeps it.
-            let loaded = prefs::load(&path);
-            self.simple = simplified(&loaded);
-            self.conversation_first = prefs::conversation_first(&loaded);
-            self.terminal_fallback = loaded.terminal_fallback != Some(false);
-            self.agent_details = loaded.agent_details != Some(false);
+            self.apply_prefs(prefs::load(&path));
         }
+    }
+
+    fn apply_prefs(&mut self, loaded: prefs::Prefs) {
+        self.simple = simplified(&loaded);
+        self.conversation_first = prefs::conversation_first(&loaded);
+        self.terminal_fallback = loaded.terminal_fallback != Some(false);
+        self.agent_details = loaded.agent_details != Some(false);
+        self.sidebar_width = loaded.sidebar_width;
     }
 
     /// Bring back what was typed and not sent when the last Fractal TUI ended, read once at start. A box
@@ -1108,6 +1217,7 @@ impl Ui {
                     conversation_first: self.conversation_first,
                     terminal_fallback: Some(self.terminal_fallback),
                     agent_details: Some(self.agent_details),
+                    sidebar_width: self.sidebar_width,
                 },
             );
         }
@@ -1526,6 +1636,12 @@ impl Ui {
         if self.paste_into_palette(&first) {
             return;
         }
+        if self.focused_pane() == Some(Pane::Availability)
+            && let Some(typed) = self.availability.typed_mut()
+        {
+            typed.push_str(&first);
+            return;
+        }
         if self.mission_form_focused()
             && let Some((fields, focus)) = self.new_mission.as_mut()
         {
@@ -1720,7 +1836,7 @@ impl Ui {
 
     fn listing_for(&self, tab: usize, width: usize) -> Listing {
         match tab {
-            0 => screens::home_list(&self.world, &self.snoozed, &self.closed),
+            0 => screens::home_list(&self.world, &self.closed),
             1 if self.tree => screens::agents_tree(&self.world, self.spinner(), width),
             1 => screens::agents_list(&self.world, self.spinner(), width),
             2 if self.tree => screens::missions_tree(&self.world, self.spinner(), self.system),
@@ -1829,7 +1945,14 @@ impl Ui {
         if self.tab() == 1 {
             self.selected_id()
         } else {
-            self.attention_focus()
+            self.attention_focus().map(|id| self.answer_draft_key(&id))
+        }
+    }
+
+    fn answer_draft_key(&self, id: &str) -> String {
+        match self.note_answers.get(id) {
+            Some(answer) => format!("answer:{id}:{answer}"),
+            None => id.to_owned(),
         }
     }
 
@@ -2424,22 +2547,22 @@ impl Ui {
                 thread,
             }
         });
-        let text = self.conversation_state.drafts.get(key).map(String::as_str);
+        let draft_key = self.answer_draft_key(key);
+        let text = self.conversation_state.drafts.get(&draft_key).map(String::as_str);
         Drafts {
             text,
-            cursor: self.cursor.at(key, text.unwrap_or("")),
+            cursor: self.cursor.at(&draft_key, text.unwrap_or("")),
             editing: self.editing,
             confirm: self.confirm,
             answering: self.answering,
-            needs_words: self.changes_answer.as_ref().and_then(|wanted| {
-                self.structured_request().and_then(|(_, request)| {
-                    request
-                        .answers
-                        .iter()
-                        .find(|answer| &answer.id == wanted)
-                        .map(|answer| answer.label.clone())
-                })
-            }),
+            note_answer: self.note_answers.get(key).cloned(),
+            answer_error: self.answer_errors.get(key).map(String::as_str),
+            noted_answers: self.structured_request().map(|(_, request)| {
+                request.answers.iter().filter(|answer| {
+                    self.conversation_state.drafts.get(&format!("answer:{key}:{}", answer.id))
+                        .is_some_and(|text| !text.trim().is_empty())
+                }).map(|answer| answer.id.clone()).collect()
+            }).unwrap_or_default(),
             chat,
             // In Inbox the draft's key is the alert's id: no listing is built for it per frame.
             form: self.form_state(key),
@@ -2529,6 +2652,7 @@ impl Ui {
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
             Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
             Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
+            Pane::Availability => self.availability.page(self.live, width, &chrono::Local::now()),
         };
         self.pane(buf, &pane.key(), area, doc, false);
     }
@@ -3023,6 +3147,17 @@ impl Ui {
             }
             *state
         };
+        if freshness::enabled() && key.starts_with("chat:") {
+            tracing::debug!(
+                target: "fractal_tui::freshness",
+                stage = "document", pane = key,
+                document_last_id = doc.entries.last().map(|(id, _)| id.as_str()),
+                line_count = total, follow = state.follow, top = state.top,
+                total, height,
+                main_pane_key = ?self.main_pane_key(),
+                focused_pane = ?self.focused_pane().map(|pane| pane.key()),
+            );
+        }
         let top = state.top;
         if matches!(
             Pane::parse(key),
@@ -3745,7 +3880,7 @@ impl Ui {
         // Tab badges are a compact form: the activity before the title, then what waits on you.
         marks.lines(text::wrap(
             &[text::run(
-                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts",
+                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts; • after the title, it said something since you last read it",
                 theme::soft(),
             )],
             column,
@@ -3804,6 +3939,10 @@ impl Ui {
                 ),
                 ("ctrl+o", "zoom the split, and back"),
                 ("ctrl+s", "show or hide the sidebar"),
+                (
+                    "sidebar: ctrl+←/→",
+                    "narrow/widen; ctrl+home resets the width",
+                ),
                 ("ctrl+g", "another space, or a new one"),
                 ("1-5", "open the palette at a section"),
             ],
@@ -3966,18 +4105,60 @@ impl Ui {
         }
     }
 
-    /// An answer that asks for changes needs them in words: open the box for them at once, with
-    /// the answer remembered, so a person who chose it can type (Nathan, 2026-10-12: "it says it
-    /// needs my words but I can't type anywhere"). False for an answer that needs none.
+    /// Every saved, nonblank note on a named answer of request `id` other than `chosen`, in the
+    /// request's order, as `(answer id, text)`. These go with the answer; none is dropped.
+    fn option_notes(&self, id: &str, chosen: Option<&str>) -> Vec<(String, String)> {
+        let Some(AttentionKind::Request { structured: Some(request), .. }) = self
+            .world
+            .attention
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| &item.kind)
+        else {
+            return Vec::new();
+        };
+        request
+            .answers
+            .iter()
+            .filter(|answer| Some(answer.id.as_str()) != chosen)
+            .filter_map(|answer| {
+                let text = self.conversation_state.drafts.get(&format!("answer:{id}:{}", answer.id))?;
+                let text = text.trim();
+                (!text.is_empty()).then(|| (answer.id.clone(), text.to_owned()))
+            })
+            .collect()
+    }
+
+    /// Required changes use the same option-bound editor as optional notes.
     fn ask_for_words(&mut self, answer: &fractal_client::RequestAnswerOption) -> bool {
         if answer.outcome.as_deref() != Some("request_changes") {
             return false;
         }
-        self.changes_answer = Some(answer.id.clone());
+        let Some((id, _)) = self.structured_request() else { return false };
+        self.note_answers.insert(id.clone(), answer.id.clone());
+        self.answer_errors.remove(&id);
         self.answering = None;
         self.editing = true;
-        self.flash(format!("“{}”: write the changes, then Enter", answer.label));
         true
+    }
+
+    fn start_answer_note(&mut self) {
+        let Some((id, request)) = self.structured_request() else { return };
+        if !screens::can_note(&request, self.answering) {
+            return;
+        }
+        if let Some(answer) = self.answering.and_then(|index| request.answers.get(index)) {
+            self.note_answers.insert(id.clone(), answer.id.clone());
+        } else {
+            self.note_answers.remove(&id);
+        }
+        self.answer_errors.remove(&id);
+        self.answering = None;
+        self.editing = true;
+        if let Some(chat) = &mut self.chat {
+            chat.editing = false;
+        }
     }
 
     fn answer_key(&mut self, key: KeyEvent) -> bool {
@@ -3988,12 +4169,17 @@ impl Ui {
             self.answering = None;
             return false;
         };
-        let last = request.answers.len().saturating_sub(1);
+        let last = (request.answers.len() + usize::from(request.custom)).saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.answering = Some(index.saturating_sub(1)),
             KeyCode::Down | KeyCode::Char('j') => self.answering = Some((index + 1).min(last)),
             KeyCode::Esc => self.answering = None,
+            KeyCode::Char('c') => self.start_answer_note(),
             KeyCode::Enter => {
+                if index == request.answers.len() && request.custom {
+                    self.start_answer_note();
+                    return true;
+                }
                 self.answering = None;
                 let Some(answer) = request.answers.get(index) else {
                     return true;
@@ -4004,10 +4190,12 @@ impl Ui {
                 }
                 if self.live {
                     self.effects.push(Effect::Attention {
-                        id,
+                        id: id.clone(),
                         action: "work.done".into(),
-                        reason: Some(answer.label.clone()),
+                        reason: self.conversation_state.drafts
+                            .get(&format!("answer:{id}:{}", answer.id)).cloned(),
                         answer: Some(answer.id.clone()),
+                        option_notes: self.option_notes(&id, Some(&answer.id)),
                     });
                     self.flash(format!("Answering “{}”…", answer.label));
                 } else {
@@ -4029,7 +4217,7 @@ impl Ui {
             }
             // The other ways to answer or set the card aside are always reachable: write in
             // words (c), chat about it (t), dismiss it (x), go to the agent (g).
-            KeyCode::Char('c' | 't' | 'x' | 'g') => return false,
+            KeyCode::Char('t' | 'x' | 'g') => return false,
             _ => {}
         }
         true
@@ -4139,6 +4327,10 @@ impl Ui {
             self.middle_tab = None;
             self.terminal_selecting = false;
             self.cancel_drag();
+        }
+        // Back from another window: what was decided there may have changed availability.
+        if event == Event::FocusGained {
+            self.availability.refresh();
         }
         let focused = self.input_terminal();
         match event {
@@ -4691,7 +4883,6 @@ impl Ui {
             match key.code {
                 KeyCode::Esc => {
                     self.editing = false;
-                    self.changes_answer = None;
                 }
                 KeyCode::Enter => self.submit(),
                 // Ctrl+Y speaks into the input instead of typing.
@@ -4741,8 +4932,10 @@ impl Ui {
             KeyCode::PageDown => self.scroll_main(self.page() as isize),
             KeyCode::Home => self.scroll_main(-100_000),
             KeyCode::End => {
+                self.freshness_panes("end_before");
                 self.follow_latest();
                 self.scroll_main(100_000);
+                self.freshness_panes("end_after");
             }
             KeyCode::Char('x') if self.tab() == 2 => self.system = !self.system,
             KeyCode::Enter if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_tool(),
@@ -4842,10 +5035,69 @@ impl Ui {
                 action: "work.done".into(),
                 reason: Some("Read".into()),
                 answer: Some("read".into()),
+                option_notes: Vec::new(),
             });
         } else {
             self.flash("Read · demo: nothing was sent");
         }
+    }
+
+    /// l: put the focused item off for [`SNOOZE`] on every device of the person, or bring one
+    /// already put off back now. st keeps it; the next attention frame hides or shows it here.
+    fn snooze(&mut self) {
+        let Some(item) = self.current_item() else {
+            return;
+        };
+        let (id, back) = (item.id.clone(), item.snoozed(self.world.at));
+        let until = (!back).then(|| chrono::Utc::now() + SNOOZE);
+        let hours = SNOOZE.num_hours();
+        if self.live {
+            self.effects.push(Effect::Snooze {
+                id,
+                until: until.map(|until| until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+            });
+            self.flash(if back { "Bringing it back…".to_owned() } else { format!("Putting it off for {hours}h…") });
+        } else {
+            // The demo's world is its st: keep the snooze on its row, as st would.
+            if let Load::Ready(items) = &mut self.world.attention
+                && let Some(item) = items.iter_mut().find(|item| item.id == id)
+            {
+                item.snoozed_until = until.map(|until| until.fixed_offset());
+            }
+            self.refresh_tab_statuses();
+            let index = self.selected[0];
+            self.select(index);
+            self.flash(if back {
+                "Brought back · demo: nothing was sent".to_owned()
+            } else {
+                format!("Put off for {hours}h · demo: nothing was sent")
+            });
+        }
+    }
+
+    /// What dismissing request `id` says to its asker: every note on its answers as
+    /// `label: note`, a line each, so no note the person wrote is lost; `None` when they wrote
+    /// none. Only for a request without its own `dismiss` answer, which is answered instead.
+    fn dismissal_text(&self, id: &str) -> Option<String> {
+        let Some(AttentionKind::Request { structured: Some(request), .. }) =
+            self.world.attention.items().iter().find(|item| item.id == id).map(|item| &item.kind)
+        else {
+            return None;
+        };
+        let text = self
+            .option_notes(id, None)
+            .iter()
+            .map(|(answer, note)| {
+                let label = request
+                    .answers
+                    .iter()
+                    .find(|option| &option.id == answer)
+                    .map_or(answer.as_str(), |option| option.label.as_str());
+                format!("{label}: {note}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (!text.is_empty()).then_some(text)
     }
 
     fn current_kind(&self) -> Option<&'static str> {
@@ -5034,19 +5286,17 @@ impl Ui {
                     )),
                     (_, 'g') => self.go_to_subject(),
                     (_, 't') => self.start_chat(),
-                    ("message", 'l') => {
-                        if let Some(id) = self.selected_id() {
-                            self.snoozed.insert(id);
-                            self.refresh_tab_statuses();
-                            let index = self.selected[0];
-                            self.select(index);
-                            self.flash("Put off until later · demo, this machine only");
+                    (_, 'l') => self.snooze(),
+                    ("request", 'c') => {
+                        if self.structured_request().is_some() {
+                            self.start_answer_note();
+                        } else {
+                            self.editing = true;
                         }
                     }
-                    (
-                        "review" | "feedback" | "launch" | "message" | "revision" | "request",
-                        'c',
-                    ) => self.editing = true,
+                    ("review" | "feedback" | "launch" | "message" | "revision", 'c') => {
+                        self.editing = true;
+                    }
                     // An unplaced row answers only as st lists for it.
                     ("unplaced", 'c') => {
                         if self
@@ -5505,36 +5755,38 @@ impl Ui {
     }
 
     fn submit(&mut self) {
-        let Some(id) = self.draft_key() else { return };
+        let Some(draft_key) = self.draft_key() else { return };
+        let Some(id) = (if self.tab() == 1 { self.selected_id() } else { self.attention_focus() }) else { return };
+        self.answer_errors.remove(&id);
         let images = if self.tab() == 1 {
             self.attachments.get(&id).cloned().unwrap_or_default()
         } else {
             Vec::new()
         };
-        let draft = match self.conversation_state.send(&id) {
+        let draft = match self.conversation_state.send(&draft_key) {
             Some(PaneIntent::Send(draft)) => Some(draft),
+            _ if self.note_answers.contains_key(&id) => Some(String::new()),
             _ if !images.is_empty() => Some(String::new()),
             _ => None,
         };
         let Some(mut draft) = draft else {
-            // An answer that asks for changes is sent with the changes in words.
-            let wanted = self.changes_answer.clone().and_then(|wanted| {
-                self.structured_request().and_then(|(_, request)| {
-                    request
-                        .answers
-                        .iter()
-                        .find(|answer| answer.id == wanted)
-                        .map(|answer| answer.label.clone())
-                })
-            });
-            self.flash(match wanted {
-                Some(label) => format!(
-                    "“{label}” needs your words: write what should change, then Enter. Esc cancels"
-                ),
-                None => "Write something first".to_owned(),
-            });
+            if self.structured_request().is_some() {
+                self.answer_errors.insert(id, "Write an answer before sending.".into());
+            } else {
+                self.flash("Write something first");
+            }
             return;
         };
+        if let Some((_, request)) = self.structured_request()
+            && let Some(answer) = self.note_answers.get(&id)
+                .and_then(|wanted| request.answers.iter().find(|answer| &answer.id == wanted))
+            && answer.outcome.as_deref() == Some("request_changes")
+            && draft.trim().is_empty()
+        {
+            self.answer_errors.insert(id, format!("“{}” requires a note explaining what should change.", answer.label));
+            self.editing = true;
+            return;
+        }
         // A message st will not take is not sent, and the box keeps it.
         if self.live
             && self.tab() == 1
@@ -5597,6 +5849,7 @@ impl Ui {
                         .into(),
                         reason: Some(draft),
                         answer: None,
+                        option_notes: Vec::new(),
                     }),
                     Some(AttentionKind::Launch { .. }) => Some(Effect::LaunchRevise {
                         id: id.clone(),
@@ -5614,7 +5867,8 @@ impl Ui {
                         }
                         .into(),
                         reason: Some(draft),
-                        answer: self.changes_answer.take(),
+                        answer: self.note_answers.get(&id).cloned(),
+                        option_notes: self.option_notes(&id, self.note_answers.get(&id).map(String::as_str)),
                     }),
                     Some(AttentionKind::Message { from, .. }) => Some(Effect::Reply {
                         id: id.clone(),
@@ -5630,6 +5884,7 @@ impl Ui {
                             action: answer.into(),
                             reason: Some(draft),
                             answer: None,
+                            option_notes: Vec::new(),
                         }),
                     Some(AttentionKind::Revision { .. }) => self
                         .current_item()
@@ -5648,7 +5903,7 @@ impl Ui {
             match effect {
                 Some(effect) => {
                     self.effects.push(effect);
-                    self.conversation_state.drafts.remove(&id);
+                    self.conversation_state.drafts.remove(&draft_key);
                     self.follow_latest();
                     // An answer on Home is done: the next item opens closed, so it does not
                     // take the keys (Nathan, 2026-10-02).
@@ -5838,25 +6093,56 @@ impl Ui {
         {
             return;
         }
-        if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
-            // r closes a request that needs nothing from the person; the step continues. A
-            // decision or choice is set aside by name: st tells its asker it was dismissed.
-            let named = action == 'r'
-                && self
-                    .structured_request()
-                    .is_some_and(|(_, request)| !request.answers.is_empty());
-            let answer = match action {
-                'y' => "Yes",
-                'n' => "No",
-                _ if named => "Dismissed without an answer.",
-                _ => "Nothing for me to do here.",
-            };
+        if action == 'r' && self.current_kind() == Some("request") {
+            // A request that offers its own `dismiss` answer is answered with it: that answer is
+            // the asker's, so st takes it as work.done, with its note and the other notes.
+            let own = self
+                .structured_request()
+                .is_some_and(|(_, request)| request.answers.iter().any(|answer| answer.id == "dismiss"));
+            if own {
+                let answer = "Dismissed without an answer.";
+                if self.live {
+                    let reason = self
+                        .conversation_state
+                        .drafts
+                        .get(&format!("answer:{id}:dismiss"))
+                        .cloned()
+                        .unwrap_or_else(|| answer.into());
+                    let option_notes = self.option_notes(&id, Some("dismiss"));
+                    self.effects.push(Effect::Attention {
+                        id,
+                        action: "work.done".into(),
+                        reason: Some(reason),
+                        answer: Some("dismiss".into()),
+                        option_notes,
+                    });
+                    self.flash(format!("Answering “{answer}”…"));
+                } else {
+                    self.flash(format!("Answered “{answer}” · demo: nothing was sent"));
+                }
+                return;
+            }
+            // Any other request is set aside with the person's own dismissal
+            // (`attention.dismiss`): its asker reads `dismissed`, and st resumes what waits on it.
+            let text = self.dismissal_text(&id);
             if self.live {
+                self.effects.push(Effect::Dismiss { id, text });
+                self.flash("Dismissing…");
+            } else {
+                self.flash("Dismissed · demo: nothing was sent");
+            }
+            return;
+        }
+        if matches!(action, 'y' | 'n') && self.current_kind() == Some("request") {
+            let answer = if action == 'y' { "Yes" } else { "No" };
+            if self.live {
+                let option_notes = self.option_notes(&id, None);
                 self.effects.push(Effect::Attention {
                     id,
                     action: "work.done".into(),
                     reason: Some(answer.into()),
-                    answer: named.then(|| "dismiss".to_owned()),
+                    answer: None,
+                    option_notes,
                 });
                 self.flash(format!("Answering “{answer}”…"));
             } else {
@@ -5894,6 +6180,7 @@ impl Ui {
                     action: name.into(),
                     reason,
                     answer: None,
+                    option_notes: Vec::new(),
                 });
                 self.flash("Sending…");
             } else {
@@ -6073,6 +6360,16 @@ impl Ui {
                 }
                 return;
             }
+        }
+        // The sidebar owns its resize through release, even over a mouse-enabled program.
+        if self.glasses.sidebar_resizing()
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+            && self.drag_mouse(mouse)
+        {
+            return;
         }
         if self.terminal_mouse(mouse) {
             return;
@@ -6384,7 +6681,7 @@ impl Ui {
             self.prompt_keys = None;
         }
         match hit {
-            Hit::Message | Hit::Subject | Hit::Resize => {}
+            Hit::Message | Hit::Subject | Hit::Resize | Hit::SidebarResize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
             Hit::PaletteSection(section) => self.open_palette(Some(section), glass::Open::Here),
             Hit::Home => self.open_home(),
@@ -6393,6 +6690,9 @@ impl Ui {
             // the browser opens too.
             Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
             Hit::Document(tap) => self.document_tap(tap),
+            Hit::Availability(letter) => {
+                self.availability_press(letter);
+            }
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);
@@ -6426,6 +6726,7 @@ impl Ui {
                 sidebar.selected[sidebar.section] = index;
                 self.open_from_sidebar();
             }
+            Hit::SidebarToggle => self.toggle_sidebar(),
             Hit::Usage => self.toggle_usage(),
             Hit::Connection => self.show_connection(),
             Hit::Menu(action) => self.run_menu_action(action),
@@ -6464,7 +6765,7 @@ impl Ui {
             Hit::Key('a') if self.answering.is_some() => {
                 let count = self
                     .structured_request()
-                    .map_or(0, |(_, request)| request.answers.len());
+                    .map_or(0, |(_, request)| request.answers.len() + usize::from(request.custom));
                 self.answering = self.answering.map(|index| (index + 1) % count.max(1));
             }
             Hit::Key(key) => {
@@ -6478,34 +6779,36 @@ impl Ui {
                 }
             }
             Hit::Enter if self.new_mission.is_some() => self.create_launch(),
-            // "Send this answer" sends the answer being chosen, not the (empty) text box.
-            Hit::Enter if self.answering.is_some() => {
-                self.answer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            Hit::ChatEnter => {
+                self.answering = None;
+                self.editing = false;
+                if let Some(chat) = &mut self.chat {
+                    chat.editing = true;
+                }
+                self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            Hit::ChatComposer => {
+                self.answering = None;
+                self.editing = false;
+                if let Some(chat) = &mut self.chat {
+                    chat.editing = true;
+                }
             }
             Hit::Enter => {
-                if self.chat.is_some() {
-                    self.submit_chat()
-                } else {
-                    self.submit()
+                // A visible Send belongs to this draft even after Esc or refusal restored it.
+                // Chat has a distinct send target; a stale chat must not capture this click.
+                if let Some(chat) = &mut self.chat {
+                    chat.editing = false;
                 }
-            }
-            Hit::Escape if self.answering.is_some() => self.answering = None,
-            Hit::Escape if self.new_mission.is_some() => {
-                self.new_mission = None;
-                self.close_form_tab();
+                if self.answering.is_some() && !self.editing {
+                    self.answer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                } else {
+                    self.answering = None;
+                    self.submit();
+                }
             }
             Hit::Escape => {
-                if self.popover.take().is_none() {
-                    self.editing = false;
-                    self.confirm = None;
-                    if let Some(chat) = &mut self.chat {
-                        if chat.editing {
-                            chat.editing = false;
-                        } else {
-                            self.chat = None;
-                        }
-                    }
-                }
+                self.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
             }
             Hit::ToggleTool(id) | Hit::Pane(PaneIntent::Expand(id)) => {
                 if let Some(conversation) = self.content_conversation() {
@@ -6554,7 +6857,14 @@ impl Ui {
             Hit::JumpLatest => self.follow_latest(),
             Hit::Composer => {
                 if let Some(chat) = &mut self.chat {
-                    chat.editing = true;
+                    chat.editing = false;
+                }
+                if self.structured_request().is_some() {
+                    if self.note_answers.contains_key(&self.attention_focus().unwrap_or_default()) {
+                        self.editing = true;
+                    } else {
+                        self.start_answer_note();
+                    }
                 } else {
                     self.editing = true;
                 }
@@ -7390,6 +7700,7 @@ mod tests {
         world.attention = Load::Ready(vec![Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7420,6 +7731,7 @@ mod tests {
             .position(|id| id == "attention/garden")
             .unwrap();
         let rendered = frame(&ui, 120, 50).join("\n");
+        assert!(rendered.contains("from      Seed"), "{rendered}");
         assert!(rendered.contains("Reply with fields"));
         assert!(!rendered.contains("Dismiss: nothing to do"));
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
@@ -7678,6 +7990,7 @@ mod tests {
         let asks = |id: &str| Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7729,6 +8042,7 @@ mod tests {
         let asks = |id: &str| Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -8041,6 +8355,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -8081,7 +8396,7 @@ mod tests {
         assert!(ui.chat.as_ref().is_some_and(|chat| chat.editing));
         type_in(&mut ui, "xj a question");
         let key = format!("chat:{}", "attention/pick");
-        assert_eq!(ui.conversation_state.drafts[&key], "xj a question");
+        assert_eq!(ui.conversation_state.drafts.get(&key).map(String::as_str), Some("xj a question"));
         // Answering in words after choosing does too.
         let mut ui2 = {
             let mut again = Ui::new(ui.world.clone());
@@ -8096,8 +8411,13 @@ mod tests {
         assert_eq!(ui2.answering, Some(1));
         ui2.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert!(ui2.editing);
+        assert_eq!(ui2.note_answers.get("attention/pick").map(String::as_str), Some("b"));
         type_in(&mut ui2, "jk and x too");
-        assert_eq!(ui2.conversation_state.drafts["attention/pick"], "jk and x too");
+        assert_eq!(
+            ui2.conversation_state.drafts.get("answer:attention/pick:b").map(String::as_str),
+            Some("jk and x too"),
+            "the highlighted option's note receives every typed command letter"
+        );
         assert_eq!(ui2.answering, None, "the box has the keyboard, the choice yielded");
     }
 
@@ -8122,6 +8442,7 @@ mod tests {
             let item = Attention {
                 deadline: None,
                 requested_at: None,
+                snoozed_until: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -8163,13 +8484,13 @@ mod tests {
             assert!(screen.contains(shown), "{shown}: {screen}");
         }
         assert!(!screen.contains("Choose an answer"), "{screen}");
-        // x then y closes it with word to its asker, as a plain request does.
+        // x then y sets it aside with st's own dismissal (`attention.dismiss`), as a plain
+        // request is: its asker reads `dismissed`.
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(frame(&ui, 140, 50).join("\n").contains("tell Chief of Staff there is nothing"));
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, action, reason: Some(reason), .. }]
-                if id == "attention/feedback" && action == "work.done" && reason.contains("Nothing for me")),
+            matches!(&ui.effects[..], [Effect::Dismiss { id, text: None }] if id == "attention/feedback"),
             "{:?}",
             ui.effects
         );
@@ -8184,17 +8505,21 @@ mod tests {
         };
         let mut ui = feedback("choice", vec![answer]);
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("Choose an answer"), "{screen}");
+        assert!(
+            screen.lines().any(|line| line.contains("Choose an answer")
+                && line.contains("Dismiss without answering")),
+            "{screen}"
+        );
         assert!(!screen.contains("Dismiss: nothing to do"), "{screen}");
-        assert!(screen.contains("Dismiss without answering"), "{screen}");
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(ui.confirm.is_some());
         assert!(ui.effects.is_empty(), "it asks first");
-        assert!(frame(&ui, 140, 50).join("\n").contains("you set it aside without answering"));
+        let confirmation = frame(&ui, 140, 50).join("\n");
+        assert!(confirmation.contains("you set it aside without answering"), "{confirmation}");
+        assert!(!confirmation.contains("Dismiss without answering"), "{confirmation}");
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, action, answer: Some(answer), .. }]
-                if id == "attention/feedback" && action == "work.done" && answer == "dismiss"),
+            matches!(&ui.effects[..], [Effect::Dismiss { id, text: None }] if id == "attention/feedback"),
             "{:?}",
             ui.effects
         );
@@ -8258,6 +8583,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8292,7 +8618,10 @@ mod tests {
             .unwrap();
         ui.select(at);
         let screen = frame(&ui, 140, 50).join("\n");
+        assert!(!screen.contains("asks  Chief of Staff"), "{screen}");
+        assert!(!screen.contains("from      Chief of Staff"), "{screen}");
         for shown in [
+            "agent    ",
             "recommends  Tell me more",
             "All three machines run main.",
             "Seats start reliably (#1008).",
@@ -8310,11 +8639,27 @@ mod tests {
         ui.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, answer: Some(answer), reason: Some(reason), .. }]
-                if id == "attention/shipped" && answer == "read" && reason == "Read it"),
+            matches!(&ui.effects[..], [Effect::Attention { id, answer: Some(answer), reason: None, .. }]
+                if id == "attention/shipped" && answer == "read"),
             "{:?}",
             ui.effects
         );
+
+        let Load::Ready(items) = &mut ui.world.attention else {
+            unreachable!("the fixture has loaded attention");
+        };
+        let item = items
+            .iter_mut()
+            .find(|item| item.id == "attention/shipped")
+            .unwrap();
+        let AttentionKind::Request { from, from_id, .. } = &mut item.kind else {
+            unreachable!("the fixture is a request");
+        };
+        *from = "Planner".into();
+        *from_id = "agent/example/planner".into();
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("agent    Chief of Staff"), "{screen}");
+        assert!(screen.contains("from      Planner"), "{screen}");
     }
 
     #[test]
@@ -8344,6 +8689,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8438,6 +8784,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8475,14 +8822,10 @@ mod tests {
         ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("what should change? Enter sends it with “Follow the brief”"), "{screen}");
+        assert!(screen.contains("Follow the brief") && screen.contains("request changes"), "{screen}");
         // Enter with nothing written says what is wanted, not just "Write something first".
         ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            ui.flash.as_ref().is_some_and(|(text, _)| text.contains("“Follow the brief” needs your words")),
-            "{:?}",
-            ui.flash
-        );
+        assert!(ui.answer_errors.get("attention/decide").is_some_and(|error| error.contains("requires a note")));
         assert!(ui.effects.is_empty());
         // Choosing it with a click opens the box for the words at once, and the person can type
         // (Nathan, 2026-10-12: "it says it needs my words but I can't type anywhere").
@@ -8493,22 +8836,22 @@ mod tests {
         for letter in "keep the brief".chars() {
             ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
         }
-        assert_eq!(ui.conversation_state.drafts["attention/decide"], "keep the brief");
+        assert_eq!(ui.conversation_state.drafts.get("answer:attention/decide:follow").map(String::as_str), Some("keep the brief"));
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("in your own words") && screen.contains("◉ Follow the brief"), "{screen}");
+        assert!(screen.contains("Follow the brief") && screen.contains("request changes"), "{screen}");
         // Selected with the keys, its box is already on the card, and the first letter typed
         // opens it and goes into it (even one that is otherwise a command).
         ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        ui.conversation_state.drafts.remove("attention/decide");
+        ui.conversation_state.drafts.remove("answer:attention/decide:follow");
         ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(ui.answering, Some(0));
         assert!(!ui.editing);
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("in your own words") && screen.contains("Start typing"), "{screen}");
+        assert!(screen.contains("Start typing"), "{screen}");
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(ui.editing && ui.confirm.is_none(), "x typed into the box, not a dismissal");
-        assert_eq!(ui.conversation_state.drafts["attention/decide"], "xy");
+        assert_eq!(ui.conversation_state.drafts.get("answer:attention/decide:follow").map(String::as_str), Some("xy"));
     }
 
     #[test]
@@ -8519,6 +8862,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8572,6 +8916,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -8644,6 +8989,7 @@ mod tests {
             action: "work.done".into(),
             reason: None,
             answer: None,
+            option_notes: Vec::new(),
         });
         let mut next = world;
         if let Load::Ready(items) = &mut next.attention {
@@ -8827,6 +9173,7 @@ mod tests {
                 Attention {
                     deadline: None,
                     requested_at: None,
+                    snoozed_until: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
@@ -8871,7 +9218,7 @@ mod tests {
             ui.attention_focus().unwrap()
         };
         let x = |ui: &mut Ui| ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        // A request asks first, then tells its asker there is nothing to do.
+        // A request asks first, then sets it aside with st's own dismissal (`attention.dismiss`).
         let request = pick(&mut ui, "request");
         x(&mut ui);
         assert!(ui.effects.is_empty());
@@ -8882,8 +9229,7 @@ mod tests {
         );
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
-            matches!(&ui.effects[..], [Effect::Attention { id, action, .. }]
-                if *id == request && action == "work.done"),
+            matches!(&ui.effects[..], [Effect::Dismiss { id, text: None }] if *id == request),
             "{:?}",
             ui.effects
         );
@@ -9617,22 +9963,66 @@ mod tests {
         assert!(ui.voice.is_none());
     }
 
+    /// The demo's world is its st: l keeps the snooze on the row, which leaves Home and the
+    /// alert count until it ends.
     #[test]
-    fn remind_me_later_hides_a_message_and_the_badge_counts_what_is_left() {
+    fn l_puts_an_item_off_and_the_badge_counts_what_is_left() {
         let mut ui = Ui::new(demo::test_world());
-        let index = ui.ids().iter().position(|id| id == "attention/6").unwrap();
+        let alerts = ui.world.attention.items().iter().filter(|item| item.is_alert()).count();
+        let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
         ui.select(index);
         press(&mut ui, KeyCode::Char('l'));
-        assert!(!ui.ids().contains(&"attention/6".to_owned()));
-        let alerts = ui
-            .world
-            .attention
-            .items()
-            .iter()
-            .filter(|item| item.is_alert() && !ui.snoozed.contains(&item.id))
-            .count();
-        let top = frame(&ui, 150, 30)[0].clone();
-        assert!(top.contains(&format!("◆ {alerts} alert")), "{top}");
+        assert!(!ui.ids().contains(&"attention/1".to_owned()));
+        let item = ui.world.attention.items().iter().find(|item| item.id == "attention/1").unwrap();
+        let left = item.snoozed_until.unwrap().signed_duration_since(chrono::Utc::now());
+        assert!(left > SNOOZE - chrono::TimeDelta::minutes(1) && left <= SNOOZE, "{left}");
+        let screen = frame(&ui, 150, 30);
+        assert!(screen[0].contains(&format!("◆ {} alert", alerts - 1)), "{}", screen[0]);
+        assert!(screen.join("\n").contains("1 put off until later"), "{}", screen.join("\n"));
+    }
+
+    /// Live, l asks st (`attention.snooze`) and hides nothing itself: the row goes when st says
+    /// it is put off, and l on it then brings it back.
+    #[test]
+    fn l_asks_st_to_snooze_and_the_row_follows_what_st_says() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.live = true;
+        let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
+        ui.select(index);
+        press(&mut ui, KeyCode::Char('l'));
+        let [Effect::Snooze { id, until: Some(until) }] = ui.effects.as_slice() else {
+            panic!("{:?}", ui.effects);
+        };
+        assert_eq!(id, "attention/1");
+        let until = chrono::DateTime::parse_from_rfc3339(until).unwrap();
+        let left = until.signed_duration_since(chrono::Utc::now());
+        assert!(left > SNOOZE - chrono::TimeDelta::minutes(1) && left <= SNOOZE, "{left}");
+        assert!(ui.ids().contains(&"attention/1".to_owned()), "nothing is hidden before st says so");
+        ui.effects.clear();
+        // st's next frame carries the snooze: the row leaves Home and is counted as put off.
+        let mut world = ui.world.clone();
+        if let Load::Ready(items) = &mut world.attention {
+            items.iter_mut().find(|item| item.id == "attention/1").unwrap().snoozed_until = Some(until);
+        }
+        ui.set_world(world.clone());
+        assert!(!ui.ids().contains(&"attention/1".to_owned()));
+        assert!(frame(&ui, 150, 30).join("\n").contains("1 put off until later"));
+        // Its card, still open in a pane, offers to bring it back, and l does.
+        ui.replace_focused_pane(Pane::Home(Some("attention/1".into())));
+        assert!(frame(&ui, 150, 40).join("\n").contains("Bring back now"));
+        press(&mut ui, KeyCode::Char('l'));
+        assert!(
+            matches!(ui.effects.as_slice(), [Effect::Snooze { id, until: None }] if id == "attention/1"),
+            "{:?}",
+            ui.effects
+        );
+        // A snooze st says has already ended hides nothing.
+        if let Load::Ready(items) = &mut world.attention {
+            items.iter_mut().find(|item| item.id == "attention/1").unwrap().snoozed_until =
+                Some(world.at - chrono::TimeDelta::minutes(1));
+        }
+        ui.set_world(world);
+        assert!(screens::home_list(&ui.world, &ui.closed).ids.contains(&"attention/1".to_owned()));
     }
 
     #[test]

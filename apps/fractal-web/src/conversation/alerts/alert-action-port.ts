@@ -3,7 +3,8 @@ import type * as Native from '@fractal/client/schema'
 
 /** One answer to an alert: sent, or refused in words a person reads. */
 export type AlertActionResult =
-  | { readonly _tag: 'Sent' }
+  /** `settled`: the source already holds this as done, and its feed will not say so (a replay). */
+  | { readonly _tag: 'Sent'; readonly settled?: boolean }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
 /** The alert as the person read it: what an answer names and is fenced on. */

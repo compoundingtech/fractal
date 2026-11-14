@@ -4,15 +4,17 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Dialog, Modal, ModalOverlay } from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
-import { ResizableSplit, usePersistedSize } from '../../assistant-ui/composition/Shell'
+import { ResizableSplit } from '../../assistant-ui/composition/Shell'
+import { usePersistedSize } from '../../assistant-ui/composition/usePersistedSize'
 import { DockedSplit } from '../../assistant-ui/composition/DockedSplit'
 import { Pane, PaneHeaderButton, PaneHeaderToggle } from '../../assistant-ui/composition/Pane'
 import { ConnectionStatus } from '../../assistant-ui/composition/SystemState'
 import { DiffPanel, type DiffRevealRequest } from '../../assistant-ui/composition/DiffPanel'
 import { ResourceChipV1 } from '../../assistant-ui/resources/ResourceCardV1'
-import type { TranscriptTurn } from '../../assistant-ui/composition/Transcript'
+import type { TranscriptProps, TranscriptTurn } from '../../assistant-ui/composition/Transcript'
 import type { WorkLogCall } from '../../assistant-ui/taste/work-log'
 import type { SyncStatus } from '../../assistant-ui/sync-presentation/sync-status'
+import { SyncLine } from '../../assistant-ui/sync-presentation/SyncLine'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { baselineTheme } from '../../assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from '../../assistant-ui/composition-theme'
@@ -20,30 +22,53 @@ import { borderVars as border, elevationVars as elevation, geometryNumbers, geom
 import { MilestoneSidebar, type RosterState } from './MilestoneSidebar'
 import { MilestonePalette, type PaletteCommand } from './MilestonePalette'
 import { AgentResultCard, MilestoneThread, PaneGlyph, type PaneTab, type ThreadView } from './MilestonePane'
-import { branchFiles, changedFiles, idleAgentRef, inboxCount, lastSeen, mainAgentRef, mainTurns, milestoneNow, proseResources, reviewerCard, reviewerRef, reviewerTurns, rosterFolders, staleMainTurns } from './milestone-fixtures'
+import type { DiffFile } from '../../assistant-ui/composition/DiffPanel'
+import type { ResourceData } from '../../assistant-ui/resources/resource-model'
+import type { RosterFolder } from './MilestoneSidebar'
 
-export type MilestoneState = 'slice' | 'loading' | 'empty-roster' | 'empty-thread' | 'no-match' | 'roster-error' | 'thread-unavailable' | 'stale' | 'navigation'
-/** Recovery phases a Retry walks through; never a story's starting state. */
-type Phase = MilestoneState | 'roster-retry' | 'thread-retry'
+/** Presentation projections; stories adapt scenario slices before crossing this boundary. */
+export type MilestoneLoad<TValue> =
+  | { readonly _tag: 'loading'; readonly value: TValue }
+  | { readonly _tag: 'ready'; readonly value: TValue }
+  | { readonly _tag: 'failed'; readonly value: TValue; readonly reason: string; readonly detail: string }
+  | { readonly _tag: 'stale'; readonly value: TValue; readonly observedAt: number }
+export interface MilestoneRoster {
+  readonly folders: readonly RosterFolder[]
+  readonly inboxCount: number
+  readonly query: string
+}
+export interface MilestoneConversation {
+  readonly threads: Readonly<Record<string, { readonly turns: readonly TranscriptTurn[]; readonly running: boolean; readonly history?: TranscriptProps['history'] }>>
+  /** Host-projected status, retained without reconstructing transport facts from a load tag. */
+  readonly sync?: SyncStatus
+  readonly primaryRef: string
+  readonly reviewerRef: string
+  readonly lastSeen: Extract<ThreadView, { readonly _tag: 'Stale' }>['lastSeen']
+}
+type Phase = 'slice' | 'loading' | 'empty-roster' | 'empty-thread' | 'no-match' | 'roster-error' | 'thread-unavailable' | 'stale' | 'navigation' | 'roster-retry' | 'thread-retry'
 
 export interface RedesignMilestoneProps {
   readonly scheme: Scheme
-  readonly state: MilestoneState
+  readonly roster: MilestoneLoad<MilestoneRoster>
+  readonly conversation: MilestoneLoad<MilestoneConversation>
+  readonly now: number
+  readonly changedFiles: readonly DiffFile[]
+  readonly branchFiles: readonly DiffFile[]
+  readonly proseResources: Readonly<Record<string, ResourceData>>
+  readonly reviewerCard: { readonly path: string; readonly summary: string }
+  readonly defaultOpenRefs: readonly string[]
+  readonly defaultChangesOpen: boolean
+  /** Navigation is a local UI demonstration, not a data-load state. */
+  readonly defaultPaletteOpen?: boolean
   /** Device-local key for persisted panel sizes; stories pass a per-story key so screenshots stay deterministic. */
   readonly persistKey: string
-  /** The fetch a Retry performs; the failed surface shows loading until it settles. Defaults to a short simulated fetch. */
+  /** The fetch a Retry performs; the failed surface shows loading until it settles. */
   readonly reload?: () => Promise<void>
 }
 
-const rosterState: Record<Phase, RosterState> = {
-  slice: 'ready', loading: 'loading', 'empty-roster': 'empty', 'empty-thread': 'ready', 'no-match': 'ready', 'roster-error': 'error',
-  'roster-retry': 'loading', 'thread-unavailable': 'ready', 'thread-retry': 'ready', stale: 'stale', navigation: 'ready',
-}
 /** Simulated network latency for browsing the workshop; plays pass a reload they settle themselves. */
 const simulatedReload = () => new Promise<void>(resolve => { window.setTimeout(resolve, 900) })
 const changesKey = 'changes'
-const allRows = rosterFolders.flatMap(folder => folder.rows.flatMap(row => [row, ...row.children]))
-const rowFor = (ref: string) => allRows.find(row => row.ref === ref)!
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
 const modKey = isMac ? '⌘' : 'Ctrl+'
 /** Opens at 304px so the two-line SR-2 row with its metrics line has room; the row stays two lines at every width (RM1-Q1). */
@@ -55,60 +80,79 @@ const subscribeNarrow = (notify: () => void) => {
   return () => media.removeEventListener('change', notify)
 }
 
-function threadSync(phase: Phase): SyncStatus {
-  if (phase === 'loading' || phase === 'thread-retry') return { _tag: 'Connecting', attempt: 1, since: milestoneNow - 1200 }
-  if (phase === 'stale') return { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: milestoneNow + 4000, issue: 'Gateway connection interrupted' }, lastLiveAt: lastSeen.at }
-  return { _tag: 'Live', since: milestoneNow - 30_000 }
-}
-
-/** Only the agent last seen mid-run gets the "Last seen" tail; settled threads have nothing in flight to freeze. */
-function threadView(phase: Phase, key: string, onRetry: () => void): ThreadView {
-  if (phase === 'loading' || phase === 'thread-retry') return { _tag: 'Loading' }
-  if (phase === 'stale') return key === mainAgentRef ? { _tag: 'Stale', lastSeen } : { _tag: 'Live' }
-  if (phase === 'thread-unavailable') return { _tag: 'Unavailable', reason: 'Conversation unavailable', detail: 'The gateway could not load it (HTTP 503). Your draft is unchanged.', onRetry }
-  return { _tag: 'Live' }
-}
-
-/** What a tab shows for an agent: the exact row status, except while the view itself is unknown or last-known. */
-function agentTab(ref: string, phase: Phase): PaneTab {
-  const row = rowFor(ref)
-  if (phase === 'loading' || phase === 'thread-retry') return { key: ref, title: row.title, status: 'pending', statusLabel: 'Connecting' }
-  if (phase === 'thread-unavailable') return { key: ref, title: row.title, status: 'offline', statusLabel: 'Unavailable' }
-  if (phase === 'stale' && ref === mainAgentRef) return { key: ref, title: row.title, status: 'stale', statusLabel: 'Last seen working' }
-  return { key: ref, title: row.title, status: row.status, statusLabel: row.statusLabel }
-}
-
-const initialTabs = (state: MilestoneState): readonly string[] =>
-  state === 'empty-roster' ? [] : state === 'empty-thread' ? [idleAgentRef] : state === 'slice' || state === 'navigation' ? [mainAgentRef, reviewerRef] : [mainAgentRef]
-
 export function RedesignMilestone(props: RedesignMilestoneProps) {
-  const [phase, setPhase] = React.useState<Phase>(props.state)
+  const { changedFiles, branchFiles, proseResources, reviewerCard, now: milestoneNow } = props
+  const { folders: rosterFolders, inboxCount } = props.roster.value
+  const { primaryRef: mainAgentRef, reviewerRef, lastSeen } = props.conversation.value
+  const firstOpenRef = props.defaultOpenRefs[0]
+  const [recovery, setRecovery] = React.useState<Partial<Record<'roster' | 'conversation', { readonly input: RedesignMilestoneProps['roster'] | RedesignMilestoneProps['conversation']; readonly state: 'loading' | 'ready' }>>>({})
+  const rosterRecovery = recovery.roster?.input === props.roster ? recovery.roster.state : undefined
+  const conversationRecovery = recovery.conversation?.input === props.conversation ? recovery.conversation.state : undefined
+  const rosterLoad = rosterRecovery ?? props.roster._tag
+  const conversationLoad = conversationRecovery ?? props.conversation._tag
+  const conversationPhase: Phase = conversationRecovery === 'loading' ? 'thread-retry'
+    : conversationLoad === 'loading' ? 'loading'
+    : conversationLoad === 'failed' ? 'thread-unavailable'
+    : conversationLoad === 'stale' ? 'stale' : 'slice'
+  // Preserve the reference canvas marker; rendering reads each slice independently below.
+  const phase: Phase = rosterRecovery === 'loading' ? 'roster-retry' : (
+    rosterLoad === 'failed' ? 'roster-error'
+      : rosterLoad === 'loading' ? 'loading'
+      : conversationPhase !== 'slice' ? conversationPhase
+      : rosterLoad === 'stale' ? 'stale'
+      : rosterFolders.length === 0 ? 'empty-roster'
+      : props.roster.value.query !== '' ? 'no-match'
+      : props.defaultOpenRefs.length === 1 && firstOpenRef !== undefined && props.conversation.value.threads[firstOpenRef]?.turns.length === 0 ? 'empty-thread'
+      : props.defaultPaletteOpen ? 'navigation' : 'slice')
+  const allRows = rosterFolders.flatMap(folder => folder.rows.flatMap(row => [row, ...row.children]))
+  const rowFor = (ref: string) => allRows.find(row => row.ref === ref)
+  const agentTab = (ref: string, current: Phase): PaneTab => {
+    const row = rowFor(ref)
+    const title = row?.title ?? ref
+    if (current === 'loading' || current === 'thread-retry') return { key: ref, title, status: 'pending', statusLabel: 'Connecting' }
+    if (current === 'thread-unavailable' || row === undefined) return { key: ref, title, status: 'offline', statusLabel: 'Unavailable' }
+    if (current === 'stale' && ref === mainAgentRef) return { key: ref, title, status: 'stale', statusLabel: 'Last seen working' }
+    return { key: ref, title, status: row.status, statusLabel: row.statusLabel }
+  }
+  const threadSync = (current: Phase): SyncStatus => {
+    if (props.conversation.value.sync !== undefined) return props.conversation.value.sync
+    if (current === 'loading' || current === 'thread-retry') return { _tag: 'Connecting', attempt: 1, since: milestoneNow - 1200 }
+    if (current === 'stale') return { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: milestoneNow + 4000, issue: 'Gateway connection interrupted' }, lastLiveAt: lastSeen.at }
+    return { _tag: 'Live', since: milestoneNow - 30_000 }
+  }
+  const threadView = (current: Phase, key: string, onRetry: () => void): ThreadView => {
+    if (current === 'loading' || current === 'thread-retry') return { _tag: 'Loading' }
+    if (current === 'stale' && key === mainAgentRef) return { _tag: 'Stale', lastSeen }
+    if (current === 'thread-unavailable' && props.conversation._tag === 'failed') return { _tag: 'Unavailable', reason: props.conversation.reason, detail: props.conversation.detail, onRetry }
+    return { _tag: 'Live' }
+  }
   const [scheme, setScheme] = React.useState(props.scheme)
   const narrow = React.useSyncExternalStore(subscribeNarrow, () => window.matchMedia(narrowQuery).matches, () => false)
   const [width, setWidth] = usePersistedSize(props.persistKey, sidebarDefault)
   // Docked: collapsed hides the sidebar. Narrow: the sidebar is a modal drawer, open only when the roster is the content.
-  const [collapsed, setCollapsed] = React.useState(() => window.matchMedia(narrowQuery).matches && props.state !== 'empty-roster' && props.state !== 'roster-error')
-  const [query, setQuery] = React.useState(props.state === 'no-match' ? 'zz-nothing' : '')
-  const [paletteOpen, setPaletteOpen] = React.useState(props.state === 'navigation')
-  const [tabs, setTabs] = React.useState(() => initialTabs(props.state))
-  const [activeKey, setActiveKey] = React.useState(() => initialTabs(props.state)[0] ?? '')
-  const [changesOpen, setChangesOpen] = React.useState(props.state === 'slice' || props.state === 'navigation')
+  const [collapsed, setCollapsed] = React.useState(() => window.matchMedia(narrowQuery).matches && phase !== 'empty-roster' && phase !== 'roster-error')
+  const [query, setQuery] = React.useState(props.roster.value.query)
+  const [paletteOpen, setPaletteOpen] = React.useState(props.defaultPaletteOpen ?? false)
+  const [tabs, setTabs] = React.useState(props.defaultOpenRefs)
+  const [activeKey, setActiveKey] = React.useState(props.defaultOpenRefs[0] ?? '')
+  const [changesOpen, setChangesOpen] = React.useState(props.defaultChangesOpen)
   const [revealRequest, setRevealRequest] = React.useState<DiffRevealRequest>()
   const [sent, setSent] = React.useState<Readonly<Record<string, readonly TranscriptTurn[]>>>({})
   const searchRef = React.useRef<HTMLInputElement>(null)
   // Only the latest Retry may finish recovery, and never after unmount.
-  const attempt = React.useRef(0)
-  React.useEffect(() => () => { attempt.current = -1 }, [])
+  const attempt = React.useRef({ roster: 0, conversation: 0 })
+  React.useEffect(() => () => { attempt.current = { roster: -1, conversation: -1 } }, [])
   const reload = props.reload ?? simulatedReload
 
   // Each Retry walks the real recovery path for its own fault only: the failed surface loads, then shows live data.
-  const recover = React.useCallback((through: Phase) => {
-    setPhase(through)
-    const current = ++attempt.current
-    void reload().then(() => { if (attempt.current === current) setPhase('slice') })
-  }, [reload])
-  const retryRoster = React.useCallback(() => recover('roster-retry'), [recover])
-  const retryThread = React.useCallback(() => recover('thread-retry'), [recover])
+  const recover = React.useCallback((surface: 'roster' | 'conversation') => {
+    const input = props[surface]
+    setRecovery(previous => ({ ...previous, [surface]: { input, state: 'loading' } }))
+    const current = ++attempt.current[surface]
+    void reload().then(() => { if (attempt.current[surface] === current) setRecovery(previous => ({ ...previous, [surface]: { input, state: 'ready' } })) })
+  }, [reload, props.roster, props.conversation])
+  const retryRoster = React.useCallback(() => recover('roster'), [recover])
+  const retryThread = React.useCallback(() => recover('conversation'), [recover])
 
   const openAgent = React.useCallback((row: Row) => {
     setTabs(current => current.includes(row.ref) ? current : [...current, row.ref])
@@ -121,7 +165,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
     if (window.matchMedia(narrowQuery).matches) setActiveKey(changesKey)
     const path = call.changedPath ?? changedFiles.find(file => file.path === call.argsSummary)?.path
     if (path !== undefined) setRevealRequest(previous => ({ path, sequence: (previous?.sequence ?? 0) + 1 }))
-  }, [])
+  }, [changedFiles])
   const focusFilter = React.useCallback(() => { setCollapsed(false); requestAnimationFrame(() => searchRef.current?.focus()) }, [])
 
   // Global chords: Mod+K palette, Mod+B sidebar, "/" filter. Single keys never fire while typing.
@@ -138,42 +182,44 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [focusFilter])
 
-  const roster = rosterState[phase]
-  const sync = threadSync(phase)
-  const renderInlineReference = React.useCallback((path: string) => {
-    if (path === reviewerCard.path) return <AgentResultCard tab={agentTab(reviewerRef, 'slice')} summary={reviewerCard.summary} onOpen={() => openAgent(rowFor(reviewerRef))} />
+  const roster: RosterState = rosterLoad === 'loading' ? 'loading' : rosterLoad === 'failed' ? 'error' : rosterLoad === 'stale' ? 'stale' : rosterFolders.length === 0 ? 'empty' : 'ready'
+  const sync = threadSync(conversationPhase)
+  const renderInlineReference = (path: string) => {
+    const reviewer = rowFor(reviewerRef)
+    if (path === reviewerCard.path && reviewer !== undefined) return <AgentResultCard tab={agentTab(reviewerRef, 'slice')} summary={reviewerCard.summary} onOpen={() => openAgent(reviewer)} />
     const resource = proseResources[path]
-    return resource === undefined ? undefined : <ResourceChipV1 resource={resource} file={resource.files[0]!} />
-  }, [openAgent])
+    const file = resource?.files[0]
+    return resource === undefined || file === undefined ? undefined : <ResourceChipV1 resource={resource} file={file} />
+  }
 
   // Narrow: one pane, so Changes folds in as a tab derived from changesOpen alone. Docked: a resizable panel beside the thread.
   const paneKeys = narrow && changesOpen ? [...tabs, changesKey] : tabs
   const shownKey = paneKeys.includes(activeKey) ? activeKey : paneKeys[0]
-  const paneTabs = paneKeys.map(key => key === changesKey ? { key, title: 'Changes' } : agentTab(key, phase))
+  const paneTabs = paneKeys.map(key => key === changesKey ? { key, title: 'Changes' } : agentTab(key, conversationPhase))
   const sidebarHidden = narrow || collapsed
   const showSidebar = <PaneHeaderButton label="Show sidebar" icon="chevron-right" shortcut="Meta+B Control+B" onPress={() => setCollapsed(false)} />
 
   // The panel header names the change set; the "Changes" surface tab beside it says what kind of view it is.
-  const changes = (inPane: boolean) => <DiffPanel open title="feat/metric-track" width="100%" diff={changedFiles[0]!.diff} path={changedFiles[0]!.path} added={2} removed={1}
+  const changes = (inPane: boolean) => <DiffPanel open title="feat/metric-track" width="100%"
     currentTurnFiles={changedFiles} branchFiles={branchFiles} revealRequest={revealRequest} onClose={inPane ? undefined : () => setChangesOpen(false)} />
   const thread = (key: string) => {
-    const turns = [...(phase === 'empty-thread' || key === idleAgentRef ? [] : key === mainAgentRef ? (phase === 'stale' ? staleMainTurns : mainTurns) : key === reviewerRef ? reviewerTurns : []), ...(sent[key] ?? [])]
-    const view = threadView(phase, key, retryThread)
-    const running = key === mainAgentRef && view._tag === 'Live'
+    const turns = [...(props.conversation.value.threads[key]?.turns ?? []), ...(sent[key] ?? [])]
+    const view = threadView(conversationPhase, key, retryThread)
+    const running = (props.conversation.value.threads[key]?.running ?? false) && view._tag === 'Live'
     const send = (text: string) => setSent(current => {
       const list = current[key] ?? []
       const id = `local-${key}-${list.length + 1}`
       const at = new Date(milestoneNow).toISOString()
       return { ...current, [key]: [...list, { id, prompt: { _tag: 'Text', id: `${id}-prompt`, role: 'user', text, attachments: [], streaming: false, at }, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }] }
     })
-    return <MilestoneThread key={key} title={rowFor(key).title} view={view} now={milestoneNow}
+    return <MilestoneThread key={key} title={rowFor(key)?.title ?? key} view={view} now={milestoneNow}
       runtime={{ messages: turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt]), ...turn.items]), isRunning: running, onNew: async message => send(message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')) }}
-      transcript={{ turns, sync, now: milestoneNow, observedAt: phase === 'stale' ? lastSeen.at : milestoneNow, renderInlineReference, onOpenTool: openTool, viewportKey: `${props.persistKey}.${key}` }}
+      transcript={{ turns, history: props.conversation.value.threads[key]?.history, sync, now: milestoneNow, observedAt: props.conversation._tag === 'stale' ? props.conversation.observedAt : milestoneNow, renderInlineReference, onOpenTool: openTool, viewportKey: `${props.persistKey}.${key}` }}
       composer={{ running, folder: 'fractal-web', branch: 'feat/metric-track', onSend: send, onSteer: send, draftKey: `${props.persistKey}.${key}` }} />
   }
 
-  const sidebar = <MilestoneSidebar state={roster} folders={phase === 'empty-roster' ? [] : rosterFolders} now={milestoneNow} observedAt={roster === 'stale' ? lastSeen.at : undefined} activeRef={shownKey} query={query} onQueryChange={setQuery} searchRef={searchRef}
-    inboxCount={phase === 'empty-roster' ? 0 : inboxCount}
+  const sidebar = <MilestoneSidebar state={roster} folders={rosterFolders} now={milestoneNow} observedAt={props.roster._tag === 'stale' ? props.roster.observedAt : undefined} activeRef={shownKey} query={query} onQueryChange={setQuery} searchRef={searchRef}
+    inboxCount={inboxCount}
     onOpen={openAgent} onRetry={retryRoster} onOpenPalette={() => setPaletteOpen(true)} onCollapse={() => setCollapsed(true)} collapseLabel={narrow ? 'Close sidebar' : 'Hide sidebar'} modKey={modKey} />
   const commands: readonly PaletteCommand[] = [
     { id: 'toggle-sidebar', label: sidebarHidden ? 'Show sidebar' : 'Hide sidebar', shortcut: `${modKey}B`, run: () => setCollapsed(value => !value) },
@@ -193,7 +239,11 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
         <Modal {...stylex.props(styles.drawer)}><Dialog aria-label="Agents" {...stylex.props(styles.drawerDialog)}>{sidebar}</Dialog></Modal>
       </ModalOverlay>}
       <main aria-label="Workspace" {...stylex.props(styles.main)}>
-        {phase === 'stale' && <ConnectionStatus state="reconnecting" text="Next try in 4s · attempt 2" />}
+        {props.conversation.value.sync === undefined
+          ? phase === 'stale' && <ConnectionStatus state="reconnecting" text="Next try in 4s · attempt 2" />
+          : sync._tag === 'Stale' && sync.reason._tag === 'Reconnecting'
+            ? <ConnectionStatus state="reconnecting" text={`${sync.reason.issue} · Next try in ${Math.ceil(Math.max(0, sync.reason.nextAt - milestoneNow) / 1000)}s · attempt ${sync.reason.attempt}`} />
+            : <SyncLine status={sync} label="conversation" now={milestoneNow} observedAt={props.conversation._tag === 'stale' ? props.conversation.observedAt : milestoneNow} inline />}
         {shownKey === undefined
           ? <div {...stylex.props(styles.emptyFrame)}>
             {sidebarHidden && <div {...stylex.props(styles.emptyBar)}>{showSidebar}</div>}

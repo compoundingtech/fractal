@@ -32,12 +32,14 @@ fn app(
     client_relay: Option<ClientRelay>,
 ) -> crate::api::AppState {
     crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(tokio::sync::Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: node.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: "pty".into(),
@@ -298,6 +300,7 @@ async fn a_viewer_reads_a_relay_hosts_seat_from_it_and_unknown_when_it_does_not_
             host: OWNER.into(),
             held: true,
             status: Some("read"),
+            consumed: Some("read"),
             latest: answered.get(&message.subject).and_then(|relayed| match relayed {
                 Relayed::Answered { latest, .. } => latest.clone(),
                 Relayed::Unknown { .. } => None,
@@ -789,8 +792,15 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
         "current messages leave out what the host closed"
     );
 
-    // A paging client's current pages, one message each: the one the host closed is left out,
-    // its page comes back empty with a cursor, and the walk reaches every other message once.
+    // A paging client's current pages, one message each: once maintenance records the
+    // host's close, the selector leaves it out, so no page comes back empty and the walk reaches
+    // every other message once (#4866).
+    crate::api::relayed_close_maintenance::turn(&state, &mut Default::default()).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::store::relayed_closes::closed(&viewer.readers.get(), "message/00000000000000c2").unwrap() {
+        assert!(Instant::now() < deadline, "the background writer never recorded the host's close");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     while viewer.maintain_client_message_selectors().unwrap() {}
     let mut query = crate::api::ClientListQuery { limit: Some(1), ..Default::default() };
     let mut snapshot = crate::api::new_client_snapshot(&state);
@@ -813,7 +823,7 @@ async fn views_and_lists_read_a_relay_hosts_seat_from_it() {
         walked,
         ["message/00000000000000b1", "message/00000000000000c1", "message/00000000000000c3"]
     );
-    assert_eq!(empty, 1, "the page of the message the host closed");
+    assert_eq!(empty, 0, "the selector counts the host's close, so it leaves no empty page");
 }
 
 /// A view does not wait for a host that does not answer: it waits a second, then shows this
@@ -901,7 +911,7 @@ async fn a_faults_targets_and_a_wake_read_a_relay_hosts_seat_from_it() {
             last_attempt_at_unix_ms: None,
             acknowledged_by: acknowledged_by.map(str::to_owned),
             failure: None,
-            asks: crate::model::WakeAsks { messages: vec![message.into()], delivery_acknowledges },
+            asks: crate::model::WakeAsks { messages: vec![message.into()], delivery_acknowledges, staging_acknowledges: false },
         });
         step
     };
@@ -919,4 +929,412 @@ async fn a_faults_targets_and_a_wake_read_a_relay_hosts_seat_from_it() {
         steps.iter().map(|step| step.wake.as_ref().unwrap().acknowledged_by.as_deref()).collect::<Vec<_>>(),
         [Some("consumed"), Some("consumed"), Some("claim"), Some("delivery"), None, Some("turn")]
     );
+}
+
+/// A reminder group of two to `cedar`, `message/00000000000000e1` (version 1) and its newer
+/// `message/00000000000000e2` (version 2), whose winner `e2` the seat closed on its host.
+fn reminders(owner: &Store, cedar: &str) {
+    for (subject, version) in [("message/00000000000000e1", 1), ("message/00000000000000e2", 2)] {
+        append(
+            owner,
+            subject,
+            "message.sent",
+            Some("agent/sender"),
+            json!({
+                "from": "agent/sender", "to": cedar, "content": "stand-up", "status": "sent",
+                "tags": ["reminder:standup", format!("version:{version}")],
+            }),
+        );
+    }
+    for kind in ["message.delivered", "message.read", "message.closed"] {
+        message_marks::record(owner, "message/00000000000000e2", kind, cedar).unwrap();
+    }
+}
+
+/// The ids and layers of a paging client's first page of current or all messages.
+async fn client_page(state: &crate::api::AppState, history: bool) -> Vec<(String, Value)> {
+    let query = crate::api::ClientListQuery { history, limit: Some(50), ..Default::default() };
+    let (_, axum::Json(page)) = crate::api::client_reads::client_messages_sql_page_for_tests(
+        state,
+        crate::api::new_client_snapshot(state),
+        &query,
+    )
+    .await
+    .unwrap();
+    page.items
+        .iter()
+        .map(|item| (item["id"].as_str().unwrap().to_owned(), item["operational"].clone()))
+        .collect()
+}
+
+/// Two members of this build: the seat's host closed a reminder's winner as a mark, which never
+/// replicates. The other member's read hears the close without queueing any write, even with
+/// its writer held for the whole read; that read leaves the closed winner out of current
+/// mail, as before. Once the close is recorded, the older reminder is current in the paging and
+/// the non-paging lists, the closed one is history even with the host silent, and no revision moves
+/// (#4866).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hosts_close_of_a_reminders_winner_makes_the_next_one_current_on_another_member() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _birch) = owner(root.path()).await;
+    reminders(&owner, &cedar);
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let (winner, older) = ("message/00000000000000e2", "message/00000000000000e1");
+    let ids = |page: &[(String, Value)]| page.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let before = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+
+    // The first read, with this member's writer held throughout.
+    let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let holder = {
+        let viewer = viewer.clone();
+        let (held, release) = (held.0, release.1);
+        std::thread::spawn(move || {
+            let _writer = viewer.connection.write();
+            held.send(()).unwrap();
+            release.recv().unwrap();
+        })
+    };
+    held.1.recv().unwrap();
+    let started = Instant::now();
+    let first = tokio::time::timeout(Duration::from_secs(5), client_page(&state, false))
+        .await
+        .expect("a read waited for the writer");
+    assert!(started.elapsed() < message_reads::VIEW_DEADLINE * 2, "{:?}", started.elapsed());
+    assert!(
+        !ids(&first).contains(&winner.to_owned()) && !ids(&first).contains(&older.to_owned()),
+        "the first read leaves the closed winner out, and the older one is still superseded: {first:?}"
+    );
+    assert!(!crate::store::relayed_closes::closed(&viewer.readers.get(), winner).unwrap());
+    release.0.send(()).unwrap();
+    holder.join().unwrap();
+
+    assert!(crate::store::relayed_closes::idle(&viewer));
+    crate::api::relayed_close_maintenance::turn(&state, &mut Default::default()).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::store::relayed_closes::closed(&viewer.readers.get(), winner).unwrap() {
+        assert!(Instant::now() < deadline, "the background writer never recorded the host's close");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        owner.claims_for(winner, Some("message.closed")).unwrap().is_empty()
+            && viewer.claims_for(winner, Some("message.closed")).unwrap().is_empty(),
+        "the host's close is a mark, and nothing replicated it"
+    );
+
+    // The next read: the older reminder is current, and the winner the host closed is history.
+    let current = client_page(&state, false).await;
+    assert!(ids(&current).contains(&older.to_owned()), "{current:?}");
+    assert!(!ids(&current).contains(&winner.to_owned()), "{current:?}");
+    let all = client_page(&state, true).await;
+    let layer = |page: &[(String, Value)], id: &str| page.iter().find(|(item, _)| item == id).unwrap().1.clone();
+    assert_eq!(layer(&all, older), json!({"layer": "current", "actionable": true, "reasons": []}));
+    assert_eq!(layer(&all, winner), json!({"layer": "history", "actionable": false, "reasons": ["closed"]}));
+    // The non-paging client's lists pick the same winner.
+    let listed = crate::api::client_message_resources(&viewer, None, false, None).unwrap();
+    assert_eq!(
+        listed.iter().filter(|item| item["id"] == older || item["id"] == winner).map(|item| item["id"].clone()).collect::<Vec<_>>(),
+        [json!(older)]
+    );
+    // No revision moves: a relayed close never feeds one.
+    let after = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let revision = |items: &[Value], id: &str| {
+        let item = items.iter().find(|item| item["id"] == id).unwrap();
+        (item["revision"].clone(), item["updated_at"].clone())
+    };
+    for id in [winner, older] {
+        assert_eq!(revision(&after, id), revision(&before, id), "{id}");
+    }
+    let unpatched = after.iter().find(|item| item["id"] == winner).unwrap();
+    assert_eq!(unpatched["operational"]["reasons"], json!(["closed"]), "{unpatched}");
+
+    // With the host silent, once its kept answer has lapsed, the close still counts, and the
+    // message's state is this member's own records.
+    tokio::time::sleep(Duration::from_millis(5_200)).await;
+    let silent = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), hung().await)));
+    let all = client_page(&silent, true).await;
+    assert_eq!(layer(&all, winner), json!({"layer": "history", "actionable": false, "reasons": ["closed"]}));
+    let current = client_page(&silent, false).await;
+    assert!(ids(&current).contains(&older.to_owned()) && !ids(&current).contains(&winner.to_owned()), "{current:?}");
+    let resource = crate::api::client_message_resources(&viewer, None, true, None).unwrap();
+    let resource = resource.iter().find(|item| item["id"] == winner).unwrap();
+    assert_eq!(resource["state"], "sent", "this member's own records: {resource}");
+}
+
+/// A staging the host records as a mark reads as staged on another member, below every mark: in
+/// the message's status and delivery, in a work wake whose driver's staging is its delivery, and
+/// in doctor's held mail, where held mail the host's seat took any step with goes, as it does from
+/// the host's own held flag. Mail the host did not stage stays held.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_hosts_staging_mark_reads_as_staged() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _birch) = owner(root.path()).await;
+    for subject in ["message/00000000000000e1", "message/00000000000000e2"] {
+        append(
+            &owner,
+            subject,
+            "message.sent",
+            Some("agent/sender"),
+            json!({"from": "agent/sender", "to": cedar, "content": "hello", "status": "sent",
+                   "tags": [crate::silent::SILENT_TAG]}),
+        );
+    }
+    message_marks::record(&owner, "message/00000000000000e1", message_marks::STAGED, &cedar).unwrap();
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer
+        .import_replication(OWNER, &owner.export_replication(0).unwrap())
+        .unwrap();
+    // Held mail is indexed as the replicated mail is projected.
+    viewer.project_replication_backlog().unwrap();
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let staged = BTreeMap::from([(OWNER.to_owned(), vec!["message/00000000000000e1".to_owned()])]);
+    let answered = message_reads::read(&state, staged, message_reads::STATUS_DEADLINE).await;
+    assert_eq!(
+        answered.get("message/00000000000000e1").and_then(Relayed::status),
+        Some("staged"),
+        "{answered:?}"
+    );
+    let socket = serve(root.path(), state.clone()).await;
+    let status: Value = crate::client::Client::unix(&socket)
+        .get("/v1/messages/delivery/message/00000000000000e1")
+        .await
+        .unwrap();
+    assert_eq!(status["delivery"]["phase"], "staged", "{status}");
+
+    let worker = declare(&viewer, "viewer-seat", VIEWER);
+    let step = viewer
+        .start_work(&crate::model::WorkStartRequest {
+            actor: worker,
+            title: "Inspect a fixture".into(),
+            idempotency_key: "staged-wake-step".into(),
+        })
+        .unwrap();
+    let wake = |staging_acknowledges: bool| {
+        let mut step = step.clone();
+        step.wake = Some(crate::model::WorkWakeView {
+            assignee: cedar.clone(),
+            assignee_state: "working".into(),
+            incarnation_id: "incarnation".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: None,
+            acknowledged_by: None,
+            failure: None,
+            asks: crate::model::WakeAsks {
+                messages: vec!["message/00000000000000e1".into()],
+                delivery_acknowledges: true,
+                staging_acknowledges,
+            },
+        });
+        step
+    };
+    let mut steps = [wake(true), wake(false)];
+    crate::api::message_reads::read_work_wakes(&state, steps.iter_mut()).await.unwrap();
+    assert_eq!(
+        steps.iter().map(|step| step.wake.as_ref().unwrap().acknowledged_by.as_deref()).collect::<Vec<_>>(),
+        [Some("delivery"), None],
+        "a staging is a delivery only for a driver whose staging is its delivery"
+    );
+
+    let later = smallclaims::store::now_ms() + 60_000;
+    let runtime = tokio::runtime::Handle::current();
+    let seats = vec![(cedar.clone(), 2, 0)];
+    let held = tokio::task::spawn_blocking(move || {
+        crate::api::relayed_held_mail(&state, seats, later, Some(&runtime)).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        held.iter().map(|(seat, count, _)| (seat.as_str(), *count)).collect::<Vec<_>>(),
+        [(cedar.as_str(), 1)],
+        "the staged message is offered; the other is still held"
+    );
+}
+
+/// Include every SQLite page, including local-only tables omitted from replication digests.
+fn sqlite_bytes_digest(path: &Path) -> Vec<(bool, usize, Vec<u8>)> {
+    use sha2::{Digest as _, Sha256};
+    [path.to_path_buf(), path.with_file_name("claims.sqlite3-wal")].into_iter().map(|path| {
+        match fs::read(path) {
+            Ok(bytes) => (true, bytes.len(), Sha256::digest(&bytes).to_vec()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (false, 0, Vec::new()),
+            Err(error) => panic!("could not hash SQLite fixture: {error}"),
+        }
+    }).collect()
+}
+
+async fn close_writer_idle(store: &Store) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !crate::store::relayed_closes::idle(store) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("close writer did not become idle");
+}
+
+/// The real HTTP read learns a held remote close with a receipt, but has no writer side effect.
+async fn identityless_close_read_is_read_only(work: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _) = owner(root.path()).await;
+    let step = owner.start_work(&crate::model::WorkStartRequest {
+        actor: cedar.clone(), title: "Inspect remote close".into(),
+        idempotency_key: "read-only-step".into(),
+    }).unwrap();
+    let wake = crate::reconcile::append_work_wake_message(
+        &owner, &step, &cedar, "fixture-incarnation", 1, "automatic", "daemon/runtime",
+        "ready", "read-only-wake".into(),
+    ).unwrap();
+    message_marks::record(&owner, &wake.subject, "message.closed", &cedar).unwrap();
+    let database = root.path().join("claims.sqlite3");
+    let viewer = Arc::new(Store::open(&database, VIEWER).unwrap());
+    viewer.import_replication(OWNER, &owner.export_replication(0).unwrap()).unwrap();
+    viewer.project_replication_backlog().unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let local = viewer.step_run(&step.subject).unwrap().unwrap();
+    assert!(local.wake.as_ref().unwrap().asks.messages.contains(&wake.subject));
+    assert_ne!(local.wake.as_ref().unwrap().acknowledged_by.as_deref(), Some("consumed"));
+    assert_eq!(viewer.message(&wake.subject).unwrap().unwrap().status, "sent");
+    assert!(!crate::store::relayed_closes::closed(&viewer.readers.get(), &wake.subject).unwrap());
+    assert!(viewer.claims_for(&wake.subject, Some("message.closed")).unwrap().is_empty());
+    assert!(message_marks::recorded_at(&viewer.readers.get(), &wake.subject, &["message.closed"], None).unwrap().is_none());
+    // Inspect through the peer directly: this must not warm the viewing member's answer cache.
+    let peer = relay(root.path(), url.clone());
+    let answer = peer.read_message_marks(OWNER, std::slice::from_ref(&wake.subject), Duration::from_secs(10))
+        .await.unwrap().unwrap().messages.remove(0);
+    assert!(answer.held);
+    assert!(answer.marks.iter().any(|mark| mark.kind == "message.closed" && !mark.receipt.is_empty()));
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let client = crate::client::Client::unix(&serve(root.path(), state).await);
+    let observer = rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let version = || observer.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0)).unwrap();
+    let before_version = version();
+    let before = sqlite_bytes_digest(&database);
+    let rows_before: i64 = viewer.readers.get().query_row("SELECT COUNT(*) FROM local_relayed_message_closes", [], |row| row.get(0)).unwrap();
+    let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let holder = {
+        let viewer = viewer.clone();
+        let (held, release) = (held.0, release.1);
+        std::thread::spawn(move || {
+            let _writer = viewer.connection.write();
+            held.send(()).unwrap();
+            release.recv().unwrap();
+        })
+    };
+    held.1.recv().unwrap();
+    let route = if work { format!("/v1/work-items/{}", step.subject) }
+        else { format!("/v1/messages/read/{}", wake.subject) };
+    for _ in 0..2 {
+        let read: Value = tokio::time::timeout(Duration::from_secs(5), client.get(&route))
+            .await.expect("GET waited for the writer").unwrap();
+        if work {
+            assert_eq!(read["wake"]["acknowledged_by"], "consumed", "{read}");
+        } else {
+            assert_eq!(read["status"], "closed", "{read}");
+            assert_eq!(read["status_from"], json!({"host": OWNER, "state": "answered"}));
+        }
+        assert_eq!(sqlite_bytes_digest(&database), before);
+        assert_eq!(version(), before_version);
+    }
+    let idle_after_read = crate::store::relayed_closes::idle(&viewer);
+    let queued_after_read = crate::store::relayed_closes::queued(&viewer);
+    release.0.send(()).unwrap();
+    holder.join().unwrap();
+    close_writer_idle(&viewer).await;
+    assert!(idle_after_read, "GET started a deferred close writer");
+    assert_eq!(queued_after_read, 0);
+    assert_eq!(sqlite_bytes_digest(&database), before, "GET changed SQLite after the writer became idle");
+    assert_eq!(version(), before_version);
+    let rows_after: i64 = viewer.readers.get().query_row("SELECT COUNT(*) FROM local_relayed_message_closes", [], |row| row.get(0)).unwrap();
+    assert_eq!(rows_after, rows_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identityless_work_item_get_never_records_a_relayed_close() {
+    identityless_close_read_is_read_only(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn identityless_message_get_never_records_a_relayed_close() {
+    identityless_close_read_is_read_only(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relayed_close_maintenance_stops_when_cancelled() {
+    let root = tempfile::tempdir().unwrap();
+    let viewer = Arc::new(Store::open(&root.path().join("claims.sqlite3"), VIEWER).unwrap());
+    let state = app(viewer.clone(), VIEWER, root.path(), None);
+    let (stop, stopped) = watch::channel(false);
+    let worker = tokio::spawn(crate::api::relayed_close_maintenance::run(state, stopped));
+    tokio::task::yield_now().await;
+    stop.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(1), worker).await
+        .expect("maintenance ignored cancellation").unwrap();
+    assert!(crate::store::relayed_closes::idle(&viewer));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relayed_close_maintenance_pages_past_open_mail_without_any_get() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _) = owner(root.path()).await;
+    for index in 0..258 {
+        send(&owner, &format!("message/{:016x}", 0x1000 + index), &cedar);
+    }
+    let closed = "message/0000000000001101";
+    message_marks::record(&owner, closed, "message.closed", &cedar).unwrap();
+    let viewer = Arc::new(Store::open(&root.path().join("viewer.db"), VIEWER).unwrap());
+    viewer.import_replication(OWNER, &owner.export_replication(0).unwrap()).unwrap();
+    viewer.project_replication_backlog().unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let mut cursor = crate::api::relayed_close_maintenance::Cursor::default();
+    crate::api::relayed_close_maintenance::turn(&state, &mut cursor).await.unwrap();
+    close_writer_idle(&viewer).await;
+    assert!(!crate::store::relayed_closes::closed(&viewer.readers.get(), closed).unwrap(), "first turn exceeded its page cap");
+    crate::api::relayed_close_maintenance::turn(&state, &mut cursor).await.unwrap();
+    close_writer_idle(&viewer).await;
+    assert!(crate::store::relayed_closes::closed(&viewer.readers.get(), closed).unwrap(), "open prefix starved a later close");
+    let row = || viewer.readers.get().query_row(
+        "SELECT COUNT(*), MIN(receipt) FROM local_relayed_message_closes WHERE message=?1", [closed],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    ).unwrap();
+    let recorded = row();
+    assert_eq!(recorded.0, 1);
+    assert!(recorded.1.starts_with("offset-receipt/"));
+    for _ in 0..3 {
+        crate::api::relayed_close_maintenance::turn(&state, &mut cursor).await.unwrap();
+        close_writer_idle(&viewer).await;
+    }
+    assert_eq!(row(), recorded, "repeated sweeps must be idempotent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relayed_close_maintenance_cancels_an_in_flight_remote_read() {
+    let root = tempfile::tempdir().unwrap();
+    let (owner, url, cedar, _) = owner(root.path()).await;
+    message_marks::record(&owner, "message/00000000000000c1", "message.closed", &cedar).unwrap();
+    let database = root.path().join("claims.sqlite3");
+    let viewer = Arc::new(Store::open(&database, VIEWER).unwrap());
+    viewer.import_replication(OWNER, &owner.export_replication(0).unwrap()).unwrap();
+    viewer.project_replication_backlog().unwrap();
+    while viewer.maintain_client_message_selectors().unwrap() {}
+    // Warm the GET cache with a terminal close. Discovery must nevertheless contact the peer.
+    let reads = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let client = crate::client::Client::unix(&serve(root.path(), reads).await);
+    let read: Value = client.get("/v1/messages/read/message/00000000000000c1").await.unwrap();
+    assert_eq!(read["status"], "closed");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let state = app(viewer.clone(), VIEWER, root.path(), Some(relay(root.path(), url)));
+    let before = sqlite_bytes_digest(&database);
+    let (stop, stopped) = watch::channel(false);
+    let worker = tokio::spawn(crate::api::relayed_close_maintenance::run(state, stopped));
+    let (_connection, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await
+        .expect("maintenance did not begin its remote read").unwrap();
+    stop.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(1), worker).await
+        .expect("shutdown waited for the silent peer").unwrap();
+    close_writer_idle(&viewer).await;
+    assert_eq!(sqlite_bytes_digest(&database), before, "cancelled discovery wrote SQLite");
 }

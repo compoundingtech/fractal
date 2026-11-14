@@ -161,7 +161,8 @@ before displaying the new order. Rows leaving a bounded window appear in
 
 Rows are joined in Fractal so a client never joins collections itself. A mission's
 `run_details` carry `steps` for each open run and for its latest run, and every
-run's steps in a mission detail read. An agent names its queue in
+run's steps in a mission detail read. A window never carries the detail-only step history
+(`attempts`, `waits`, `transitions`, `history_complete`) or per-step `eta`. An agent names its queue in
 `current_work`, `next_work`, and `upcoming_work`: each step's mission, run,
 path, title, first goal, and state, and the `subagents` its harness runs now.
 A work row names its `mission_id`.
@@ -325,8 +326,8 @@ session starts with its own availability and must not inherit the previous windo
 Older-page responses independently report whether there are entries before that page; once
 the session's start is reached, later live deltas do not reopen older-history paging.
 
-`st missions ls --watch`, `st attention ls --watch`, `st agents ls --watch`,
-and `st work ls --watch` consume this same transport.
+`fractal missions ls --watch`, `fractal attention ls --watch`, `fractal agents ls --watch`,
+and `fractal work ls --watch` consume this same transport.
 
 ## Summary
 
@@ -343,8 +344,8 @@ These are complete current source counts, independent of any list's page size.
 gates, launch/revision approvals, person asks, agent and custom requests, harness
 prompts and logins, and broken gates the person published). Updates, messages and
 agents' faults are not alerts. `needs_you` carries the same count for older clients; a daemon that
-predates alerts omits `alerts` and also counted unread updates in `needs_you`. Local snoozes and closed rows remain
-client-owned. `working_agents` uses running/working presentation, excluding
+predates alerts omits `alerts` and also counted unread updates in `needs_you`. Snoozed rows still count here: each
+client hides a row while its `snoozed_until` is ahead, and closed rows remain client-owned. `working_agents` uses running/working presentation, excluding
 faults and stale delivery. `active_missions` uses the shared mission words
 working, queued, decision, stalled, unstaffed and unclaimed, excluding system
 missions. Human gates use the selected person's unresolved attention membership.

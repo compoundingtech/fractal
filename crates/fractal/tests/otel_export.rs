@@ -1874,9 +1874,29 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             assert!(double_attribute(cold, &key).is_some_and(|ms| ms >= 0.0), "{key}: {cold}");
         }
     }
-    assert!(spans.iter().all(|span| span["parentSpanId"].as_str()
-        .is_none_or(|parent| !spans.iter().any(|server| server["traceId"] == TRACE
-            && server["spanId"].as_str() == Some(parent)))), "request stage children leaked: {spans:?}");
+    let roster_gets: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "GET /v1/client/agents").collect();
+    assert!(!roster_gets.is_empty(), "roster GET server spans missing");
+    let roster_child = |span: &Value| span["traceId"] == TRACE
+        && span["parentSpanId"].as_str().is_some_and(|parent|
+            roster_gets.iter().any(|server| server["spanId"].as_str() == Some(parent)));
+    assert!(spans.iter().all(|span| !roster_child(span)),
+        "roster GET stage children leaked: {spans:?}");
+    assert!(spans.iter().all(|span| span["name"] != "st.db.writer" || !roster_child(span)),
+        "roster GET unexpectedly created a writer span: {spans:?}");
+    // The fixture's diagnostics POSTs share TRACE with the reads. Their writes
+    // intentionally have request-parented children, unlike published roster reads.
+    let diagnostic_posts: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "POST /v1/diagnostics/harness").collect();
+    assert!(!diagnostic_posts.is_empty(), "diagnostics POST server spans missing");
+    let writers: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "st.db.writer").collect();
+    assert!(!writers.is_empty(), "diagnostics writes must export writer spans");
+    for writer in writers {
+        assert!(writer["parentSpanId"].as_str().is_some_and(|parent|
+            diagnostic_posts.iter().any(|server| server["spanId"].as_str() == Some(parent))),
+            "writer span must be a child of its diagnostics POST: {writer}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2720,7 +2740,9 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     };
     // Deliberately old read/closed mail must affect neither count nor oldest age.
     let mut transitions = Vec::new();
+    // Write oldest first: accepted time never moves behind this writer's newest batch.
     for (id, recipient, lifecycle, silent, seconds) in [
+        ("stale-pending", BUSY, "sent", false, 90_000),
         ("read", BUSY, "read", false, 600),
         ("closed", BUSY, "closed", false, 600),
         ("remote", REMOTE, "sent", false, 600),
@@ -2791,8 +2813,9 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
                         .map(|kv: &opentelemetry::KeyValue| (kv.key.as_str(), kv.value.to_string()))
                         .collect::<BTreeMap<_, _>>();
                     assert_eq!(attributes.keys().copied().collect::<BTreeSet<_>>(),
-                        BTreeSet::from(["st.agent", "st.mailbox.state"]));
-                    (attributes["st.agent"].clone(), attributes["st.mailbox.state"].clone())
+                        BTreeSet::from(["st.agent", "st.mailbox.state", "st.mailbox.age_band"]));
+                    (attributes["st.agent"].clone(), attributes["st.mailbox.state"].clone(),
+                        attributes["st.mailbox.age_band"].clone())
                 };
                 match metric.name() {
                     "st.mailbox.unread" => {
@@ -2819,29 +2842,31 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
         (counts, ages)
     };
     let (counts, ages) = collect();
-    let expected = BTreeMap::from([
-        ((BUSY.to_owned(), "pending".into()), 2),
-        ((BUSY.to_owned(), "delivered".into()), 2),
-        ((BUSY.to_owned(), "held".into()), 1),
-        ((EMPTY.to_owned(), "pending".into()), 0),
-        ((EMPTY.to_owned(), "delivered".into()), 0),
-        ((EMPTY.to_owned(), "held".into()), 0),
-    ]);
-    assert_eq!(counts, expected, "exact agent set and mandatory zero states");
+    let expected = [BUSY, EMPTY].into_iter().flat_map(|agent| {
+        [("pending", 2), ("delivered", 2), ("held", 1)].into_iter().flat_map(move |(state, count)| {
+            ["recent", "stale"].into_iter().map(move |band| {
+                let count = if agent == EMPTY { 0 } else if band == "recent" { count }
+                    else { u64::from(state == "pending") };
+                ((agent.to_owned(), state.to_owned(), band.to_owned()), count)
+            })
+        })
+    }).collect::<BTreeMap<_, _>>();
+    assert_eq!(counts.len(), 12, "six series per agent for each gauge");
+    assert_eq!(counts, expected, "exact agent set and mandatory zero state/band pairs");
     assert_eq!(ages.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>());
     let elapsed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
         .saturating_sub(now) as f64 / 1000.0;
-    for ((agent, state), age) in &ages {
-        if agent == EMPTY {
+    for ((agent, state, band), age) in &ages {
+        if expected[&(agent.clone(), state.clone(), band.clone())] == 0 {
             assert_eq!(*age, 0.0);
         } else {
-            let oldest = match state.as_str() {
+            let oldest = if band == "stale" { 90_000.0 } else { match state.as_str() {
                 "pending" => 120.0,
                 "delivered" => 90.0,
                 "held" => 60.0,
                 _ => unreachable!(),
-            };
+            }};
             assert!(*age >= oldest && *age <= oldest + elapsed + 1.0,
                 "age must use oldest accepted sent timestamp: {state}={age}");
         }
@@ -2855,21 +2880,121 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     assert_eq!(collect().0, expected);
     *cache.write().unwrap() = mailbox_metrics::summarize(&store).unwrap();
     let (partial_counts, partial_ages) = collect();
-    let partial_keys = BTreeSet::from([
-        (BUSY.to_owned(), "pending".to_owned()),
-        (BUSY.to_owned(), "delivered".to_owned()),
-        (EMPTY.to_owned(), "pending".to_owned()),
-        (EMPTY.to_owned(), "delivered".to_owned()),
-    ]);
+    let partial_keys = expected.keys().filter(|(_, state, _)| state != "held")
+        .cloned().collect::<BTreeSet<_>>();
     assert_eq!(partial_counts.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
     assert_eq!(partial_ages.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
-    assert!(partial_counts[&(BUSY.into(), "pending".into())] >= 2);
-    assert!(partial_counts[&(BUSY.into(), "delivered".into())] >= 2);
-    assert_eq!(partial_counts.values().sum::<u64>(), 5,
+    assert_eq!(partial_counts.len(), 8, "only the two held bands per agent are omitted");
+    assert!(partial_counts[&(BUSY.into(), "pending".into(), "recent".into())] >= 2);
+    assert!(partial_counts[&(BUSY.into(), "delivered".into(), "recent".into())] >= 2);
+    assert_eq!(partial_counts.values().sum::<u64>(), 6,
         "incomplete held classification must not discard unread mail");
-    assert_eq!(partial_counts[&(EMPTY.into(), "pending".into())], 0);
-    assert_eq!(partial_counts[&(EMPTY.into(), "delivered".into())], 0);
-    assert_eq!(partial_ages[&(EMPTY.into(), "pending".into())], 0.0);
-    assert_eq!(partial_ages[&(EMPTY.into(), "delivered".into())], 0.0);
+    for band in ["recent", "stale"] {
+        for state in ["pending", "delivered"] {
+            assert_eq!(partial_counts[&(EMPTY.into(), state.into(), band.into())], 0);
+            assert_eq!(partial_ages[&(EMPTY.into(), state.into(), band.into())], 0.0);
+        }
+    }
     provider.shutdown().unwrap();
+}
+
+/// The child exports an isolated cached snapshot through the real HTTP/JSON exporter.
+/// The parent checks the receiver's decoded OTLP, not merely local instrument counters.
+#[cfg(target_os = "linux")]
+#[test]
+fn population_gauges_export_exact_otlp_attribute_sets() {
+    const CHILD: &str = "ST_POPULATION_EXPORT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        use fractal_daemon::{SeatsStoreCore as _, SubagentsStore as _};
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_otlp::WithExportConfig as _;
+        use std::sync::{Arc, RwLock};
+        let store = fractal_daemon::store::Store::open_memory("example").unwrap();
+        let intent = fractal_daemon::parse_intent(
+            "version 2\nagent \"example.worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n",
+            "example",
+        ).unwrap();
+        store.apply_internal(&intent, "population-export").unwrap();
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&fractal_daemon::model::ClaimInput {
+                subject: "agent/example.worker".into(), kind: kind.into(),
+                actor: None, fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        append("runtime.observed", serde_json::json!({
+            "status":"running", "runtime_id":"wrapper", "incarnation_id":"one"
+        }));
+        append("harness.observed", serde_json::json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one"
+        }));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        append("subagent.appeared", serde_json::json!({
+            "subagent_id":"child", "driver":"omp", "incarnation_id":"one",
+            "session_id":"native", "lease_expires_at_unix_ms":now + 60_000
+        }));
+        assert_eq!(store.running_subagents(now).unwrap().len(), 1);
+        let snapshot = fractal_daemon::api::population_metrics::summarize(&store, &[]).unwrap();
+        let exporter = opentelemetry_otlp::MetricExporter::builder().with_http()
+            .with_protocol(opentelemetry_otlp::Protocol::HttpJson).build().unwrap();
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_resource(opentelemetry_sdk::Resource::builder_empty()
+                .with_service_name("st-daemon")
+                .with_attribute(opentelemetry::KeyValue::new("host.name", "example-host")).build())
+            .with_periodic_exporter(exporter).build();
+        fractal_daemon::api::population_metrics::register_metrics(&provider.meter("st3"), Arc::new(RwLock::new(snapshot)));
+        provider.force_flush().unwrap();
+        provider.shutdown().unwrap();
+        return;
+    }
+    let Some(collector) = otelite("population_gauges_export_exact_otlp_attribute_sets") else { return; };
+    let root = tempfile::tempdir().unwrap();
+    let output = isolated_command(&collector, root.path())
+        .args(["run", "--out"]).arg(root.path().join("capture"))
+        .args(["--protocol", "http/json", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "otel_export::population_gauges_export_exact_otlp_attribute_sets", "--nocapture"])
+        .env(CHILD, "1").output().unwrap();
+    assert!(output.status.success(), "population exporter child failed: {output:?}");
+    let requests = capture_requests(&root.path().join("capture/metrics.ndjson"));
+    let mut population = std::collections::BTreeSet::new();
+    let mut attention = std::collections::BTreeMap::new();
+    let mut freshness = false;
+    let value = |point: &Value| point["asInt"].as_u64()
+        .or_else(|| point["asInt"].as_str().and_then(|value| value.parse().ok()))
+        .expect("OTLP u64 gauge value");
+    for request in &requests {
+        for point in metric_points(request, "st.agents") {
+            let keys = point["attributes"].as_array().unwrap().iter()
+                .map(|attribute| attribute["key"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(keys, std::collections::BTreeSet::from([
+                "st.agent.driver", "st.agent.kind", "st.agent.repo",
+                "st.agent.state", "st.agent.reason", "st.agent.has_work"]));
+            assert_eq!(value(point), 1);
+            assert_eq!(string_attribute(point, "st.agent.repo"), Some("unattributed"));
+            assert_eq!(string_attribute(point, "st.agent.reason"), Some("unattributed"));
+            assert_eq!(bool_attribute(point, "st.agent.has_work"), Some(false));
+            population.insert((string_attribute(point, "st.agent.driver").unwrap().to_owned(),
+                string_attribute(point, "st.agent.kind").unwrap().to_owned(),
+                string_attribute(point, "st.agent.state").unwrap().to_owned()));
+        }
+        for point in metric_points(request, "st.attention.open") {
+            assert_eq!(point["attributes"].as_array().unwrap().len(), 1);
+            attention.insert(string_attribute(point, "st.attention.kind").unwrap().to_owned(),
+                value(point));
+        }
+        for point in metric_points(request, "st.agents.refresh.last_success") {
+            assert!(point["attributes"].as_array().is_none_or(Vec::is_empty));
+            assert!(value(point) > 0);
+            freshness = true;
+        }
+    }
+    assert_eq!(population, std::collections::BTreeSet::from([
+        ("claude".into(), "unattributed".into(), "working".into()),
+        ("omp".into(), "subagent".into(), "unknown".into())]));
+    assert_eq!(attention.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["person-step", "human-gate", "launch-approval", "unread-message",
+            "agent-request", "revision-approval", "harness-login", "harness-prompt", "fault", "model-drift", "unattributed"]));
+    assert!(attention.values().all(|count| *count == 0));
+    assert!(freshness);
 }

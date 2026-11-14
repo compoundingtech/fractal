@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add private agent-review grammar validation with no user-visible effect",
+  "replay": {
+    "status": "none",
+    "detail": "No claims, replay or projections change; the helper is disconnected."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema or storage version changes; evidence types still have no serde implementation."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The private helper validates required reviewer, question and evidence with strict allowlists. Public mission parsing still rejects agent-review."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or publication changes; existing gate kinds and human review behavior are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No runtime behavior or restart-time work changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting removes the private helper and tests; no data recovery is needed."
+  }
+}

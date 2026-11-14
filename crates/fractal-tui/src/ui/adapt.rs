@@ -133,12 +133,12 @@ fn missions(model: &Model, person: &str, now: &str) -> Vec<Mission> {
 /// How long st may stay silent before the screen calls the link offline, not reconnecting.
 pub const OFFLINE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// `OFFLINE_GRACE`, unless `STUI_OFFLINE_GRACE_MS` says otherwise. Only the end-to-end tests set it,
+/// `OFFLINE_GRACE`, unless `FRACTAL_TUI_OFFLINE_GRACE_MS` says otherwise. Only the end-to-end tests set it,
 /// so they need not wait a minute to see the offline word.
 pub fn offline_grace() -> std::time::Duration {
     static GRACE: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
     *GRACE.get_or_init(|| {
-        std::env::var("STUI_OFFLINE_GRACE_MS")
+        std::env::var("FRACTAL_TUI_OFFLINE_GRACE_MS")
             .ok()
             .and_then(|ms| ms.parse().ok())
             .map(std::time::Duration::from_millis)
@@ -178,11 +178,12 @@ pub(super) fn human_presentation(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
-    world_at(model, person, extras, &chrono::Utc::now().to_rfc3339())
+    world_at(model, person, extras, chrono::Utc::now().fixed_offset())
 }
 
 /// Adapt a snapshot using one explicit clock for all timestamp presentation.
-pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) -> World {
+pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, at: chrono::DateTime<chrono::FixedOffset>) -> World {
+    let now = &at.to_rfc3339();
     let restarting = extras
         .offline_since
         .is_some_and(|since| since.elapsed() < offline_grace());
@@ -239,7 +240,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         .window_errors
         .iter()
         .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
-            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals", "ReadPositions", "ReadPositionsList"].contains(&name.as_str()))
         .map(|(name, why)| format!("{name}: {why}"))
         .chain(
             extras
@@ -257,6 +258,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         behind,
         missions_followed: extras.missions_followed,
         settled: extras.attention_live && extras.agents_live,
+        unread: Default::default(),
         active_missions: extras.summary.as_ref().map(|(summary, _)| summary.active_missions as usize),
         inbox_alerts: extras.summary.as_ref()
             .filter(|(_, summary)| model.now.truncated && model.now.snapshot.as_ref().is_some_and(|attention| {
@@ -319,6 +321,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         },
         inventory_supported: extras.inventory_supported,
         inventory_partial: extras.inventory_partial.clone(),
+        at,
     }
 }
 
@@ -341,8 +344,8 @@ fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>
     }
 }
 
-/// Whether a client's reported build is an older version than the member's own. Only st's own
-/// builds share the member's version line ("stui 0.1.0+ab12cd3", "st 0.1.0+ab12cd3"); any other
+/// Whether a client's reported build is an older version than the member's own. Only Fractal's own
+/// builds share the member's version line ("fractal-tui 0.1.0+ab12cd3", "fractal 0.1.0+ab12cd3"); any other
 /// client, and any build that does not parse, is never called older.
 fn older_than_member(client: &str, member: &str) -> bool {
     fn version(build: &str) -> Option<Vec<u64>> {
@@ -637,6 +640,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                 waiting: path.map(|path| format!("step {path}")),
                 age: age(&item.requested_at, now),
                 requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
+                snoozed_until: item.snoozed_until.as_deref().and_then(|until| chrono::DateTime::parse_from_rfc3339(until).ok()),
                 deadline: item.deadline_at.as_deref().map(|deadline| {
                     ask_deadline(
                         deadline,
@@ -873,6 +877,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
                     .presentation
                     .is_none()
                     .then(|| agent.state.clone()),
+                last_prose_ms: agent.last_prose_at.as_deref().and_then(super::read_store::at_ms),
             }
         })
         .collect::<Vec<_>>();
@@ -910,6 +915,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
             terminal: false,
             subagents: Vec::new(),
             reported: None,
+            last_prose_ms: None,
         }
     }));
     agents
@@ -1478,6 +1484,7 @@ mod tests {
     fn both_delivery_sentences_are_sts_notes_not_the_persons_words() {
         for note in [
             "The person reads replies in st, not in the agent's session.",
+            "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.",
             "Answer the person in this conversation; people have no inbox, so do not reply with st.",
         ] {
             let delivery = format!("<smalltalk-message id=\"e6\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/e6\">\nis this a watcher?\n</smalltalk-message>\n{note}");
@@ -1508,7 +1515,7 @@ mod tests {
 
     #[test]
     fn a_delivery_by_the_current_channel_plugin_leaves_no_empty_shell_behind() {
-        // Nathan, 2026-10-05: "I see xml in stui tonight": plugin:st-channel:st was not a name
+        // Nathan, 2026-10-05: "I see xml in the terminal UI tonight": plugin:st-channel:st was not a name
         // the delivery recognised, so its envelope was taken out and `<channel …></channel>` stayed.
         let delivery = "<channel source=\"plugin:st-channel:st\" from=\"person/example\" messageId=\"message/c4\" threadId=\"message/c4\" identity=\"fleet/example/quay\">\n<smalltalk-message id=\"c4\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/c4\">\nhow is it going?\n</smalltalk-message>\nThe person reads replies in st, not in the agent's session.\n</channel>";
         let shown = BTreeSet::from(["message/c4".to_owned()]);
@@ -2502,6 +2509,30 @@ mod tests {
         );
     }
 
+    /// st's snooze on a row (`snoozed_until`) is the row's: it is told against the clock the
+    /// world was adapted at, and the world says when the next one ends.
+    #[test]
+    fn a_row_carries_the_snooze_st_serves_and_the_world_knows_when_it_ends() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        for row in [
+            row("attention/later", "human-gate", serde_json::json!({"snoozed_until": "2026-10-15T13:00:00Z"})),
+            row("attention/ended", "human-gate", serde_json::json!({"snoozed_until": "2026-10-15T11:00:00Z"})),
+            row("attention/open", "human-gate", serde_json::json!({})),
+        ] {
+            model.now.items.push(serde_json::from_value(row).unwrap());
+        }
+        model.now.snapshot = Some(fractal_client::Snapshot {
+            id: "snapshot/one".into(), host_id: "host/one".into(), store_index: 1,
+            projection_version: "test".into(), created_at: "2026-10-15T12:00:00Z".into(), published_at: None,
+        });
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-15T12:00:00Z").unwrap();
+        let world = world_at(&model, "person/example", &Extras::default(), at);
+        let snoozed = world.attention.items().iter().map(|item| (item.id.as_str(), item.snoozed(world.at))).collect::<Vec<_>>();
+        assert_eq!(snoozed, [("attention/later", true), ("attention/ended", false), ("attention/open", false)]);
+        assert_eq!(world.snooze_ends(), chrono::DateTime::parse_from_rfc3339("2026-10-15T13:00:00Z").ok());
+    }
+
     /// A newer st may name a group or card this client does not know: the row still shows, as
     /// what st says, never dropped. Only a null group or card keeps a row off Now.
     #[test]
@@ -2968,8 +2999,8 @@ mod tests {
     }
 
     #[test]
-    fn only_an_older_st_build_is_called_older_than_its_member() {
-        assert!(older_than_member("stui 0.0.9+77d0a13", "0.1.0+1ecae71"));
+    fn only_an_older_fractal_build_is_called_older_than_its_member() {
+        assert!(older_than_member("fractal-tui 0.0.9+77d0a13", "0.1.0+1ecae71"));
         assert!(older_than_member("st 0.1.0+local.ab12cd3", "0.2.0+1ecae71"));
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         assert!(older_than_member(
@@ -2982,15 +3013,15 @@ mod tests {
         ));
         assert!(!older_than_member("fractal-tui dev", "0.1.0+1ecae71"));
         // LIVE-MIGRATION END
-        assert!(!older_than_member("stui 0.1.0+77d0a13", "0.1.0+1ecae71"));
-        assert!(!older_than_member("stui 0.2.0+77d0a13", "0.1.0+1ecae71"));
+        assert!(!older_than_member("fractal-tui 0.1.0+77d0a13", "0.1.0+1ecae71"));
+        assert!(!older_than_member("fractal-tui 0.2.0+77d0a13", "0.1.0+1ecae71"));
         // Another client's version line is its own, and an unnamed or odd build is never older.
         assert!(!older_than_member(
             "smalltalk-ios 0.0.1 (3)",
             "0.1.0+1ecae71"
         ));
         assert!(!older_than_member("", "0.1.0+1ecae71"));
-        assert!(!older_than_member("stui dev", "0.1.0+1ecae71"));
+        assert!(!older_than_member("fractal-tui dev", "0.1.0+1ecae71"));
     }
 
     #[test]
@@ -3009,7 +3040,7 @@ mod tests {
             .collect();
         let text = text.join("\n");
         assert!(text.contains("CONNECTED CLIENTS"), "{text}");
-        assert!(text.contains("stui 0.1.0+1ecae71"), "{text}");
+        assert!(text.contains("fractal-tui 0.1.0+1ecae71"), "{text}");
         assert!(text.contains("person/robin · Robin's phone"), "{text}");
         // The follows list may wrap, so its words are checked apart.
         assert!(text.contains("follows now,"), "{text}");

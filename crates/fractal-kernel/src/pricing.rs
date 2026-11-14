@@ -106,7 +106,10 @@ pub fn rates(model: &str) -> Option<&'static Rates> {
         .map(|(_, rates)| rates)
 }
 
-fn canonical_model(model: &str) -> String {
+/// The decorations harnesses add to an API ID, removed: a `provider/` prefix, a bracketed
+/// variant such as `[1m]`, and a trailing date snapshot. Lowercased and trimmed, so a declared
+/// `anthropic/claude-opus-5-5` matches usage that reports `claude-opus-5-5-20260901`.
+pub fn canonical_model(model: &str) -> String {
     let mut model = model.trim().to_ascii_lowercase();
     if let Some(index) = model.rfind('/') {
         model = model[index + 1..].to_owned();
@@ -121,6 +124,26 @@ fn canonical_model(model: &str) -> String {
         model = stem.to_owned();
     }
     model
+}
+
+/// The Claude harness's model aliases: each names the newest model of its family.
+const CLAUDE_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
+
+/// Whether usage that reports `live` runs the model a seat declares as `declared`, or `None`
+/// when the declaration cannot be compared. Both compare after [`canonical_model`]. A Claude
+/// alias (`opus`, `sonnet`, `haiku`, with or without a `[1m]` variant) matches any API ID of
+/// its family (`sonnet` matches `claude-sonnet-4-6`). A declaration that is neither an alias
+/// nor a model this table prices is not a resolvable API ID, so it never reads as a mismatch.
+pub fn declared_model_matches(declared: &str, live: &str) -> Option<bool> {
+    let declared = canonical_model(declared);
+    let live = canonical_model(live);
+    if declared == live {
+        return Some(true);
+    }
+    if CLAUDE_ALIASES.contains(&declared.as_str()) {
+        return Some(live.starts_with(&format!("claude-{declared}-")));
+    }
+    MODELS.iter().any(|(id, _)| *id == declared).then_some(false)
 }
 
 /// One response's disjoint token buckets. `cache_write_1h` is the part of `cache_write` written
@@ -202,6 +225,19 @@ mod tests {
         assert!(rates("claude-opus-5-5").is_some());
         assert!(rates("local-model").is_none());
         assert_eq!(cost_microusd("local-model", Tokens::default()), None);
+    }
+
+    #[test]
+    fn a_declared_model_matches_its_spellings_and_claude_aliases_their_family() {
+        assert_eq!(declared_model_matches("anthropic/claude-opus-5-5", "claude-opus-5-5-20260901"), Some(true));
+        assert_eq!(declared_model_matches("anthropic/claude-opus-5-5", "gpt-6-sol"), Some(false));
+        assert_eq!(declared_model_matches("sonnet", "claude-sonnet-4-6"), Some(true));
+        assert_eq!(declared_model_matches("opus[1m]", "claude-opus-5-5"), Some(true));
+        assert_eq!(declared_model_matches("haiku", "claude-sonnet-4-6"), Some(false));
+        assert_eq!(declared_model_matches("sonnet", "gpt-6-sol"), Some(false));
+        // Neither an alias nor a priced API ID: not comparable, never a mismatch.
+        assert_eq!(declared_model_matches("local-model", "gpt-6-sol"), None);
+        assert_eq!(declared_model_matches("local-model", "local-model"), Some(true));
     }
 
     #[test]

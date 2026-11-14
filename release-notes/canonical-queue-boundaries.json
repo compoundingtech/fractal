@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep adjacent same-named queue blocks separate when rendering canonical mission KDL, preserving queue positions and dependencies.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No checkpoint changes." },
+  "compatibility": { "status": "none", "detail": "Canonical rendering preserves independent authored queue blocks instead of adding a predecessor edge between them." },
+  "downtime": { "status": "none", "detail": "No startup changes." },
+  "manual": { "status": "none", "detail": "No operator actions." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

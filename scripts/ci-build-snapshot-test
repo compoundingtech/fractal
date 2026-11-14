@@ -42,6 +42,31 @@ def command(*args, cwd, env=None):
     return result.stdout.strip(), result.stderr
 
 
+# Exercise dependency-only restoration without invoking Cargo: all host/cross
+# workspace outputs go away, including renamed targets, while dependencies stay.
+with tempfile.TemporaryDirectory() as tmp:
+    work = Path(tmp)
+    (work / 'Cargo.toml').write_text('[workspace]\nmembers=["member"]\n')
+    (work / 'member').mkdir()
+    (work / 'member/Cargo.toml').write_text('[package]\nname="local-crate"\nversion="0.1.0"\n[lib]\nname="renamed_lib"\n[[bin]]\nname="renamed-tool"\n')
+    target = work / 'target'
+    for profile in ('debug', 'release', 'aarch64-unknown-linux-gnu/debug'):
+        base = target / profile
+        stale = ['.fingerprint/local-crate-abcd/lib-local_crate.json',
+                 'build/local-crate-abcd/out/generated.rs',
+                 'deps/librenamed_lib-abcd.rlib', 'deps/renamed_tool-abcd.d',
+                 'renamed-tool', 'renamed-tool.d']
+        warm = ['.fingerprint/serde-abcd/lib-serde.json', 'deps/libserde-abcd.rlib',
+                '.fingerprint/local-crate-extra-abcd/lib-extra.json']
+        for name in stale + warm:
+            path = base / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('cached')
+        module.discard_workspace_outputs(work, target)
+        assert all(not (base / name).exists() for name in stale)
+        assert all((base / name).exists() for name in warm)
+
+
 with tempfile.TemporaryDirectory() as tmp:
     base = Path(tmp)
     work, temp, cargo = base / 'checkout', base / 'temp', base / 'cargo-home'
@@ -58,7 +83,10 @@ with tempfile.TemporaryDirectory() as tmp:
     (work / 'src/main.rs').write_text('fn main() { println!("{}{}{}", fractal_build_stamp::ST_BUILD_STAMP_LOCAL.unwrap(), library::SEPARATOR, fractal_build_stamp::AGENT_SPEC_REVISION); }\n')
     command('git', 'init', '-q', cwd=work)
     environment = {key: value for key, value in os.environ.items() if key not in ('RUSTC_WRAPPER', 'RUSTFLAGS', 'AGENT_SPEC_REVISION', 'CARGO_TARGET_DIR', 'CI_LOCAL_CACHES', 'CI_BUILD_SNAPSHOT_HIT', 'CI_NATIVE_SNAPSHOT', 'CI_SNAPSHOT_PIPELINE_FILE', 'CI_SNAPSHOT_PIPELINE', 'GITHUB_WORKFLOW_REF')}
-    environment.update(CARGO_HOME=str(cargo), CARGO_INCREMENTAL='0', CARGO_ENCODED_RUSTFLAGS='')
+    # A runner's build.build-dir can otherwise put fingerprints/deps outside the
+    # archived target, making the fixture reuse intermediates it never restored.
+    environment.update(CARGO_HOME=str(cargo), CARGO_INCREMENTAL='0', CARGO_ENCODED_RUSTFLAGS='',
+                       CARGO_TARGET_DIR=str(work / 'target'), CARGO_BUILD_BUILD_DIR=str(work / 'target'))
     command('cargo', 'generate-lockfile', cwd=work, env=environment)
     command('git', 'add', '.', cwd=work)
     def commit():
@@ -132,6 +160,8 @@ with tempfile.TemporaryDirectory() as tmp:
         assert index.stat().st_mtime_ns == index_mtime, 'source restoration must not restamp Git metadata'
         assert 'CI_BUILD_SNAPSHOT_STORES_HIT=1' in env_file.read_text()
         assert 'CI_BUILD_SNAPSHOT_ZIG_HIT=1' in env_file.read_text() and (zig / 'x64.complete').exists()
+        # GitHub applies GITHUB_ENV between steps; emulate that for prepare.
+        os.environ['CI_BUILD_SNAPSHOT_HIT'] = '1'
         assert (temp / 'st-bench/generated-fixture').read_text() == 'store fixture'
         module.prepare()
         _, warm = command('cargo', 'build', '--locked', '-vv', cwd=work, env=dict(os.environ))
@@ -146,16 +176,21 @@ with tempfile.TemporaryDirectory() as tmp:
         assert 'Compiling snapshot-fixture' in dirty
         dirty_stamp, dirty_revision = command(str(binary), cwd=base)[0].split('|')
         assert json.loads(dirty_stamp)['dirty'] is True and dirty_revision == 'local-dirty.' + head
+        (library / 'src/lib.rs').write_text((library / 'src/lib.rs').read_text() + '// new library source\n')
         new_head = commit()
         assert module.fingerprint() != name
         source_mtime = (work / 'src/main.rs').stat().st_mtime_ns
         module.source.restore_sources(work / 'target/.ci-source-state.json')
         assert (work / 'src/main.rs').stat().st_mtime_ns == source_mtime
+        # A fallback archive may carry artifacts newer than the checkout; Cargo's
+        # mtime freshness check alone must not authorize their reuse.
+        os.environ.pop('CI_BUILD_SNAPSHOT_HIT')
+        os.utime(library / 'src/lib.rs', ns=(1, 1))
         module.prepare(); os.environ['AGENT_SPEC_REVISION'] = new_head
         _, changed = command('cargo', 'build', '--locked', '-vv', cwd=work, env=dict(os.environ))
         assert 'Compiling snapshot-fixture' in changed and 'Compiling fractal-build-stamp' in changed
-        # A new commit restamps only the binary: the library it depends on is not rebuilt.
-        assert 'Fresh library' in changed and 'Compiling library' not in changed, changed
+        assert 'Compiling library' in changed and 'Fresh library' not in changed, changed
+        print('PASS: fallback source change rebuilds library despite changed AGENT_SPEC_REVISION', flush=True)
         changed_stamp, changed_revision = command(str(binary), cwd=base)[0].split('|')
         assert json.loads(changed_stamp)['dirty'] is False and changed_revision == new_head
         assert 'cache-hit=true' in output.read_text() and 'cache HIT' in summary.read_text()
@@ -170,5 +205,35 @@ with tempfile.TemporaryDirectory() as tmp:
         assert 'Compiling fractal-build-stamp' in touched, touched
         _, again = command('cargo', 'build', '--locked', '-vv', cwd=work, env=local)
         assert 'Fresh fractal-build-stamp' in again and 'Compiling ' not in again, again
+
+# Isolate library freshness from the workspace build stamp entirely. A different
+# revision must neither rescue the stale pre-cleanup library nor hide a missed
+# cleanup by rebuilding only the stamp and its dependent executable.
+with tempfile.TemporaryDirectory() as tmp:
+    work = Path(tmp)
+    target = work / 'target'
+    (work / 'src').mkdir()
+    (work / 'Cargo.toml').write_text('[package]\nname="freshness-library"\nversion="0.1.0"\nedition="2024"\n[workspace]\n')
+    library = work / 'src/lib.rs'
+    library.write_text('pub const VALUE: &str = "before";\n')
+    isolated = dict(environment, CARGO_HOME=str(work / 'cargo-home'),
+                    CARGO_TARGET_DIR=str(target), CARGO_BUILD_BUILD_DIR=str(target),
+                    AGENT_SPEC_REVISION='a' * 40)
+    command('cargo', 'generate-lockfile', cwd=work, env=isolated)
+    _, cold = command('cargo', 'build', '--locked', '-vv', cwd=work, env=isolated)
+    assert 'Compiling freshness-library' in cold, cold
+    fingerprints = list(target.glob('debug/.fingerprint/freshness-library-*'))
+    assert fingerprints and list((target / 'debug/deps').glob('libfreshness_library-*.rlib')), 'fixture outputs must be inside its target'
+    library.write_text('pub const VALUE: &str = "after";\n')
+    os.utime(library, ns=(1, 1))
+    isolated['AGENT_SPEC_REVISION'] = 'b' * 40
+    _, stale = command('cargo', 'build', '--locked', '-vv', cwd=work, env=isolated)
+    assert 'Fresh freshness-library' in stale and 'Compiling freshness-library' not in stale, stale
+    print('PASS: stamp-free library reproduces stale freshness with changed AGENT_SPEC_REVISION', flush=True)
+    module.discard_workspace_outputs(work, target)
+    assert all(not path.exists() for path in fingerprints), 'workspace fingerprints must be removed'
+    _, rebuilt = command('cargo', 'build', '--locked', '-vv', cwd=work, env=isolated)
+    assert 'Compiling freshness-library' in rebuilt and 'Fresh freshness-library' not in rebuilt, rebuilt
+    print('PASS: stamp-free library rebuilds after cleanup with changed AGENT_SPEC_REVISION', flush=True)
 
 print('Build snapshot tests passed: real Cargo cold/warm/dirty/new-SHA builds, provenance, flags/compiler/pipeline isolation, PAX restoration')

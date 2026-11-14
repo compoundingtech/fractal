@@ -709,6 +709,7 @@ mod tests {
             None,
             10,
             true,
+            &mut NativeReadAdmission::default(),
         )
         .unwrap();
         let item = page
@@ -791,6 +792,270 @@ mod tests {
                 assert!(image["metadata"].get("continuation").is_none());
             }
         }
+    }
+
+    #[test]
+    fn header_projection_preserves_normal_todos_jobs_subagents_and_pending_questions() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"views", "type":"tool_result", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[
+                {"kind":"tool_output", "payload":{}, "view":{"type":"todo","phases":[{"items":["ship"]}]}},
+                {"kind":"tool_output", "payload":{}, "view":{"type":"job","jobs":[{"id":"job","status":"running"}]}},
+                {"kind":"tool_output", "payload":{}, "view":{"type":"task","agents":[{"id":"child","name":"Worker","status":"running"}]}},
+                {"kind":"tool_call", "payload":{"call_id":"ask"}, "view":{"type":"ask","questions":[{"question":"Continue?"}]}}
+            ]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let expected = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut actual = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut actual);
+        for key in ["todos", "jobs", "subagents", "ask"] {
+            assert!(actual.get(key).is_some(), "{key}");
+        }
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    // The pre-change path: prepare the entire newest head, then derive its header and
+    // truncate its entries for the page. Keep it independent of header_items.
+    fn legacy_head(
+        state: &AppState, native: &ExternalSession, session: &ClientSession,
+        snapshot: &ClientSnapshot, limit: usize,
+    ) -> (Value, Vec<Value>) {
+        let (slice, _) = super::super::canonical_native_slice(
+            state, snapshot, native, session, &native.id, &[],
+            crate::external_sessions::TimelineOrder::TimestampSequence, None,
+            (limit + 1).max(CLIENT_MAX_PAGE_ITEMS), None, true,
+            &mut NativeReadAdmission::default(),
+        ).unwrap();
+        let count = slice.items.len().min(CLIENT_MAX_PAGE_ITEMS);
+        let header = fractal_api_core::conversation_header::derive(
+            &slice.items[..count], slice.has_more || slice.items.len() > count,
+        );
+        let items = slice.items.into_iter().take(limit).rev().collect();
+        (header, items)
+    }
+
+    #[test]
+    fn native_read_admission_survives_slice_refills_header_and_display_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([{"type":"text","text":"reply"}]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let slots = read_slots(&native.transcript);
+        let mut admission = NativeReadAdmission::default();
+        let mut slice = read_slice(&native, &session, &native.id,
+            crate::external_sessions::TimelineOrder::Sequence, None, 1, false, &mut admission,
+        ).unwrap();
+        assert_eq!(slots.available_permits(), 3);
+        let other_reads = slots.try_acquire_many(3).unwrap();
+        // Refill/head reads reuse the first decision even when no second permit exists.
+        read_slice(&native, &session, &native.id,
+            crate::external_sessions::TimelineOrder::Sequence, None, 1, false, &mut admission,
+        ).unwrap();
+        let header = header_items(&native, &native.id, &slice.items);
+        assert!(!header.is_empty());
+        for item in &mut slice.items {
+            prepare_one(&native, &session, &native.id, &slice.basis, item).unwrap();
+        }
+        assert_eq!(slots.available_permits(), 0);
+        drop(admission);
+        assert_eq!(slots.available_permits(), 1);
+        drop(other_reads);
+        assert_eq!(slots.available_permits(), 4);
+    }
+
+    #[test]
+    fn header_projection_is_byte_equal_for_an_ordinary_9000_byte_model() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"model", "type":"assistant", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[{"kind":"text","payload":{},"metadata":{"model":"m".repeat(9000)}}]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let expected = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut actual = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut actual);
+        assert!(actual["model"]["value"].as_str().unwrap().ends_with("size limit; 9000 bytes]"));
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    #[test]
+    fn header_page_and_continuation_match_legacy_with_a_managed_graph_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let mut native = fixture(root.path(), json!([]));
+        let transcript = (0..4).map(|index| {
+            let record = json!({"type":"message", "id":format!("overlay-{index}"),
+                "timestamp":format!("2026-10-06T12:00:0{index}Z"),
+                "message":{"role":"assistant","content":[{"type":"text","text":format!("reply {index}")}]}});
+            format!("{record}\n")
+        }).collect::<String>();
+        std::fs::write(&native.transcript, transcript).unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "header-overlay");
+        let owner = "agent/header-overlay";
+        let incarnation = "header-overlay:i1";
+        native.id = super::super::managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject:"message/header-overlay".into(), kind:"message.sent".into(), actor:Some("person/example".into()),
+            fields:serde_json::from_value(json!({"from":"person/example", "to":owner,
+                "session_id":native.id, "status":"sent", "content":"graph overlay"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        let managed = (owner.to_owned(), Some(incarnation.to_owned()), None);
+        let snapshot = super::super::new_client_snapshot(&state);
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let mut query = super::super::ClientListQuery { limit: Some(2), ..Default::default() };
+        let page = super::super::native_slice_page_at_generation(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert!(page["items"].as_array().unwrap().iter().any(|item| item["type"] == "message"));
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(page.clone(), expected, true);
+        query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        let older = super::super::native_slice_page_at_generation(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(older, expected, false);
+    }
+
+    fn assert_complete_page_matches_legacy(mut actual: Value, mut expected: Value, first: bool) {
+        if first {
+            // Independently issued first pages have different wall-clock TTLs (and MACs).
+            // Compare every other cursor position field; continuation cursors below are
+            // byte-equal because both paths receive the same incoming expiration.
+            for page in [&mut actual, &mut expected] {
+                let cursor = page["page"]["next_cursor"].as_str().unwrap();
+                let mut cursor: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(
+                    cursor.strip_prefix(super::super::NATIVE_PAGE_CURSOR_PREFIX).unwrap(),
+                ).unwrap()).unwrap();
+                cursor["position"].as_object_mut().unwrap().remove("expires_at_unix_ms");
+                page["page"]["next_cursor"] = cursor["position"].take();
+                page["page"].as_object_mut().unwrap().remove("cursor_expires_at");
+            }
+        }
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    fn assert_header_page_matches_legacy(limit: usize) {
+        let _counter = prepared_counter_guard();
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut transcript = String::new();
+        for index in 0..240 {
+            let record = json!({
+                "type":"message", "id":format!("message-{index:03}"),
+                "timestamp":format!("2026-10-06T12:{:02}:{:02}Z", index / 60, index % 60),
+                "message":{"role":"assistant", "model":"example/model",
+                    "usage":{"cost":{"total":0.01}}, "contextSnapshot":{"promptTokens":1000 + index},
+                    "content":[{"type":"text","text":format!("reply {index}")}]},
+            });
+            transcript.push_str(&format!("{record}\n"));
+        }
+        std::fs::write(&native.transcript, transcript).unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "header-equality");
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let snapshot = super::super::new_client_snapshot(&state);
+        let mut query = super::super::ClientListQuery { limit: Some(limit), ..Default::default() };
+        reset_prepared_bodies(&native.id);
+        let page = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id, &query, &native,
+        ).unwrap().0;
+        assert_eq!(prepared_bodies(), limit + 1);
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, None,
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(page.clone(), expected, true);
+        query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        let older = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id, &query, &native,
+        ).unwrap().0;
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, None,
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(older, expected, false);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_1() {
+        assert_header_page_matches_legacy(1);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_20() {
+        assert_header_page_matches_legacy(20);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_200() {
+        assert_header_page_matches_legacy(200);
+    }
+
+    #[test]
+    fn header_keeps_bounded_facts_from_a_pathological_entry_replaced_for_display() {
+        let root = tempfile::tempdir().unwrap();
+        let mut details = serde_json::Map::from_iter((0..6_000)
+            .map(|index| (format!("key-{index:0>196}"), json!(0))));
+        details.insert("model".into(), json!(format!("{}\u{001b}", "m".repeat(20_000))));
+        let native = fixture(root.path(), json!([
+            {"type":"toolResult", "call_id":"pathological", "content":"ok", "details":details},
+        ]));
+        let state = super::super::tests::test_state_named(root.path(), "header-pathological");
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let snapshot = super::super::new_client_snapshot(&state);
+        let (old_header, _) = legacy_head(&state, &native, &session, &snapshot, 1);
+        let page = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id,
+            &super::super::ClientListQuery { limit: Some(1), ..Default::default() }, &native,
+        ).unwrap().0;
+        assert!(old_header.get("model").is_none());
+        let model = page["header"]["model"]["value"].as_str().unwrap();
+        assert!(model.len() < VALUE_BYTES + 256);
+        assert!(!model.chars().any(char::is_control));
+        assert!(serde_json::to_vec(&page["header"]).unwrap().len() < VALUE_BYTES + 1024);
+        assert_eq!(page["items"][0]["body"]["code"], "native-entry-too-large");
+    }
+
+    #[test]
+    fn header_uses_raw_pending_question_call_id_when_display_payload_exceeds_8kib() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"ask", "type":"tool_call", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[{"kind":"tool_call", "payload":{"call_id":"raw-call", "padding":"p".repeat(9000)},
+                "view":{"type":"ask", "questions":[{"question":"Continue?"}]}}]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let old = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut new = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut new);
+        assert_eq!(old["ask"]["value"]["call_id"], "");
+        assert_eq!(new["ask"]["value"]["call_id"], "raw-call");
+        assert_eq!(old["ask"]["value"]["questions"], new["ask"]["value"]["questions"]);
     }
 
     fn assert_native_keyset_pages_match_full_read(
@@ -2059,7 +2324,7 @@ mod tests {
         ] {
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: "custom/client/invented-display".into(),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/example".into()),
@@ -2106,7 +2371,7 @@ mod tests {
         }
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/invented-display".into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/example".into()),
@@ -2254,6 +2519,7 @@ mod tests {
                             None,
                             10,
                             true,
+                            &mut NativeReadAdmission::default(),
                         )
                     })
                 };
@@ -2549,13 +2815,21 @@ mod tests {
         assert_eq!(page["value"]["page"]["has_more"], json!(true));
         // Keyset continuations derive the same bounded newest head while the source is unchanged.
         let cursor = page["value"]["page"]["next_cursor"].as_str().unwrap();
+        let (status, mismatch) = request(
+            format!("/v1/client/sessions/{leaf}/timeline?limit=100&cursor={cursor}"),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE, "{mismatch}");
+        assert_eq!(mismatch["code"], "page-cursor-expired");
         let (status, older) = request(
             // The cursor is `page/native/` plus base64url, so it needs no percent-encoding.
-            format!("/v1/client/sessions/{leaf}/timeline?limit=5&cursor={cursor}"),
+            format!("/v1/client/sessions/{leaf}/timeline?cursor={cursor}"),
             true,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{older}");
+        assert_eq!(older["value"]["page"]["limit"], 5);
         assert_eq!(older["value"]["header"], header);
         assert_eq!(older["value"]["session_id"], child_id);
         assert!(older["value"]["items"].as_array().unwrap().iter().all(|item| {

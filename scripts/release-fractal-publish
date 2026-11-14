@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Publish a complete draft candidate only with a product GO for its exact source SHA."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+from release_artifact import assert_current_attempt, download_release, get_attempt
+from release_tag import ensure_tag
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout.strip()
+
+
+def publish(tag, sha, go_ref, allow_superseded=''):
+    if not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
+        raise ValueError('candidate tag must be a stable vMAJOR.MINOR.PATCH tag')
+    if not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError('GO requires the full, lowercase 40-character candidate SHA')
+    if not go_ref.strip() or '\n' in go_ref or '\r' in go_ref:
+        raise ValueError('GO reference must be a nonempty, single-line PR/comment/message identifier')
+    state = json.loads(run('gh', 'release', 'view', tag, '--json',
+                           'isDraft,isPrerelease,targetCommitish,body'))
+    if not state['isDraft'] or state['isPrerelease']:
+        raise ValueError('only an unpublished stable draft candidate can be published')
+    if state['targetCommitish'] != sha:
+        raise ValueError('GO SHA differs from the candidate target SHA')
+    repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
+    pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
+                           f'repos/{repository}/releases?per_page=100'))
+    version = tuple(map(int, tag[1:].split('.')))
+    newer = [row['tag_name'] for page in pages for row in page
+             if row['draft'] and not row['prerelease']
+             and re.fullmatch(r'v\d+\.\d+\.\d+', row['tag_name'])
+             and tuple(map(int, row['tag_name'][1:].split('.'))) > version]
+    if allow_superseded and allow_superseded != tag:
+        raise ValueError('supersession override must name the selected candidate tag')
+    if newer and allow_superseded != tag:
+        raise ValueError(f'newer draft exists ({", ".join(newer)}); explicitly name {tag} with --allow-superseded')
+    tagged = run('git', 'ls-remote', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}').splitlines()
+    refs = dict(line.split()[::-1] for line in tagged)
+    if refs and refs.get(f'refs/tags/{tag}^{{}}', refs.get(f'refs/tags/{tag}')) != sha:
+        raise ValueError('existing tag differs from the candidate SHA')
+    with tempfile.TemporaryDirectory(prefix='fractal-publish-') as directory:
+        dist = Path(directory)
+        run('gh', 'release', 'download', tag, '--dir', directory)
+        if json.loads((dist / 'RELEASE.json').read_text())['source'] != sha:
+            raise ValueError('GO SHA differs from the candidate artifact source SHA')
+        for required in ('RELEASE-NOTES.md', 'UPGRADE-IMPACT.json'):
+            if not (dist / required).is_file():
+                raise ValueError(f'incomplete candidate: missing {required}')
+        run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
+        run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=dist)
+        proof = json.loads((dist / 'CANDIDATE.json').read_text())
+        if (proof['source'] != sha or type(proof['build_run']) is not int or proof['build_run'] <= 0
+                or type(proof['build_attempt']) is not int or proof['build_attempt'] <= 0
+                or type(proof['build_artifact']) is not int or proof['build_artifact'] <= 0):
+            raise ValueError('candidate build proof does not identify this exact source')
+        build_run = str(proof['build_run'])
+        workflow = json.loads(run('gh', 'api', f'repos/{repository}/actions/workflows/release-fractal.yml'))
+        built = get_attempt(build_run, repository, proof['build_attempt'], run)
+        if built['workflow_id'] != workflow['id']:
+            raise ValueError('candidate proof belongs to a different workflow ID')
+        assert_current_attempt(build_run, repository, proof['build_attempt'], run)
+        exact_source = (built['head_sha'] == sha if built['event'] == 'push'
+                        else built['display_title'].startswith(f'Fractal candidate {sha} '))
+        if (built['status'] != 'completed' or built['conclusion'] != 'success'
+                or built['head_branch'] != 'main'
+                or built['event'] not in ('push', 'workflow_dispatch') or not exact_source):
+            raise ValueError('candidate build run did not succeed at the exact approved SHA')
+        # Do not trust an edited draft proof alone: compare it to the successful run artifact.
+        build_dist = dist / 'build-proof'
+        build_dist.mkdir()
+        download_release(build_run, repository, proof['build_attempt'], build_dist, run,
+                         artifact_id=proof['build_artifact'])
+        if json.loads((build_dist / 'RELEASE.json').read_text())['source'] != sha:
+            raise ValueError('successful build artifact source differs from approved SHA')
+        if (build_dist / 'SHA256SUMS').read_bytes() != (dist / 'SHA256SUMS').read_bytes():
+            raise ValueError('candidate archives differ from the successful build run')
+        run('sha256sum', '--check', 'SHA256SUMS', cwd=build_dist)
+        run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=build_dist)
+        actor = os.environ.get('GITHUB_ACTOR', 'local operator')
+        run_url = (f'{os.environ.get("GITHUB_SERVER_URL", "https://github.com")}/{repository}'
+                   f'/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
+                   if 'GITHUB_RUN_ID' in os.environ else 'local invocation')
+        receipt = f'\n\n## Product release GO\n\n- Source: `{sha}`\n- GO reference: {go_ref}\n- Publisher: {actor}\n- Workflow run: {run_url}\n'
+        notes = dist / 'PUBLISH-NOTES.md'
+        notes.write_text(state['body'] + receipt)
+        # Keep stable drafts untagged until every proof check and the product GO pass.
+        assert_current_attempt(build_run, repository, proof['build_attempt'], run)
+        ensure_tag(repository, tag, sha, cwd=Path(__file__).resolve().parent.parent, call=run)
+        run('gh', 'release', 'edit', tag, '--target', sha, '--notes-file', str(notes),
+            '--draft=false', '--latest')
+    print(f'Published {tag} at {sha}; product GO: {go_ref}')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tag', required=True)
+    parser.add_argument('--sha', required=True)
+    parser.add_argument('--go-ref', required=True)
+    parser.add_argument('--allow-superseded', default='', help='explicitly name this older tag to override newer-draft refusal')
+    args = parser.parse_args()
+    try:
+        publish(args.tag, args.sha, args.go_ref, args.allow_superseded)
+    except (ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f'release-fractal-publish: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

@@ -7,7 +7,7 @@ import type { Key } from 'react-aria-components'
 import { MilestoneAgentRow, openAgentRowMenu } from './MilestoneAgentRow'
 import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, type SidebarTreeItem, type SidebarTreeRowState } from './SidebarTree'
 import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model'
-import { geometryNumbers, geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { geometryNumbers, geometryVars as g, sidebarRowSize, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
@@ -36,7 +36,7 @@ const parent: Row = {
 interface AgentItem extends SidebarTreeItem<AgentItem> { readonly kind: 'agent'; readonly row: Row; readonly children: readonly AgentItem[] }
 interface FolderItem extends SidebarTreeItem<Item> { readonly kind: 'folder'; readonly children: readonly AgentItem[] }
 type Item = AgentItem | FolderItem
-const toItem = (row: Row, depth: number): AgentItem => ({ kind: 'agent', id: row.ref, depth, textValue: row.title, row, disclosurePlacement: 'trailing', children: row.children.map(next => toItem(next, depth + 1)) })
+const toItem = (row: Row, depth: number): AgentItem => ({ kind: 'agent', id: row.ref, depth, textValue: row.title, row, rowHeight: { compact: sidebarRowSize }, disclosurePlacement: 'trailing', children: row.children.map(next => toItem(next, depth + 1)) })
 const treeItems: readonly AgentItem[] = [toItem(parent, 0), toItem(stateRows[2]!, 0)]
 const touchDisclosure = (state: SidebarTreeRowState) => state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined
 
@@ -70,14 +70,14 @@ const noSessionChild: Row = { ...subagent, ref: 'agent/example-no-session', titl
 const displayOnlyChild = parent.children[0]!
 const actionAgent = (depth: number): AgentItem => {
   const root = toItem({ ...parent, children: [...parent.children, noSessionChild] }, depth)
-  return { ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true } : child) }
+  return { ...root, children: root.children.map(child => child.id === displayOnlyChild.ref ? { ...child, isDisabled: true, rowHeight: { compact: sidebarRowSize, touch: sidebarRowSize } } : child) }
 }
 /** A parent whose only subagent is display-only: arrow keys expand it but never move focus into the child. */
 const displayOnlyParentRow: Row = { ...parent, ref: 'agent/example-display-parent', title: 'Summarise reported subagents', needsMe: false,
   children: [{ ...displayOnlyChild, ref: 'agent/example-display-review', parentRef: 'agent/example-display-parent', title: 'Reported review summary' }] }
 const displayOnlyParent = (depth: number): AgentItem => {
   const root = toItem(displayOnlyParentRow, depth)
-  return { ...root, children: root.children.map(child => ({ ...child, isDisabled: true })) }
+  return { ...root, children: root.children.map(child => ({ ...child, isDisabled: true, rowHeight: { compact: sidebarRowSize, touch: sidebarRowSize } })) }
 }
 /** Desktop: a refused folder carries an inline retry, and nests a parent agent inside RAC's nested Collection. */
 const retryFolder: FolderItem = { kind: 'folder', id: 'folder/example-retry', depth: 0, textValue: 'Reviews', children: [displayOnlyParent(1)] }
@@ -181,14 +181,14 @@ export const GlyphStates: Story = {
     await expect(new Set(frozen.map(row => glyph(row).innerHTML)).size).toBe(stateOrder.length)
     await expect(new Set(frozen.map(row => getComputedStyle(glyph(row)).color)).size).toBe(1)
     const byStatus = (rows: Element[], status: AgentStatus) => rows.find(row => row.getAttribute('data-status') === status)!
-    // Live keeps its accents; stale is an observation gap and shares the muted frozen tone, never danger red.
+    // Live working is the row's strongest neutral; stale is an observation gap and shares the muted frozen tone, never danger red.
     const frozenTone = getComputedStyle(glyph(frozen[0]!)).color
     await expect(getComputedStyle(glyph(byStatus(live, 'working'))).color).not.toBe(frozenTone)
     await expect(getComputedStyle(glyph(byStatus(live, 'stale'))).color).toBe(frozenTone)
     // The snapshot is separate from the row's own status and freshness.
     const frozenWorking = byStatus(frozen, 'working')
     await expect(frozenWorking.getAttribute('data-observation-freshness')).toBe('live')
-    await expect(glyph(frozenWorking)).toHaveAttribute('aria-label', expect.stringMatching(/^Working; .*live observation; last-observed snapshot$/))
+    await expect(glyph(frozenWorking)).toHaveAttribute('aria-label', 'Working; last-observed snapshot')
     await expect(glyph(byStatus(live, 'working')).getAttribute('aria-label')).not.toMatch(/snapshot/)
     // Frozen times measure against the observation: 3m ago reads 1m; activity after the observation is omitted, not 0s.
     await expect(frozenWorking.querySelector('[data-row-field="last-turn"] time')?.textContent).toBe('1m')
@@ -207,7 +207,8 @@ export const TwoLineAndNesting: Story = {
     const rows = await waitFor(() => { const found = [...tree.querySelectorAll<HTMLElement>('[data-milestone-row]')].filter(row => row.closest('[inert]') === null); expect(found).toHaveLength(4); return found })
     const [root, review, checks, leaf] = rows
     for (const row of rows) {
-      await expect(Math.abs(row.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
+      await expect(row.getBoundingClientRect().height).toBe(sidebarRowSize)
+      await expect(row.closest('[role="row"]')!.getBoundingClientRect().height).toBe(sidebarRowSize)
       // Line 1 (glyph, title, time, signal) sits wholly above line 2.
       const title = row.querySelector('[data-row-column="title"]')!.getBoundingClientRect()
       const line2 = row.querySelector('[data-row-column="line2"]')!.getBoundingClientRect()
@@ -218,13 +219,14 @@ export const TwoLineAndNesting: Story = {
     }
     // Without a mission, line 2 is exactly status · host; metrics remain in reported details.
     const line2 = (row: Element) => row.querySelector('[data-row-column="line2"]')!
-    await expect(line2(root!).textContent).toBe('Working·build-2')
+    await expect(line2(root!).textContent).toBe('Needs you·build-2')
     await expect(line2(review!).textContent).toBe('Ended·build-2')
     for (const row of rows) {
-      await expect(line2(row).querySelector('[data-box="pill"], [data-row-field="spend"], [data-row-field="duration"]')).toBeNull()
+      await expect(line2(row).querySelector('[data-mission-ring], [data-row-field="spend"], [data-row-field="duration"]')).toBeNull()
     }
-    // Attention and unread share the trailing signal column.
-    await expect(root!.querySelector('[data-row-column="attention"]')).toHaveTextContent('!')
+    // A real ask is the status column's amber disc; unread stays in the trailing signal column.
+    await expect(root!.querySelector('[data-row-column="status"] [data-mark="needs-you"]')).not.toBeNull()
+    await expect(root!.querySelector('[data-row-column="attention"]')).toBeNull()
     await expect(checks!.querySelector('[data-row-signal="unread"]')).toHaveTextContent('2')
     // Nesting: subagents are level-2 tree rows, indented past a root-level leaf and aligned with each other.
     await expect(review!.closest('[role="row"]')).toHaveAttribute('aria-level', '2')
@@ -277,10 +279,10 @@ export const RowActions: Story = {
     const host = canvasElement.querySelector<HTMLElement>('[data-host="actions"]')!
     const root = await waitFor(() => { const row = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(element => element.closest('[inert]') === null); expect(row).toBeDefined(); return row! })
     const gear = root.querySelector<HTMLElement>('[data-agent-menu]')!
-    // The trigger overlays line 2 without a track of its own: the row stays 48px and the `!` stays visible.
+    // The trigger overlays line 2 without a track of its own: the row stays 48px and the amber disc stays visible.
     await expect(Math.abs(root.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
     await expect(gear.getBoundingClientRect().top).toBeGreaterThanOrEqual(root.querySelector('[data-row-column="line2"]')!.getBoundingClientRect().top - 1)
-    await expect(root.querySelector('[data-row-column="attention"]')).toBeVisible()
+    await expect(glyph(root)).toBeVisible()
     // A pointer context menu opens the shared menu.
     await userEvent.pointer({ keys: '[MouseRight]', target: root.querySelector('[data-row-column="title"]')! })
     const menu = await waitFor(() => { const element = document.querySelector<HTMLElement>('[role="menu"]'); expect(element).not.toBeNull(); return element! })
@@ -397,7 +399,7 @@ export const RowActions: Story = {
   },
 }
 
-const neutralStates = ['idle', 'pending', 'offline', 'ended', 'suspended', 'retired', 'unobserved'] as const satisfies readonly AgentStatus[]
+const mutedStates = ['pending', 'stale', 'offline', 'ended', 'suspended', 'retired', 'unobserved'] as const satisfies readonly AgentStatus[]
 const allStatesPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async ({ canvasElement }) => {
   const surfaceRoot = within(canvasElement).getByTestId('all-states')
   const host = surfaceRoot.querySelector<HTMLElement>('[data-host="all-states"]')!
@@ -407,23 +409,19 @@ const allStatesPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async (
   await expect(rows.map(row => row.getAttribute('data-status'))).toEqual(stateOrder)
   const at = (status: AgentStatus) => glyph(rows.find(row => row.getAttribute('data-status') === status)!)
   const color = (status: AgentStatus) => getComputedStyle(at(status)).color
-  // G3: working and idle are bare discs told apart by tone; every other state draws its canonical shape over a faded disc.
-  for (const status of stateOrder) {
-    await expect(at(status)).toHaveAttribute('data-disc-refinement', 'G3')
-    await expect(at(status).children.length === 1).toBe(status === 'working' || status === 'idle')
-  }
-  await expect(new Set(stateOrder.map(status => `${at(status).innerHTML}|${color(status)}`)).size).toBe(stateOrder.length)
-  // Ended is not idle: a finished agent draws the stop shape, never the bare idle disc.
-  await expect(at('ended').innerHTML).not.toBe(at('idle').innerHTML)
+  // Marks: filled is active, hollow is at rest, and every state differs by shape or weight with color removed.
+  await expect(new Set(stateOrder.map(status => at(status).innerHTML.replace(/_r_[^"]*|«[^"]*/g, ''))).size).toBe(stateOrder.length)
+  await expect(at('working').querySelector('circle')).toHaveAttribute('fill', 'currentColor')
+  await expect(at('idle').querySelector('circle')).not.toHaveAttribute('fill', 'currentColor')
+  await expect(at('waiting').querySelector('circle')).not.toHaveAttribute('fill', 'currentColor')
+  await expect(at('waiting').innerHTML).not.toBe(at('idle').innerHTML)
+  // Color means act: only failure is colored here, and no quiet state borrows amber, red or blue.
   const probe = getComputedStyle(surfaceRoot.querySelector('[data-tone-probe]')!)
   const soft = probe.color, muted = probe.backgroundColor, danger = probe.borderTopColor
-  await expect(color('working')).not.toBe(soft)
-  await expect(color('waiting')).not.toBe(soft)
-  await expect(color('waiting')).not.toBe(color('working'))
-  for (const status of neutralStates) await expect(color(status)).toBe(soft)
-  // Stale is an observation gap: muted, never the danger red.
-  await expect(color('stale')).toBe(muted)
-  await expect(color('stale')).not.toBe(danger)
+  await expect(color('failed')).toBe(danger)
+  await expect(color('waiting')).toBe(soft)
+  await expect(color('idle')).toBe(soft)
+  for (const status of mutedStates) await expect(color(status)).toBe(muted)
   // The scheme reaches the surface: light renders on a light canvas, dark on a dark one (relative luminance of the canvas).
   const [red, green, blue] = getComputedStyle(surfaceRoot).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
   await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(surfaceRoot.getAttribute('data-scheme') === 'light')
@@ -450,6 +448,9 @@ const phoneTouchPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async 
   // Labels keep the fine-pointer x: a 16px gutter at every depth, and one depth step between parent and child.
   const folderRow = await waitFor(() => canvas.getByRole('row', { name: phoneFolder.textValue }))
   await waitFor(() => expect(canvas.getByRole('row', { name: parent.title })).toBeVisible())
+  const exactChildRow = canvas.getByRole('row', { name: displayOnlyChild.title })
+  await expect(exactChildRow.querySelector('[data-milestone-row]')!.getBoundingClientRect().height).toBe(sidebarRowSize)
+  await expect(exactChildRow.getBoundingClientRect().height).toBe(sidebarRowSize)
   const step = offset(childTitles[1]!) - offset(parent.title)
   await expect(Math.abs(offset(parent.title) - step - 16)).toBeLessThanOrEqual(0.5)
   await expect(Math.abs(folderRow.querySelector('[data-folder-label]')!.getBoundingClientRect().left - folderRow.getBoundingClientRect().left - 16)).toBeLessThanOrEqual(0.5)
@@ -965,19 +966,37 @@ export const NativeOverlaysThemed: StoryObj<{ scheme: Scheme }> = {
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed row with reported context opens the hover card and the Reported details dialog inside a scheme-themed root without a host portal layer, verifying both overlays portal into and paint that scheme.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <main data-testid="overlay-root" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}>
+    <label>Composer<input aria-label="Composer" /></label>
     <section aria-label="Sidebar" {...stylex.props(styles.column)}><MilestoneAgentRow row={contextRow} now={storyNow} /></section>
   </main>,
   play: async ({ canvasElement }) => {
     const root = within(canvasElement).getByTestId('overlay-root')
     const light = root.getAttribute('data-scheme') === 'light'
     const row = root.querySelector<HTMLElement>('[data-milestone-row]')!
+    const composer = within(root).getByRole('textbox', { name: 'Composer' })
+    await userEvent.click(composer)
     await userEvent.hover(row)
     const card = await waitFor(() => { const element = document.querySelector<HTMLElement>('[data-testid="agent-hover-card"]'); expect(element).not.toBeNull(); return element! })
     // Portalled inside the themed root, so the theme's tokens resolve on the overlay itself.
     await expect(root.contains(card)).toBe(true)
     await expect(paintedLuminance(card) > 0.5).toBe(light)
+    // The direct sidebar surface opens under the pointer even while keyboard focus is elsewhere.
+    await expect(composer).toHaveFocus()
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
+    await expect(composer).toHaveFocus()
     await userEvent.unhover(row)
     await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
+    // An interactive overlay supersedes the passive preview before taking ownership of Escape.
+    await userEvent.hover(row)
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).not.toBeNull())
+    await userEvent.click(row.querySelector<HTMLElement>('[data-agent-menu]')!)
+    await within(document.body).findByRole('menu', { name: `Actions for ${contextRow.title}` })
+    await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
+    // RAC FocusScope restores focus in requestAnimationFrame after the menu unmounts.
+    await waitFor(() => expect(row.querySelector('[data-agent-menu]')).toHaveFocus())
     await userEvent.click(row.querySelector<HTMLElement>('[data-agent-menu]')!)
     const menu = await within(document.body).findByRole('menu', { name: `Actions for ${contextRow.title}` })
     await expect(root.contains(menu)).toBe(true)
@@ -996,7 +1015,7 @@ const reachTitle = 'GatewaySchemaReconciliationAcrossEveryHost'
 const reachRows: readonly Row[] = [
   { ...base, ref: 'agent/example-reach-empty', title: reachTitle },
   { ...base, ref: 'agent/example-reach-time', title: reachTitle, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 } },
-  { ...base, ref: 'agent/example-reach-waiting', title: 'Waiting on your answer', status: 'waiting', statusLabel: statuses.waiting.label, needsMe: true, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 30_000 } },
+  { ...base, ref: 'agent/example-reach-waiting', title: 'Waiting on an agent', status: 'waiting', statusLabel: statuses.waiting.label, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 30_000 } },
   { ...base, ref: 'agent/example-reach-needs', title: 'Working but asking', status: 'working', statusLabel: 'Working', needsMe: true },
 ]
 
@@ -1018,12 +1037,11 @@ export const TitleReach: StoryObj<{ scheme: Scheme }> = {
     // A last turn takes only its own width: the name column (title plus count) still ends before it, and gains everything the empty row gained.
     await expect(box(timed!, 'name').right).toBeLessThanOrEqual(box(timed!, 'time').left)
     await expect(box(empty!, 'name').width - box(timed!, 'name').width).toBeLessThanOrEqual(box(timed!, 'trailing').width + Number.parseFloat(getComputedStyle(timed!).columnGap) + 1)
-    // Waiting already says "Needs you" with its glyph: no third "!" signal. A working row asking for you keeps it, bold.
-    await expect(waiting!.querySelector('[data-row-column="attention"]')).toBeNull()
-    await expect(waiting!.querySelector('[data-row-field="status-label"]')).toHaveTextContent('Needs you')
-    const attention = needs!.querySelector<HTMLElement>('[data-row-column="attention"]')!
-    await expect(attention).toBeVisible()
-    await expect(getComputedStyle(attention).fontWeight).toBe('700')
+    // Waiting with no question is neutral. A real ask is the amber disc and says "Needs you", whatever the agent is doing.
+    await expect(waiting!.querySelector('[data-row-field="status-label"]')).toHaveTextContent('Waiting')
+    await expect(waiting!.querySelector('[data-row-column="status"] [data-mark="waiting"]')).not.toBeNull()
+    await expect(needs!.querySelector('[data-row-column="status"] [data-mark="needs-you"]')).not.toBeNull()
+    await expect(glyph(needs!)).toHaveAttribute('aria-label', 'Needs you')
     // Hover: the ghost trigger shows over line 2's end, which fades beneath it instead of reserving a column.
     const trigger = empty!.querySelector<HTMLElement>('[data-agent-menu]')!
     await expect(getComputedStyle(trigger).opacity).toBe('0')

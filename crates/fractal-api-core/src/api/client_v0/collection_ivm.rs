@@ -99,7 +99,7 @@ pub struct Candidate {
 fn authority(session: &ClientSession) -> String {
     json!({"actor":session.actor,"authority":session.authority_actor,
         "grant":session.pairing_grant,"scopes":session.scopes,
-        "custom_forms":session.custom_forms,"conversation_blocks":session.conversation_blocks,"transport":session.transport})
+        "custom_forms":session.custom_forms,"model_drift_attention":session.model_drift_attention,"conversation_blocks":session.conversation_blocks,"transport":session.transport})
     .to_string()
 }
 

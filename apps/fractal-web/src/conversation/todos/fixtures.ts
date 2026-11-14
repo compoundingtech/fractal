@@ -1,5 +1,5 @@
-import { Agent, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
-import { openAgent } from '@fractal/sdk/effect'
+import { Agent, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema/read'
+import { openAgent } from '@fractal/sdk/read'
 
 /** Synthetic agent identity shared by the native todo projection tests. */
 export const todoAgentRef = 'agent/example/example'

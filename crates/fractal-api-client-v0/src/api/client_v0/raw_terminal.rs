@@ -9,7 +9,16 @@ pub use fractal_api_core::api::client_v0::raw_terminal::{splice};
 pub mod lease;
 pub mod peek_capability;
 
-const SUBPROTOCOL: &str = "st3.client.pty.v0";
+const SUBPROTOCOL: &str = "fractal.client.pty.v0";
+
+#[test]
+fn server_raw_subprotocol_uses_fractal_and_negotiates_legacy_offers() {
+    assert_eq!(SUBPROTOCOL, "fractal.client.pty.v0");
+    for protocol in ["st3.client.pty.v0", SUBPROTOCOL] {
+        assert_eq!(super::super::wire_names::terminal_protocol(&[protocol], SUBPROTOCOL, true),
+            Some((protocol, None)));
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,7 +90,7 @@ pub async fn attachment(
         derive_terminal_capability(&state, &session.actor, &attachment_id, &live.owner_host_id)?;
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: terminal_attachment_subject(&attachment_id)?,
             kind: "custom.client.terminal-attached".into(),
             actor: Some(session_claim_actor(&session)),
@@ -134,8 +143,18 @@ pub async fn stream(
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let started = std::time::Instant::now();
+    tracing::debug!(
+        terminal = %id,
+        incarnation = %query.incarnation,
+        mode = mode_name(query.mode),
+        started_at_unix_ms = %client_now_ms(),
+        phase = "auth",
+        "raw terminal setup started"
+    );
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
     authorize(&session, query.mode)?;
+    tracing::debug!(terminal = %id, phase = "auth", elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase completed");
     // This protocol subscribes in the upgrade request, without a JSON subscribe command.
     let first_frame = subscription_first_frame("terminal", "raw", upgrade.as_ref(), None)
         .map(|first| first.span);
@@ -152,10 +171,14 @@ pub async fn stream(
         &protocols, SUBPROTOCOL, query.mode == fractal_client::RawTerminalMode::Peek,
     ).ok_or_else(|| validation("raw terminal requires one supported pty protocol plus one capability protocol (optional for peek)"))?;
     let direct_peek = capability.is_none();
+    let lookup_started = std::time::Instant::now();
+    tracing::debug!(terminal = %id, phase = "lookup", elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase started");
     let live = remote_terminal_live_session(&state, &terminal_subject(&id), &query.incarnation)?;
     if !live.terminal {
         return Err(validation("raw attachment requires a terminal runtime"));
     }
+    tracing::debug!(terminal = %id, owner = %live.owner_host_id, phase = "lookup", duration_ms = %lookup_started.elapsed().as_millis(), elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase completed");
+    let authorization_started = std::time::Instant::now();
     let acquisition_epoch = if direct_peek {
         Some(authorization_epoch(&state, &session)?)
     } else if query.mode == fractal_client::RawTerminalMode::Peek {
@@ -199,6 +222,9 @@ pub async fn stream(
             )
         })
         .transpose()?;
+    tracing::debug!(terminal = %id, phase = "capability", duration_ms = %authorization_started.elapsed().as_millis(), elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase completed");
+    let open_started = std::time::Instant::now();
+    tracing::debug!(terminal = %id, owner = %live.owner_host_id, phase = "owner-open", elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase started");
     // Open and fence before HTTP upgrade: a stale owner incarnation is a refusal, not a blank pane.
     let (transport, control) = if live.owner_host_id == client_host_id(&state.node) {
         let terminal = crate::model::LocalTerminal {
@@ -232,6 +258,7 @@ pub async fn stream(
             .map_err(|error| remote_read_error(&live.owner_host_id, error))?;
         (transport, Some(control))
     };
+    tracing::debug!(terminal = %id, owner = %live.owner_host_id, phase = "owner-open", duration_ms = %open_started.elapsed().as_millis(), elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase completed");
     if let Some(lease) = lease.clone() {
         lease_query(lease, |lease| lease.revalidate())
             .await
@@ -247,11 +274,25 @@ pub async fn stream(
             "raw PEEK open authorized"
         );
     }
+    tracing::debug!(terminal = %id, phase = "upgrade", elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase started");
     Ok(websocket
         .protocols([selected.to_owned()])
         .max_message_size(CHUNK * 4)
         .max_frame_size(CHUNK * 4)
-        .on_upgrade(move |socket| splice(socket, transport, Some(query.mode), lease, control, upgrade, first_frame)))
+        .on_upgrade(move |socket| async move {
+            tracing::debug!(terminal = %id, phase = "upgrade", elapsed_ms = %started.elapsed().as_millis(), "raw terminal phase completed");
+            let span = tracing::debug_span!(
+                "raw_terminal_stream",
+                terminal = %id,
+                incarnation = %query.incarnation,
+                mode = mode_name(query.mode)
+            );
+            tracing::Instrument::instrument(
+                splice(socket, transport, Some(query.mode), lease, control, upgrade, first_frame),
+                span,
+            )
+            .await;
+        }))
 }
 
 #[cfg(test)]

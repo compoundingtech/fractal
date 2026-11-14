@@ -7,15 +7,18 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/79d526d1be4f77bb3764dc1d880492806f8a07fc";
+    pty.url = "github:compoundingtech/pty/d0e816ac4129c97f39473855bb4fe527701ea07c";
     pty.inputs.nixpkgs.follows = "nixpkgs";
-    # Merged pairing stack, including the daemon-identity restricted client.
-    fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
+    # Fabric v0.9.4 includes bounded peer expiry and recoverable identity rotation.
+    fabric.url = "github:compoundingtech/fabric/19e7f8964ce8305aeb8c200fb717967aa03f738f";
     fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/d883d18e3ad7609602db0ec8687c14a77625b905";
+      "github:overengineeringstudio/effect-utils/15ff7fa8968469c2c99a647888a999f9d62ffde5";
+    mergemaster.url = "github:compoundingtech/mergemaster/v0.6.0";
+    mergemaster.inputs.nixpkgs.follows = "nixpkgs";
+    mergemaster.inputs.effect-utils.follows = "effect-utils";
   };
 
   outputs =
@@ -27,17 +30,52 @@
       pty,
       fabric,
       effect-utils,
+      mergemaster,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
         pkgs = import nixpkgs { inherit system; };
 
+        # Client-side compilation needs sccache >= 0.18; the root pin has 0.16.
+        # Keep the rest of the toolchain pinned; vendor with this pin's fetcher.
+        sccache = pkgs.sccache.overrideAttrs (final: old: {
+          version = "0.19.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "mozilla";
+            repo = "sccache";
+            rev = "v0.19.0";
+            hash = "sha256-iq9/SOS13z8hyt4x03azms+J19jtfYEr7ly4VIENi9s=";
+          };
+          cargoHash = "sha256-V8WH8QFBpOOP3QV/B+mvqBuSt12VD4sB89gJw86igAE=";
+          # buildRustPackage captures cargoHash before overrideAttrs runs.
+          cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+            inherit (final) src;
+            name = "${final.pname}-${final.version}";
+            hash = final.cargoHash;
+          };
+          buildInputs = old.buildInputs ++ [ pkgs.zstd ];
+        });
+
+        sccacheShellHook = ''
+          source ${./scripts/sccache-read-cache-env} || exit $?
+          # Preserve even an explicitly empty wrapper (Cargo's cache opt-out).
+          # The host owns SCCACHE_CLIENT_SIDE, SCCACHE_SERVER_UDS and cache settings.
+          if [ -z "''${RUSTC_WRAPPER+x}" ]; then
+            if [ "''${GITHUB_ACTIONS:-}" = true ] &&
+                [ -z "''${SCCACHE_SERVER_UDS:-}''${SCCACHE_CLIENT_SIDE:-}" ]; then
+              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+            else
+              export RUSTC_WRAPPER=${sccache}/bin/sccache
+            fi
+          fi
+        '';
+
         ciRustcWrapper = pkgs.writeShellApplication {
           name = "ci-rustc-wrapper";
           runtimeInputs = [ pkgs.coreutils pkgs.gnugrep ];
           text = ''
-            export SCCACHE_BIN=${pkgs.sccache}/bin/sccache
+            export SCCACHE_BIN=${sccache}/bin/sccache
             ${builtins.readFile ./scripts/ci-rustc-wrapper}
           '';
         };
@@ -61,7 +99,9 @@
           };
         mkHmModuleEval = extraConfig: nixpkgs.lib.evalModules {
           specialArgs = {
-            inherit pkgs;
+            pkgs = if extraConfig.darwinFixture or false then
+              pkgs // { stdenv = pkgs.stdenv // { hostPlatform = pkgs.stdenv.hostPlatform // { isLinux = false; isDarwin = true; }; }; }
+              else pkgs;
             lib = pkgs.lib // {
               hm.dag = rec {
                 entryBetween = before: after: data: { inherit before after data; };
@@ -95,6 +135,8 @@
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
               config.home.file = extraConfig.homeFiles or { };
+              config.launchd.agents = lib.optionalAttrs (extraConfig ? launchdDomain)
+                (lib.genAttrs [ "smalltalk" "smalltalk-apply" "fractal" "fractal-apply" ] (_: { domain = extraConfig.launchdDomain; }));
               config.xdg.configFile = lib.recursiveUpdate (extraConfig.configFiles or { })
                 (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
                   "st3/config.toml".force = true;
@@ -105,7 +147,7 @@
                 socket = "/tmp/fractal-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/fractal/seats/claude.kdl ];
-              } // builtins.removeAttrs extraConfig [ "forceLegacyConfig" "homeFiles" "configFiles" ];
+              } // builtins.removeAttrs extraConfig [ "forceLegacyConfig" "homeFiles" "configFiles" "darwinFixture" "launchdDomain" ];
             })
           ];
         };
@@ -362,6 +404,11 @@
           inherit effect-utils system version buildStamp;
           source = self;
         };
+        fractalWebPublisher = import ./nix/fractal-web-publisher.nix {
+          inherit effect-utils system version;
+          source = self;
+          installation = fractalWeb.installation;
+        };
 
         st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
           assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
@@ -550,6 +597,8 @@
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             ptyPackage
             effect-utils.packages.${system}.otelite
             messagingCompat
@@ -617,22 +666,30 @@
         st3 = fractal;
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 
-        stChatgpt = pkgs.rustPlatform.buildRustPackage {
-          pname = "st-chatgpt";
+        fractalChatgpt = pkgs.rustPlatform.buildRustPackage {
+          pname = "fractal-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "st-chatgpt" ];
+          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" "--bin" "fractal-mcp" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
+          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+          postInstall = ''ln -s fractal-chatgpt "$out/bin/st-chatgpt"'';
+          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
           meta = {
-            description = "Standalone Fractal ChatGPT MCP adapter";
+            description = "Standalone Fractal ChatGPT and local stdio MCP adapters";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "st-chatgpt";
+            mainProgram = "fractal-chatgpt";
           };
         };
+
+        # Both entrypoints share one crate and build; only nix run's default differs.
+        fractalMcp = fractalChatgpt.overrideAttrs (old: {
+          meta = old.meta // { mainProgram = "fractal-mcp"; };
+        });
 
         fractalFabricAdapter = pkgs.rustPlatform.buildRustPackage {
           pname = "fractal-fabric-adapter";
@@ -845,18 +902,37 @@
         packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.fractal-web = fractalWeb;
+        packages.fractal-web-publisher = fractalWebPublisher;
+        apps.fractal-web-publisher = {
+          type = "app";
+          program = "${fractalWebPublisher}/bin/fractal-web-publisher";
+        };
+        checks.fractal-web-publisher = fractalWebPublisher;
         packages.fractal = fractal;
         # Preserve existing .#st2 profile upgrades for at least one release.
         packages.st2 = fractal;
-        packages.st-chatgpt = stChatgpt;
+        packages.fractal-chatgpt = fractalChatgpt;
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        packages.st-chatgpt = fractalChatgpt;
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
         packages.fractal-fabric-adapter = fractalFabricAdapter;
         packages.st-fabric-adapter = fractalFabricAdapter;
+        packages.fractal-mcp = fractalMcp;
         # Isolated bootstrap/live proofs use the exact pairing API revision.
         packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         # All four components come out of one build; the install paths are unchanged.
         packages.default = st3;
+        # A null attribute name omits this output entirely on non-Darwin systems.
+        packages.${if pkgs.stdenv.hostPlatform.isDarwin then "ios-rust-toolchain" else null} =
+          fenix.packages.${system}.combine [
+            fenix.packages.${system}.stable.cargo
+            fenix.packages.${system}.stable.rustc
+            fenix.packages.${system}.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios-sim.stable.rust-std
+          ];
 
         # `nix flake check` is the whole CI: it builds the package — which runs
         # the hermetic portion of the in-tree `cargo test` suite via doCheck —
@@ -913,7 +989,7 @@
               set -eu
               if [ "$*" = "--version --json" ]; then
                 printf '%s\n' '{"machine_version":"fixture-version","commit":"fixture-commit"}'
-              elif [ "$1" = setup ]; then
+              elif [ "''${1:-}" = setup ]; then
                 operation=$2
                 directory=$3
                 receipt="$directory/.fractal-install.json"
@@ -927,8 +1003,11 @@
                   --receipt-verify)
                     hash=$(${pkgs.coreutils}/bin/sha256sum "$directory/fractal")
                     hash=''${hash%% *}
-                    test ! -L "$receipt" && test ! -L "$pending"
-                    matches "$receipt" || matches "$pending"
+                    if ! { test ! -L "$receipt" && test ! -L "$pending" &&
+                      { matches "$receipt" || matches "$pending"; }; }; then
+                      printf 'fixture: invalid install receipt %s; reinstall Fractal\n' "$receipt" >&2
+                      exit 1
+                    fi
                     ;;
                   --receipt-prepare)
                     test "$4" = --receipt-installer && test "$5" = hm
@@ -957,6 +1036,29 @@
               package = fixturePackage;
               ptyPackage = null;
             }).config.home.activation.smalltalkBinary.data;
+            preReceiptPackage = pkgs.writeShellScriptBin "fractal" ''
+              echo pre-receipt-fractal
+            '';
+            preReceiptGeneration = pkgs.runCommand "fractal-pre-receipt-hm-generation" { } ''
+              mkdir -p "$out"
+              ln -s ${preReceiptPackage} "$out/home-path"
+              # Model the old activation's copy-and-rename, without receipt writes.
+              cat > "$out/activate" <<'SH'
+              #!${pkgs.runtimeShell}
+              set -eu
+              directory=$1
+              ${pkgs.coreutils}/bin/cp ${preReceiptPackage}/bin/fractal "$directory/.legacy-fractal"
+              ${pkgs.coreutils}/bin/chmod 755 "$directory/.legacy-fractal"
+              ${pkgs.coreutils}/bin/mv -f "$directory/.legacy-fractal" "$directory/fractal"
+              ${pkgs.coreutils}/bin/ln -sfn fractal "$directory/st"
+              ${pkgs.coreutils}/bin/ln -sfn fractal "$directory/st3"
+              SH
+              chmod +x "$out/activate"
+            '';
+            rollbackPackage = pkgs.runCommand "st3-with-pty" { } ''
+              mkdir -p "$out/bin"
+              cp ${preReceiptPackage}/bin/fractal "$out/bin/st3"
+            '';
           in
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
@@ -964,7 +1066,10 @@
           assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
           assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
           assert pkgs.lib.hasInfix "--web-dist" args;
-          assert builtins.elem "${package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
+          # The PTY wrapper is a symlinkJoin: individual assets resolve outside its web root.
+          assert toString rendered.services.smalltalk.package != package;
+          assert builtins.elem "${rendered.services.smalltalk.package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
+          assert !(builtins.elem "${package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args)));
           assert (
             let
               disabled = (mkHmModuleEval { webListen = null; }).config;
@@ -977,10 +1082,10 @@
           # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
           # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
           assert (if pkgs.stdenv.hostPlatform.isLinux then
-            pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/st3-client.sock"'' args
-            && !(pkgs.lib.hasInfix "%%t/st3-client.sock" args)
+            pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/fractal-client.sock"'' args
+            && !(pkgs.lib.hasInfix "%%t/fractal-client.sock" args)
           else
-            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/st3-client.sock" args);
+            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/fractal-client.sock" args);
           assert (if pkgs.stdenv.hostPlatform.isLinux then
             pkgs.lib.hasPrefix ''"${stableExecutable}" '' args
           else
@@ -1056,6 +1161,150 @@
               test ! -e "$receipt" && test ! -L "$receipt"
               test "$(find "$binDir" -name '.fractal.*' | wc -l)" -eq 0
             done
+            # Recorded pre-Fractal rollback state, never leftover byte equality.
+            for layout in st-alias st-absent no-state other-package malformed-json traversal slash-name wrong-st3 foreign-alias foreign-symlink; do
+              rm -rf state
+              mkdir -p "$binDir" "$PWD/state/binary-installer"
+              cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+              printf 'leftover candidate\n' > "$target"
+              if [ "$layout" != st-absent ]; then ln -s st3 "$binDir/st"; fi
+              package=${rollbackPackage}
+              if [ "$layout" = other-package ]; then package=${preReceiptPackage}; fi
+              if [ "$layout" = traversal ]; then package="$package/../$(basename "$package")"; fi
+              if [ "$layout" = slash-name ]; then package="$package/child"; fi
+              ${pkgs.jq}/bin/jq -n --arg package "$package" \
+                '{installer:"historical-installer",package:$package,narHash:"historical-hash"}' \
+                > "$PWD/state/binary-installer/current.json"
+              case "$layout" in
+                no-state) rm "$PWD/state/binary-installer/current.json" ;;
+                malformed-json) printf '{broken' > "$PWD/state/binary-installer/current.json" ;;
+                wrong-st3) chmod u+w "$binDir/st3"; printf foreign > "$binDir/st3" ;;
+                foreign-alias) ln -sfn elsewhere "$binDir/st" ;;
+                foreign-symlink) mv "$target" "$binDir/elsewhere"; ln -s elsewhere "$target" ;;
+              esac
+              case "$layout" in
+                st-alias|st-absent)
+                  ${pkgs.runtimeShell} activate
+                  cmp "$source" "$target"
+                  test "$(readlink "$binDir/st")" = fractal
+                  test "$(readlink "$binDir/st3")" = fractal
+                  assertReceipt
+                  set -- "$binDir"/fractal.replaced-*
+                  test "$#" = 1
+                  cmp "$1" <(printf 'leftover candidate\n')
+                  # An old generation restores st3 and st, leaving receipt,
+                  # canonical payload and preserved siblings untouched.
+                  for cycle in 1 2; do
+                    rm "$binDir/st3"
+                    cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+                    ln -sfn st3 "$binDir/st"
+                    ${pkgs.runtimeShell} activate
+                    assertReceipt
+                    cmp "$1" <(printf 'leftover candidate\n')
+                  done
+                  echo "PASS: rollback adoption $layout and repeated roll-forward"
+                  ;;
+                *)
+                  if ${pkgs.runtimeShell} activate 2>refusal; then
+                    echo "unexpected rollback adoption: $layout" >&2; exit 1
+                  fi
+                  ${pkgs.gnugrep}/bin/grep -q 'Home Manager: refusing to replace foreign fractal command:' refusal
+                  test ! -e "$receipt"
+                  test -z "$(find "$binDir" -name 'fractal.replaced-*' -print)"
+                  echo "PASS: rollback adoption refuses $layout"
+                  ;;
+              esac
+            done
+            # Inject swaps immediately before rename in a copy of the emitted
+            # activation, not via a production environment-variable hook.
+            substitute activate race-activate \
+              --replace-fail '${pkgs.coreutils}/bin/mv -f "$target" "$replaced"' \
+                'raceSwap; ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"' \
+              --replace-fail 'if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]]' \
+                'raceAfterMove; if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]]'
+            raceSwap() {
+              case "$RACE_LAYOUT" in
+                candidate)
+                  mv "$target" "$binDir/checked-candidate"
+                  printf 'racing foreign candidate\n' > "$target"
+                  ;;
+                st3-inode)
+                  cp "$binDir/st3" "$binDir/.racing-st3"
+                  mv -Tf "$binDir/.racing-st3" "$binDir/st3"
+                  ;;
+                st3-content)
+                  chmod u+w "$binDir/st3"
+                  printf 'racing st3 bytes\n' > "$binDir/st3"
+                  chmod a-w "$binDir/st3"
+                  ;;
+                st-link)
+                  ln -s st3 "$binDir/.racing-st"
+                  mv -Tf "$binDir/.racing-st" "$binDir/st"
+                  ;;
+                failed-rename)
+                  mv "$target" "$binDir/checked-candidate"
+                  mkdir "$target"
+                  printf 'foreign directory entry\n' > "$target/binary"
+                  ;;
+              esac
+            }
+            raceAfterMove() {
+              if [ "$RACE_LAYOUT" = concurrent-target ]; then
+                printf 'concurrent command\n' > "$target"
+                ln -sfn elsewhere "$binDir/st"
+              fi
+            }
+            export -f raceSwap raceAfterMove
+            for RACE_LAYOUT in candidate st3-inode st3-content st-link failed-rename concurrent-target; do
+              export RACE_LAYOUT
+              rm -rf state
+              mkdir -p "$binDir" "$PWD/state/binary-installer"
+              cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+              ln -s st3 "$binDir/st"
+              printf 'leftover candidate\n' > "$target"
+              ${pkgs.jq}/bin/jq -n --arg package ${rollbackPackage} \
+                '{installer:"historical-installer",package:$package,narHash:"historical-hash"}' \
+                > "$PWD/state/binary-installer/current.json"
+              # The injected function runs in the activation subprocess.
+              export binDir target
+              if ${pkgs.runtimeShell} race-activate 2>refusal; then
+                echo "unexpected race adoption: $RACE_LAYOUT" >&2; exit 1
+              fi
+              ${pkgs.gnugrep}/bin/grep -q 'Home Manager: refusing to replace foreign fractal command:' refusal
+              if [ "$RACE_LAYOUT" = failed-rename ]; then
+                test -d "$target"
+                cmp "$target/binary" <(printf 'foreign directory entry\n')
+                cmp "$binDir/checked-candidate" <(printf 'leftover candidate\n')
+              elif [ "$RACE_LAYOUT" = concurrent-target ]; then
+                cmp "$target" <(printf 'concurrent command\n')
+                set -- "$binDir"/fractal.replaced-*
+                test "$#" = 1
+                cmp "$1" <(printf 'leftover candidate\n')
+                ${pkgs.gnugrep}/bin/grep -F "preserved candidate at $1; leaving concurrent command at $target untouched." refusal
+              elif [ "$RACE_LAYOUT" = candidate ]; then
+                cmp "$target" <(printf 'racing foreign candidate\n')
+                cmp "$binDir/checked-candidate" <(printf 'leftover candidate\n')
+              else
+                cmp "$target" <(printf 'leftover candidate\n')
+              fi
+              test ! -e "$receipt"
+              case "$RACE_LAYOUT" in
+                failed-rename)
+                  # A failed rename may retain the empty reserved aside path,
+                  # but must never trigger restoration into the foreign directory.
+                  set -- "$binDir"/fractal.replaced-*
+                  test "$#" = 1 && test -f "$1" && test ! -s "$1"
+                  echo 'PASS: rollback adoption refuses failed rename without restoring over foreign entry'
+                  ;;
+                concurrent-target)
+                  echo 'PASS: rollback adoption preserves both paths and refuses concurrent target publication'
+                  ;;
+                *)
+                  test -z "$(find "$binDir" -name 'fractal.replaced-*' -print)"
+                  echo "PASS: rollback adoption restores and refuses $RACE_LAYOUT race"
+                  ;;
+              esac
+            done
             # A managed physical layout supports mixed exact reverse aliases.
             rm -rf state
             mkdir -p "$binDir"
@@ -1103,6 +1352,86 @@
               assertReceipt
               test "$(readlink "$binDir/st")" = fractal
               test "$(readlink "$binDir/st3")" = fractal
+            done
+            # New -> pre-receipt rollback -> new: old HM copies its package but
+            # leaves the new finalized receipt. Only its active generation proves
+            # those different bytes, for both copied and linked legacy payloads.
+            for layout in copy link; do
+              rm -rf state
+              ${pkgs.runtimeShell} activate
+              cp "$receipt" saved-receipt
+              ${preReceiptGeneration}/activate "$binDir"
+              if [ "$layout" = link ]; then
+                rm "$target"
+                ln -s ${preReceiptPackage}/bin/fractal "$target"
+              fi
+              cmp saved-receipt "$receipt"
+              cmp ${preReceiptPackage}/bin/fractal "$target"
+              if "$source" setup --receipt-verify "$binDir"; then
+                echo 'strict verification accepted stale rollback receipt' >&2; exit 1
+              fi
+              oldGenPath=${preReceiptGeneration} ${pkgs.runtimeShell} activate 2>rollback-error
+              test ! -s rollback-error
+              test ! -L "$target"
+              cmp "$source" "$target"
+              assertReceipt
+            done
+            # Neither aliases alone nor an unrelated previous generation waive a
+            # mismatch. Every rejected candidate retains its payload and receipt.
+            for kind in no-generation unknown-payload script setup broken-alias symlink malformed schema name hash multiple pending dangling-pending nonexecutable mutable-generation; do
+              rm -rf state
+              ${pkgs.runtimeShell} activate
+              ${preReceiptGeneration}/activate "$binDir"
+              generation=${preReceiptGeneration}
+              case "$kind" in
+                no-generation) generation= ;;
+                unknown-payload) printf 'unknown replacement\n' > "$target" ;;
+                script|setup)
+                  ${pkgs.jq}/bin/jq --arg installer "$kind" '.installer = $installer' "$receipt" > changed-receipt
+                  cp changed-receipt "$receipt"
+                  ;;
+                broken-alias) ln -sfn foreign "$binDir/st3" ;;
+                symlink) mv "$receipt" "$binDir/receipt-target"; ln -s receipt-target "$receipt" ;;
+                malformed) printf '{broken\n' > "$receipt" ;;
+                schema|name|hash)
+                  case "$kind" in
+                    schema) filter='.schema = 2' ;;
+                    name) filter='.name = "foreign"' ;;
+                    hash) filter='.sha256 = "not-a-digest"' ;;
+                  esac
+                  ${pkgs.jq}/bin/jq "$filter" "$receipt" > changed-receipt
+                  cp changed-receipt "$receipt"
+                  ;;
+                multiple) printf '{}\n' >> "$receipt" ;;
+                pending) cp "$receipt" "$pending" ;;
+                dangling-pending) ln -s missing "$pending" ;;
+                nonexecutable) chmod 644 "$target" ;;
+                mutable-generation)
+                  mkdir -p mutable-generation/home-path/bin
+                  cp ${preReceiptPackage}/bin/fractal mutable-generation/home-path/bin/fractal
+                  generation=$PWD/mutable-generation
+                  ;;
+              esac
+              cp "$target" saved-binary
+              cp "$receipt" saved-receipt
+              before=$(stat -c '%i:%f:%s' "$target")
+              if oldGenPath="$generation" ${pkgs.runtimeShell} activate 2>receipt-error; then
+                echo "activation adopted unproven rollback: $kind" >&2; exit 1
+              fi
+              ${pkgs.gnugrep}/bin/grep -F "$receipt" receipt-error
+              ${pkgs.gnugrep}/bin/grep -i reinstall receipt-error
+              cmp saved-binary "$target"
+              cmp saved-receipt "$receipt"
+              test "$(stat -c '%i:%f:%s' "$target")" = "$before"
+              if [ "$kind" = symlink ]; then test "$(readlink "$receipt")" = receipt-target; fi
+              if [ "$kind" = pending ]; then cmp saved-receipt "$pending"; fi
+              if [ "$kind" = dangling-pending ]; then test "$(readlink "$pending")" = missing; fi
+              if [ "$kind" = broken-alias ]; then
+                test "$(readlink "$binDir/st3")" = foreign
+              else
+                test "$(readlink "$binDir/st3")" = fractal
+              fi
+              test "$(readlink "$binDir/st")" = fractal
             done
             # An invalid receipt must veto even otherwise-owned aliases.
             for kind in hash schema name symlink; do
@@ -1183,14 +1512,19 @@
             done
             # Fail after both publications: restore the exact previous executable
             # inode and receipt, rather than leaving a half-installed generation.
-            for priorPending in absent present; do
+            for priorPending in absent present rollback; do
             rm -rf state
             mkdir -p "$binDir"
-            printf 'older managed bytes\n' > "$target"
-            chmod +x "$target"
-            ln -s fractal "$binDir/st"
-            ln -s fractal "$binDir/st3"
-            writeReceipt
+            if [ "$priorPending" = rollback ]; then
+              ${pkgs.runtimeShell} activate
+              ${preReceiptGeneration}/activate "$binDir"
+            else
+              printf 'older managed bytes\n' > "$target"
+              chmod +x "$target"
+              ln -s fractal "$binDir/st"
+              ln -s fractal "$binDir/st3"
+              writeReceipt
+            fi
             cp "$target" saved-binary
             cp "$receipt" saved-receipt
             if [ "$priorPending" = present ]; then
@@ -1208,7 +1542,7 @@
             chmod +x fail-ln
             substitute activate activate-failure \
               --replace-fail '${pkgs.coreutils}/bin/ln' "$PWD/fail-ln"
-            if ${pkgs.runtimeShell} activate-failure; then
+            if oldGenPath=${preReceiptGeneration} ${pkgs.runtimeShell} activate-failure; then
               echo 'activation ignored publication failure' >&2; exit 1
             fi
             cmp saved-binary "$target"
@@ -1374,7 +1708,7 @@
           assert preflight.after == [ ];
           assert legacyPreflight.before == [ "writeBoundary" ];
           assert legacyPreflight.after == [ ];
-          assert legacyPreflight.data == preflight.data;
+          assert pkgs.stdenv.hostPlatform.isDarwin || legacyPreflight.data == preflight.data;
           assert !completed.xdg.configFile."st3/config.toml".enable;
           assert !(completed.xdg.configFile ? "fractal/config.toml");
           assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
@@ -1571,6 +1905,74 @@
             ) [ "stage" "completed" ]
             ) + "touch $out"
           );
+        checks.hm-launchd-domain-guards =
+          let
+            fixture = domain: phase: (mkHmModuleEval {
+              darwinFixture = true; launchdDomain = domain; fractalMigration.phase = phase;
+              binary.path = "/fixture/fractal";
+            }).config;
+            query = pkgs.writeShellScript "domain-query" ''printf '%s\n' "$DOMAIN"; exit "''${QUERY_EXIT:-0}"'';
+            manager = pkgs.writeShellScript "launchctl-fixture" ''
+              printf '%s\n' "$*" >> "$CALLS"
+              case "$2" in "$DOMAIN"/*) ;; *) exit 99 ;; esac
+              [ "$1" = disable ] || exit 113
+            '';
+          in pkgs.runCommand "hm-launchd-domain-guards" {} (
+            pkgs.lib.concatMapStrings (domain:
+              let
+                stage = fixture domain "stage";
+                completed = fixture domain "completed";
+                wrapper = builtins.head completed.launchd.agents.fractal.config.ProgramArguments;
+              in assert domain != "user" || pkgs.lib.hasInfix "<string>Background</string>"
+                stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              assert pkgs.lib.hasInfix "<string>${builtins.unsafeDiscardStringContext wrapper}</string>" stage.home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+              assert stage.xdg.configFile."st3/launchd-staged".enable && !completed.xdg.configFile."st3/launchd-staged".enable; ''
+                export DOMAIN="${domain}/$(id -u)" CALLS="$PWD/calls"
+                rm -rf config state
+                substitute ${pkgs.writeText "stage-preflight" stage.home.activation.fractalMigrationPreflight.data} preflight \
+                  --replace-fail /fixture/fractal ${query}
+                ${pkgs.runtimeShell} preflight
+                if DOMAIN="wrong/$(id -u)" ${pkgs.runtimeShell} preflight; then exit 1; fi
+                if QUERY_EXIT=1 ${pkgs.runtimeShell} preflight; then exit 1; fi
+                substitute ${pkgs.writeText "stage-disable" stage.home.activation.fractalStageDisabled.data} disable \
+                  --replace-fail /fixture/fractal ${query} --replace-fail /bin/launchctl ${manager}
+                : > "$CALLS"
+                ${pkgs.runtimeShell} disable
+                test "$(wc -l < "$CALLS")" -eq 4
+                # Read the emitted wrapper's guard; never execute a real manager or daemon.
+                guard=$(${pkgs.gnugrep}/bin/grep -E '^/nix/store/.*-fractal-migration-ready$' ${wrapper})
+                mkdir -p config/fractal state/fractal
+                for directory in config/fractal state/fractal; do
+                  printf '%s\n' arn:lmig:smalltalk:2026-10-16-state-dirs-fractal > "$directory/.fractal-migration-completed"
+                done
+                substitute "$guard" guard \
+                  --replace-fail /fixture/fractal ${query} --replace-fail /bin/launchctl ${manager} \
+                  --replace-fail /home/example/.config "$PWD/config" --replace-fail /home/example/.local/state "$PWD/state"
+                touch config/.fractal-host-cutover.json
+                ${pkgs.runtimeShell} guard
+                if QUERY_EXIT=1 ${pkgs.runtimeShell} guard; then exit 1; fi
+                if DOMAIN="wrong/$(id -u)" ${pkgs.runtimeShell} guard; then exit 1; fi
+                rm config/.fractal-host-cutover.json
+                if ${pkgs.runtimeShell} guard; then exit 1; fi
+                rm config/fractal/.fractal-migration-completed state/fractal/.fractal-migration-completed
+                # Isolate domain policy without weakening the real migrationReady proof.
+                substitute guard policy --replace-fail ${pkgs.diffutils}/bin/cmp ${pkgs.coreutils}/bin/true
+                ln -s fractal config/st3
+                touch config/st3/launchd-staged
+                for marker in config/fractal/.fractal-migration-completed state/fractal/.fractal-migration-completed config/fractal/config.home-manager.toml; do
+                  touch "$marker"
+                  if ${pkgs.runtimeShell} policy; then exit 1; fi
+                  rm "$marker"
+                done
+                ${pkgs.runtimeShell} policy
+                if QUERY_EXIT=1 ${pkgs.runtimeShell} policy; then exit 1; fi
+                rm config/st3/launchd-staged
+                if [ ${domain} = gui ]; then QUERY_EXIT=1 ${pkgs.runtimeShell} policy
+                elif ${pkgs.runtimeShell} policy; then exit 1; fi
+                if ${pkgs.runtimeShell} guard; then exit 1; fi
+              ''
+            ) [ "gui" "user" ] + "touch $out"
+          );
         checks.fractal-aliases =
           let
             rendered = hmModuleEval.config;
@@ -1685,6 +2087,8 @@
             chmod -R u+w hooks
             cp ${self}/crates/fractal-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
             cp ${self}/crates/fractal-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            mkdir -p tests/fixtures/harness-timeline
+            cp ${self}/crates/fractal-drivers/tests/fixtures/harness-timeline/omp-response-evidence.json tests/fixtures/harness-timeline/
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"
@@ -1730,6 +2134,9 @@
               ${pkgs.nodejs}/bin/node hooks/typecheck/st-smoke.mjs $harness hooks/typecheck/smoke-out/st-$harness-channel.mjs
             done
             ${pkgs.nodejs}/bin/node hooks/typecheck/omp-smoke.mjs ./smoke-out/st-omp-channel.mjs
+            ${pkgs.nodejs}/bin/node hooks/typecheck/omp-refresh-smoke.mjs ./smoke-out/st-omp-channel.mjs ${self}/crates/fractal-drivers/tests/fixtures/harness-admission/omp-18.1.22.json
+            ${pkgs.nodejs}/bin/node hooks/typecheck/omp-refresh-smoke.mjs ./smoke-out/st-omp-channel.mjs --native-user
+            ${pkgs.nodejs}/bin/node hooks/typecheck/omp-refresh-smoke.mjs ./smoke-out/st-omp-channel.mjs --restoring-ask
             ${pkgs.nodejs}/bin/node hooks/typecheck/environment-smoke.mjs
             touch $out
           '';
@@ -1783,7 +2190,7 @@
             # Git evidence fixtures sign observations and serve API responses with Python.
             pkgs.openssh
             pkgs.python3
-            pkgs.sccache
+            sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ] ++ [
@@ -1797,6 +2204,8 @@
             # st3's messaging fault matrix runs the omp channel hook (TypeScript) under the
             # provider stand-in with Node's built-in type stripping, which Node 24 enables.
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             # st3's completion tests drive the installed stub in each supported shell.
             pkgs.fish
             pkgs.zsh
@@ -1805,12 +2214,10 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
-          RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
-          shellHook = ''
-            source ${./scripts/sccache-read-cache-env} || exit $?
+          shellHook = sccacheShellHook + ''
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               source ${./scripts/ci-cargo-tools-env} || exit $?
-              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+              # The wrapper is selected above only when no host wrapper is inherited.
             fi
             # Pushing a branch signs its checks first when they have no evidence yet (scripts/evidence-prepush).
             if [ -z "''${GITHUB_ACTIONS:-}" ] && [ -z "''${CI:-}" ] && [ -x ./scripts/install-git-hooks ]; then
@@ -1824,19 +2231,14 @@
             pkgs.cargo
             pkgs.rustc
             pkgs.git
-            pkgs.sccache
+            sccache
             pkgs.pkg-config
             pkgs.jq
             libghosttyVT
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
-          RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
-          shellHook = ''
-            source ${./scripts/sccache-read-cache-env} || exit $?
-            if [ "''${GITHUB_ACTIONS:-}" = true ]; then
-              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
-            fi
+          shellHook = sccacheShellHook + ''
             export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | sed -n '\|^/nix/store/|p' | paste -sd:):/usr/bin:/bin"
           '';
         };
@@ -1848,7 +2250,7 @@
           '';
         };
         # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root
-        # Rust nixpkgs: pnpm 12.15.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
+        # Rust nixpkgs: pnpm 12.17.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
         # The Buck root mirrors `mkConsumerBuckRoot`; its rules and capabilities cells are linked
         # into `.buck2/` from the store, and `scripts/ci-fractal-web` fails if the checked-in
         # `.buckconfig`, `BUCK` or `buck2/toolchains/BUCK` drift from it.

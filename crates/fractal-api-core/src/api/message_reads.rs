@@ -52,6 +52,8 @@ pub enum Relayed {
         host: String,
         held: bool,
         status: Option<&'static str>,
+        /// Furthest actual delivery/read mark, retained even when status is closed.
+        consumed: Option<&'static str>,
         latest: Option<(String, u64)>,
     },
     /// The host did not answer: the reason, naming it.
@@ -219,15 +221,25 @@ fn latest_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<(S
 }
 
 /// How far `answer`'s marks took the message, keeping only those of seats this member places on
-/// `host`: a host speaks for its own seats.
-fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> Option<&'static str> {
+/// `host`: a host speaks for its own seats. A staging counts, below every mark: a host that
+/// records its seats' stagings as marks answers them here, and nowhere else.
+fn status_of(answer: &MessageMarksAnswer, seats: &BTreeSet<String>) -> (Option<&'static str>, Option<&'static str>) {
     answer
         .marks
         .iter()
         .filter(|mark| seats.contains(&mark.consumer))
-        .filter_map(|mark| message_marks::MARKS.iter().find(|kind| **kind == mark.kind))
-        .max_by_key(|kind| message_marks::rank(kind.trim_start_matches("message.")))
+        .filter_map(|mark| {
+            std::iter::once(&message_marks::STAGED)
+                .chain(&message_marks::MARKS)
+                .find(|kind| **kind == mark.kind)
+        })
         .map(|kind| kind.trim_start_matches("message."))
+        .fold((None, None), |(status, consumed), phase| {
+            let further = |previous: Option<&'static str>| Some(previous.filter(|previous| {
+                message_marks::rank(previous) >= message_marks::rank(phase)
+            }).unwrap_or(phase));
+            (further(status), if matches!(phase, "delivered" | "read") { further(consumed) } else { consumed })
+        })
 }
 
 /// Ask each host about its messages, all hosts at once, within `deadline`. Every message asked
@@ -248,6 +260,25 @@ async fn read_paced(
     silent_for: Duration,
 ) -> BTreeMap<String, Relayed> {
     let kept = state.store.extension::<KeptAnswers>();
+    read_with_cache(state, asks, deadline, silent_for, Some(&kept)).await
+}
+
+/// Independent daemon discovery never consumes hints or cached answers populated by GETs.
+pub(super) async fn read_uncached(
+    state: &AppState,
+    asks: BTreeMap<String, Vec<String>>,
+    deadline: Duration,
+) -> BTreeMap<String, Relayed> {
+    read_with_cache(state, asks, deadline, KEEP_FOR, None).await
+}
+
+async fn read_with_cache(
+    state: &AppState,
+    asks: BTreeMap<String, Vec<String>>,
+    deadline: Duration,
+    silent_for: Duration,
+    kept: Option<&KeptAnswers>,
+) -> BTreeMap<String, Relayed> {
     // Each message's host, and what it answered or why it did not.
     let mut heard = Vec::<Heard>::new();
     let mut requests = Vec::new();
@@ -262,9 +293,9 @@ async fn read_paced(
             continue;
         }
         let mut asked = Vec::new();
-        let silent = kept.silent(&host, silent_for);
+        let silent = kept.and_then(|kept| kept.silent(&host, silent_for));
         for subject in subjects {
-            match (kept.get(&subject), &silent) {
+            match (kept.and_then(|kept| kept.get(&subject)), &silent) {
                 (Some(answer), _) => heard.push((host.clone(), Ok(answer))),
                 (None, Some(reason)) => heard.push((host.clone(), Err((subject, reason.clone())))),
                 (None, None) if asked.len() < MAX_MESSAGES_PER_HOST => asked.push(subject),
@@ -307,7 +338,9 @@ async fn read_paced(
             for (host, subjects, answer) in answers {
                 let reason = match answer {
                     Ok(Ok(Some(answers))) => {
-                        kept.keep(answers.messages.iter().cloned());
+                        if let Some(kept) = kept {
+                            kept.keep(answers.messages.iter().cloned());
+                        }
                         heard.extend(
                             answers
                                 .messages
@@ -322,7 +355,9 @@ async fn read_paced(
                     Ok(Err(error)) => format!("{host} did not answer: {error:#}"),
                     Err(_) => format!("{host} did not answer in {deadline:?}"),
                 };
-                kept.fell_silent(&host, &reason);
+                if let Some(kept) = kept {
+                    kept.fell_silent(&host, &reason);
+                }
                 heard.extend(
                     subjects
                         .into_iter()
@@ -340,9 +375,10 @@ async fn read_paced(
 /// A message's host, and what it answered or, with the message, why it did not.
 type Heard = (String, Result<MessageMarksAnswer, (String, String)>);
 
-/// What each message's host said, as a status over the seats this member places on that host.
-fn settle(
-    store: &Store,
+/// What each message's host said, as a status over the seats this member places on that host. A
+/// close remains an in-memory answer: only daemon maintenance persists relayed closes.
+pub(super) fn settle(
+    store: &Arc<Store>,
     heard: Vec<Heard>,
 ) -> BTreeMap<String, Relayed> {
     let mut seats = BTreeMap::<String, Result<BTreeSet<String>, String>>::new();
@@ -354,12 +390,13 @@ fn settle(
                     seats_on(store, &host).map_err(|error| format!("{error:#}"))
                 });
                 let relayed = match on_host {
-                    Ok(on_host) => Relayed::Answered {
-                        host,
-                        held: answer.held,
-                        status: status_of(&answer, on_host),
-                        latest: latest_of(&answer, on_host),
-                    },
+                    Ok(on_host) => {
+                        let (status, consumed) = status_of(&answer, on_host);
+                        Relayed::Answered {
+                            host, held: answer.held, status, consumed,
+                            latest: latest_of(&answer, on_host),
+                        }
+                    }
                     Err(reason) => Relayed::Unknown {
                         host,
                         reason: reason.clone(),
@@ -526,7 +563,8 @@ pub fn take_in(message: &mut MessageView, relayed: &Relayed) {
 /// Ask the assignees' hosts, within [`VIEW_DEADLINE`], about the wake messages of `steps` that
 /// this member has not seen consumed, and count what they say as this member counts its own
 /// records: read or closed acknowledges the wake as `consumed`, and delivered as `delivery` while
-/// the assignee works in the wake's incarnation. It only raises `acknowledged_by`: a claim still
+/// the assignee works in the wake's incarnation, as a staging does for a driver whose staging is
+/// its delivery. It only raises `acknowledged_by`: a claim still
 /// wins, and a host that does not answer leaves the wake as this member counted it. What it says
 /// is never part of a revision. Asks nobody and reads no message when no host keeps its seats'
 /// receipts, or no wake waits on a seat of one.
@@ -584,6 +622,12 @@ pub async fn read_work_wakes<'a>(
             Some("read" | "closed") => "consumed",
             Some("delivered")
                 if wake.asks.delivery_acknowledges
+                    && !matches!(wake.acknowledged_by.as_deref(), Some("delivery")) =>
+            {
+                "delivery"
+            }
+            Some("staged")
+                if wake.asks.staging_acknowledges
                     && !matches!(wake.acknowledged_by.as_deref(), Some("delivery")) =>
             {
                 "delivery"

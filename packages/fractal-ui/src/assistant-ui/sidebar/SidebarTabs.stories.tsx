@@ -8,6 +8,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { SidebarTabs, sidebarTabName, type SidebarTab, type SidebarTabGlyph } from './SidebarTabs'
 import { SidebarAgentRow } from './SidebarAgentRow'
 import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model'
+import type { IconName } from '../composition/Icons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
@@ -77,11 +78,11 @@ function useSidebar(): Sidebar {
     }))
     const fleet = machines.map((machine): Item => ({ id: machine.id, glyph: machineGlyph(machine), title: machine.name, metric: `${machine.occupancy.running_runtimes} running`, facts: `${machine.state} · ${machine.projects.length} projects · ${machine.work.length} work` }))
     const counted = (id: string, label: string, items: readonly { readonly attention?: Attention }[]): SidebarTab => ({
-      id, label, questionCount: items.filter(item => item.attention === 'question').length, needsYouCount: items.filter(item => item.attention === 'needs-you').length,
+      id, label, icon: icons[id], questionCount: items.filter(item => item.attention === 'question').length, needsYouCount: items.filter(item => item.attention === 'needs-you').length,
     })
     const faulted = fleet.filter(item => item.glyph === '!').length
     return {
-      tabs: [counted('agents', 'Agents', agents), counted('alerts', 'Alerts', alerts), counted('missions', 'Missions', missions), { id: 'fleet', label: 'Fleet', ...(faulted === 0 ? {} : { status: { glyph: '!', label: `${faulted} unreachable with work` } }) }],
+      tabs: [counted('agents', 'Agents', agents), counted('alerts', 'Alerts', alerts), counted('missions', 'Missions', missions), { id: 'fleet', label: 'Fleet', icon: 'globe', ...(faulted === 0 ? {} : { status: { glyph: '!', label: `${faulted} unreachable with work` } }) }],
       agents, alerts, missions, fleet, agentSources, missionSteps,
     }
   }, [roster, details, attention])
@@ -120,7 +121,7 @@ function SidebarTabsHost({ scheme, sidebar }: { readonly scheme: Scheme; readonl
   return <section aria-label={`Sidebar tabs ${scheme}`} data-scheme={scheme} {...stylex.props(styles.specimen, scheme === 'light' && lightTheme)}>
     <output data-testid="sidebar-tab-selection" {...stylex.props(styles.output)}>{selectedId}</output>
     <aside aria-label={`Agents sidebar ${scheme}`} data-sidebar-host {...stylex.props(styles.sidebar)}>
-      <SidebarTabs tabs={sidebar.tabs} selectedId={selectedId} onSelectionChange={setSelectedId}>
+      <SidebarTabs tabs={sidebar.tabs} selectedId={selectedId} onSelectionChange={setSelectedId} panelHasTabbableContent={selectedId === 'agents' && sidebar.agents.length > 0}>
         <div data-sidebar-scroller {...stylex.props(styles.scroller)}>
           {selectedId === 'agents' ? <div role="list" aria-label="Agents">{sidebar.agents.map(agent => <div role="listitem" key={agent.ref}><SidebarAgentRow item={agent} now={0} /></div>)}</div>
             : selectedId === 'alerts' ? <ItemList label="Alerts" items={sidebar.alerts} />
@@ -145,28 +146,25 @@ function SidebarTabsStory({ scheme, both = false }: Args) {
 }
 
 // fleet-mid-refactor with attention.sidebar-tabs: builder's session asks one question; reviewer (holding the mission), migrator and docs each need you.
+const icons: Readonly<Record<string, IconName>> = { agents: 'person', alerts: 'bell', missions: 'checklist' }
 const names = ['Agents, 3 need you', 'Alerts, 1 open question', 'Missions, 1 needs you', 'Fleet']
-const withCounts = ['◆3 Agents', '? Alerts', '◆ Missions', 'Fleet']
-const withoutCounts = ['◆ Agents', '? Alerts', '◆ Missions', 'Fleet']
+const withCounts = ['Agents·3', 'Alerts·1', 'Missions·1', 'Fleet']
+const withoutCounts = ['Agents·', 'Alerts·', 'Missions·', 'Fleet']
 const leading = ['needs-you', 'question', 'needs-you', 'label']
 
-/** What the marker paints: its ::before `content`, with any unresolved attr() read from the marker. */
-const markerText = (marker: Element) => {
-  const content = getComputedStyle(marker, '::before').content
-  if (content === 'none' || content === 'normal') return ''
-  return [...content.matchAll(/attr\(\s*([\w-]+)\s*\)|"((?:[^"\\]|\\.)*)"/g)].map(([, attr, text]) => attr === undefined ? text!.replace(/\\(.)/g, '$1') : marker.getAttribute(attr) ?? '').join('')
-}
-/** Each tab as painted: the CSS-drawn marker, then the tab's DOM text (one space and the label). */
+/** What the pill paints: its `::after` count, read through attr(). */
+const markerText = (marker: Element) => marker.getAttribute('data-sidebar-tab-count') ?? ''
+/** Each tab as painted: its label, then `·` and the pill's count when it has a pill. */
 const visibleText = (tablist: HTMLElement) => within(tablist).getAllByRole('tab').map(tab => {
   const marker = tab.querySelector('[data-sidebar-tab-marker]')
-  return (marker === null ? '' : markerText(marker)) + tab.textContent
+  return tab.textContent + (marker === null ? '' : `·${markerText(marker)}`)
 })
 
 /** Every tab label paints whole: nothing in the row overflows, and the tabs end at the bar's content edge. */
 async function assertNoClip(tablist: HTMLElement) {
-  await expect(tablist.scrollWidth).toBeLessThanOrEqual(tablist.clientWidth)
+  // A resize settles through the observer's frame, so the row gets one to refit.
+  await waitFor(() => expect(tablist.scrollWidth).toBeLessThanOrEqual(tablist.clientWidth))
   const widths = within(tablist).getAllByRole('tab').map(tab => tab.getBoundingClientRect().width)
-  await expect(Math.max(...widths) - Math.min(...widths)).toBeLessThanOrEqual(1)
   if (window.innerWidth < 900) for (const width of widths) await expect(width).toBeGreaterThanOrEqual(44)
   for (const label of tablist.querySelectorAll<HTMLElement>('[data-sidebar-tab-label]')) {
     const tab = label.closest<HTMLElement>('[role="tab"]')!.getBoundingClientRect(), box = label.getBoundingClientRect()
@@ -177,7 +175,7 @@ async function assertNoClip(tablist: HTMLElement) {
   await expect(Math.abs(bar.right - Number.parseFloat(getComputedStyle(tablist).paddingRight) - last.right)).toBeLessThanOrEqual(1)
 }
 
-/** Counts are on exactly when the full row (every count) fits the bar; each marker leads its label. */
+/** Counts are on exactly when the full row (every count) fits the bar; each pill follows its label. */
 async function assertMarkers(section: HTMLElement, expected: { readonly names: readonly string[]; readonly withCounts: readonly string[]; readonly withoutCounts: readonly string[]; readonly leading: readonly string[] }) {
   const root = section.querySelector<HTMLElement>('[data-sidebar-tabs]')!
   const tablist = within(section).getByRole('tablist', { name: 'Sidebar' })
@@ -185,9 +183,9 @@ async function assertMarkers(section: HTMLElement, expected: { readonly names: r
   const fits = root.querySelector('[data-sidebar-tabs-measure]')!.getBoundingClientRect().width <= root.getBoundingClientRect().width + 0.5
   await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-counts', fits ? 'shown' : 'dropped'))
   await expect(visibleText(tablist)).toEqual(fits ? expected.withCounts : expected.withoutCounts)
-  const firsts = within(tablist).getAllByRole('tab').map(tab => tab.querySelector('[data-sidebar-tab-label]')!.parentElement!.firstElementChild)
-  await expect(firsts.map(first => first?.getAttribute('data-sidebar-tab-marker') ?? 'label')).toEqual(expected.leading)
-  // The marker is decorative and painted by CSS: no DOM text, so a tab's only text is its label, which leads its accessible name.
+  const pills = within(tablist).getAllByRole('tab').map(tab => tab.querySelector('[data-sidebar-tab-label]')!.nextElementSibling)
+  await expect(pills.map(pill => pill?.getAttribute('data-sidebar-tab-marker') ?? 'label')).toEqual(expected.leading)
+  // The pill is decorative and painted: no DOM text, so a tab's only text is its label, which leads its accessible name.
   for (const marker of tablist.querySelectorAll('[data-sidebar-tab-marker]')) {
     await expect(marker).toHaveAttribute('aria-hidden', 'true')
     await expect(marker.textContent).toBe('')
@@ -228,6 +226,16 @@ async function keyboardPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   await expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight)
   await expect(agentsPanel.getBoundingClientRect().bottom).toBeLessThanOrEqual(host.getBoundingClientRect().bottom)
 
+  // The selected panel has its own controls, so Tab skips the panel itself in both directions.
+  // This fixture's row-open button is disabled; reported details is the first enabled control.
+  const firstControl = within(within(agentsPanel).getAllByTestId('taste-agent-row')[0]!).getByRole('button', { name: /^Reported details for / })
+  await expect(agentsPanel).toHaveAttribute('tabindex', '-1')
+  await userEvent.click(tabs[0]!)
+  await userEvent.tab()
+  await expect(firstControl).toHaveFocus()
+  await userEvent.tab({ shift: true })
+  await expect(tabs[0]).toHaveFocus()
+
   // ←/→ move focus and selection together; Home/End reach the ends.
   await userEvent.click(tabs[0]!)
   await userEvent.keyboard('{ArrowRight}')
@@ -255,13 +263,30 @@ async function keyboardPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   await assertMarkers(section, plain)
 }
 
+/** A portalled row menu must restore focus inside the same selected sidebar panel after Escape. */
+async function overlayFocusPlay({ canvasElement }: { readonly canvasElement: HTMLElement }) {
+  const section = await within(canvasElement).findByRole('region', { name: /^Sidebar tabs / })
+  const panel = within(section).getByRole('tabpanel', { name: names[0] })
+  const row = within(panel).getAllByTestId('taste-agent-row')[0]!
+  const trigger = within(row).getByRole('button', { name: /^Actions for / })
+  const documentBody = within(canvasElement.ownerDocument.body)
+  await userEvent.click(trigger)
+  const menu = await documentBody.findByRole('menu')
+  await waitFor(() => expect(menu.contains(canvasElement.ownerDocument.activeElement)).toBe(true))
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(documentBody.queryByRole('menu')).toBeNull())
+  await waitFor(() => expect(trigger).toHaveFocus())
+  await expect(panel).toContainElement(trigger)
+  await expect(within(section).getByRole('tab', { name: names[0] })).toHaveAttribute('aria-selected', 'true')
+}
+
 /** At the row's exact natural width (equal tracks, each as wide as the widest tab with its count) every count shows; one pixel less drops every count together, and no label truncates. */
 async function countFitPlay({ canvasElement }: { readonly canvasElement: HTMLElement }) {
   const section = await within(canvasElement).findByRole('region', { name: /^Sidebar tabs / })
   const host = section.querySelector<HTMLElement>('[data-sidebar-host]')!
   const root = section.querySelector<HTMLElement>('[data-sidebar-tabs]')!
   const tablist = within(section).getByRole('tablist', { name: 'Sidebar' })
-  // The replica measures the equal-track row; the host's own frame (its hairline border) sits outside the bar, so it is added back.
+  // The replica measures the natural row; the host's own frame (its hairline border) sits outside the bar, so it is added back.
   const natural = root.querySelector('[data-sidebar-tabs-measure]')!.getBoundingClientRect().width
   const frame = host.getBoundingClientRect().width - root.getBoundingClientRect().width
   host.style.width = `${Math.ceil(natural + frame)}px`
@@ -293,14 +318,15 @@ const meta = {
 export default meta
 
 type Story = StoryObj<Args>
-export const Keyboard: Story = { tags: ['critical'], name: 'Keyboard · markers, selection and panel', play: keyboardPlay }
+export const Keyboard: Story = { tags: ['critical', 'both-widths'], name: 'Keyboard · markers, selection and panel', play: keyboardPlay }
+export const OverlayFocusReturn: Story = { tags: ['critical'], name: 'Panel focus · Escape returns to row action trigger', play: overlayFocusPlay }
 export const CountFit: Story = { tags: ['critical'], name: 'Count fit · counts drop before labels', play: countFitPlay }
 
-/** Both themes with an unreachable machine holding work: ◆3, ?, a single ◆ and Fleet's !. */
-export const AllStates: Story = { tags: ['critical'], name: 'All states · ◆3, ?, ◆ and ! in both themes', args: { both: true, roster: 'sidebar-tabs' }, play: async ({ canvasElement }) => {
+/** Both themes with an unreachable machine holding work: attention pills with their icons, and Fleet's fault pill. */
+export const AllStates: Story = { tags: ['critical', 'both-widths'], name: 'All states · attention, question and fault pills in both themes', args: { both: true, roster: 'sidebar-tabs' }, play: async ({ canvasElement }) => {
   const sections = await within(canvasElement).findAllByRole('region', { name: /^Sidebar tabs / })
   await expect(sections.map(section => section.dataset.scheme)).toEqual(['dark', 'light'])
-  const faulted = { names: [...names.slice(0, 3), 'Fleet, 1 unreachable with work'], withCounts: [...withCounts.slice(0, 3), '! Fleet'], withoutCounts: [...withoutCounts.slice(0, 3), '! Fleet'], leading: [...leading.slice(0, 3), 'status'] }
+  const faulted = { names: [...names.slice(0, 3), 'Fleet, 1 unreachable with work'], withCounts: [...withCounts.slice(0, 3), 'Fleet·'], withoutCounts: [...withoutCounts.slice(0, 3), 'Fleet·'], leading: [...leading.slice(0, 3), 'status'] }
   for (const section of sections) {
     await assertMarkers(section, faulted)
     await expect(within(section).getAllByRole('tabpanel')).toHaveLength(1)

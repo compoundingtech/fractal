@@ -1,8 +1,10 @@
 //! The authoritative st3 subject, resource, and claim registry.
 
 pub mod arrangements;
+pub mod attention_controls;
 pub mod custom;
 pub mod accountable;
+pub mod availability;
 pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
@@ -10,15 +12,20 @@ pub mod full_value;
 pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
+pub mod notice;
 pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
+pub mod invocation;
 pub mod provenance;
+pub mod read_positions;
+pub mod source_map;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
 pub mod task_grants;
+pub mod usage_limits;
 pub use task_grants::{
     TaskManifestError, TaskManifestV1, canonicalize_task_manifest_v1,
     digest_task_manifest_v1, parse_task_manifest_v1,
@@ -32,6 +39,49 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 pub const SCHEMA_NAME: &str = "st3.v1";
+
+/// Canonicalize an actor used for agent work without changing an explicit actor kind.
+/// Bare names need a host before admission; legacy slash-qualified names need `agent/`.
+pub fn canonical_agent_actor(id: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if id.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (kind, name) = id.split_once('/')?;
+    if kind.is_empty() || name.is_empty() {
+        return None;
+    }
+    if matches!(kind, "agent" | "person" | "daemon" | "host" | "plugin") {
+        Some(std::borrow::Cow::Borrowed(id))
+    } else {
+        Some(std::borrow::Cow::Owned(format!("agent/{id}")))
+    }
+}
+
+#[cfg(test)]
+mod canonical_agent_actor_tests {
+    use super::canonical_agent_actor;
+
+    #[test]
+    fn preserves_actor_kinds_and_prefixes_legacy_agent_ids() {
+        for id in ["agent/example/worker", "person/reviewer", "daemon/scheduler"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+        assert_eq!(
+            canonical_agent_actor("example/worker").as_deref(),
+            Some("agent/example/worker")
+        );
+        for id in ["", "worker", "agent/", "person/", "/worker", "example/worker name"] {
+            assert!(canonical_agent_actor(id).is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_host_and_plugin_principals() {
+        for id in ["host/example", "plugin/example"] {
+            assert_eq!(canonical_agent_actor(id).as_deref(), Some(id));
+        }
+    }
+}
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
@@ -382,7 +432,7 @@ impl std::error::Error for ValidationError {}
 
 /// Local SQLite projection notes. They are documentation only: the projection is
 /// not part of the serialized registry, so it cannot change the registry digest.
-const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-h63ee7b740f4a owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
+const LOCAL_MESSAGE_SELECTORS: &str = /* sqlite-large-value: allow-for-now lv-hbfa81626a10c owner=fractal_schema TODO=stage-generation-and-keyed-reclamation */ r#"
 ## Local message selectors
 
 The client message list pages through `local_client_message_selectors_v1`, a SQLite projection kept only on the local node. It is derived from message claims and from the `desired` projection, so it is not part of this registry. It adds no subject family, resource kind, claim kind or claim field. The registry digest and the replication compatibility digest therefore stay unchanged. Nodes with and without this table exchange claims as before. The `_v1` suffix is the projection version: a layout change uses a new table name, never an edit to this one in place.
@@ -441,6 +491,8 @@ The fourteen page indexes are partial on `born_index >= 0` and order by `sent_ke
 
 Triggers on `claims` (insert, update, delete) for `message/` subjects and on `desired` (insert, update, delete) add a pending row with the reason. Insert triggers mark only claims that can change a selector field: `message.sent`, `message.closed`, `intent.desired`, or a claim that sets `from`, `to`, `tags` or `status`. A body-only edit adds no new header version. Deleting a `desired` row immediately clears the fields it supplied (`desired_mask`) and recomputes eligibility only for that subject and the old/new global and affected-recipient reminder winners. Each candidate or previous-winner lookup is an indexed seek with `LIMIT 1`, in canonical `version DESC, subject DESC` order for candidates; it never enumerates or updates the superseded open members of a reminder group. At most seven live headers and one subject-keyed pending row are touched per desired deletion, independent of group size. The pending row retains the old reminder and recipient for bounded durable reconciliation. A fresh page therefore never shows a removed declaration, even before the transaction's flush.
 
+A header's `closed` is the message's close claim, this member's closed mark (`local_message_marks`), or a close the seat's host relayed (`local_relayed_message_closes`, member-local, never replicated). A read that hears a host's close queues it without waiting for the writer; a background writer records at most 64 per transaction, and its insert trigger adds a pending row like a mark's. A relayed close never changes a header's claim-derived revision or `message_index`. The observation trim removes it once a close here covers it.
+
 The seventh source-change trigger, `client_selector_repair`, watches `replica_records` updates of `state` and `replacement_claim_id`. A message claim newly marked `repaired`, or already repaired with a changed replacement claim, queues a full selector fold and a destructive quarantine marker. The paired epoch trigger invalidates previously issued cuts for both initial repair and replacement reselection.
 
 The central `Runtime::before_commit` boundary runs pending selector work exactly once before each managed outer writer transaction commits, including both batched and lent-writer transactions and canonical settlement. Appending claims, applying declarations and projecting replicas do not take separate eager selector allowances. The entire transaction shares at most 64 claim or legacy-position prefix rows and 16 subjects, with a cooperative 10 ms work budget; these limits do not restart for each helper invocation. The accumulator and cleanup state use the same transaction-wide allowances, and SQLite retains FULL synchronous durability. Work that does not fit remains durable for a later transaction. The accumulator for one active subject lives in `meta` under `client_message_selectors_v1_fold` and holds the subject, cut, epoch, source-touch generation, scan position, phase, canonical keys and selection scalars only. It never contains message content or attachments. A suspended full fold retains its scalar progress across append touches, finishes its captured cut, then extends to the newer cut and generation. It restarts only after a destructive epoch change, or when a metadata-only fold based on an existing header first gains selection-field dirtiness. A body-only edit adds no header version when the resulting selector is unchanged.
@@ -492,7 +544,7 @@ impl Registry {
             output.push_str(&format!(
                 "| `{}` | `{}` | {} | {} |\n",
                 spec.family,
-                spec.pattern,
+                markdown_cell(&spec.pattern),
                 if spec.client_writable { "yes" } else { "no" },
                 markdown_cell(description)
             ));
@@ -533,8 +585,12 @@ impl Registry {
         }
         output.push_str("\n`resource.observed` validates facts against the resource kind. Custom resource facts remain open.\n");
         output.push_str("\nA `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.\n");
+        output.push_str(usage_limits::DOCUMENTATION);
+        output.push_str("\n## Agent principal grammar\n\nAn agent may declare one optional `principal \"person/operator\"` child. It takes\nexactly one canonical person ID string, with no properties or body; agent IDs,\nmalformed person IDs and duplicate principal children are rejected. `principal`\nis not an agent property. The canonical `intent.desired.desired` tree retains\nthe child without adding a separate claim field. Omitting it remains valid.\nThis grammar declaration is distinct from the accountable-root contract below.\n\nPending harness observations with `ask=\"question\"` route to the declared\nprincipal, otherwise to the daemon's configured `person`. Account ownership,\nhelper bindings, mission requesters and declaration authors are not question\nauthority. If neither principal exists, global attention retains the prompt\nwith an empty person and a configuration diagnostic instead of dropping it.\nOnly a live declaration and its running incarnation can produce the item;\nrepublishing its principal invalidates attention. `under` remains non-owning.\nPermission and review prompts retain their existing ownership and answer\nauthorization. This routing does not enable answering unsupported harnesses.\nSupported native question answers require the effective principal as answerer.\nUpgrade readers before publishing the child: older readers reject it.\n");
         output.push_str("\n## Accountable fleet roots\n\nA top-level agent root may declare `accountable \"person/NAME\"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.\n\nAll members must upgrade before publishing accountable roots. Older members retain the new closed-schema claim field as unknown, without enforcing it or selecting the declaration. Existing declarations have no field and declare no trace principal. The field does not change the database layout or checkpoint rules.\n");
-        output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
+        output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp; optional `source` is the daemon-assigned writer, a pairing grant or `host/MEMBER`, and is absent on notes written before it. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
+        output.push_str("\n## Person availability\n\nFour kinds on `person/NAME` record a person's availability. Only that exact person may write them, through dedicated operations only, including replicated admission. Each names the daemon-assigned `source` that wrote it: the client's pairing grant, or `host/MEMBER` for a local caller. `person.status-set` takes `status` (`available`, `away`, or null to clear the override); `person.interruptions-set` takes `interruptions` (`all`, `urgent`, `none`); `person.deadline-clock-set` takes `deadline_clock` (`run`, `hold-routine`, `hold-all`). Each takes optional `until_unix_ms`, after which that axis returns to its default: derived status, `all` interruptions and a running clock. The canonical latest claim of each kind is that axis's current value.\n\n`person.presence-observed` is one device's raw state transition: `state` (`active`, `inactive`, `locked`, `sleeping`), optional `last_input_at_unix_ms` and the device's `observed_at_unix_ms`. Devices apply no thresholds; the daemon derives presence for every device alike. An `active` device is `present` until 10 minutes after its last input, then `idle`; `inactive` is `idle`; `locked` and `sleeping` are `locked`. A device's state counts for 24 hours after it was observed. A report observed before the device's newest recorded report is not recorded, so a delayed report never replaces a newer state. Without an override, status is `available` while some device is `present`, `away` while devices count but none is present, and `available` with source `unreported` when no device counts.\n\nA deadline-clock hold pauses ask deadlines: `hold-all` every ask, `hold-routine` every ask that is not urgent. `work.person-asked` takes optional `priority` (`critical`, `high`, `normal`, `low`; `normal` when absent), and an ask is urgent exactly when its priority is `critical`. The durable clock history records held time; an ask's effective deadline is its stored deadline plus the time held since it was asked. Availability never grants authority.\n");
+        output.push_str("\n## Person attention controls\n\n`person.attention-seen` and `person.attention-snoozed` on `person/NAME` record that person's own controls over their attention rows: required `attention_id` (`attention/HASH`) and `source`, the daemon-assigned client the person acted from (its pairing grant, or `host/MEMBER` for a local caller). `person.attention-snoozed` also takes required `until_unix_ms`, positive Unix milliseconds or null to end the snooze. Only that exact person may write them, through the `attention.seen` and `attention.snooze` actions only, including replicated admission. Per row, the earliest accepted seen claim is when the person saw it; the latest snooze by accepted time, then canonical claim key, is current. A control changes only its person's view of a row: no lifecycle, deadline or asker reads it.\n");
         output.push_str("\n## Arrangement operation vocabulary\n\nReplication retains unknown operation tags and unknown placement subject families as retryable `unknown-claim-field` records. Local edits still refuse them with `invalid-arrangement-operations` and `invalid-subject-reference`. Supported operation tags, included in this registry's digest:\n\n");
         for tag in &self.arrangement_operations {
             output.push_str(&format!("- `{tag}`\n"));
@@ -587,12 +643,13 @@ impl Registry {
                 "a subject needs a non-empty path after its registered family",
             ));
         }
-        if spec.family == "assistant" && subject != "assistant/chatgpt" {
-            let grant = subject.strip_prefix("assistant/chatgpt/session/assistant-grant/");
+        if spec.family == "assistant" && !matches!(subject, "assistant/chatgpt" | "assistant/mcp") {
+            let grant = ["assistant/chatgpt/session/assistant-grant/", "assistant/mcp/session/assistant-grant/"]
+                .iter().find_map(|prefix| subject.strip_prefix(prefix));
             if !grant.is_some_and(|id| id.len() == 24 && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
                 return Err(error(
                     "invalid-claim-subject",
-                    "an assistant subject must be assistant/chatgpt or its exact grant session",
+                    "an assistant subject must be assistant/chatgpt, assistant/mcp or its exact grant session",
                 ));
             }
         }
@@ -632,6 +689,9 @@ impl Registry {
         }
         if spec.family == "arrangement" {
             arrangements::owner(subject)?;
+        }
+        if spec.family == read_positions::FAMILY {
+            read_positions::owner(subject)?;
         }
         Ok(spec)
     }
@@ -730,13 +790,22 @@ impl Registry {
         if kind == directive_notes::KIND {
             directive_notes::validate_fields(fields)?;
         }
+        attention_controls::validate_fields(kind, fields)?;
+        availability::validate_fields(kind, fields)?;
         if kind == "mission.provenance" {
             provenance::validate_claim(subject, fields)?;
         }
+        if kind == source_map::KIND {
+            source_map::validate_claim(subject, fields)?;
+        }
         harness_questions::validate(kind, fields)?;
+        if kind == invocation::KIND {
+            invocation::validate(subject, fields)?;
+        }
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
+        usage_limits::validate(subject, kind, fields)?;
         if kind == "terminal.launch-geometry" {
             for name in ["rows", "columns"] {
                 if fields.get(name).and_then(terminal_dimension).is_none() {
@@ -769,6 +838,15 @@ impl Registry {
             if kind == "glass.upserted" {
                 glasses::body_for_read(fields.get("body").unwrap_or(&Value::Null))?;
             }
+        }
+        if subject_spec.family == read_positions::FAMILY {
+            if kind != read_positions::KIND {
+                return Err(error(
+                    "claim-write-forbidden",
+                    "a read position requires read-position.advanced",
+                ));
+            }
+            read_positions::validate_fields(subject, fields)?;
         }
         Ok(spec)
     }
@@ -861,15 +939,23 @@ impl Registry {
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
         if kind.starts_with("custom.client.assistant.")
-            || subject.starts_with("custom/client/assistant-v1-") {
+            || subject.starts_with("custom/client/assistant-v1-")
+            || kind.starts_with("custom.client.pairing")
+            || subject.starts_with("custom/client/pairing")
+            || kind.starts_with("custom.client.terminal")
+            || subject.starts_with("custom/client/terminal-") {
             return Err(error(
                 "claim-write-forbidden",
-                "assistant authority claims require a dedicated trusted-local operation",
+                "client authority claims require a dedicated trusted-local operation",
             ));
         }
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
+        read_positions::validate_actor(subject, actor)?;
         directive_notes::validate_actor(subject, kind, actor)?;
+        attention_controls::validate_actor(subject, kind, actor)?;
+        availability::validate_actor(subject, kind, actor)?;
+        usage_limits::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
             || (spec.write_policy == WritePolicy::SameSubjectActor && actor == Some(subject));
         if !allowed {
@@ -1090,7 +1176,7 @@ fn build_registry() -> Registry {
         ("person", "person/IDENTITY", "A human actor.", false),
         (
             "assistant",
-            "assistant/chatgpt[/session/assistant-grant/ID]",
+            "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]",
             "An external assistant principal or its grant-bound audit session, never a person.",
             false,
         ),
@@ -1104,6 +1190,12 @@ fn build_registry() -> Registry {
             "arrangement",
             "arrangement/person/NAME/UUIDv7",
             "A permanently person-owned shared folder arrangement.",
+            false,
+        ),
+        (
+            "read-position",
+            "read-position/person/NAME",
+            "One person's forward-only read positions across conversations.",
             false,
         ),
         (
@@ -1131,6 +1223,18 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            "objective",
+            "objective/NAME",
+            "A declared objective: an interval over claims, its targets, window and breach response.",
+            false,
+        ),
+        (
+            "notice-owner",
+            "notice-owner/fleet",
+            "The fleet's single notice owner: one admitted member incarnation, declared always on, whose daemon writes notice snapshots.",
+            false,
+        ),
+        (
             "owned-set",
             "owned-set/NAME",
             "A graph-owned set of declarations with source ordering and omission retirement.",
@@ -1152,6 +1256,12 @@ fn build_registry() -> Registry {
             github_plugin::EVENT_FAMILY,
             "github-event/RESOURCE/ITEM/NUMBER/KEY",
             "One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller.",
+            false,
+        ),
+        (
+            github_plugin::WORKFLOW_RUN_FAMILY,
+            "github-workflow-run/OWNER/REPO/RUN_ID",
+            "One completed CI run of a GitHub repository, written once by its repository's poller.",
             false,
         ),
         (
@@ -1489,6 +1599,60 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            attention_controls::SEEN_KIND,
+            &["person"],
+            WritePolicy::CapabilityHolder,
+            Cardinality::Append,
+            Some("person-attention-controls"),
+            false,
+            &[],
+        ),
+        (
+            attention_controls::SNOOZED_KIND,
+            &["person"],
+            WritePolicy::CapabilityHolder,
+            Cardinality::Append,
+            Some("person-attention-controls"),
+            false,
+            &[],
+        ),
+        (
+            availability::STATUS_KIND,
+            &["person"],
+            WritePolicy::CapabilityHolder,
+            Cardinality::StateTransition,
+            Some("person-availability"),
+            false,
+            &[],
+        ),
+        (
+            availability::INTERRUPTIONS_KIND,
+            &["person"],
+            WritePolicy::CapabilityHolder,
+            Cardinality::StateTransition,
+            Some("person-availability"),
+            false,
+            &[],
+        ),
+        (
+            availability::DEADLINE_CLOCK_KIND,
+            &["person"],
+            WritePolicy::CapabilityHolder,
+            Cardinality::StateTransition,
+            Some("person-availability"),
+            true,
+            &[],
+        ),
+        (
+            availability::PRESENCE_KIND,
+            &["person"],
+            WritePolicy::CapabilityHolder,
+            Cardinality::Append,
+            Some("person-availability"),
+            false,
+            &[],
+        ),
+        (
             "harness.todo.observed",
             &["agent"],
             WritePolicy::SameSubjectActor,
@@ -1549,6 +1713,8 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
                 "lane",
                 "message",
                 "observer",
+                "objective",
+                "notice-owner",
                 "mission",
                 "mission-run",
                 "planning-session",
@@ -1575,6 +1741,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::OrdinaryClient,
             Cardinality::Append,
             Some("ordered-memberships"),
+            false,
+            &[],
+        ),
+        (
+            read_positions::KIND,
+            &[read_positions::FAMILY],
+            WritePolicy::OrdinaryClient,
+            Cardinality::Append,
+            Some(read_positions::COLLECTION),
             false,
             &[],
         ),
@@ -1615,6 +1790,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "source.debt.recorded",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
+            "source.debt.closed",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
+            "source.audited",
+            &["agent", "schedule", "subscription", "mission", "exec", "pty"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("owned-sets"),
+            false,
+            &[],
+        ),
+        (
             "mission.published",
             &["mission"],
             WritePolicy::AuthorizedRequester,
@@ -1631,6 +1833,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("missions"),
             true,
             &["provenance"],
+        ),
+        (
+            "source.mapped",
+            &["agent", "mission"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &[],
         ),
         (
             "mission.produced",
@@ -1655,6 +1866,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["mission-run"],
             WritePolicy::SystemOnly,
             Cardinality::StateTransition,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
+            "mission-run.retry-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("mission-runs"),
+            true,
+            &[],
+        ),
+        (
+            "mission-run.supersede-linked",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
             Some("mission-runs"),
             true,
             &[],
@@ -1766,6 +1995,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["step"],
         ),
         (
+            "mission.run.trace",
+            &["mission-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
+            &["observability"],
+        ),
+        (
+            "program.attempt.trace",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &["observability"],
+        ),
+        (
+            "program.step",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &["step", "program"],
+        ),
+        (
             "work.person-asked",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -1855,6 +2111,8 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             true,
             &[],
         ),
+        ("work.handoff-returned", &["step-run"], WritePolicy::AuthorizedParticipant,
+            Cardinality::Append, Some("work"), true, &[]),
         (
             "work.extended",
             &["step-run"],
@@ -1971,6 +2229,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Once,
             Some("resources"),
             true,
+            &[],
+        ),
+        (
+            github_plugin::WORKFLOW_RUN,
+            &[github_plugin::WORKFLOW_RUN_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            false,
             &[],
         ),
         (
@@ -2091,6 +2358,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "runtime.refresh", &["agent"], WritePolicy::SystemOnly,
+            Cardinality::Append, Some("runtimes"), true, &[],
+        ),
+        (
             "runtime.restart-window-reset",
             &["agent", "exec", "pty"],
             WritePolicy::SystemOnly,
@@ -2140,6 +2411,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "client.action-result", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
+            "client.operation-authorized", &["custom"], WritePolicy::SystemOnly,
             Cardinality::Append, None, true, &[],
         ),
         (
@@ -2250,6 +2525,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "harness.invocation-artifact",
+            &["agent"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("harnesses"),
+            false,
+            &[],
+        ),
+        (
             "harness.session-file",
             &["agent"],
             WritePolicy::AuthorizedRequester,
@@ -2282,6 +2566,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::SameSubjectActor,
             Cardinality::Append,
             Some("harnesses"),
+            false,
+            &[],
+        ),
+        (
+            "usage.limits.observed",
+            &["agent"],
+            WritePolicy::SameSubjectActor,
+            Cardinality::Append,
+            None,
             false,
             &[],
         ),
@@ -2378,6 +2671,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ("client.js-error", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.native-crash", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.hang", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (invocation::KIND, &["agent"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (
             "harness.timeline",
             &["agent"],
@@ -2482,6 +2776,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["message"],
             WritePolicy::AuthorizedParticipant,
             Cardinality::OncePerActor,
+            Some("messages"),
+            true,
+            &[],
+        ),
+        (
+            "message.expired",
+            &["message"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
             Some("messages"),
             true,
             &[],
@@ -2802,6 +3105,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "fleet.shard-bounds",
+            &["host"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("fleet"),
+            false,
+            &[],
+        ),
+        (
             "rule.set",
             &["rule"],
             WritePolicy::SystemOnly,
@@ -3044,6 +3356,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
         github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
         github_plugin::EVENT => github_plugin::event_fields(),
+        github_plugin::WORKFLOW_RUN => github_plugin::workflow_run_fields(),
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -3069,6 +3382,34 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         directive_notes::KIND => &[
             ("text", FieldSpec { required: true, nullable: true, ..string() }),
             ("expires_at", string()),
+            ("source", string()),
+        ],
+        availability::STATUS_KIND => &[
+            ("status", FieldSpec { required: true, nullable: true, ..enumeration(availability::STATUSES) }),
+            ("until_unix_ms", integer()),
+            ("source", required_string()),
+        ],
+        availability::INTERRUPTIONS_KIND => &[
+            ("interruptions", required_enum(availability::INTERRUPTIONS)),
+            ("until_unix_ms", integer()),
+            ("source", required_string()),
+        ],
+        availability::DEADLINE_CLOCK_KIND => &[
+            ("deadline_clock", required_enum(availability::DEADLINE_CLOCKS)),
+            ("until_unix_ms", integer()),
+            ("source", required_string()),
+        ],
+        availability::PRESENCE_KIND => &[
+            ("state", required_enum(availability::DEVICE_STATES)),
+            ("last_input_at_unix_ms", integer()),
+            ("source", required_string()),
+            ("observed_at_unix_ms", required_integer()),
+        ],
+        attention_controls::SEEN_KIND => &[("attention_id", required_string()), ("source", required_string())],
+        attention_controls::SNOOZED_KIND => &[
+            ("attention_id", required_string()),
+            ("source", required_string()),
+            ("until_unix_ms", FieldSpec { required: true, nullable: true, ..integer() }),
         ],
         "workspace.observed" => &[
             ("host", required_string()),
@@ -3121,6 +3462,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "arrangement.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("version", integer()), ("action_id", string()), ("action_digest", string())],
         "ordered-membership.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("action_id", string()), ("action_digest", string())],
+        read_positions::KIND => &[("owner", required_reference_to(&["person"])), ("conversation", required_string()), ("at_ms", required_integer())],
         "glass.upserted" => &[
             ("body", object()),
             ("base_revision", string()),
@@ -3137,6 +3479,34 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", required_string()),
             ("body", required_object()),
         ],
+        "source.debt.recorded" => &[
+            ("set", required_string()),
+            ("set_revision", required_string()),
+            ("repository", required_string()),
+            ("ref", required_string()),
+            ("sha", required_string()),
+            ("verb", required_string()),
+            ("reason", required_string()),
+            ("claim", string()),
+            ("revision", string()),
+            ("request", string()),
+            ("pointers", array()),
+            ("before", any()),
+            ("after", any()),
+        ],
+        "source.debt.closed" => &[
+            ("debt", required_string()),
+            ("set", required_string()),
+            ("outcome", required_string()),
+            ("set_revision", required_string()),
+            ("publisher", any()),
+        ],
+        "source.audited" => &[
+            ("set", required_string()),
+            ("set_revision", required_string()),
+            ("verb", required_string()),
+            ("refusal", required_string()),
+        ],
         "mission.published" => &[
             ("revision", string()),
             ("state", string()),
@@ -3146,6 +3516,19 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("mission", required_reference_to(&["mission"])),
             ("revision", required_string()),
             ("provenance", required_object()),
+        ],
+        "source.mapped" => &[
+            ("subject", required_reference_to(&["agent", "mission"])),
+            ("revision", required_string()),
+            ("set_revision", required_string()),
+            ("repository", required_string()),
+            ("ref", required_string()),
+            ("sha", required_string()),
+            ("sequence", required_integer()),
+            ("files", required_array()),
+            ("declaration", required_integer()),
+            ("inputs", required_array()),
+            ("nodes", required_array()),
         ],
         "mission.produced" => &[
             ("name", string()),
@@ -3158,6 +3541,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("mission_spec", object()),
             ("ad_hoc_title", string()),
             ("status", string()),
+            ("phase", string()),
+            ("admission_publication", string()),
             ("mission", reference()),
             ("revision", string()),
             ("generation", reference()),
@@ -3184,6 +3569,16 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("stalled_after_ms", integer()),
             ("report_stalls", boolean()),
             ("report_completed", boolean()),
+        ],
+        "mission-run.retry-linked" => &[
+            ("source", required_reference_to(&["mission-run"])),
+            ("retry", required_reference_to(&["mission-run"])),
+            ("reason", string()),
+        ],
+        "mission-run.supersede-linked" => &[
+            ("source", required_reference_to(&["mission-run"])),
+            ("replacement", required_reference_to(&["mission-run"])),
+            ("publication", required_string()),
         ],
         "mission-run.state" => &[
             ("status", string()),
@@ -3274,6 +3669,18 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claim_incarnation", string()),
             ("claim_expires_at_unix_ms", integer()),
         ],
+        "mission.run.trace" => &[("trace", any())],
+        "program.attempt.trace" => &[("attempt", required_integer()), ("trace", any())],
+        "program.step" => &[
+            ("key", required_string()),
+            ("status", required_enum(&["started", "completed", "failed"])),
+            ("attempt", required_integer()),
+            ("program", required_string()),
+            ("value", any()),
+            ("error", any()),
+            ("ms", integer()),
+            ("child", string()),
+        ],
         "work.person-asked" => &[
             ("run", reference()),
             ("generation", reference()),
@@ -3295,6 +3702,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("deadline_unix_ms", integer()),
             ("deadline_ms", integer()),
             ("default_answer", string()),
+            ("priority", enumeration(availability::PRIORITIES)),
         ],
         "work.person-done" | "work.person-cancelled" => &[
             ("attempt", integer()),
@@ -3313,6 +3721,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("attempt", integer()),
             ("episode", string()),
         ],
+        "work.handoff-returned" => &[
+            ("attempt", integer()), ("status", string()), ("reason", string()),
+            ("handoff_claim", string()), ("handoff_message", reference()),
+            ("handoff_to", reference()), ("readiness_epoch", integer()),
+            ("disposition", enumeration(&["withdrawn", "declined"])), ("return_request", object()),
+        ],
         "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
         | "work.released" | "work.extended" => &[
             ("attempt", integer()),
@@ -3322,6 +3736,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("worker_reported", boolean()),
             ("claimant", reference()),
             ("claim_incarnation", string()),
+            ("invocation_id", string()),
+            ("declared_model", string()),
+            ("trace_id", string()),
+            ("fallback", boolean()),
             ("claim_expires_at_unix_ms", integer()),
             ("readiness_epoch", integer()),
             ("extend_ms", integer()),
@@ -3354,6 +3772,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("step_definition", string()),
             ("attempt", integer()),
             ("runner", string()),
+            ("host", string()),
+            ("dispatch", object()),
             ("model", string()),
             ("token_budget", integer()),
             ("tools", array()),
@@ -3523,6 +3943,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
         ],
+        "client.operation-authorized" => &[
+            ("record_id", required_string()),
+            ("record_hash", required_string()),
+            ("completion_id", string()),
+        ],
         "custom.client.action-result" | "client.action-result" => &[
             ("authority_actor", string()),
             ("request_digest", required_string()),
@@ -3659,6 +4084,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", required_string()),
             ("removed_by", reference_to(&["person"])),
         ],
+        "fleet.shard-bounds" => &[
+            ("member_key", required_string()),
+            ("shard_high_water", required_object()),
+        ],
         "rule.set" => &[
             ("mode", required_enum(&["off", "audit", "enforce"])),
             ("description", string()),
@@ -3717,6 +4146,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("scope", required_string()),
             ("status", required_enum(&["faulted", "recovered"])),
             ("reason", string()),
+            ("publication", string()),
         ],
         "record.repaired" => &[
             ("record", required_string()),
@@ -3742,6 +4172,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("signal", string()),
             ("reason", string()),
             ("fresh_session", boolean()),
+            ("from_stale_handoff", boolean()),
             ("ignore_fit", boolean()),
         ],
         "runtime.action.succeeded"
@@ -3756,6 +4187,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("incarnation_id", string()),
             ("runtime_pid", integer()),
             ("runtime_pid_start_token", string()),
+            ("launch_contract", object()),
             ("deadline_key", string()),
             ("desired_token", string()),
             ("rollout_operation", string()),
@@ -3776,6 +4208,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("exit_code", integer()),
             ("exit_signal", integer()),
+            ("exit_evidence", object()),
             ("incarnation_id", string()),
             ("restarting_from", string()),
             ("adopted", boolean()),
@@ -3784,6 +4217,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("shutdown_timeout_ms", integer()),
         ],
         "render.applied" => &[("writes", array()), ("warnings", array())],
+        "runtime.refresh" => &[("version", required_integer()), ("episode", FieldSpec { required: true, ..object() })],
         "runtime.restart-window-reset" => &[
             ("desired_token", string()),
             ("incarnation_id", required_string()),
@@ -3872,8 +4306,19 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ),
             ("modified_at", string()),
         ],
+        "harness.invocation-artifact" => &[
+            ("invocation_id", required_string()),
+            ("kind", enumeration(&["input", "transcript"])),
+            ("status", enumeration(&["retained", "unavailable", "deleted"])),
+            ("artifact", object()),
+            ("sha256", string()),
+            ("deleted_at_unix_ms", integer()),
+            ("reason", string()),
+        ],
         "harness.diagnostic" => &[
             ("driver", string()),
+            ("producer_version", string()),
+            ("invocation_id", string()),
             ("severity", enumeration(&["warning", "error"])),
             ("status", string()),
             ("code", string()),
@@ -3916,9 +4361,13 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("cost_microusd", integer()),
             ("reported_cost_microusd", integer()),
             ("unpriced_tokens", integer()),
+            ("unpriced_responses", integer()),
             ("pricing", string()),
             ("pricing_provenance", array()),
             ("native_session_id", string()),
+            ("execution_id", string()),
+            ("invocation_id", string()),
+            ("attempt", integer()),
             (
                 "semantics",
                 required_enum(&[
@@ -3946,6 +4395,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("weekly_percent", number()),
             ("weekly_resets_at_unix_ms", integer()),
             ("measured_at_unix_ms", required_integer()),
+        ],
+        "usage.limits.observed" => &[
+            ("readings", FieldSpec { required: true, ..array() }),
+            ("credit_readings", FieldSpec { required: true, ..array() }),
         ],
         // The harness's own subagent ID names the subagent within its parent seat. The prompt and
         // transcript stay on the host.
@@ -4040,6 +4493,19 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("unit", required_enum(&["hook"])),
             ("incarnation_id", required_string()),
             ("signals", required_object()),
+        ],
+        "harness.invocation" => &[
+            ("invocation_id", required_string()),
+            ("operation_id", required_string()),
+            ("agent", required_reference_to(&["agent"])),
+            ("phase", required_enum(&["admitted", "launch-inputs", "launch-accepted", "started",
+                "startup-failed", "revoked", "cancelled", "producer-closed", "ended", "observed"])),
+            ("event_key", any()), ("owner_run", any()), ("owner_step", any()),
+            ("owner_attempt", any()), ("parent_invocation_id", any()), ("incarnation", any()),
+            ("requested_model", any()), ("harness", any()), ("harness_version", any()),
+            ("launch_input_digest", any()), ("provider_binary_digest", any()),
+            ("prompt_digest", any()), ("transcript_ref", any()), ("trace_context", any()),
+            ("freshness", object()), ("fallback", any()), ("error", any()), ("evidence", any()),
         ],
         "harness.timeline" => &[
             (
@@ -4144,6 +4610,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
         "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
+        "message.expired" => &[
+            ("status", required_enum(&["expired"])),
+            ("reason", required_enum(&["cutoff-never-offered", "cutoff-uncertain-attempt", "no-live-recipient"])),
+        ],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
@@ -4635,10 +5105,14 @@ mod tests {
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         fields.insert("runtime_pid".into(), Value::from(1234));
         fields.insert("runtime_pid_start_token".into(), Value::from("987654321"));
+        fields.insert("launch_contract".into(), serde_json::json!({
+            "version":1, "digest":"combined", "prompt":"prompt", "binary":"binary",
+        }));
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
         for (name, invalid) in [
             ("runtime_pid", Value::from("1234")),
             ("runtime_pid_start_token", Value::from(987654321)),
+            ("launch_contract", Value::from("not an object")),
         ] {
             let mut invalid_fields = fields.clone();
             invalid_fields.insert(name.into(), invalid);
@@ -4818,6 +5292,71 @@ mod tests {
     }
 
     #[test]
+    fn assistant_principal_registry_digest_transition() {
+        // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
+        let mut current = registry().clone();
+        current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove(read_positions::KIND).unwrap();
+        current.subjects.remove(read_positions::FAMILY).unwrap();
+        for kind in attention_controls::KINDS {
+            current.claims.remove(kind).unwrap();
+        }
+        current.subjects.remove("objective").unwrap();
+        current.claims.get_mut("intent.desired").unwrap().source_kdl
+            .retain(|kind| kind != "objective" && kind != "notice-owner");
+        current.subjects.remove("notice-owner").unwrap();
+        current.claims.remove("message.expired").unwrap();
+        current.claims.remove("program.step").unwrap();
+        current.claims.remove("mission.run.trace").unwrap();
+        current.claims.remove("program.attempt.trace").unwrap();
+        current.claims.remove(invocation::KIND).unwrap();
+        current.claims.remove("harness.invocation-artifact").unwrap();
+        for field in ["producer_version", "invocation_id"] {
+            current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
+        }
+        current.claims.remove("mission-run.retry-linked").unwrap();
+        current.claims.remove("mission-run.supersede-linked").unwrap();
+        for field in ["phase", "admission_publication"] {
+            current.claims.get_mut("mission-run.created").unwrap().fields.remove(field).unwrap();
+        }
+        current.claims.get_mut("reconcile.fault").unwrap().fields.remove("publication").unwrap();
+        for kind in ["source.debt.recorded", "source.debt.closed", "source.audited", source_map::KIND] {
+            current.claims.remove(kind).unwrap();
+        }
+        for kind in availability::KINDS {
+            current.claims.remove(kind).unwrap();
+        }
+        current.claims.get_mut(directive_notes::KIND).unwrap().fields.remove("source").unwrap();
+        current.claims.get_mut("work.person-asked").unwrap().fields.remove("priority").unwrap();
+        current.claims.remove(github_plugin::WORKFLOW_RUN).unwrap();
+        current.subjects.remove(github_plugin::WORKFLOW_RUN_FAMILY).unwrap();
+        current.claims.get_mut("runtime.action.requested").unwrap()
+            .fields.remove("from_stale_handoff").unwrap();
+        current.claims.get_mut("runtime.observed").unwrap()
+            .fields.remove("exit_evidence").unwrap();
+        for field in ["host", "dispatch"] {
+            current.claims.get_mut("gate.requested").unwrap().fields.remove(field).unwrap();
+        }
+        for kind in ["work.claimed", "work.renewed", "work.progress", "work.submitted",
+            "work.failed", "work.released", "work.extended"] {
+            for field in ["declared_model", "trace_id", "fallback", "invocation_id"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
+        for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
+            current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
+        }
+        assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
+        let mut previous = current.clone();
+        previous.subjects.get_mut("assistant").unwrap().pattern =
+            "assistant/chatgpt[/session/assistant-grant/ID]".into();
+        println!("assistant principal registry digest: {} -> {}", previous.digest(), current.digest());
+        assert_eq!(previous.digest(), "ce8391a1987ae8ff1831e03a2e321c0b02088fbf8a4c819180afd0022eccfc27");
+        assert_eq!(current.digest(), "47464ac96d49d65ff43fde59e29c3df1ff4154997d69adcac93d8006a0800ac3");
+    }
+
+    #[test]
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {
@@ -4907,6 +5446,15 @@ mod tests {
             .unwrap();
         registry().validate_subject("assistant/chatgpt").unwrap();
         registry().validate_subject("assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567").unwrap();
+        registry().validate_subject("assistant/mcp").unwrap();
+        registry().validate_subject("assistant/mcp/session/assistant-grant/0123456789abcdef01234567").unwrap();
+        for subject in [
+            "assistant/mcp/session/person/robin",
+            "assistant/mcp/session/assistant-grant/not-a-grant",
+            "assistant/mcp/session/assistant-grant/0123456789abcdef01234567/extra",
+        ] {
+            assert!(registry().validate_subject(subject).is_err(), "{subject}");
+        }
     }
 
     #[test]
@@ -4994,6 +5542,7 @@ mod tests {
                 "work.claimed",
                 "work.extended",
                 "work.failed",
+                "work.handoff-returned",
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",

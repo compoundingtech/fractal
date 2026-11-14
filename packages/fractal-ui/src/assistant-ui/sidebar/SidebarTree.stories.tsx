@@ -80,6 +80,7 @@ export const scenarioExemptions: readonly string[] = [
   'RevealUnvisitedAncestors:contract-fixture',
   'StickyChain:contract-fixture',
   'VisibleFocusDoesNotJump:contract-fixture',
+  'VisibleRevealDoesNotJump:contract-fixture',
 ]
 type Story = StoryObj
 const frames = async () => { await document.fonts.ready; for (let i = 0; i < 6; i++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
@@ -124,6 +125,27 @@ export const DepthCap: Story = { parameters: { scenario: { _tag: 'contract-fixtu
 export const AccessibleRows: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); for (const example of [yes, no]) { await expect(within(example as HTMLElement).getAllByRole('treegrid')).toHaveLength(1); await expect(within(example as HTMLElement).getAllByRole('row')).toHaveLength(example.querySelectorAll('[data-sidebar-tree-key]').length); await expect(stack(example).querySelectorAll('[role="row"]')).toHaveLength(0); await expect(stack(example).getAttribute('aria-hidden')).toBe('true') } await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0) } }
 export const PinnedClick: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const pin = [...yes.querySelectorAll('[data-pinned-key]')].at(-1) as HTMLElement; const key = pin.dataset.pinnedKey!; await userEvent.click(pin); await waitFor(() => expect(document.activeElement).toBe(real(yes, key)), settled); await frames(); await expect(clear(yes, real(yes, key)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
 export const FocusAndReveal: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const top = stack(yes).dataset.topKey!; real(yes, top)!.focus(); await frames(); await expect(clear(yes, real(yes, top)!)).toBe(true); await userEvent.keyboard('{ArrowDown}'); await frames(); await expect(clear(yes, document.activeElement as HTMLElement)).toBe(true); await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal review' })); await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled); await frames(); await expect(clear(yes, real(yes, deepKey)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
+export const VisibleRevealDoesNotJump: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
+  const [yes] = examples(canvasElement)
+  const reveal = within(yes as HTMLElement).getByRole('button', { name: 'Reveal review' })
+  await userEvent.click(reveal)
+  await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled)
+  await frames()
+  const view = viewport(yes).getBoundingClientRect()
+  // From the top of the list the row is below the view: it scrolls only until its bottom edge shows.
+  await waitFor(() => expect(Math.abs(real(yes, deepKey)!.getBoundingClientRect().bottom - view.bottom)).toBeLessThanOrEqual(1), settled)
+  const stays = async (top: () => number) => {
+    await scroll(yes, viewport(yes).scrollTop + real(yes, deepKey)!.getBoundingClientRect().top - view.top - top())
+    const before = viewport(yes).scrollTop
+    await expect(clear(yes, real(yes, deepKey)!)).toBe(true)
+    await userEvent.click(reveal)
+    await frames()
+    await expect(viewport(yes).scrollTop).toBe(before)
+  }
+  await stays(() => view.height / 2)
+  // Just below the painted stack, inside the height all its ancestors would take: still clear, so still no scroll.
+  await stays(() => stack(yes).getBoundingClientRect().height + 4)
+} }
 export const VisibleFocusDoesNotJump: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: geometryReason } }, render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   await frames()

@@ -276,12 +276,14 @@ async fn delivery_recovery_control(
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "bootstrap".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: pty_root.clone(),
         pty_binary: pty.clone(),
@@ -340,7 +342,13 @@ async fn delivery_recovery_control(
             .unwrap();
     });
     until(|| socket.exists(), "the isolated API did not start").await;
-    let provider = root.join("provider");
+    let managed_bin = root.join("managed-bin");
+    std::fs::create_dir(&managed_bin).unwrap();
+    let profile = root.join("runtime-profile.json");
+    std::fs::write(&profile, serde_json::to_vec(&json!({
+        "personas": {"launch": {"generalist": {"harnessBin": managed_bin}}},
+    })).unwrap()).unwrap();
+    let provider = managed_bin.join("codex");
     let stub = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/fractal-boot-canaries/stub-codex.py");
     std::fs::write(
@@ -370,6 +378,9 @@ async fn delivery_recovery_control(
         ("HOME", root.to_string_lossy().into_owned()),
         ("PATH", path.to_string_lossy().into_owned()),
         ("ST_AGENT", SUBJECT.to_owned()),
+        ("FRACTAL_AGENT", SUBJECT.to_owned()),
+        ("AGENT_PERSONA", "generalist".to_owned()),
+        ("AGENT_RUNTIME_PROFILE", profile.to_string_lossy().into_owned()),
         (
             "ST3_SUBJECT",
             if bound_shell { TERMINAL } else { SUBJECT }.to_owned(),
@@ -408,7 +419,7 @@ async fn delivery_recovery_control(
         }
         if bound_shell {
             command.args(["--", bash.to_str().unwrap(), "--noprofile", "--norc", "-c"])
-                .arg(format!("while [ ! -e \"$HOME/launch-bound-codex\" ]; do sleep 0.02; done; \"$ST3_BIN\" driver codex --subject \"$ST_AGENT\" -- \"$HOME/provider\"; {BOUND_EXIT_PUBLICATION}; while :; do sleep 1; done"));
+                .arg(format!("while [ ! -e \"$HOME/launch-bound-codex\" ]; do sleep 0.02; done; \"$ST3_BIN\" driver codex --subject \"$ST_AGENT\" -- \"$HOME/managed-bin/codex\"; {BOUND_EXIT_PUBLICATION}; while :; do sleep 1; done"));
         } else {
             command.arg("--").arg(binary).args(["driver", "codex", "--subject", SUBJECT, "--"]).arg(provider);
         }
@@ -970,12 +981,14 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "bootstrap".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().into(),
         pty_root: pty_root.clone(),
         pty_binary: pty.clone(),
@@ -1029,7 +1042,13 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
             .unwrap();
     });
     until(|| socket.exists(), "the isolated API did not start").await;
-    let provider = root.path().join("provider");
+    let managed_bin = root.path().join("managed-bin");
+    std::fs::create_dir(&managed_bin).unwrap();
+    let profile = root.path().join("runtime-profile.json");
+    std::fs::write(&profile, serde_json::to_vec(&json!({
+        "personas": {"launch": {"generalist": {"harnessBin": managed_bin}}},
+    })).unwrap()).unwrap();
+    let provider = managed_bin.join("codex");
     let marker = root.path().join("provider-invoked");
     std::fs::write(
         &provider,
@@ -1048,6 +1067,8 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         ("HOME", root.path().to_string_lossy().into_owned()),
         ("PATH", path.to_string_lossy().into_owned()),
         ("ST_AGENT", SUBJECT.to_owned()),
+        ("FRACTAL_AGENT", SUBJECT.to_owned()),
+        ("AGENT_RUNTIME_PROFILE", profile.to_string_lossy().into_owned()),
         ("ST3_SUBJECT", SUBJECT.to_owned()),
         ("ST3_BIN", binary_path.clone()),
         ("ST3_ENDPOINT", socket.to_string_lossy().into_owned()),

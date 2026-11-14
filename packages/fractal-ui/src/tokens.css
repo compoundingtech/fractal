@@ -125,10 +125,18 @@
 .font-mono { font-family: var(--mono); }
 .tabular { font-variant-numeric: tabular-nums; }
 
-@keyframes fui-spin { to { transform: rotate(360deg); } }
 @keyframes fui-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-.fui-spin { animation: fui-spin var(--motion-duration, 180ms) linear infinite; }
 .fui-pulse { animation: fui-pulse calc(var(--motion-duration, 180ms) * 3) ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
-  .fui-spin, .fui-pulse { animation: none; }
+  .fui-pulse { animation: none; }
 }
+
+/* Transcript search paints through the CSS Custom Highlight API, whose rules need a global selector. They live here because the
+   app's CSP refuses inline style elements. Both inks read on either theme's canvas, so these tokens do not vary by theme. */
+:root {
+  --fractal-search-match: rgba(254, 154, 0, 0.28);
+  --fractal-search-current: #fe9a00;
+  --fractal-search-current-ink: #1a1200;
+}
+::highlight(transcript-search-match) { background-color: var(--fractal-search-match); }
+::highlight(transcript-search-current) { background-color: var(--fractal-search-current); color: var(--fractal-search-current-ink); }

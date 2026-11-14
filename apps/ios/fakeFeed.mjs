@@ -1,5 +1,5 @@
 // A fake client whose collections sockets the test drives frame by frame.
-export function fakeClient() {
+export function fakeClient({ autoOpen = true } = {}) {
   const sockets = [];
   const client = {
     collectionStream: async options => {
@@ -9,12 +9,15 @@ export function fakeClient() {
       socket.subscribeTerminal = (id, terminal, incarnation, capability) => socket.sent.push({ kind: 'subscribe', id, collection: 'terminal', terminal, incarnation, capability });
       socket.subscribeConversation = (id, conversation) => socket.sent.push({ kind: 'subscribe', id, collection: 'conversation', conversation });
       socket.subscribeArrangements = (id, person, limit = 100) => socket.sent.push({ kind: 'subscribe', id, collection: 'arrangements', person, limit });
+      socket.subscribeReadPositions = (id, person, limit = 100) => socket.sent.push({ kind: 'subscribe', id, collection: 'read-positions', person, limit });
       socket.subscribeGlasses = id => socket.sent.push({ kind: 'subscribe', id, collection: 'glasses', limit: 100 });
       socket.unsubscribe = id => socket.sent.push({ kind: 'unsubscribe', id });
       socket.close = () => { socket.closed = true; transport?.close(); };
       socket.frame = frame => options.onFrame(frame);
       socket.drop = error => options.onEnd(error);
+      socket.open = () => options.onOpen?.();
       sockets.push(socket);
+      if (autoOpen) queueMicrotask(socket.open);
       return socket;
     },
   };

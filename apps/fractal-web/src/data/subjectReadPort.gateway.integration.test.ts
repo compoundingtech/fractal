@@ -26,10 +26,12 @@ const contract = <T>(
 ) => {
   it(`${family}: decodes the synthetic response or preserves its refusal`, async () => {
     let corrupt = false
+    let requests = 0
     const client: ClientOptions = {
       baseUrl: 'http://recorded-gateway.invalid',
       fetchImpl: async (input) => {
         if (String(input).endsWith('/capabilities')) return Response.json(recording.capabilities)
+        requests++
         const payload: unknown = structuredClone(fixture.payload)
         if (corrupt && typeof payload === 'object' && payload !== null && 'value' in payload) {
           const value = payload.value
@@ -61,11 +63,13 @@ const contract = <T>(
       if ('updated_at' in result.success)
         expect(DateTime.isDateTime(result.success.updated_at)).toBe(true)
     }
+    const initialRequests = requests
     corrupt = true
     expect(await Effect.runPromise(Effect.flip(reader.read(fixture.ref)))).toMatchObject({
       _tag: 'SubjectReadFailure',
       reason: 'failed',
     })
+    expect(requests).toBeGreaterThan(initialRequests)
   })
 }
 

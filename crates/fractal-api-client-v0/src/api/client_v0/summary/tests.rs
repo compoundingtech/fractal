@@ -31,6 +31,7 @@ fn summary_home_working_machine_predicates_and_deadline() {
         assert!(!crate::model::attention_is_alert(kind, true));
     }
     assert!(!crate::model::attention_is_alert("unread-message", false));
+    assert!(!crate::model::attention_is_alert("model-drift", false));
     let agent = json!({"state":"running","harness_state":"working","fault":null,"delivery":{"state":"current"}});
     assert!(working(&agent));
     for changed in [
@@ -520,15 +521,49 @@ mission "summary-update-about" state="ready" {
                 evidence: vec![],
                 episode: None,
                 idempotency_key: "summary-update-read".into(),
-                answer: Some(crate::person_request::AnswerInput {
-                    id: Some("read".into()),
-                    text: None,
-                }),
+                answer: Some(crate::person_request::AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() }),
             },
             false,
         )
         .unwrap();
     assert_eq!(count("person/avery"), 1);
+}
+
+/// An attention row is urgent exactly when its ask has priority `critical`; the row carries the
+/// ask's priority, `normal` without one.
+#[test]
+fn an_attention_row_is_urgent_only_for_a_critical_ask() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"summary-fixture.asker\" { workspace \"/tmp\"; command \"true\"; restart always; }\n";
+    let intent = crate::graph::parse_internal_intent(source, "summary-fixture").unwrap();
+    state.store.apply_internal(&intent, "summary-urgent-publication").unwrap();
+    let mut asks = Vec::new();
+    for priority in [None, Some("high"), Some("critical")] {
+        let name = priority.unwrap_or("unnamed");
+        let mut request = json!({
+            "person":"person/avery","actor":"agent/summary-fixture.asker",
+            "title":format!("A {name} question"),"reason":"Only the person can answer.",
+            "new_run":format!("urgent-{name}"),"idempotency_key":format!("urgent-{name}")
+        });
+        if let Some(priority) = priority {
+            request["priority"] = json!(priority);
+        }
+        asks.push(state.store.ask_person(&serde_json::from_value(request).unwrap()).unwrap().subject);
+    }
+    let attention = client_attention_resources_at(&state.store, Some("person/avery"), false, client_now_ms()).unwrap();
+    let rows = asks
+        .iter()
+        .map(|subject| {
+            let row = attention.iter().find(|row| row["source_id"] == *subject).unwrap();
+            (row["priority"].clone(), row["urgent"].clone(), row["alert"].clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows, [
+        (json!("normal"), json!(false), json!(true)),
+        (json!("high"), json!(false), json!(true)),
+        (json!("critical"), json!(true), json!(true)),
+    ]);
 }
 
 #[test]

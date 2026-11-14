@@ -36,12 +36,14 @@ impl Host {
         let socket = root.join("st3.sock");
         let store = Arc::new(Store::open(&root.join("store.db"), name).unwrap());
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: name.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.to_path_buf(),
             pty_root: root.join("pty"),
             pty_binary: PathBuf::from("pty"),

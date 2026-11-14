@@ -1,9 +1,9 @@
 import { ClientError, FractalClient, type ClientOptions } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 import { Effect, Fiber, Schedule, Stream } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { unavailable, waiting, type Feed } from './source.ts'
+import { clientReadAuthorization, unavailable, waiting, type Feed } from './source.ts'
 import { projectNativeDeclarations, type NativeDeclarations } from './nativeDeclarations.ts'
 
 export interface NativeDetailsSource {
@@ -22,8 +22,7 @@ export interface NativeDetailsSource {
   readonly refresh: (atom: Atom.Atom<Feed<unknown>>) => void
 }
 const failure = (error: unknown): Feed<never> => unavailable({
-  reason: error instanceof ClientError && error.status === 403 ? 'ungranted'
-    : error instanceof ClientError && (error.status === 404 || error.status === 501) ? 'unsupported' : 'failed',
+  reason: clientReadAuthorization(error) ?? (error instanceof ClientError && (error.status === 404 || error.status === 501) ? 'unsupported' : 'failed'),
   detail: 'These session details could not be loaded.',
 })
 
@@ -55,7 +54,7 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
       }).pipe(Effect.match({
         onSuccess: (value): Feed<T> => { retained = value; readAt = now(); return { _tag: 'Observed', value, freshness: 'live', readAt } },
         onFailure: (error): Feed<T> => {
-          if (error._tag === 'Unavailable' && error.reason === 'ungranted') retained = undefined
+          if (error._tag === 'Unavailable' && (error.reason === 'ungranted' || error.reason === 'unauthorized')) retained = undefined
           return retained === undefined || error._tag !== 'Unavailable'
             ? error : { _tag: 'Observed', value: retained, freshness: 'stale', readAt, error: { reason: error.reason, detail: error.detail } }
         },

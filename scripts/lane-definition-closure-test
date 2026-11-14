@@ -385,6 +385,25 @@ class CommandLine(Fixture):
         self.assertEqual(self.run_tool('--check').returncode, 0)
         self.assertEqual(self.run_tool('--lane', 'nope').returncode, 2)
 
+    def test_required_aggregate_proof_is_generated_and_checked(self):
+        selector = '.github/workflows/fleet.yml::jobs.fixture-proof'
+        previous = ldc.CI_PROOFS
+        ldc.CI_PROOFS = {'demo': [selector]}
+        self.addCleanup(setattr, ldc, 'CI_PROOFS', previous)
+        self.tree({
+            'scripts/a': SH,
+            'scripts/ci-evidence-gate': 'PROTECTED = ()\nBASE_READ = ()\n',
+            '.github/workflows/fleet.yml': 'jobs:\n  fixture-proof:\n    runs-on: box\n',
+        })
+        self.lanes(['scripts/a'])
+        run = lambda *args: ldc.main(['--root', str(self.root), *args])
+        self.assertEqual(run('--check'), 1)
+        self.assertEqual(run('--write'), 0)
+        declaration = json.loads((self.root / '.st/required-lanes.json').read_text())['lanes']['demo']
+        self.assertEqual(declaration['ci_inputs'], [selector])
+        self.assertEqual(run('--write'), 0)  # Repeated generation cannot duplicate selectors.
+        self.assertEqual(run('--check'), 0)
+
     def test_verdict_data_is_declared_and_kept_lanes_are_left_alone(self):
         tool = TOOL.read_text()
         tool = tool.replace("KEPT = {'ci-script-tests', 'genie-freshness'}", "KEPT = {'kept'}")

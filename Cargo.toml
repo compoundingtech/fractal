@@ -15,6 +15,7 @@ members = [
   "crates/fractal-fabric-adapter",
   "crates/fractal-runtime",
   "crates/fractal-storage-version",
+  "crates/fractal-socket-discovery",
   "crates/fractal-tiles-registry",
   "crates/fractal-resource-protocol",
   "crates/fractal-resource-providers",
@@ -26,6 +27,7 @@ members = [
   "crates/fractal-daemon",
   "crates/fractal-e2e",
   "crates/fractal-kernel",
+  "crates/fractal-jobs",
   "crates/fractal-telemetry",
   "crates/fractal-secrets",
   "crates/fractal-seats-base",
@@ -51,6 +53,7 @@ members = [
   "crates/fractal-feed",
   "crates/fractal-migrate",
   "crates/fractal-schema",
+  "crates/fractal-sidebar",
   "crates/fractal-terminal-direct",
   "crates/fractal-ui-model",
   "crates/fractal-tui",
@@ -63,6 +66,7 @@ default-members = [
   "crates/fractal-drivers",
   "crates/fractal-fabric-adapter",
   "crates/fractal-runtime",
+  "crates/fractal-socket-discovery",
   "crates/fractal-resource-protocol",
   "crates/fractal-wire",
   "crates/fractal",
@@ -86,6 +90,7 @@ default-members = [
   "crates/fractal-feed",
   "crates/fractal-migrate",
   "crates/fractal-schema",
+  "crates/fractal-sidebar",
   "crates/fractal-terminal-direct",
   "crates/fractal-ui-model",
   "crates/fractal-tui",
@@ -97,6 +102,7 @@ exclude = ["vendor/libghostty-vt-sys"]
 version = "0.1.0"
 
 [workspace.dependencies]
+libc = "0.2"
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 
 # The published 0.2.1 crate with one build-script change so Zig 0.15.2 can link against current

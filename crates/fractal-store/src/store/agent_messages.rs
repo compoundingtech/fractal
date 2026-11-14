@@ -107,10 +107,12 @@ pub fn synthetic(fields: &Value) -> bool {
     }) {
         return true;
     }
-    let title = fields["title"]
-        .as_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    synthetic_title(fields["title"].as_str().unwrap_or_default())
+}
+
+/// Whether a title marks a probe, soak or canary message.
+pub fn synthetic_title(title: &str) -> bool {
+    let title = title.to_ascii_lowercase();
     let mut title = title.trim();
     while let Some(rest) = title.strip_prefix("re:") {
         title = rest.trim_start();
@@ -188,7 +190,8 @@ fn sync_subject(
     coordination_live: bool,
     counts: SendCounts,
 ) -> Result<()> {
-    // Earliest send time is stable across replication order and duplicate send claims.
+    // Earliest send time is stable across replication order and duplicate send claims. A stream
+    // item the graph does not hold reads from the stream mirror (stream_mirror.rs).
     let sent: Option<(u64, String)> = transaction
         .query_row(
             "SELECT CAST(accepted_at_unix_ms AS INTEGER),body FROM claims
@@ -198,6 +201,17 @@ fn sync_subject(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
+    let streamed = sent.is_none();
+    let sent = match sent {
+        Some(sent) => Some(sent),
+        None => transaction
+            .query_row(
+                "SELECT sent_ms, json_object('fields', json(fields)) FROM local_stream_sent WHERE subject=?1",
+                [subject],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?,
+    };
     if coordination_live && sent.is_none() {
         coordination::sync(transaction, subject, None)?;
     }
@@ -219,7 +233,9 @@ fn sync_subject(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let count = match counts {
+    // The backfill reads only the graph's claims, so a stream item counts at once, whatever
+    // the backfill has reached.
+    let count = streamed || match counts {
         SendCounts::None => false,
         SendCounts::All => true,
         SendCounts::Through(through) => current.is_some() || transaction.query_row(
@@ -275,6 +291,12 @@ pub fn backfill_page(transaction: &Transaction<'_>, limit: usize) -> Result<bool
             transaction.execute_batch(
                 /* sqlite-large-value: allow-for-now lv-hd9f46d887d56 owner=fractal_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM agent_message_sends;
                  DELETE FROM agent_message_days;",
+            )?;
+            // The pass walks the graph's sends only: the stream's are counted again from the
+            // mirror at the next flush.
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h58e04850fe62 owner=fractal_store::store::agent_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_agent_message_pending SELECT subject FROM local_stream_sent",
+                [],
             )?;
             0
         }

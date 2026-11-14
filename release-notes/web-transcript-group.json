@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Web in-progress states share one LiveRing, expanded work-log rows share one vertical rhythm and a live work log can be collapsed from its Working header, agent to-dos open focus first with abandoned work counted apart, and the conversation header shows only load progress and failures",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Breaking for @fractal/ui consumers: the exported Icon (CompositionIcon from @fractal/ui/assistant-ui) no longer accepts the 'spinner' name or the `spinning` prop; every in-progress state draws LiveRing instead. A TypeScript caller using either stops compiling, and a JavaScript caller asking for 'spinner' renders an empty icon. No caller in this repository uses them after this change. IconName gains 'more' (additive). No runtime, wire or stored format changes. The owner approved this breaking removal at high risk (2026-11-08)."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous loading indicators, work-log layout, to-do list and header sync status."
+  }
+}

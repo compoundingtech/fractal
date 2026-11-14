@@ -1,4 +1,5 @@
 //! One-use SCG read consent is verified against an independently pinned attestor.
+//! Both synchronous approval receipts and queued caller-bound receipts retain the grant's principal.
 use super::*;
 use axum::extract::OriginalUri;
 use axum::http::HeaderMap;
@@ -10,19 +11,7 @@ fn max_response_bytes() -> usize { MAX_RESPONSE_BYTES }
 pub const HEADER: &str = "x-st3-scg-read-authorization";
 pub(super) const USED: &str = "custom.client.assistant.v1.read-used";
 pub const OUTCOME: &str = "custom.client.assistant.v1.read-outcome";
-pub const ROUTES: &[(&str, &str)] = &[
-    ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
-    ("attention-content", "read.assistant.attention"),
-    ("attention-rich", "read.assistant.attention"), ("missions-rich", "read.assistant.missions"),
-    ("agents-rich", "read.assistant.agents"),
-    ("missions", "read.assistant.missions"), ("agents", "read.assistant.agents"),
-    ("conversation-content", "read.assistant.conversation"),
-    ("conversations", "read.assistant.conversation"),
-    ("conversation-detail", "read.assistant.conversation"),
-    ("conversation-timeline", "read.assistant.conversation"),
-    ("conversation-search", "read.assistant.conversation"),
-    ("terminal-content", "read.assistant.terminal"),
-];
+pub use super::super::external_grants::{ROUTES, authorize_route as route};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -124,7 +113,7 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
                        AxumPath(id): AxumPath<String>, Json(request): Json<ReadTrustRequest>)
     -> Result<Json<Value>, ApiError> {
     let issuer = trusted_issuer(&state, &session)?;
-    if request.api_version != CLIENT_API_VERSION { return Err(validation("invalid API version")); }
+    if !super::super::super::wire_names::api_version(&request.api_version) { return Err(validation("invalid API version")); }
     let trust = ReadTrust {issuer:request.issuer,key_id:request.key_id,
         attestor_public_key:request.attestor_public_key,shim_public_key:request.shim_public_key,
         default_response_bytes:request.default_response_bytes,max_response_bytes:request.max_response_bytes};
@@ -138,31 +127,19 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
     }
     let previous = effective(&state, &granted)?;
     let mut value = fields(&previous)?.clone();
+    value["principal"] = json!(principal(fields(&granted)?)?);
     value["read_trust"] = serde_json::to_value(trust).map_err(ApiError::internal)?;
     value["policy_revision"] = json!(value["policy_revision"].as_u64().unwrap_or(0) + 1);
     value["timestamp"] = json!(client_timestamp(client_now_ms()));
     value["transport"] = json!(session.transport);
     value["outcome"] = json!("read-attestor-pinned");
     let result = append(&state, subject, POLICY, issuer, value, Some(&previous));
-    audit(&state, "pin-read-attestor", &session.actor, session.transport, Some(&id), &result)?;
+    audit(&state, "pin-read-attestor", &session.actor, session.transport, Some(&id), None, &result)?;
     result?;
     signal_changed(&state);
     Ok(Json(projection(&state, &granted)?))
 }
 
-pub fn route(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
-    if request.uri().path() == "/v1/client/assistant/propose" && request.method() == axum::http::Method::POST {
-        return Ok(());
-    }
-    let projection = request.uri().path().strip_prefix("/v1/client/assistant/");
-    let Some((_, scope)) = ROUTES.iter().find(|(route, _)| projection == Some(*route))
-        else { return Err(forbidden("assistants may access only explicit proof-bearing read projections")) };
-    if request.method() != axum::http::Method::GET || !session.allows(scope)
-        || request.headers().contains_key(axum::http::header::UPGRADE) {
-        return Err(forbidden("assistant read requires its exact scope"));
-    }
-    Ok(())
-}
 pub fn parameters(uri: &axum::http::Uri) -> Result<BTreeMap<String,String>, ApiError> {
     let mut result = BTreeMap::new();
     fn decode(value: &str) -> Result<String, ApiError> {
@@ -223,8 +200,9 @@ pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters:
     validate_trust(&trust)?;
     let payload = &authorization.payload;
     let requested = budget(parameters,&trust)?;
-    if payload.issuer!=trust.issuer || payload.key_id!=trust.key_id || payload.identity!="chatgpt"
-        || payload.assistant_id!=PRINCIPAL || payload.grant_id!=source["grant_id"].as_str().unwrap_or("")
+    let principal = principal(source)?;
+    if payload.issuer!=trust.issuer || payload.key_id!=trust.key_id || payload.identity!=principal.strip_prefix("assistant/").unwrap_or("")
+        || payload.assistant_id!=principal || payload.grant_id!=source["grant_id"].as_str().unwrap_or("")
         || payload.policy_revision!=source["policy_revision"].as_u64().unwrap_or(0)
         || payload.projection!=projection || payload.parameters!=*parameters
         || payload.max_response_bytes!=requested || payload.request_digest!=request_digest(path,parameters)?
@@ -295,7 +273,7 @@ pub async fn read_with(State(state): State<AppState>, Extension(session): Extens
     if result.is_err() {
         let granted=session.pairing_grant.as_deref().map(|subject| latest(&state,subject,GRANTED)).transpose()?.flatten();
         let grant_id=granted.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")).and_then(Value::as_str);
-        audit(&state,"read",&session.actor,session.transport,grant_id,&result)?;
+        audit(&state,"read",&session.actor,session.transport,grant_id,None,&result)?;
     }
     result
 }
@@ -344,6 +322,7 @@ async fn read_inner_with_cause(State(state): State<AppState>, Extension(session)
         if !current.allows(scope) { return Err(forbidden("assistant projection scope is not granted").into()); }
         let receipt_subject = format!("custom/client/assistant-v1-read-{}", uuid::Uuid::new_v4());
         let used = json!({
+            "principal":current.authority_actor,
             "grant_id": fields(&policy)?["grant_id"], "mode":"caller-bound-allow",
             "projection":projection, "request_digest":request_digest(uri.path(), &parameters)?,
             "max_response_bytes":requested, "timestamp":client_timestamp(client_now_ms())
@@ -362,6 +341,7 @@ async fn read_inner_with_cause(State(state): State<AppState>, Extension(session)
                 state.assistant_receipts.enqueue_reserved(&state.store, receipt.subject, receipt.actor,
                     receipt.pending_used.expect("caller-bound receipt"), json!({"version":1,
                     "outcome":"denied-projection","denial_code":error.code,"returned_bytes":0,
+                    "principal":principal(fields(&policy)?)?,
                     "timestamp":client_timestamp(client_now_ms())}),space)?;
                 return Err(error.into());
             }
@@ -375,6 +355,7 @@ async fn read_inner_with_cause(State(state): State<AppState>, Extension(session)
     // Consumption precedes any source access and is fenced in the durable authority namespace.
     let consumed = append(&state,receipt.subject.clone(),USED,&receipt.actor,json!({
         "version":1,"grant_id":authorization.payload.grant_id,"policy_revision":receipt.policy_revision,
+        "principal":authorization.payload.assistant_id,
         "issuer":authorization.payload.issuer,"attestor_key_id":authorization.payload.key_id,
         "approval_id":authorization.payload.approval_id,"execution_id":authorization.payload.execution_id,
         "request_digest":authorization.payload.request_digest,"nonce_digest":credential_digest(&authorization.payload.nonce),
@@ -387,6 +368,7 @@ async fn read_inner_with_cause(State(state): State<AppState>, Extension(session)
         Ok(result) => result,
         Err(error) => {
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
+                "principal":authorization.payload.assistant_id,
                 "outcome":"denied-projection","denial_code":error.code,"returned_bytes":0,
                 "timestamp":client_timestamp(client_now_ms())}),Some(&consumed))?;
             return Err(error.into());
@@ -423,7 +405,11 @@ pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
         Some(consumed)
     } else { None };
     let delivered=within_budget && authorization.is_ok();
+    let principal = receipt.pending_used.as_ref().and_then(|used| used.get("principal"))
+        .or_else(|| consumed.as_ref().and_then(|claim| claim.body.pointer("/fields/principal")))
+        .ok_or_else(|| forbidden("read consent receipt principal absent"))?;
     let outcome = json!({"version":1,
+        "principal":principal,
         "policy_revision":receipt.policy_revision,"transport":receipt.transport,
         "max_response_bytes":receipt.max_response_bytes,
         "returned_bytes":if delivered {bytes.len()} else {0},"budget_used":bytes.len(),
@@ -442,7 +428,7 @@ pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
         let grant_id=receipt.pending_used.as_ref().and_then(|used| used.get("grant_id"))
             .or_else(|| consumed.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")))
             .and_then(Value::as_str);
-        audit(state,"read",&receipt.actor,receipt.transport,grant_id,&authorization)?;
+        audit(state,"read",&receipt.actor,receipt.transport,grant_id,None,&authorization)?;
     }
     authorization
 }

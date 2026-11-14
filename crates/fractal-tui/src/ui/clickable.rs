@@ -51,6 +51,7 @@ impl Ui {
             Hit::ResourceAdd(_) => "find a resource to add".into(),
             Hit::ResourceFolderMenu(_) => "rename or delete folder".into(),
             Hit::ResourceFolderDrag(_) => "drag to reorder folder".into(),
+            Hit::SidebarToggle => "show/hide sidebar · Ctrl+S".into(),
             Hit::SidebarRow(_) => "open item in tab".into(),
             Hit::SidebarSection(_) => format!("show {label}"),
             Hit::Usage => "show/hide Usage".into(),
@@ -58,7 +59,8 @@ impl Ui {
             Hit::Row(_) => "select row".into(),
             Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
-            Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
+            Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
+            Hit::Key(_) | Hit::Availability(_) | Hit::Enter | Hit::ChatEnter | Hit::Escape | Hit::Menu(_) => label,
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
@@ -67,7 +69,7 @@ impl Ui {
             Hit::Pane(PaneIntent::Send(_)) => "send message".into(),
             Hit::Pane(PaneIntent::LoadOlder) => "load older messages".into(),
             Hit::JumpLatest => "jump to latest [End]".into(),
-            Hit::Composer => "edit message [c]".into(),
+            Hit::Composer | Hit::ChatComposer => "edit message [c]".into(),
             Hit::Help => "show/hide help [F1]".into(),
             Hit::Peek(id) if self.popover.as_deref() == Some(id) && rect.height > 1 => {
                 "card already open".into()
@@ -105,7 +107,7 @@ impl Ui {
             && self.context.is_none()
             && !self.home_open()
             && !self.palette_open()
-            && !matches!(hit, Hit::Composer | Hit::Resize)
+            && !matches!(hit, Hit::Composer | Hit::ChatComposer | Hit::Resize | Hit::SidebarResize)
             && self.click_focuses_split(point.0, point.1)
         {
             left = "focus split; click again to act".into();
@@ -523,7 +525,7 @@ mod tests {
 
     #[test]
     fn sweeping_the_pointer_over_every_cell_of_a_busy_conversation_never_panics() {
-        // Nathan, 2026-10-07: hovering messages seemed to crash stui.
+        // Nathan, 2026-10-07: hovering messages seemed to crash the terminal UI.
         for (width, height) in [(60, 20), (100, 30), (160, 48)] {
             let mut ui = Ui::new(demo::test_world());
             ui.live = true;

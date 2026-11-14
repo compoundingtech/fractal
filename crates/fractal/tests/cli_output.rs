@@ -255,12 +255,14 @@ mission "orchid" state="ready" {
     .unwrap();
     store.apply_internal(&intent, "cli-output-fixture").unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "cli-output".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),

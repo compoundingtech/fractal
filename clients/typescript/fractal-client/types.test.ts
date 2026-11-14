@@ -1,6 +1,15 @@
-import type { ActionOf, ConversationSearchHit, TimelineMessageBody } from './Models.generated.ts';
+import type { ActionOf, ActionRequest, ConversationSearchHit, NoticeSnapshot, Resource, TimelineMessageBody } from './Models.generated.ts';
 import type { ClientOptions, RequestOptions, FractalClient, TraceContext } from './Client.generated.ts';
 import type { FabricClientOptions, FabricTransport, FabricEndpoint } from './fabric.mjs';
+
+type InternalNoticeAssert<T extends true> = T;
+type InternalNoticeBoundary = [
+    InternalNoticeAssert<Extract<Resource, { kind: 'attention-notice' }> extends never ? true : false>,
+    InternalNoticeAssert<Extract<ActionRequest, { type: 'notice.seen' | 'notice.dismiss' | 'notice.snooze' }> extends never ? true : false>,
+    InternalNoticeAssert<NoticeSnapshot['kind'] extends 'attention-notice' ? true : false>,
+];
+declare const internalNoticeBoundary: InternalNoticeBoundary;
+void internalNoticeBoundary;
 
 const nativeOptions: FabricClientOptions = {
     endpoint: 'fabric://studio/st3-client-v0',
@@ -33,6 +42,17 @@ void cancellationClient.notesList(cancellationOptions);
 void cancellationClient.customSubjectsList({}, cancellationOptions);
 void cancellationClient.publicationDefinition('mission/example', cancellationOptions);
 void cancellationClient.conversationContentChunk('session/example', 'reference', 0, cancellationOptions);
+void cancellationClient.availabilityList(undefined, cancellationOptions);
+void cancellationClient.availabilityList('person/ada', cancellationOptions);
+void cancellationClient.availabilitySet({ status: { value: null } }, cancellationOptions);
+void cancellationClient.presenceReport({ state: 'active', last_input_at: '2026-11-12T09:57:30Z', observed_at: '2026-11-12T09:58:00Z' }, cancellationOptions);
+// @ts-expect-error a client reports raw device state, never derived presence
+void cancellationClient.presenceReport({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' });
+// @ts-expect-error interruptions are all, urgent or none
+void cancellationClient.availabilitySet({ interruptions: { value: 'focus' } });
+void cancellationClient.notesSet({ text: null }, cancellationOptions);
+// @ts-expect-error a note write always names its text, even to clear it
+void cancellationClient.notesSet({ expires_at: '2026-11-16T09:00:00Z' });
 
 const valid: ActionOf<'launch.approve'> = {
     api_version: 'st3.client.v0',
@@ -193,3 +213,32 @@ const terminalRefusal: ErrorEnvelope = {
     details: { scope: 'control.messages', applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/example/worker' } },
 };
 void [genericRefusal, terminalRefusal];
+
+import type { DeviceCommand, DeviceCommandRequest, DeviceResult } from './Models.generated.ts';
+const inspectPhone: DeviceCommandRequest = { api_version: 'st3.client.v0', device: 'device/phone', kind: 'phone.inspect', args: {} };
+const navigatePhone: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Conversation', params: { target: 'agent/worker', sessionId: 'session/chat' } } };
+const readPhoneMessage: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.message.read', args: { message_id: 'message/example' }, ttl_ms: 30000 };
+const reportPhoneResult: DeviceResult = { command_id: 'device-command/example', outcome: 'completed', result: { route: 'Conversation' } };
+const phoneWindow: CollectionCommand = { kind: 'subscribe', id: 'commands', collection: 'commands' };
+void cancellationClient.deviceCommand(inspectPhone, cancellationOptions);
+void cancellationClient.deviceCommand(navigatePhone, cancellationOptions);
+void cancellationClient.deviceCommand(readPhoneMessage, cancellationOptions);
+void cancellationClient.deviceCommandGet('device-command/example', { wait: true }, cancellationOptions);
+void cancellationClient.deviceResult(reportPhoneResult, cancellationOptions);
+declare const phoneCommand: DeviceCommand;
+const phoneResourceKind: 'device-command' = phoneCommand.kind;
+if (phoneCommand.command_kind === 'phone.message.read') {
+    const messageID: string = phoneCommand.args.message_id;
+    void messageID;
+}
+// @ts-expect-error Message-read arguments are required for the selected command kind.
+const missingMessageID: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.message.read', args: {} };
+// @ts-expect-error A Conversation route requires its target, not another route's id.
+const wrongRouteParams: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Conversation', params: { id: 'agent/worker' } } };
+// @ts-expect-error Arbitrary phone screens are not a command surface.
+const unknownPhoneScreen: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Settings' } };
+// @ts-expect-error A phone may report terminal outcomes only.
+const pendingPhoneResult: DeviceResult = { command_id: 'device-command/example', outcome: 'pending' };
+// @ts-expect-error Inspection accepts an empty argument object, not navigation arguments.
+const nonemptyInspect: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.inspect', args: { screen: 'NowRoot' } };
+void [phoneWindow, phoneResourceKind, missingMessageID, wrongRouteParams, unknownPhoneScreen, pendingPhoneResult, nonemptyInspect];

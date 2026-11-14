@@ -40,17 +40,19 @@ const privateRegistry = () => {
 const buildPublic = async (main: string, registries: { readonly public: string; readonly private: string }) => {
   const entry = join(root, 'main.js')
   writeFileSync(entry, [
-    `import { changelogManifest } from ${JSON.stringify(join(app, 'src/changelog/build.ts'))}`,
+    `import { getChangelogManifest } from ${JSON.stringify(join(app, 'src/changelog/build.ts'))}`,
     `import { changelogEntryIds } from ${JSON.stringify(join(app, 'src/changelog/metadata.ts'))}`,
-    'globalThis.changelog = { changelogManifest, changelogEntryIds }',
+    `globalThis.changelog = { changelogManifest: getChangelogManifest(${JSON.stringify(machineVersion)}), changelogEntryIds }`,
     main,
   ].join('\n'))
+  const html = join(root, 'index.html')
+  writeFileSync(html, '<script>globalThis.earlyClient = "__FRACTAL_WEB_CLIENT__"</script><script type="module" src="/main.js"></script>')
   const output = await build({
     configFile: false,
     root,
     logLevel: 'silent',
     plugins: [identity, extensionBuild({ entry: '../src/extensions/app-public.ts', privateBuild: false, changelogRegistries: registries })],
-    build: { write: false, minify: false, rolldownOptions: { input: entry } },
+    build: { write: false, minify: false, rolldownOptions: { input: html } },
   })
   const outputs = Array.isArray(output) ? output : [output]
   return outputs.flatMap((result) => 'output' in result ? result.output : []).map((item) => item.type === 'chunk' ? item.code : String(item.source)).join('\n')
@@ -60,6 +62,8 @@ describe('public changelog build gate', () => {
   it('replaces the changelog modules with the compiled public manifest for the exact build identity', async () => {
     const text = await buildPublic('', { public: publicRegistry, private: privateRegistry() })
     expect(text).toContain(machineVersion)
+    expect(text).toContain(`fractal-web ${machineVersion}`)
+    expect(text).not.toContain('__FRACTAL_WEB_CLIENT__')
     for (const { file } of changelogSources) {
       expect(text).toContain(file.replace(/\.ts$/, ''))
     }

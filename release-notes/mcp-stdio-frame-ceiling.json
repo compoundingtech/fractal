@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound inbound MCP stdio frames and clarify principal-specific disclosure consent recipients",
+  "replay": {"status": "none", "detail": "No replay or backfill."},
+  "schema": {"status": "none", "detail": "No storage, claim, or API schema changes."},
+  "rules": {"status": "none", "detail": "No authorization or consent rule changes. Documentation names OpenAI for assistant/chatgpt and the local MCP client's model provider for assistant/mcp."},
+  "compatibility": {"status": "changed", "detail": "Both adapters' shared stdio runtime ends the session on an inbound line exceeding 2 MiB, excluding LF and counting any CR, including unterminated lines. Exactly 2 MiB is accepted. ChatGPT HTTP behavior and its tools/list golden are unchanged."},
+  "downtime": {"status": "none", "detail": "No daemon restart or migration is required. Restart the local adapter to apply the ceiling."},
+  "manual": {"status": "none", "detail": "No configuration change is needed. Clients must keep each inbound stdio frame within the ceiling."},
+  "recovery": {"status": "none", "detail": "Restart the adapter after an oversized frame ends a session. Reverting removes the stdio ceiling without changing stored state."}
+}

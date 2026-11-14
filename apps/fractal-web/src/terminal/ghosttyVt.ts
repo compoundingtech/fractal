@@ -336,9 +336,9 @@ export const makeGhosttyTerminal = (
           Object.keys(cursor).every((key) => cursor[key as keyof typeof cursor] === previous!.cursor[key as keyof typeof cursor]) &&
           Object.keys(currentModes).every((key) => currentModes[key as keyof TerminalModes] === previous!.modes[key as keyof TerminalModes])) return previous
       previous = {
-        kind: 'terminal-screen', terminal_id: Schema.decodeUnknownSync(TerminalId)(meta.terminalId),
+        kind: 'terminal-screen', terminal_id: Schema.decodeSync(TerminalId)(meta.terminalId),
         runtime_incarnation: meta.incarnation, rows, columns,
-        revision: Schema.decodeUnknownSync(TerminalScreen.fields.revision)(String(++revision)),
+        revision: Schema.decodeSync(TerminalScreen.fields.revision)(String(++revision)),
         next_sequence: 0, truncated: rows > 200, lines, cursor, title, modes: currentModes,
       }
       return previous

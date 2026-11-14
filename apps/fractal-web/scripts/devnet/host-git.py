@@ -19,6 +19,7 @@ LOCAL_KEYS = frozenset((
     'remote.origin.url', 'remote.origin.fetch', 'user.name', 'user.email',
     'extensions.worktreeconfig', 'extensions.objectformat',
     'rerere.enabled', 'rerere.autoupdate', 'maintenance.autodetach', 'gc.autodetach',
+    'gc.auto', 'maintenance.auto',
 ))
 
 

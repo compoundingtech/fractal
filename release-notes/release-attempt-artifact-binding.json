@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bind draft release provenance to an immutable attempt-qualified build artifact",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or fleet coordination change."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or harness compatibility change."},
+  "downtime": {"status": "none", "detail": "No additional service interruption introduced."},
+  "manual": {"status": "changed", "detail": "Release candidates bind the full source SHA, canonical workflow numeric ID and path, build run ID, exact attempt number and immutable numeric artifact ID for fractal-release-attempt-N. Candidate creation and publication read exact-attempt API metadata, verify archive source SHAs and checksums, and publication requires candidate bytes and checksums to match the recorded artifact downloaded by ID. Both recheck the run's current attempt immediately before creating or publishing the draft. A build rerun requires a fresh candidate from the new successful attempt; old-format drafts must be recreated from a new attempt-qualified build, not hand edited. Missing or expired artifacts require a fresh build and candidate. The GO reference remains the dispatcher's attestation to the Product Lead's GO for the exact source SHA, not automation-verified approval."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change; candidate recreation does not alter installed state."}
+}

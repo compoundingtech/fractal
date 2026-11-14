@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Validate consistent typed and canonical declared admission metadata before gated publication",
+  "replay": {"status": "changed", "detail": "Existing agent and mission declaration claim payloads retain optional declared priority, lane and budgets. Absence preserves prior canonical serialization and hashes; no backfill is required."},
+  "schema": {"status": "none", "detail": "Uses existing declaration model fields and claims; no table, index, storage version, claim kind or migration is added."},
+  "rules": {"status": "changed", "detail": "New typed publications and direct claims reject nulls, invalid values, unknown budget keys and disagreement between typed members and canonical agent declaration metadata before the publication barrier and before writes. Direct semantic validation and the barrier share the same four persisted payload candidates (body, fields, body.body and fields.body), so empty decoys cannot hide metadata. Canonical admission children are interpreted only for agents; typed member checks remain independent of subject kind. Nested missions and deferred declaration sources are checked. The consolidated simplified validator preserves the reviewed accepted declarations, refusal codes, messages and details.field rather than introducing a second validator. Metadata remains declared, not enforced."},
+  "compatibility": {"status": "changed", "detail": "Typed normalization retains optional admission fields, but the inherited fail-closed barrier refuses the whole publication or direct declaration claim containing declared admission, including empty budgets, until the companion fleet feature gate lands. This slice writes no populated declared metadata. Absent metadata preserves previous behavior; future enum values remain readable historically but are refused for new authoring."},
+  "downtime": {"status": "none", "detail": "Normal binary restart only; no migration or backfill."},
+  "manual": {"status": "none", "detail": "No enforcement or operator setting is introduced. ST_SEAT_PRIORITY behavior is unchanged."},
+  "recovery": {"status": "none", "detail": "The inherited fail-closed barrier prevents new populated declaration writes, so reverting this slice requires no metadata removal. Historical reads and replay remain unchanged."}
+}

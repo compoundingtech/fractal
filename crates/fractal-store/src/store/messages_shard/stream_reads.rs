@@ -283,7 +283,16 @@ pub fn conversation_items(
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    drop(statement);
+    drop(connection);
+    // A subject the graph holds is the graph's conversation entry, never a second one.
+    let mut items = Vec::with_capacity(rows.len());
+    for (claim, arrival) in rows {
+        if !super::graph_sent(graph, &claim.subject)? {
+            items.push((claim, arrival));
+        }
+    }
+    Ok(items)
 }
 
 /// Whether a stream item to or from any of `names` was admitted after shard index `after`

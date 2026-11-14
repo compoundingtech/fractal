@@ -249,7 +249,7 @@ it does not change direct merge/check gates or claim measured live savings.
 The optional daemon `[github].app_token_root = "/absolute/operator/supplied/path"`
 or explicit `ST3_GITHUB_APP_TOKEN_ROOT` environment input selects installation
 tokens for reads. The environment input overrides the config field. Relative
-roots are rejected. st3 never computes a platform root: Agent Policy's host facts
+roots are rejected. Fractal never computes a platform root: Agent Policy's host facts
 are Linux `$XDG_RUNTIME_DIR/github-app-token` and macOS
 `$(getconf DARWIN_USER_TEMP_DIR)github-app-token`; the operator supplies the
 already-resolved absolute result. The external minter rollout depends on
@@ -259,7 +259,11 @@ For a repository's owner, read `ROOT/gh-ci/OWNER.token` and `OWNER.json` for
 metadata, branches/contents, PRs/reviews, checks/actions and open-PR GraphQL.
 Use `ROOT/github-ledger/OWNER.token` and `OWNER.json` for issue lists, issue
 comments/excerpts, issue watch preflight and Issue identity GraphQL. PR watch
-preflight and review excerpts use gh-ci. When either installation is selected,
+preflight and review excerpts use gh-ci. When no github-ledger installation is
+published for the owner (reason `missing` or `no-installation`) and the gh-ci
+sidecar's `permissions` grant `issues` read, issue reads use the gh-ci token
+instead and record no fallback; an expired or unreadable ledger installation
+still falls back to the PAT. When either installation is selected,
 remembered opaque node IDs are partitioned by their recorded `ItemIdentity.pull`,
 never guessed from their bytes, and each partition gets its own minimal identity
 query and authorization. PAT-only batches retain the prior single mixed Issue/PR
@@ -271,7 +275,7 @@ Token files must be owner-owned regular mode0600 files, containing only the
 bare token with no whitespace or newline. Sidecars contain numeric
 `installation_id`, RFC3339 `expires_at`, a `permissions` object and
 `repository_selection` (`all` or `selected`). The minter owns atomic publication
-and refresh when less than15minutes remain from a60-minute lifetime. st3 reopens
+and refresh when less than15minutes remain from a60-minute lifetime. Fractal reopens
 the supplied files per read batch, not once per daemon lifetime. A401 permits
 one bounded reload/read replay, then a transition PAT read if still rejected.
 No network retry is made for a failed transport or for a mutation.
@@ -290,16 +294,17 @@ These count source-selection fallback events, not GitHub charges; conditional
 cache hits can still encounter a missing source. Remove transition fallback only
 after one week with zero unintentional fallback across the enrolled owners.
 
-**Legacy status qualification:** neither app has statuses:read. An app GraphQL
-`statusCheckRollup` returns check runs without legacy `StatusContext` data, so
-repository PR detail reads retain a PAT-only combined commit-status GET, once
-per distinct head SHA in a read, through the existing ETag cache. Its source
+**Legacy status qualification:** an installation without statuses:read sees a
+GraphQL `statusCheckRollup` of check runs without legacy `StatusContext` data,
+so repository PR detail reads then add a PAT-only combined commit-status GET,
+once per distinct head SHA in a read, through the existing ETag cache. Its source
 exception is observable as fallback reason `statuses`. Legacy status contexts
 are merged with app check runs before deriving check facts and required-check
 outcomes. Truncated status responses fail visibly rather than asserting missing
-contexts passed. This intentional status exception must be excluded from the
-one-week unintentional-fallback gate until installation permissions are separately
-approved and qualified. No statuses permission is assumed or added here.
+contexts passed. When the gh-ci sidecar grants `statuses` read, the rollup already
+carries `StatusContext` entries, so the extra GET is skipped, and any commit-status
+read routes to gh-ci without a fallback. Until then this intentional status
+exception is excluded from the one-week unintentional-fallback gate.
 
 REST cache keys include the stable installation principal, permissions and
 repository-selection scope, not token bytes; rotation preserves cache identity.
@@ -321,6 +326,82 @@ legacy-status merging. The same-origin redirect fixture verifies installation
 authorization and separate admission for each hop. No live migration is required.
 
 Response accounting runs once at the one-send transport boundary, including each
-initial installation401, reload401 and final PAT response; resource wrappers do
-not recount the final response. Artifact URL invalidation clears every stable
-principal-qualified cache entry for that exact URL, retaining unrelated URLs.
+initial installation401, reload401, final PAT response and redirect hop. Resource
+configuration registers its accounting observer with the transport before requests
+can be sent; the transport owns the hook, while resource keeps the usage state and
+metrics. A missing observer refuses the request rather than silently dropping
+accounting. Resource wrappers do not recount the final response. Artifact URL
+invalidation clears every stable principal-qualified cache entry for that exact
+URL, retaining unrelated URLs.
+
+## Webhook delivery
+
+GitHub webhooks push freshness; polling remains the backstop. A daemon runs the
+receiver only when both keys are set:
+
+```toml
+[github]
+webhook_listen = "127.0.0.1:41871"
+webhook_secret_file = "/absolute/owner-only/secret"
+```
+
+`webhook_listen` must be a loopback address with a nonzero port, and
+`webhook_secret_file` must be absolute; one without the other is a configuration
+error. The receiver serves exactly `POST /fractal/github-webhook` and answers
+everything else 404. A public proxy forwards that path verbatim; the daemon never
+listens publicly. The webhook uses content type `application/json`.
+
+**Security.** Every delivery must carry `X-GitHub-Event`, `X-GitHub-Delivery`
+and `X-Hub-Signature-256`, the HMAC-SHA256 of the raw body under the shared
+secret, compared in constant time. A missing or wrong signature is 401. The
+secret file is read again for every delivery, under the same custody rules as
+token files (an owner-owned regular file with no group or other permissions,
+opened without following links), so it may appear or rotate after the daemon
+starts. While it is absent, unreadable, empty or too permissive, every delivery
+is 503: an unsigned delivery is never accepted. The secret's custody, the GitHub
+hook and the proxy are external to Fractal. Bodies over 5 MiB are 413.
+
+**Events.** `ping` is 200. `pull_request`, `pull_request_review`,
+`pull_request_review_comment`, `pull_request_review_thread`, `issue_comment`,
+`issues`, `push`, `status`, `merge_group`, `create`, `delete`, and
+`check_suite`, `check_run` and `workflow_run` once `completed`, refresh
+observers; every other event or action is 204. The receiver reads only
+`repository.full_name`, plus `ref` for `push` and `ref`/`ref_type` for
+`create`/`delete`; a refreshing event without a repository is 400.
+
+**Refresh.** For each active observer whose provider is `github.repository` with a
+locator equal to the repository in any case, and, for a `push`, `create` or
+`delete` of branch `B`, each `github.ref` observer of `OWNER/REPO@B`, the
+receiver writes an `observer.refresh-requested` claim with attempt
+`"github-webhook:" + hex(sha256("fractal.github-webhook.v1\0" + delivery + "\0" + observer))`,
+the same claim a declared `refresh` writes; the attempt prefix alone marks it as
+webhook-requested, since declared attempts are bare hex digests. A redelivery
+writes nothing more, since its attempt is already requested. The answer is 202
+with `{"refreshed": n}`. Refresh claims replicate, so the member that polls the
+observer acts on a delivery any member received; a refresh poll bypasses the
+GraphQL floor, as a declared refresh does.
+
+**Coalescing.** The poller decides, on its own replica, so a delivery that
+arrives while a poll runs is never lost to replication lag. Requests are taken
+oldest first, and a poll is named for the request it took, so later requests
+never retire a running poll. Under the observer's look lock, right before its
+reads, a poll taken for a webhook refresh answers the newest pending webhook
+refresh written by the same member instead; that answer also answers every
+earlier webhook refresh from that member, since each was written after the
+change it announced and before those reads. A burst of deliveries during one
+poll thus costs one more poll, not one per delivery.
+
+**Backstop cadence.** A repository observer with a webhook refresh claim
+accepted within the last 30 minutes is webhook-covered. The member that polls it
+reads that from its own replicated claims, not from the receiving host's memory.
+While covered, the repository's GraphQL floor is the 15-minute settled interval
+instead of 5 minutes, and a quiet standing-observer poll goes straight to the
+10-minute ceiling instead of stepping through 6 minutes; a poll that sees a
+change still returns to the 3-minute active cadence. Without coverage nothing
+changes. The provider learns coverage through `ObservationRequest.webhook_covered`.
+
+**Observability.** `st.github.webhook.deliveries` is a monotonic OpenTelemetry
+counter labeled `github.event` (the event name, or `other` for unknown events)
+and `outcome` (`refreshed`, `ignored`, `unauthorized`, `unavailable`, `invalid`).
+Doctor shows a `github-webhook` line on a daemon that runs the receiver: its
+address, the last verified delivery time, and counts by outcome since start.

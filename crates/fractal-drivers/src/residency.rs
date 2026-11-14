@@ -72,29 +72,6 @@ pub enum RuntimeResidency {
     },
 }
 
-impl RuntimeResidency {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Quiescing { .. } => "quiescing",
-            Self::Stopping { .. } => "stopping",
-            Self::Cold { .. } => "cold",
-            Self::Starting { .. } => "starting",
-            Self::Refused { .. } => "refused",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InventoryProjection {
-    state: &'static str,
-    generation: u64,
-    wake_pending: bool,
-    refusal_reason: Option<RefusalReason>,
-    presence: Option<RuntimePresence>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Ledger {
@@ -149,20 +126,6 @@ impl Ledger {
 
     pub fn wake_pending(&self) -> bool {
         self.wake_pending
-    }
-
-    pub fn inventory_projection(&self) -> InventoryProjection {
-        let (refusal_reason, presence) = match self.runtime_residency {
-            RuntimeResidency::Refused { reason, presence } => (Some(reason), Some(presence)),
-            _ => (None, None),
-        };
-        InventoryProjection {
-            state: self.runtime_residency.as_str(),
-            generation: self.generation.0,
-            wake_pending: self.wake_pending,
-            refusal_reason,
-            presence,
-        }
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {

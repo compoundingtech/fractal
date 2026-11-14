@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Edge publication is recoverable and forward-only: a leased Git tag push precedes all release mutation, then source-qualified staged builds are verified as one coherent unit through STAGING-LEDGER.sha256 before repairing fixed asset aliases. Interrupted publication converges on the next eligible run.",
+  "replay": {
+    "status": "none",
+    "detail": "Release publication scripts only; no graph, claim or storage replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No daemon or client schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client or daemon compatibility impact. Existing fixed-name archive URLs and per-archive checksum sidecars are preserved; STAGING-LEDGER.sha256 is a distinct temporary publication asset."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon downtime. During the documented brief window between moving the edge tag and replacing aliases, installers may receive the previous binaries; a mismatched archive and sidecar fails closed."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step; an eligible subsequent publication repairs interruptions automatically."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data recovery or migration. A same-source publication retry reconciles interrupted aliases, the source manifest, cleanup and release notes. The forward-only guard prevents older or divergent sources from overwriting a newer tag or manifest."
+  }
+}

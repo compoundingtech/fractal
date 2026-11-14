@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Mission KDL accepts ${FRACTAL_*} context references beside ${ST_*}, mission gate checks get the daemon's FRACTAL_ENDPOINT, FRACTAL_BIN and FRACTAL_DRIVER_STATE_DIR, and the st/st3 deprecation warning no longer names a removal date",
+  "replay": {"status": "none", "detail": "No claims, projections or caches change. Publication stores the registered ${ST_*} spelling, so existing and new mission revisions decode as before."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "changed", "detail": "Publishing mission KDL that writes ${FRACTAL_X} for a registered ${ST_X} context name now succeeds and yields the same mission revision, source hash and normalized declaration as the ${ST_X} spelling; members that do not have this release keep refusing that KDL with unknown-variable at publication, and they run revisions published by this release unchanged because those contain only ${ST_*}. Escaped $${FRACTAL_X} text, unregistered FRACTAL_ names and ${...} outside mission declarations are unchanged. `fractal missions check` gate processes now receive FRACTAL_ENDPOINT, FRACTAL_BIN and FRACTAL_DRIVER_STATE_DIR equal to their ST3_ values, and an authored env value under either spelling no longer replaces them, matching member launches. The st and st3 executable warning text changes on stderr only; stdout and exit status are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart-time work."},
+  "manual": {"status": "none", "detail": "Authors may write ${FRACTAL_MISSION_RUN}, ${FRACTAL_WORKSPACE} and the other FRACTAL_ context names once the member they publish through runs this release. The st and st3 names are removed after every host has adopted fractal and an audit finds no remaining caller, not on a calendar date; scripts parsing the old warning text can match the diagnostic prefix or set FRACTAL_SUPPRESS_DEPRECATION=1."},
+  "recovery": {"status": "none", "detail": "Rollback restores the previous parser and warning text. Stored revisions contain only ${ST_*}, so no state repair is needed; KDL that uses ${FRACTAL_*} must be republished from a member with this release or rewritten to ${ST_*}."}
+}

@@ -49,15 +49,42 @@ pub async fn run(
 }
 
 fn spool_watcher(directory: &Path, wake: Arc<Notify>) -> Result<notify::RecommendedWatcher> {
+    // FSEvents reports canonical paths even when TMPDIR traverses /tmp's symlink.
+    let directory = directory.canonicalize().context("resolve recorder spool watch directory")?;
+    let watched_directory = directory.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        // Scanning the spool opens its directory and reads receipts. Those access
-        // events must not schedule another scan of the same directory.
-        if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) {
+        if event.is_ok_and(|event| spool_event_needs_scan(&event, &watched_directory)) {
             wake.notify_one();
         }
     })?;
-    watcher.watch(directory, notify::RecursiveMode::NonRecursive)?;
+    watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+fn spool_event_needs_scan(event: &notify::Event, directory: &Path) -> bool {
+    if event.need_rescan() {
+        return true;
+    }
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return false;
+    }
+    // FSEvents can deliver the directory's creation after watch registration,
+    // and directory metadata is not evidence that its receipt entries changed.
+    // In particular, a scan's access-time update must not schedule another scan.
+    // Root xattrs describe the directory itself, not receipt bytes, names, identity,
+    // or retry mtimes. FSEvents reports these separately as Metadata(Extended).
+    // Child xattrs, root ownership/permissions, unknown events and rescans stay actionable.
+    // Keep child metadata events: retry deadlines live in receipt mtimes.
+    let root_only = !event.paths.is_empty() && event.paths.iter().all(|path| path == directory);
+    !(root_only
+        && matches!(
+            event.kind,
+            notify::EventKind::Create(notify::event::CreateKind::Folder)
+                | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(
+                    notify::event::MetadataKind::Any | notify::event::MetadataKind::AccessTime
+                        | notify::event::MetadataKind::Extended
+                ))
+        ))
 }
 
 /// Imports completed JSON files, returning how many new claims were appended.
@@ -273,12 +300,79 @@ mod tests {
         }
     }
 
+    #[test]
+    fn spool_events_ignore_root_bookkeeping_but_keep_receipt_changes() {
+        use notify::{
+            Event, EventKind,
+            event::{AccessKind, CreateKind, Flag, MetadataKind, ModifyKind, RemoveKind, RenameMode},
+        };
+
+        let directory = Path::new("/spool");
+        let root_created = Event::new(EventKind::Create(CreateKind::Folder))
+            .add_path(directory.to_owned());
+        let root_metadata = Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)))
+            .add_path(directory.to_owned());
+        let root_xattr = Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Extended)))
+            .add_path(directory.to_owned());
+        let read = Event::new(EventKind::Access(AccessKind::Any))
+            .add_path(directory.join("receipt.json"));
+        for event in [&root_created, &root_metadata, &root_xattr, &read] {
+            assert!(!spool_event_needs_scan(event, directory), "{event:?}");
+            assert!(spool_event_needs_scan(&event.clone().set_flag(Flag::Rescan), directory));
+        }
+        for event in [
+            Event::new(EventKind::Create(CreateKind::File))
+                .add_path(directory.join("receipt.json")),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)))
+                .add_path(directory.join("receipt.attempt-1.json")),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Extended)))
+                .add_path(directory.join("receipt.json")),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Ownership)))
+                .add_path(directory.to_owned()),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)))
+                .add_path(directory.to_owned()),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(directory.join("receipt.tmp"))
+                .add_path(directory.join("receipt.json")),
+            Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(directory.to_owned()),
+            Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+                .add_path(directory.to_owned()),
+            Event::new(EventKind::Create(CreateKind::Any)).add_path(directory.to_owned()),
+            Event::new(EventKind::Modify(ModifyKind::Metadata(MetadataKind::Other)))
+                .add_path(directory.to_owned()),
+            Event::new(EventKind::Modify(ModifyKind::Any)).add_path(directory.to_owned()),
+            Event::new(EventKind::Other).add_path(directory.to_owned()),
+            root_metadata.clone().add_path(directory.join("receipt.json")),
+            root_xattr.clone().add_path(directory.join("receipt.json")),
+            Event::new(EventKind::Any),
+        ] {
+            assert!(spool_event_needs_scan(&event, directory), "{event:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scanning_a_symlinked_spool_does_not_wake_an_idle_consumer() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let spool = alias.join("spool");
+        fs::create_dir(&spool).unwrap();
+        assert_idle_scan_then_publication(&spool).await;
+    }
+
     #[tokio::test]
     async fn scanning_an_empty_spool_does_not_wake_an_idle_consumer() {
         let spool = tempfile::tempdir().unwrap();
+        assert_idle_scan_then_publication(spool.path()).await;
+    }
+
+    async fn assert_idle_scan_then_publication(spool: &Path) {
         let wake = Arc::new(Notify::new());
-        let _watcher = spool_watcher(spool.path(), wake.clone()).unwrap();
-        assert_eq!(fs::read_dir(spool.path()).unwrap().count(), 0);
+        let _watcher = spool_watcher(spool, wake.clone()).unwrap();
+        assert_eq!(fs::read_dir(spool).unwrap().count(), 0);
         assert!(
             tokio::time::timeout(Duration::from_millis(250), wake.notified())
                 .await
@@ -286,8 +380,8 @@ mod tests {
             "the consumer's own scan queued another scan"
         );
         // Ignoring reads must not suppress the next atomic publication.
-        fs::write(spool.path().join("receipt.tmp"), b"partial").unwrap();
-        fs::rename(spool.path().join("receipt.tmp"), spool.path().join("receipt.json")).unwrap();
+        fs::write(spool.join("receipt.tmp"), b"partial").unwrap();
+        fs::rename(spool.join("receipt.tmp"), spool.join("receipt.json")).unwrap();
         tokio::time::timeout(Duration::from_secs(2), wake.notified()).await.unwrap();
     }
 
@@ -411,7 +505,8 @@ mod tests {
         assert_eq!(actual["kind"], "vcs.issue");
         assert_eq!(actual["facts"], json!({
             "repository": "resource/github/acme/demo", "number": 8,
-            "url": value.url, "opened_by": "agent/builder", "opened_by_run": "mission-run/raw/run"
+            "url": value.url, "opened_by": "agent/builder", "opened_by_run": "mission-run/raw/run",
+            "receipt_only": true
         }));
         let claims = store.claims_page(Some(subject), None, 0, None, false, 100).unwrap().claims;
         assert_eq!(claims.len(), 1);

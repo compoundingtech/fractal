@@ -34,6 +34,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 toml = "0.9"
 tracing = "0.1"
+tracing-opentelemetry = "0.31"
 tempfile = { version = "3", optional = true }
 tower = { version = "0.5", features = ["util"] }
 uuid = { version = "1", features = ["v7"] }

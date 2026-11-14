@@ -2,6 +2,9 @@
 import { act } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
+import { createRoot } from 'react-dom/client'
+import { Embed } from './Embed.tsx'
+import { createEmbedNavigation } from './navigation.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 // The same adapter replacement as vite.embed.config.ts, without changing the live app tests.
@@ -88,4 +91,48 @@ it('uses the narrow container inside a desktop window and keeps agent navigation
     expect(push).not.toHaveBeenCalled()
     expect(network).not.toHaveBeenCalled()
   } finally { await act(async () => dispose()); host.remove() }
+})
+
+it('publishes both push and replace navigation inside the embed without changing browser history', () => {
+  const before = window.location.href
+  const historyLength = window.history.length
+  const navigation = createEmbedNavigation('/w/agent/example?open=thread')
+  const locations: string[] = []
+  const unsubscribe = navigation.subscribe(() => locations.push(navigation.getLocation()))
+  navigation.navigate('/w/agent/example?open=terminal/example:detail')
+  navigation.navigate('/w/agent/example?open=thread', { replace: true })
+  expect(locations).toEqual(['/w/agent/example?open=terminal/example:detail', '/w/agent/example?open=thread'])
+  expect(navigation.getLocation()).toBe('/w/agent/example?open=thread')
+  expect(window.location.href).toBe(before)
+  expect(window.history.length).toBe(historyLength)
+  unsubscribe()
+  navigation.navigate('/w/agent/other?open=thread', { replace: true })
+  expect(locations).toHaveLength(2)
+})
+
+it('keeps repeated embed work logs and composers as named groups, not duplicate landmarks', async () => {
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  try {
+    await act(async () => root.render(<><Embed fragment="web" scheme="light" /><Embed fragment="web-narrow" scheme="light" /></>))
+    await vi.waitFor(async () => {
+      await act(async () => {})
+      expect(host.querySelectorAll('[role="group"][aria-label^="Message composer"]')).toHaveLength(2)
+    })
+    const logs = host.querySelectorAll('[data-testid="work-log"]')
+    const composers = host.querySelectorAll('[role="group"][aria-label^="Message composer"]')
+    expect(logs.length).toBeGreaterThan(1)
+    expect(composers).toHaveLength(2)
+    for (const composer of composers) {
+      const form = composer.querySelector('form')
+      expect(form).not.toBeNull()
+      expect(form?.getAttribute('role')).toBeNull()
+      expect(form?.getAttribute('aria-label')).toBeNull()
+    }
+    for (const element of [...logs, ...composers]) {
+      expect(element.getAttribute('role')).toBe('group')
+      expect(element.getAttribute('aria-label')).toBeTruthy()
+    }
+  } finally { await act(async () => root.unmount()); host.remove() }
 })

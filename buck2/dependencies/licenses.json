@@ -1,8 +1,8 @@
 {
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
-  "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
+  "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback) or recognized LICENSE fingerprint; missing packages from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "7d9c908d521c0bbf892cd3359ce84849190eb873bd3dceaf9f48d8e1429f116e",
+  "lockfileSha256": "5beadbe1e513e4c7bc383b4393664ad3afd36fc93242519c624e7df1c1b90e31",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -396,27 +396,32 @@
     },
     {
       "name": "@effect/atom-react",
-      "version": "4.0.3",
+      "version": "4.1.0",
       "license": "MIT"
     },
     {
       "name": "@effect/opentelemetry",
-      "version": "4.0.3",
+      "version": "4.1.0",
+      "license": "MIT"
+    },
+    {
+      "name": "@effect/platform-browser",
+      "version": "4.1.0",
       "license": "MIT"
     },
     {
       "name": "@effect/platform-node",
-      "version": "4.0.3",
+      "version": "4.1.0",
       "license": "MIT"
     },
     {
       "name": "@effect/platform-node-shared",
-      "version": "4.0.3",
+      "version": "4.1.0",
       "license": "MIT"
     },
     {
       "name": "@effect/vitest",
-      "version": "4.0.3",
+      "version": "4.1.0",
       "license": "MIT"
     },
     {
@@ -1070,6 +1075,11 @@
       "license": "MIT"
     },
     {
+      "name": "@pierre/highlights",
+      "version": "0.3.0",
+      "license": "apache-2.0"
+    },
+    {
       "name": "@playwright/test",
       "version": "1.64.1",
       "license": "Apache-2.0"
@@ -1373,6 +1383,11 @@
       "name": "@radix-ui/rect",
       "version": "1.1.3",
       "license": "MIT"
+    },
+    {
+      "name": "@react-aria/optimize-locales-plugin",
+      "version": "2.1.0",
+      "license": "Apache-2.0"
     },
     {
       "name": "@react-native-async-storage/async-storage",
@@ -1942,11 +1957,6 @@
     {
       "name": "@types/node",
       "version": "26.6.4",
-      "license": "MIT"
-    },
-    {
-      "name": "@types/prismjs",
-      "version": "1.26.6",
       "license": "MIT"
     },
     {
@@ -2656,7 +2666,7 @@
     },
     {
       "name": "effect",
-      "version": "4.0.3",
+      "version": "4.1.0",
       "license": "MIT"
     },
     {
@@ -3000,11 +3010,6 @@
       "license": "MIT"
     },
     {
-      "name": "hast-util-parse-selector",
-      "version": "4.0.0",
-      "license": "MIT"
-    },
-    {
       "name": "hast-util-to-jsx-runtime",
       "version": "2.3.6",
       "license": "MIT"
@@ -3012,11 +3017,6 @@
     {
       "name": "hast-util-whitespace",
       "version": "3.0.0",
-      "license": "MIT"
-    },
-    {
-      "name": "hastscript",
-      "version": "9.0.1",
       "license": "MIT"
     },
     {
@@ -4315,11 +4315,6 @@
       "license": "MIT"
     },
     {
-      "name": "refractor",
-      "version": "5.0.0",
-      "license": "MIT"
-    },
-    {
       "name": "regenerate",
       "version": "1.5.0",
       "license": "MIT"
@@ -4836,7 +4831,7 @@
     },
     {
       "name": "undici",
-      "version": "8.11.2",
+      "version": "8.12.3",
       "license": "MIT"
     },
     {

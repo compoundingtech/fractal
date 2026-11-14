@@ -1491,12 +1491,14 @@ async fn onboarding_api(
         fractal_daemon::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
     );
     let state = fractal_daemon::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0_u64).0,
         node: "studio".into(),
+        api_socket: state_dir.join("api.sock"),
         state_dir: state_dir.clone(),
         pty_root: state_dir.join("pty"),
         pty_binary: "pty".into(),

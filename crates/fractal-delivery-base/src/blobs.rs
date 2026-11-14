@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use sha2::{Digest as _, Sha256};
 
-use crate::model::St3Error;
+use crate::model::FractalError;
 
 /// The most one upload may hold.
 pub const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;
@@ -61,12 +61,12 @@ pub fn is_sha256(value: &str) -> bool {
 }
 
 /// `blob/<sha256>` or a bare hash, as the hash.
-pub fn parse_reference(value: &str) -> Result<String, St3Error> {
+pub fn parse_reference(value: &str) -> Result<String, FractalError> {
     let hash = value.strip_prefix("blob/").unwrap_or(value).to_ascii_lowercase();
     if is_sha256(&hash) {
         Ok(hash)
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-blob-reference",
             "a blob reference is `blob/` and 64 hex digits",
         ))
@@ -74,7 +74,7 @@ pub fn parse_reference(value: &str) -> Result<String, St3Error> {
 }
 
 /// Check an upload's type and bytes; return the type to record.
-pub fn validate_upload(media_type: &str, bytes: &[u8]) -> Result<&'static str, St3Error> {
+pub fn validate_upload(media_type: &str, bytes: &[u8]) -> Result<&'static str, FractalError> {
     let declared = media_type
         .split(';')
         .next()
@@ -82,22 +82,22 @@ pub fn validate_upload(media_type: &str, bytes: &[u8]) -> Result<&'static str, S
         .trim()
         .to_ascii_lowercase();
     let Some(supported) = MEDIA_TYPES.iter().find(|candidate| **candidate == declared) else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unsupported-media-type",
             format!("an attachment is one of {}", MEDIA_TYPES.join(", ")),
         ));
     };
     if bytes.is_empty() {
-        return Err(St3Error::new("blob-content-mismatch", "the upload is empty"));
+        return Err(FractalError::new("blob-content-mismatch", "the upload is empty"));
     }
     if bytes.len() > MAX_BLOB_BYTES {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "blob-too-large",
             format!("an attachment is at most {MAX_BLOB_BYTES} bytes"),
         ));
     }
     if sniff_media_type(bytes) != Some(*supported) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "blob-content-mismatch",
             format!("the bytes are not {supported}"),
         ));
@@ -237,14 +237,22 @@ pub async fn materialize(
     directory: &Path,
     message: &crate::model::MessageView,
 ) -> anyhow::Result<Vec<fractal_drivers::ding::AttachmentNotice>> {
-    let mut notices = Vec::new();
     if message.attachments.is_empty() {
-        return Ok(notices);
+        return Ok(Vec::new());
     }
+    let client = fractal_client::Client::unix_as(socket, actor);
+    materialize_with_client(&client, directory, message).await
+}
+
+async fn materialize_with_client(
+    client: &fractal_client::Client,
+    directory: &Path,
+    message: &crate::model::MessageView,
+) -> anyhow::Result<Vec<fractal_drivers::ding::AttachmentNotice>> {
+    let mut notices = Vec::new();
     let files = BlobDir::at(directory.to_path_buf());
     files.ensure()?;
     files.sweep(DEFAULT_RETENTION);
-    let client = fractal_client::Client::unix_as(socket, actor);
     for attachment in &message.attachments {
         anyhow::ensure!(
             is_sha256(&attachment.sha256),
@@ -310,10 +318,13 @@ pub async fn materialize_for_seat(
     if message.attachments.is_empty() {
         return Ok(Vec::new());
     }
-    let socket = client
-        .socket_path()
-        .ok_or_else(|| anyhow::anyhow!("attachments are read over the daemon's Unix socket"))?;
-    materialize(socket, subject, directory, message).await
+    let client = match &client.endpoint {
+        crate::client::Endpoint::Unix(socket) => fractal_client::Client::unix_as(socket, subject),
+        crate::client::Endpoint::DiscoveredUnix(identity) =>
+            fractal_client::Client::discovered_unix_as(identity.clone(), subject),
+        _ => anyhow::bail!("attachments are read over the daemon's Unix socket"),
+    };
+    materialize_with_client(&client, directory, message).await
 }
 
 fn touch(path: &Path) {
@@ -327,6 +338,58 @@ mod tests {
     use super::*;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n0000";
+
+    #[tokio::test]
+    async fn discovered_clients_materialize_uncached_attachments_on_legacy_and_published_sockets() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        for published_custom in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let primary = root.path().join("fractal.sock");
+            let live = root.path().join(if published_custom { "custom.sock" } else { "st3.sock" });
+            if published_custom {
+                std::os::unix::fs::symlink(&live, &primary).unwrap();
+            }
+            let listener = tokio::net::UnixListener::bind(&live).unwrap();
+            let client = crate::client::Client::new(crate::client::Endpoint::DiscoveredUnix(
+                fractal_client::UnixSocketDiscovery::Defaults {
+                    runtime: primary.clone(), published: primary,
+                },
+            ));
+            assert_eq!(client.socket_path().as_deref(), Some(fs::canonicalize(&live).unwrap().as_path()));
+            let hash = hex::encode(Sha256::digest(b"image"));
+            let message = serde_json::from_value(serde_json::json!({
+                "subject":"message/example", "from":"person/example", "to":"agent/example",
+                "content":"attached", "status":"queued", "created_index":1,
+                "attachments":[{"sha256":hash, "media_type":"image/png", "size":5, "origin":"host/example"}]
+            })).unwrap();
+            let body = serde_json::json!({
+                "api_version":"st3.client.v0", "request_id":"request/example",
+                "snapshot":{"id":"snapshot/example", "host_id":"host/example", "store_index":1,
+                    "projection_version":"client-projection.v0", "created_at":"2026-11-01T00:00:00Z"},
+                "value":{"sha256":hash, "size":5, "offset":0, "data":"aW1hZ2U="}
+            }).to_string();
+            let server = tokio::spawn(async move {
+                loop {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = [0; 4096];
+                    let length = stream.read(&mut request).await.unwrap();
+                    if length == 0 { continue; }
+                    let request = String::from_utf8_lossy(&request[..length]).to_ascii_lowercase();
+                    assert!(request.contains("x-st3-person: agent/example"));
+                    stream.write_all(format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    ).as_bytes()).await.unwrap();
+                    break;
+                }
+            });
+            let directory = root.path().join("attachments");
+            let notices = materialize_for_seat(&client, "agent/example", &directory, &message).await.unwrap();
+            server.await.unwrap();
+            assert_eq!(notices.len(), 1);
+            assert_eq!(fs::read(notices[0].path.as_ref().unwrap()).unwrap(), b"image");
+        }
+    }
 
     #[test]
     fn uploads_are_checked_against_their_own_bytes() {

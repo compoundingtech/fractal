@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Load terminal and mutation SDK services on first use while keeping read-only views unaffected.",
+  "replay": { "status": "none", "detail": "No graph, storage or replay behavior change." },
+  "schema": { "status": "none", "detail": "No schema change." },
+  "rules": { "status": "none", "detail": "No rule change." },
+  "compatibility": { "status": "none", "detail": "No API or wire change. The read SDK remains eagerly available for read-only views; terminal and mutation SDK services load only when first requested. The first terminal or editing action may briefly wait for its service. If service loading fails, retrying the action can load it again without reloading the app; read-only views remain available." },
+  "downtime": { "status": "none", "detail": "Takes effect with the next web build; no daemon restart is required." },
+  "manual": { "status": "none", "detail": "No operator step." },
+  "recovery": { "status": "none", "detail": "Revert this change and rebuild the web app to restore eager terminal and mutation SDK service loading." }
+}

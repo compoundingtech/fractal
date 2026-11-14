@@ -104,7 +104,7 @@ mod tests {
             CARD_FAULT_PINNED_WALL_BACKSTOP + std::time::Duration::from_millis(50));
         let started = std::time::Instant::now();
         let error = store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert!(started.elapsed() >= CARD_FAULT_PINNED_WALL_BACKSTOP, "the stall must reach the backstop");
         assert_eq!(store.index().unwrap(), cut);
     }
@@ -119,7 +119,7 @@ mod tests {
         Store::expire_next_card_fault_read_for_test();
         let started = std::time::Instant::now();
         let error = store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert!(started.elapsed() < CARD_FAULT_PINNED_WALL_BACKSTOP, "the forced deadline must not wait for the backstop");
         assert_eq!(store.index().unwrap(), cut);
     }
@@ -143,7 +143,7 @@ mod tests {
         let error = smallclaims::read_budget::with(Some(parent.clone()), ||
             store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index))).unwrap_err();
         let work = scope.finish();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert!(parent.check().is_ok(), "the local work limit must refuse before its parent");
         assert!(work.vm_steps > 1000, "the control must execute real SQLite work");
         assert_eq!(store.index().unwrap(), cut, "a refused read cannot return a repaired cut");
@@ -159,11 +159,11 @@ mod tests {
         AFTER_FAULT_ACQUISITION.with(|hook| *hook.borrow_mut() = Some(Box::new(move || cancel.cancel())));
         let error = smallclaims::read_budget::with(Some(parent), ||
             store.mailbox_faults_for(&subjects, cut)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         BEFORE_FAULT_READER.with(|hook| *hook.borrow_mut() = Some(Box::new(||
             std::thread::sleep(std::time::Duration::from_millis(60)))));
         let error = store.mailbox_faults_for(&subjects, cut).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert_eq!(store.index().unwrap(), cut);
     }
 
@@ -204,7 +204,7 @@ mod tests {
         let budget = smallclaims::read_budget::ReadBudget::new("expired-card-cut", std::time::Duration::ZERO);
         let error = smallclaims::read_budget::with(Some(budget), ||
             store.mailbox_faults_for(&subjects, second_cut)).unwrap_err();
-        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "read-deadline");
         assert_eq!(store.index().unwrap(), before, "failure cannot backfill or return a partial fault map");
     }
 
@@ -985,6 +985,11 @@ mod tests {
         store
             .apply_internal(&stopped, "intentional-stop-fixture")
             .unwrap();
+        // A stop parsed from a person's or an agent's intent names no owning run, so it never
+        // keeps the mailbox of the declaration it ended, as a run's end does.
+        let ended = store.declaration_ended_by_stop("agent/eval.worker").unwrap().unwrap();
+        assert_eq!(ended.stop.owner_run, None);
+        assert!(ended.declaration.member.is_some());
         assert!(
             store.check_mailbox(&fence).is_err(),
             "a live wrapper must not read after intentional stop"
@@ -996,6 +1001,57 @@ mod tests {
                 .bind_mailbox_with_lease(&request(), Some(&authority(2)))
                 .is_err()
         );
+    }
+
+    /// A run's end stops its seats, but the reconciler keeps one running while it holds mail sent
+    /// before the stop. That seat keeps the mailbox of the declaration its stop ended, so it can
+    /// read that mail, until its runtime stops.
+    #[test]
+    fn a_seat_its_runs_end_stopped_keeps_its_mailbox_until_its_runtime_stops() {
+        let store = fixture();
+        let owner = authority(1);
+        let fence = store
+            .bind_mailbox_with_lease(&request(), Some(&owner))
+            .unwrap();
+        let mut stopped =
+            crate::graph::parse_intent("version 2\nstop \"agent/eval.worker\"", "node").unwrap();
+        for stop in stopped.subjects.values_mut() {
+            stop.owner_run = Some("mission-run/ended-run".into());
+        }
+        store.apply_internal(&stopped, "run-end-stop-fixture").unwrap();
+        store.check_mailbox(&fence).unwrap();
+        store.mailbox_session_active(&fence, &owner).unwrap();
+        assert!(!store.repair_mailbox(&fence, &owner).unwrap());
+        // The stream's reconnect after a daemon restart rebinds the same capability.
+        let rebound = store.bind_mailbox_with_lease(&fence, Some(&owner)).unwrap();
+        assert_eq!((rebound.token, rebound.epoch), (fence.token.clone(), fence.epoch));
+        // Another provider, or another incarnation, still cannot take the stopping seat.
+        let mut foreign = authority(2);
+        foreign.provider = "claude".into();
+        assert!(store.mailbox_session_active(&fence, &foreign).is_err());
+        let successor = Fence::new("agent/eval.worker", "successor", "delivery");
+        assert!(
+            store
+                .bind_mailbox_with_lease(&successor, Some(&authority(2)))
+                .is_err()
+        );
+        // Once nothing holds it the reconciler stops the runtime, and the lease ends with it.
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/eval.worker".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: serde_json::from_value(json!({"status":"stopped",
+                    "runtime_id":"eval.worker","incarnation_id":"current"}))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some("runtime:current:stopped".into()),
+            })
+            .unwrap();
+        assert!(store.check_mailbox(&fence).is_err());
+        assert!(store.mailbox_session_active(&fence, &owner).is_err());
+        assert!(store.bind_mailbox_with_lease(&fence, Some(&owner)).is_err());
     }
 
     #[test]
@@ -1192,5 +1248,111 @@ mod tests {
         let result = finished_without_the_writer("failed lease read", &receiver, worker);
         assert!(result.is_err(), "{result:?}");
         drop(held);
+    }
+
+    /// Bind `fence` with `owner` on another thread, as a channel's reconnect does.
+    fn bind_elsewhere(
+        store: &Arc<Store>,
+        fence: &Fence,
+        owner: &Authority,
+    ) -> (std::sync::mpsc::Receiver<Result<(), String>>, std::thread::JoinHandle<()>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (store, fence, owner) = (Arc::clone(store), fence.clone(), owner.clone());
+        let worker = std::thread::spawn(move || {
+            let result = store
+                .bind_mailbox_with_lease_checked(&fence, Some(&owner), &|| Ok(()))
+                .map(|bound| assert_eq!((bound.token, bound.epoch), (fence.token.clone(), fence.epoch.max(1))))
+                .map_err(|error| format!("{error:?}"));
+            let _ = sender.send(result);
+        });
+        (receiver, worker)
+    }
+
+    fn lease_row(store: &Store) -> Value {
+        store.readers.get().query_row(
+            "SELECT json_array(subject,component,incarnation,provider,session,sequence,pid,process_token,token,epoch,revoked)
+             FROM local_mailbox_leases",
+            [], |row| row.get::<_, String>(0),
+        ).map(|row| serde_json::from_str(&row).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_reconnect_with_the_lease_it_holds_is_admitted_without_the_writer() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store.bind_mailbox_with_lease(&request(), Some(&owner)).unwrap();
+        let before = lease_row(&store);
+        // Its capability (epoch 1), and its token before the bind answered it (epoch 0).
+        for (case, fence) in [("capability", bound.clone()), ("token", Fence { epoch: 0, ..bound.clone() })] {
+            let held = store.connection.write();
+            let (receiver, worker) = bind_elsewhere(&store, &fence, &owner);
+            assert_eq!(finished_without_the_writer(case, &receiver, worker), Ok(()), "{case}");
+            drop(held);
+        }
+        assert_eq!(lease_row(&store), before);
+        store.check_mailbox(&bound).unwrap();
+    }
+
+    #[test]
+    fn a_revoke_committed_before_a_reconnect_refuses_it_on_the_read_transaction() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store.bind_mailbox_with_lease(&request(), Some(&owner)).unwrap();
+        store.connection.write().execute("UPDATE local_mailbox_leases SET revoked=1", []).unwrap();
+        let held = store.connection.write();
+        let (receiver, worker) = bind_elsewhere(&store, &bound, &owner);
+        let refused = finished_without_the_writer("revoked", &receiver, worker);
+        assert!(refused.as_ref().is_err_and(|error| error.contains("revoked")), "{refused:?}");
+        drop(held);
+        assert_eq!(lease_row(&store)[10], 1, "a refused reconnect must not restore the lease");
+    }
+
+    #[test]
+    fn a_reconnect_that_records_a_lease_is_decided_and_recorded_under_the_writer() {
+        let store = Arc::new(fixture());
+        // A capability bound before leases: its first native reconnect records one.
+        let bound = store.bind_mailbox_with_lease(&request(), None).unwrap();
+        let owner = authority(1);
+        let held = store.connection.write();
+        let (receiver, worker) = bind_elsewhere(&store, &bound, &owner);
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_millis(300)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ), "recording a lease must wait for the writer");
+        drop(held);
+        assert_eq!(finished_without_the_writer("recording", &receiver, worker), Ok(()));
+        assert_eq!(store.mailbox_lease_authority(&bound).unwrap(), Some(owner));
+    }
+
+    #[test]
+    fn a_successor_between_the_read_check_and_the_writer_is_seen_by_the_writer() {
+        let store = Arc::new(fixture());
+        let bound = store.bind_mailbox_with_lease(&request(), None).unwrap();
+        let taking = Arc::clone(&store);
+        fractal_store::store::mailbox_lease_shared_seats::AFTER_BIND_READ_CHECK.with(|pause| {
+            *pause.borrow_mut() = Some(Box::new(move || {
+                taking.bind_mailbox_with_lease(&request(), None).unwrap();
+            }));
+        });
+        let refused = store.bind_mailbox_with_lease(&bound, Some(&authority(1)));
+        assert!(refused.as_ref().is_err_and(|error| error.code == "stale-mailbox-session"), "{refused:?}");
+        assert!(store.mailbox_lease_authority(&bound).unwrap().is_none(), "the retired capability recorded no lease");
+    }
+
+    #[test]
+    fn a_successor_after_a_read_admitted_reconnect_retires_its_capability() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store.bind_mailbox_with_lease(&request(), Some(&owner)).unwrap();
+        // Admitted on the read transaction: the lease stood as it was.
+        let held = store.connection.write();
+        let (receiver, worker) = bind_elsewhere(&store, &bound, &owner);
+        assert_eq!(finished_without_the_writer("reconnect", &receiver, worker), Ok(()));
+        drop(held);
+        // A later channel of the seat takes the mailbox; the earlier capability is refused.
+        let successor = store.bind_mailbox_with_lease(&request(), Some(&authority(2))).unwrap();
+        assert!(successor.epoch > bound.epoch);
+        assert!(store.check_mailbox(&bound).is_err());
+        store.check_mailbox(&successor).unwrap();
     }
 }

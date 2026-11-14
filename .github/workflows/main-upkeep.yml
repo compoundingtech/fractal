@@ -57,8 +57,11 @@ jobs:
       - proof-evidence-gate-rust-tests
       - proof-upgrade-impact
       - proof-genie-freshness
+      - proof-hm-module-eval
       - proof-ci-script-tests
       - proof-typescript-client
+      - proof-swift-client-changes
+      - proof-swift-client
       - proof-nix-evidence-genie-freshness
       - proof-nix-evidence-typescript-client
       - proof-linux-test-build
@@ -74,6 +77,7 @@ jobs:
       - proof-fractal-web-changes
       - proof-fractal-web-execution
       - proof-fractal-web
+      - proof-compat-archives-x86_64-unknown-linux-gnu
     if: always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
     runs-on: ubuntu-latest
     permissions: {}
@@ -132,6 +136,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -162,11 +189,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -230,14 +252,18 @@ jobs:
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -257,6 +283,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (runner.os == 'Linux')
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -340,6 +368,7 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-probe.outcome }}","hit":"${{ steps.cargo-probe.outputs.cache-hit }}","matched":"${{ steps.cargo-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-probe.outcome }}","hit":"${{ steps.nix-probe.outputs.cache-hit }}","matched":"${{ steps.nix-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    needs: [compat-archives-x86_64-unknown-linux-gnu]
   linux-clippy:
     name: warm-clippy
     runs-on:
@@ -360,6 +389,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -390,11 +420,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -458,14 +483,18 @@ jobs:
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -566,6 +595,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned fleet archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-fleet'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-fleet'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-fleet'] }}
+        run: 'python3 scripts/ci-compat-archive download fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -596,11 +648,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -664,14 +711,18 @@ jobs:
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -692,6 +743,8 @@ jobs:
       - name: Build missing cache contents
         shell: bash
         run: nix develop . -c bash scripts/ci-cache-warm fleet-compat
+        env:
+          GH_TOKEN: ${{ github.token }}
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Save Nix outputs
         run: bash scripts/ci-nix-cache save
@@ -752,6 +805,7 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-probe.outcome }}","hit":"${{ steps.cargo-probe.outputs.cache-hit }}","matched":"${{ steps.cargo-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-probe.outcome }}","hit":"${{ steps.nix-probe.outputs.cache-hit }}","matched":"${{ steps.nix-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    needs: [compat-archives-x86_64-unknown-linux-gnu]
   genie-freshness:
     name: warm-genie
     runs-on: ubuntu-latest
@@ -768,6 +822,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Restore the local Nix cache
         id: nix-probe
         if: success()
@@ -786,11 +841,6 @@ jobs:
           if [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -831,14 +881,18 @@ jobs:
           path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}"
           restore-keys: ""
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -902,6 +956,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 1
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -932,11 +987,6 @@ jobs:
           if [ "$CARGO_HIT" != true ] || [ "$NIX_HIT" != true ]; then
             echo "::warning::P0: missing main-scope cache; filling it for Namespace overflow and pull requests"
           fi
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 1
-        if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -1000,14 +1050,18 @@ jobs:
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1098,14 +1152,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1129,7 +1187,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}"
+          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-${{ steps.lockfiles.outputs.hash }}"
+          restore-keys: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-"
       - name: Fill missing dependencies
         shell: bash
         run: "nix develop '.#web' -c pnpm fetch"
@@ -1160,14 +1219,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1189,7 +1252,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-"
           lookup-only: true
       - name: Restore the web shell closure
         id: web-shell
@@ -1221,7 +1285,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
         if: steps.pnpm-store.outputs.cache-hit != 'true'
       - name: Fill the web shell closure
         shell: bash
@@ -1325,14 +1389,18 @@ jobs:
             nix4-${{ github.job }}-${{ runner.os }}-
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1427,6 +1495,92 @@ jobs:
         shell: bash
         env:
           CACHE_ENTRIES: '[{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the generated stores","outcome":"${{ steps.cache-11.outcome }}","hit":"${{ steps.cache-11.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  compat-archives-x86_64-unknown-linux-gnu:
+    name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact-messaging: ${{ steps['identity-0'].outputs['artifact-name'] }}
+      artifact-id-messaging: ${{ steps.upload-0.outputs.artifact-id }}
+      artifact-fleet: ${{ steps['identity-1'].outputs['artifact-name'] }}
+      artifact-id-fleet: ${{ steps.upload-1.outputs.artifact-id || steps.upload-0.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identify the pinned messaging archive
+        id: identity-0
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Identify the pinned fleet archive
+        id: identity-1
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Restore messaging archive
+        id: archive-0
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Verify and prepare messaging archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-0.outputs.cache-hit }}
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''identity-0''].outputs.path }}"'
+      - name: Save verified messaging archive
+        if: steps.archive-0.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Share verified messaging archive
+        id: upload-0
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps['identity-0'].outputs['artifact-name'] }}
+          path: ${{ steps['identity-0'].outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Restore fleet archive
+        id: archive-1
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['identity-1'].outputs['cache-path'] }}
+          key: ${{ steps['identity-1'].outputs.key }}
+      - name: Verify and prepare fleet archive
+        shell: bash
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-1.outputs.cache-hit }}
+        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''identity-1''].outputs.path }}"'
+      - name: Save verified fleet archive
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256 && steps.archive-1.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps['identity-1'].outputs['cache-path'] }}
+          key: ${{ steps['identity-1'].outputs.key }}
+      - name: Share verified fleet archive
+        id: upload-1
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps['identity-1'].outputs['artifact-name'] }}
+          path: ${{ steps['identity-1'].outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore fleet archive","outcome":"${{ steps.archive-1.outcome }}","hit":"${{ steps.archive-1.outputs.cache-hit }}","matched":"${{ steps.archive-1.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   proof-pick-runner:
     name: post-merge pick-runner
@@ -2538,14 +2692,18 @@ jobs:
           path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}"
           restore-keys: ""
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -2569,6 +2727,10 @@ jobs:
         run: |
           python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.proof-evidence-gate-genie-freshness.outputs.skip != 'true' && needs.proof-evidence-gate-genie-freshness.outputs.refuse != 'true'
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
         if: needs.proof-evidence-gate-genie-freshness.outputs.skip != 'true' && needs.proof-evidence-gate-genie-freshness.outputs.refuse != 'true'
       - name: Check license coverage, runner selection and generated files
         shell: bash
@@ -2656,6 +2818,41 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  proof-hm-module-eval:
+    name: post-merge hm-module-eval
+    needs: [main-checks, proof-pick-runner]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) ) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Prove Home Manager activation ownership and rollback
+        run: "nix build .#checks.x86_64-linux.hm-module-eval --no-link --print-build-logs"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   proof-ci-script-tests:
     name: post-merge ci-script-tests
     env:
@@ -2710,14 +2907,18 @@ jobs:
           path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}"
           restore-keys: ""
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -2846,14 +3047,18 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -2881,7 +3086,8 @@ jobs:
         uses: actions/cache@v5
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}"
+          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-${{ steps.lockfiles.outputs.hash }}"
+          restore-keys: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-"
         if: needs.proof-evidence-gate-typescript-client.outputs.skip != 'true' && needs.proof-evidence-gate-typescript-client.outputs.refuse != 'true'
       - name: Install the frozen workspace
         shell: bash
@@ -2973,6 +3179,80 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Cache the locked TypeScript and Effect toolchain","outcome":"${{ steps.typescript-cache.outcome }}","hit":"${{ steps.typescript-cache.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  proof-swift-client-changes:
+    name: post-merge swift-client-changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.detect.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Detect Swift client inputs
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 - <<'PY'
+          import fnmatch
+          import os
+          import subprocess
+
+          patterns = (
+              'clients/swift/**',
+              'crates/fractal-client-codegen/templates/*.swift.in',
+              'crates/fractal-client-codegen/src/**',
+              'docs/st3/client-v0/fixtures/**',
+              'docs/st3/client-v0/schemas/**',
+              'fixtures/clients/**',
+              'fixtures/scenarios/**',
+              '.github/workflows/swift-client.ts',
+              '.github/workflows/fleet.yml*',
+              'scripts/ci-swift-client',
+          )
+          base = os.environ.get('BASE_SHA', '')
+          relevant = True
+          if os.environ['EVENT_NAME'] != 'workflow_dispatch' and base and set(base) != {'0'}:
+              subprocess.run(['git', 'fetch', '--no-tags', '--depth=1', 'origin', base], check=True)
+              names = subprocess.check_output(['git', 'diff', '--name-only', '--no-renames', '-z', base, 'HEAD']).decode().split('\0')
+              relevant = any(fnmatch.fnmatchcase(name, pattern) for name in names for pattern in patterns)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'relevant={str(relevant).lower()}\n')
+          PY
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Classifies Git paths only; builds nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) ) }}
+    needs: [main-checks]
+  proof-swift-client:
+    name: post-merge swift-client
+    needs: [main-checks, proof-swift-client-changes]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.proof-swift-client-changes.result == 'success' && needs.proof-swift-client-changes.outputs.relevant == 'true') ) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and test the Swift package on Linux
+        env:
+          SWIFT_IMAGE: "swift:6.0.3-jammy@sha256:95f6ef898992dc840b35517e780f6f6db9661432775ab0b33cc0a531ea749bdb"
+        run: bash scripts/ci-swift-client
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Uses a digest-pinned container and ephemeral compiler output; no reusable build cache.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   proof-nix-evidence-genie-freshness:
     name: post-merge nix-evidence-genie-freshness
     needs: [main-checks, proof-pick-runner]
@@ -3015,14 +3295,18 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3134,14 +3418,18 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3219,6 +3507,7 @@ jobs:
         proof-pick-runner,
         proof-evidence-gate-linux-gate,
         proof-evidence-gate-rust-tests,
+        proof-compat-archives-x86_64-unknown-linux-gnu,
       ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true')) && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(vars.CI_MERGE_TEST_BUILD_OWNED && (needs.proof-pick-runner.outputs.ci1_build || format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE || 'linux-x86-64', github.run_id)) || needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
@@ -3263,6 +3552,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -3297,14 +3608,18 @@ jobs:
             nix4-linux-tests-${{ runner.os }}-
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3322,6 +3637,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -3411,13 +3728,12 @@ jobs:
   proof-linux-tests:
     name: post-merge linux-tests
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - proof-compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -3468,6 +3784,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -3482,14 +3820,18 @@ jobs:
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
             nix4-linux-tests-${{ runner.os }}-
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3507,6 +3849,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -3534,6 +3878,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Prove shards form the complete selected inventory
@@ -3655,13 +4002,12 @@ jobs:
   proof-linux-tests-shard-2:
     name: post-merge linux-tests-shard-2
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - proof-compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -3712,6 +4058,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -3726,14 +4094,18 @@ jobs:
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
             nix4-linux-tests-${{ runner.os }}-
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3751,6 +4123,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -3778,6 +4152,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Make room for the JUnit report
@@ -3896,13 +4273,12 @@ jobs:
   proof-linux-tests-shard-3:
     name: post-merge linux-tests-shard-3
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - proof-compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && true) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.proof-pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -3953,6 +4329,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -3967,14 +4365,18 @@ jobs:
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
             nix4-linux-tests-${{ runner.os }}-
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3992,6 +4394,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -4019,6 +4423,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Make room for the JUnit report
@@ -4137,13 +4544,12 @@ jobs:
   proof-linux-tests-shard-4:
     name: post-merge linux-tests-shard-4
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - proof-compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && true) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.proof-pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -4194,6 +4600,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -4208,14 +4636,18 @@ jobs:
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
             nix4-linux-tests-${{ runner.os }}-
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -4233,6 +4665,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -4260,6 +4694,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Make room for the JUnit report
@@ -4464,14 +4901,18 @@ jobs:
             nix4-${{ 'linux-clippy' }}-${{ runner.os }}-
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -4487,6 +4928,9 @@ jobs:
       - name: Use the cached Nix outputs
         if: env.CI_LOCAL_CACHES != '1'
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Run the Clippy warning ratchet and generated-client check
@@ -4613,6 +5057,7 @@ jobs:
         proof-pick-runner,
         proof-evidence-gate-linux-gate,
         proof-evidence-gate-linux-fleet-compat,
+        proof-compat-archives-x86_64-unknown-linux-gnu,
       ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-linux-fleet-compat.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
@@ -4658,6 +5103,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned fleet archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-fleet'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-fleet'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-fleet'] }}
+        run: 'python3 scripts/ci-compat-archive download fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -4692,14 +5159,18 @@ jobs:
             nix4-${{ 'linux-fleet-compat' }}-${{ runner.os }}-
       - name: Remember genuine source inputs before compiling
         run: 'python3 "${CI_BUILD_SNAPSHOT_SCRIPT:-scripts/ci-build-snapshot}" prepare'
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -4715,6 +5186,9 @@ jobs:
       - name: Use the cached Nix outputs
         if: env.CI_LOCAL_CACHES != '1'
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Run fleet compatibility against the pinned older st3
@@ -4849,6 +5323,7 @@ jobs:
       - proof-linux-fleet-compat
       - proof-ci-script-tests
       - proof-evidence-gate-ci-script-tests
+      - proof-hm-module-eval
       - proof-evidence-gate-rust-tests
       - proof-evidence-gate-linux-clippy
       - proof-evidence-gate-linux-fleet-compat
@@ -4903,6 +5378,10 @@ jobs:
           [ "$SCRIPT_TESTS_RESULT" = success ] && exit 0
           [ "$SCRIPT_TESTS_RESULT" = skipped ] && [ "${SCRIPT_TESTS_SKIPPED_BY_GATE:-}" = true ] && exit 0
           exit 1
+      - name: Require fixture-only HM activation proof to pass
+        env:
+          HM_RESULT: ${{ needs.proof-hm-module-eval.result }}
+        run: test "$HM_RESULT" = success
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -5208,7 +5687,7 @@ jobs:
   proof-fractal-web-changes:
     name: post-merge fractal-web-changes
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     permissions:
       contents: read
     outputs:
@@ -5248,7 +5727,7 @@ jobs:
           import sys
           import tempfile
 
-          # Directory patterns end in `/**`; `*` stays within one path component.
+          # `**/` includes zero or more directories; `*` stays within one path component.
           PATTERNS = (
               "apps/fractal-web/**",
               "packages/fractal-ui/**",
@@ -5309,17 +5788,25 @@ jobs:
           # scripts/ci-fractal-web-kit-graph fails the kit lane when the built Storybook bundles a file outside these.
           KIT_PATTERNS = (
               "packages/fractal-ui/**",
+              # Every app story belongs to kit, including stories added in new source folders.
+              "apps/fractal-web/src/**/*.stories.tsx",
               # Changelog stories render the app's changelog view and seen state.
               "apps/fractal-web/src/changelog/**",
+              # The dev-bar build and changes stories render the real segment.
+              "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
+              # SettingsDialog and AvailabilityPanel stories render the availability section.
+              "apps/fractal-web/src/availability/AvailabilityEditor.tsx",
+              "apps/fractal-web/src/availability/AvailabilityPanel.tsx",
+              "apps/fractal-web/src/availability/availability.fixtures.ts",
+              "apps/fractal-web/src/availability/availabilityModel.ts",
               "apps/fractal-web/src/embed/**",
-              "apps/fractal-web/src/web/ColdOpen.stories.tsx",
+              "apps/fractal-web/src/web/AlertDetailsPane.tsx",
+              "apps/fractal-web/src/web/AlertFlashBand.tsx",
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
-              # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
-              "apps/fractal-web/src/web/ComposerImages.stories.tsx",
-              # NativeTranscript exercises the real ConversationPane over synthetic native wire records.
-              "apps/fractal-web/src/web/NativeTranscript.stories.tsx",
-              # The transcript image integration story exercises the app's production transcript image cache in kit Storybook.
-              "apps/fractal-web/src/web/TranscriptImages.stories.tsx",
+              "apps/fractal-web/src/web/missionsTab.ts",
+              "apps/fractal-web/src/web/SettingsDialog.tsx",
+              "apps/fractal-web/src/web/settingsModel.ts",
+              "apps/fractal-web/src/web/shortcuts.ts",
               "apps/fractal-web/src/web/transcriptImages.ts",
               # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
               "apps/fractal-web/.changelog/**",
@@ -5329,37 +5816,57 @@ jobs:
               "apps/fractal-web/src/command-palette/fuzzy.ts",
               "apps/fractal-web/src/conversation/alerts/AgentAlerts.tsx",
               "apps/fractal-web/src/conversation/alerts/AlertButton.tsx",
+              "apps/fractal-web/src/conversation/alerts/alertAnswers.ts",
+              "apps/fractal-web/src/conversation/alerts/alertChoices.ts",
+              "apps/fractal-web/src/conversation/alerts/alertNames.ts",
+              "apps/fractal-web/src/conversation/alerts/answerableAlerts.fixture.ts",
               "apps/fractal-web/src/conversation/alerts/AnswerAlert.tsx",
+              "apps/fractal-web/src/conversation/alerts/decisionText.ts",
+              "apps/fractal-web/src/conversation/alerts/decisionWords.ts",
+              "apps/fractal-web/src/conversation/alerts/LiveAlertNames.tsx",
+              "apps/fractal-web/src/conversation/alerts/PromptAlert.tsx",
+              "apps/fractal-web/src/conversation/alerts/useAlertAnswers.ts",
               "apps/fractal-web/src/conversation/assistantFacts.ts",
               "apps/fractal-web/src/conversation/blocks.ts",
               "apps/fractal-web/src/conversation/fixtures.ts",
               "apps/fractal-web/src/conversation/fromTimeline.ts",
               "apps/fractal-web/src/conversation/inspect.ts",
+              "apps/fractal-web/src/conversation/mail.ts",
               "apps/fractal-web/src/conversation/model.ts",
               "apps/fractal-web/src/conversation/q101OmpEnvelopeStopgap.ts",
               "apps/fractal-web/src/conversation/recordedStSend.ts",
               "apps/fractal-web/src/conversation/recordedWait.ts",
               "apps/fractal-web/src/conversation/semanticToolModel.ts",
               "apps/fractal-web/src/conversation/semantics.ts",
+              "apps/fractal-web/src/conversation/systemRecords.ts",
               "apps/fractal-web/src/conversation/telemetry.ts",
               "apps/fractal-web/src/conversation/toolClassification.ts",
               "apps/fractal-web/src/conversation/todos/AgentTodos.tsx",
+              "apps/fractal-web/src/conversation/todos/fixtures.ts",
               "apps/fractal-web/src/conversation/todos/model.ts",
               "apps/fractal-web/src/conversation/vocabulary.ts",
               "apps/fractal-web/src/data/arrangements.ts",
               "apps/fractal-web/src/data/asking.ts",
+              "apps/fractal-web/src/data/attachmentSchema.ts",
               "apps/fractal-web/src/data/attention.ts",
               "apps/fractal-web/src/data/contextOccupancy.ts",
+              "apps/fractal-web/src/data/browserPairing.ts",
               "apps/fractal-web/src/data/fixtureSource.ts",
+              "apps/fractal-web/src/data/lazySdk.ts",
               "apps/fractal-web/src/data/nativeDeclarations.ts",
               "apps/fractal-web/src/data/nativeDetails.ts",
               "apps/fractal-web/src/data/nativeDetailsSource.ts",
               "apps/fractal-web/src/data/observedClock.ts",
+              "apps/fractal-web/src/data/objectivesSource.ts",
+              "apps/fractal-web/src/data/pins.ts",
               "apps/fractal-web/src/data/projections.ts",
               "apps/fractal-web/src/data/react.tsx",
+              "apps/fractal-web/src/data/sdk-browser/trace.ts",
+              "apps/fractal-web/src/data/sidebarPins.ts",
               "apps/fractal-web/src/data/source.ts",
               "apps/fractal-web/src/data/subjectReadPort.ts",
               "apps/fractal-web/src/declarations/model.ts",
+              "apps/fractal-web/src/declarations/sourceMap.ts",
               "apps/fractal-web/src/documents/DocumentLink.tsx",
               "apps/fractal-web/src/documents/DocumentPane.tsx",
               "apps/fractal-web/src/documents/document-port.ts",
@@ -5368,6 +5875,7 @@ jobs:
               "apps/fractal-web/src/extensions/public.ts",
               "apps/fractal-web/src/fixtures/projections.ts",
               "apps/fractal-web/src/fixtures/world.ts",
+              "apps/fractal-web/src/folders/arrangementSchema.ts",
               "apps/fractal-web/src/folders/client.ts",
               "apps/fractal-web/src/folders/core.mts",
               "apps/fractal-web/src/folders/edit.ts",
@@ -5376,9 +5884,28 @@ jobs:
               "apps/fractal-web/src/folders/useSidebarFolders.ts",
               "apps/fractal-web/src/icons/WfIcon.tsx",
               "apps/fractal-web/src/missions/fixtures.ts",
+              "apps/fractal-web/src/missions/MissionDetailView.tsx",
+              "apps/fractal-web/src/missions/MissionFeedNotice.tsx",
+              "apps/fractal-web/src/missions/missionPlan.ts",
               "apps/fractal-web/src/missions/MissionsPane.tsx",
+              "apps/fractal-web/src/missions/missionTitle.ts",
+              "apps/fractal-web/src/missions/missionWords.ts",
               "apps/fractal-web/src/missions/presentation.ts",
+              "apps/fractal-web/src/missions/StepSourceChip.tsx",
+              "apps/fractal-web/src/missions/rowData.ts",
+              "apps/fractal-web/src/missions/SidebarMissionsList.tsx",
+              "apps/fractal-web/src/missions/useMissionRows.ts",
               "apps/fractal-web/src/monitor/fixtures.ts",
+              "apps/fractal-web/src/monitor/model.ts",
+              "apps/fractal-web/src/monitor/state.ts",
+              "apps/fractal-web/src/monitor/UsagePane.stories.tsx",
+              "apps/fractal-web/src/monitor/UsagePane.tsx",
+              "apps/fractal-web/src/monitor/usageFixtures.ts",
+              "apps/fractal-web/src/monitor/usageModel.ts",
+              "apps/fractal-web/src/monitor/UsageSection.tsx",
+              "apps/fractal-web/src/monitor/usageSectionState.ts",
+              "apps/fractal-web/src/monitor/usageSectionView.ts",
+              "apps/fractal-web/src/monitor/wire.ts",
               "apps/fractal-web/src/resources/agent/model.ts",
               "apps/fractal-web/src/resources/contract.ts",
               "apps/fractal-web/src/resources/envelope.ts",
@@ -5394,10 +5921,12 @@ jobs:
               "apps/fractal-web/src/shell/sidebar/state.ts",
               "apps/fractal-web/src/shell/sidebar/StatusIcon.tsx",
               "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
+              "apps/fractal-web/src/shell/sameFolderFleet.ts",
               "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
               "apps/fractal-web/src/state/persistence.ts",
               "apps/fractal-web/src/state/storageAdapter.ts",
               # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
+              "apps/fractal-web/src/telemetry/devBarPreference.ts",
               "apps/fractal-web/src/telemetry/inputPaint.ts",
               "apps/fractal-web/src/telemetry/measurement/counters.ts",
               "apps/fractal-web/src/telemetry/measurement/developer.ts",
@@ -5412,6 +5941,7 @@ jobs:
               "apps/fractal-web/src/terminal/rawTerminalInput.ts",
               "apps/fractal-web/src/terminal/rawTerminalState.ts",
               "apps/fractal-web/src/terminal/terminalMetrics.stylex.ts",
+              "apps/fractal-web/src/terminal/terminalSchema.ts",
               "apps/fractal-web/src/terminal/terminalTyping.ts",
               "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
               "apps/fractal-web/src/terminal/assets/JetBrainsMono-Regular.woff2",
@@ -5439,10 +5969,18 @@ jobs:
               "apps/fractal-web/src/ui-compat/tokens.stylex.ts",
               "apps/fractal-web/src/web/AgentActions.tsx",
               "apps/fractal-web/src/web/AgentDetailsPanel.tsx",
-              "apps/fractal-web/src/web/AlertsPopover.tsx",
+              "apps/fractal-web/src/web/AgentMissions.tsx",
+              "apps/fractal-web/src/web/AgentResourcesPanel.tsx",
+              "apps/fractal-web/src/web/AlertsTab.tsx",
+              "apps/fractal-web/src/web/AlertsTab.stories.tsx",
+              "apps/fractal-web/src/web/alertsTab.ts",
               "apps/fractal-web/src/web/AttentionControls.tsx",
+              "apps/fractal-web/src/web/BrowserPairing.tsx",
+              "apps/fractal-web/src/web/browserPairingState.ts",
               "apps/fractal-web/src/web/capturedChanges.ts",
               "apps/fractal-web/src/web/ChangesInspector.tsx",
+              "apps/fractal-web/src/web/composerDraftPort.ts",
+              "apps/fractal-web/src/web/composerDrafts.ts",
               "apps/fractal-web/src/web/composerSend.ts",
               "apps/fractal-web/src/web/ConversationHeaderActions.tsx",
               "apps/fractal-web/src/web/ConversationPaneFallback.tsx",
@@ -5456,30 +5994,83 @@ jobs:
               "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
               "apps/fractal-web/src/web/useTabMetadata.ts",
               "apps/fractal-web/src/web/liveSidebarTree.ts",
-              "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/NativeTurnFooter.tsx",
               "apps/fractal-web/src/web/perfMarks.ts",
-              "apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx",
               "apps/fractal-web/src/web/ResponsiveAgentSidebar.tsx",
               "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
               "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
               "apps/fractal-web/src/web/semanticTool.tsx",
               "apps/fractal-web/src/web/sidebarAttention.ts",
-              "apps/fractal-web/src/web/SidebarChrome.stories.tsx",
               "apps/fractal-web/src/web/SidebarChromeFooter.tsx",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
-              "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
               "apps/fractal-web/src/web/subagentThreadFocus.ts",
+              "apps/fractal-web/src/web/themePreference.ts",
               "apps/fractal-web/src/web/TypedToolPreview.tsx",
               "apps/fractal-web/src/web/TypedToolResult.tsx",
               "apps/fractal-web/src/web/typedToolResult.ts",
               "apps/fractal-web/src/web/useNativeDetails.ts",
               "apps/fractal-web/src/web/workspaceView.ts",
               "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
+              "apps/fractal-web/src/workbench-kit/EditorTabs.tsx",
               "apps/fractal-web/src/workbench-kit/IconButton.tsx",
               "apps/fractal-web/src/workbench-kit/icons.tsx",
+              "apps/fractal-web/src/workbench-kit/keys.tsx",
               "fixtures/clients/words.json",
+              "apps/fractal-web/src/plugins/github/card/GithubCard.tsx",
+              "apps/fractal-web/src/plugins/github/data.ts",
+              "apps/fractal-web/src/plugins/github/detail/Checks.tsx",
+              "apps/fractal-web/src/plugins/github/detail/Conversation.tsx",
+              "apps/fractal-web/src/plugins/github/detail/detail-model.ts",
+              "apps/fractal-web/src/plugins/github/detail/DetailShell.tsx",
+              "apps/fractal-web/src/plugins/github/detail/Files.tsx",
+              "apps/fractal-web/src/plugins/github/detail/index.ts",
+              "apps/fractal-web/src/plugins/github/detail/IssueDetail.tsx",
+              "apps/fractal-web/src/plugins/github/detail/PullRequestDetail.tsx",
+              "apps/fractal-web/src/plugins/github/detail/RunDetail.tsx",
+              "apps/fractal-web/src/plugins/github/fixtures.ts",
+              "apps/fractal-web/src/plugins/github/index.ts",
+              "apps/fractal-web/src/plugins/github/model.ts",
+              "apps/fractal-web/src/plugins/github/refs.ts",
+              "apps/fractal-web/src/plugins/github/schema.ts",
+              "apps/fractal-web/src/plugins/github/surface.tsx",
+              "apps/fractal-web/src/plugins/github/views.tsx",
+              "apps/fractal-web/src/state/cell/defaultEnvironment.ts",
+              "apps/fractal-web/src/state/cell/environment.ts",
+              "apps/fractal-web/src/state/cell/StateCell.ts",
+              "apps/fractal-web/src/state/cell/store.ts",
+              "apps/fractal-web/src/state/cell/testing.ts",
+              "apps/fractal-web/src/state/cells/drafts.ts",
+              "apps/fractal-web/src/state/cells/lists.ts",
+              "apps/fractal-web/src/state/cells/panels.ts",
+              "apps/fractal-web/src/state/cells/view.ts",
+              "apps/fractal-web/src/workspace/chunks.ts",
+              "apps/fractal-web/src/workspace/kinds.ts",
+              "apps/fractal-web/src/workspace/model.ts",
+              "apps/fractal-web/src/workspace/openable.ts",
+              "apps/fractal-web/src/workspace/registry.ts",
+              "apps/fractal-web/src/workspace/resources.ts",
+              "apps/fractal-web/src/workspace/store.ts",
+              "apps/fractal-web/src/workspace/subject.ts",
+              "apps/fractal-web/src/workspace/surfaces.tsx",
+              "apps/fractal-web/src/workspace/tabPresentation.tsx",
+              "apps/fractal-web/src/workspace/useWorkspace.ts",
+              "apps/fractal-web/src/workspace/useWorkspaceKeys.ts",
+              "apps/fractal-web/src/workspace/WorkspaceBody.tsx",
+              "apps/fractal-web/src/workspace/WorkspaceStrip.tsx",
+              "docs/st3/client-v0/fixtures/github-plugin-checks.json",
+              "docs/st3/client-v0/fixtures/github-plugin-comment.json",
+              "docs/st3/client-v0/fixtures/github-plugin-conversation.json",
+              "docs/st3/client-v0/fixtures/github-plugin-files.json",
+              "docs/st3/client-v0/fixtures/github-plugin-gone.json",
+              "docs/st3/client-v0/fixtures/github-plugin-issue.json",
+              "docs/st3/client-v0/fixtures/github-plugin-moved.json",
+              "docs/st3/client-v0/fixtures/github-plugin-not-found.json",
+              "docs/st3/client-v0/fixtures/github-plugin-pull-request.json",
+              "docs/st3/client-v0/fixtures/github-plugin-run.json",
+              "docs/st3/client-v0/fixtures/github-plugin-stale.json",
+              "docs/st3/client-v0/fixtures/github-plugin-unavailable.json",
+              "fixtures/clients/transcripts/wakes.json",
               "apps/fractal-web/src/web/index.html",
               "clients/typescript/fractal-scenarios/**",
               "clients/typescript/fractal-client/**",
@@ -5503,11 +6094,10 @@ jobs:
               "apps/fractal-web/src/data/attention.ts",
               "apps/fractal-web/src/data/projections.ts",
               "apps/fractal-web/src/data/source.ts",
-              "apps/fractal-web/src/web/LiveRoster.stories.tsx",
               "apps/fractal-web/src/web/LiveRoster.tsx",
+              "apps/fractal-web/src/web/narrowLayout.ts",
+              "apps/fractal-web/src/web/rightPanel.ts",
               # The production module suites mount the real LiveAgentWorkspace and ConversationPane over app story states.
-              "apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx",
-              "apps/fractal-web/src/web/ConversationPane.stories.tsx",
               "apps/fractal-web/src/fixtures/AppStoryHarness.tsx",
               "apps/fractal-web/src/fixtures/appStoryAssertions.ts",
               "apps/fractal-web/src/fixtures/appStoryStates.ts",
@@ -5518,8 +6108,8 @@ jobs:
 
 
           def pattern_regex(pattern):
-              parts = re.split(r"(\*\*|\*)", pattern)
-              body = "".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part) for part in parts)
+              parts = re.split(r"(\*\*/|\*\*|\*)", pattern)
+              body = "".join("(?:.*/)?" if part == "**/" else ".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part) for part in parts)
               # DOTALL: Git paths may legally contain newlines, and `**` must still cover them.
               return re.compile(body + r"\Z", re.DOTALL)
 
@@ -5645,14 +6235,18 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@v3
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -5678,7 +6272,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          restore-keys: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-"
       - name: Enable user namespaces for Buck TypeScript sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Restore the web shell closure
@@ -5792,7 +6387,7 @@ jobs:
       ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) ) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     permissions:
       contents: read
     steps:
@@ -5881,3 +6476,91 @@ jobs:
         env:
           CACHE_REASON: Collects the detection and execution results and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  proof-compat-archives-x86_64-unknown-linux-gnu:
+    name: post-merge Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact-messaging: ${{ steps['identity-0'].outputs['artifact-name'] }}
+      artifact-id-messaging: ${{ steps.upload-0.outputs.artifact-id }}
+      artifact-fleet: ${{ steps['identity-1'].outputs['artifact-name'] }}
+      artifact-id-fleet: ${{ steps.upload-1.outputs.artifact-id || steps.upload-0.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identify the pinned messaging archive
+        id: identity-0
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Identify the pinned fleet archive
+        id: identity-1
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Restore messaging archive
+        id: archive-0
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Verify and prepare messaging archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-0.outputs.cache-hit }}
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''identity-0''].outputs.path }}"'
+      - name: Save verified messaging archive
+        if: steps.archive-0.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Share verified messaging archive
+        id: upload-0
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps['identity-0'].outputs['artifact-name'] }}
+          path: ${{ steps['identity-0'].outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Restore fleet archive
+        id: archive-1
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['identity-1'].outputs['cache-path'] }}
+          key: ${{ steps['identity-1'].outputs.key }}
+      - name: Verify and prepare fleet archive
+        shell: bash
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-1.outputs.cache-hit }}
+        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''identity-1''].outputs.path }}"'
+      - name: Save verified fleet archive
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256 && steps.archive-1.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps['identity-1'].outputs['cache-path'] }}
+          key: ${{ steps['identity-1'].outputs.key }}
+      - name: Share verified fleet archive
+        id: upload-1
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps['identity-1'].outputs['artifact-name'] }}
+          path: ${{ steps['identity-1'].outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore fleet archive","outcome":"${{ steps.archive-1.outcome }}","hit":"${{ steps.archive-1.outputs.cache-hit }}","matched":"${{ steps.archive-1.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) ) }}
+    needs: [main-checks]

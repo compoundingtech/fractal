@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Recheck consumed v1 placement resolutions before reusing sidebar projections, including same-revision readiness and destination changes.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rules changes."},
+  "compatibility": {"status": "none", "detail": "The unwired cache preserves authoritative full-projection errors."},
+  "downtime": {"status": "none", "detail": "No deployment changes."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}

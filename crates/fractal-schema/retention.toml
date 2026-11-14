@@ -26,6 +26,8 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"harness.invocation" = { class = "durable" }
+"harness.invocation-artifact" = { class = "durable" }
 "deploy.go" = { class = "durable" }
 "deploy.go-revoked" = { class = "durable" }
 "deploy.go-consumed" = { class = "durable" }
@@ -37,6 +39,7 @@
 "agent.helper-launched" = { class = "durable", log = "local" }
 "custom.client.action-result" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
+"client.operation-authorized" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "member.admission-override" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
@@ -70,6 +73,7 @@
 "fleet.member-endpoints" = { class = "current", pending = "the membership fold reads every endpoint claim" }
 "fleet.member-left" = { class = "durable" }
 "fleet.member-removed" = { class = "durable" }
+"fleet.shard-bounds" = { class = "durable" }
 "gate.head-bound" = { class = "durable" }
 "gate.remediation-attached" = { class = "durable" }
 "gate.requested" = { class = "durable" }
@@ -81,6 +85,9 @@
 # The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
 # repository's poller from step 3b of the plugin store; readers take the newest state per item.
 "github.event" = { class = "transition", window = "30d", pending = "no reader audit yet" }
+# One claim per completed Workspace CI run, written once by a repository's poller; CI's declared
+# objectives read the last day of them.
+"github.workflow-run" = { class = "transition", window = "30d", pending = "no reader audit yet" }
 "glass.deleted" = { class = "durable" }
 "glass.upserted" = { class = "durable" }
 # Compact question identity, shape, status, positions and receipt stay indefinitely.
@@ -91,6 +98,8 @@
 "harness.context-clear.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "harness.inventory.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
 "harness.limits" = { class = "current" }
+# Quota snapshots also carry immutable credit events and dispositions. Keep every claim.
+"usage.limits.observed" = { class = "durable" }
 # Other nodes read the current harness state: step readiness is judged on the mission's node and
 # fleet views run anywhere. Nothing reads a heartbeat, so only changes replicate.
 "harness.observed" = { class = "current", log = "on-change" }
@@ -117,11 +126,14 @@
 "loop.state" = { class = "transition", window = "7d" }
 "message.closed" = { class = "durable" }
 "message.delivered" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
+"message.expired" = { class = "durable" }
 "message.read" = { class = "transition", window = "7d", pending = "unread state reads it until the message closes" }
 "message.sent" = { class = "durable" }
 "message.staged" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
 "mission-run.created" = { class = "durable" }
 "mission-run.report-to" = { class = "durable" }
+"mission-run.retry-linked" = { class = "durable" }
+"mission-run.supersede-linked" = { class = "durable" }
 "mission-run.state" = { class = "durable" }
 "mission.produced" = { class = "durable" }
 "mission.provenance" = { class = "durable" }
@@ -134,8 +146,16 @@
 "operational.recovered" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "ordered-membership.edited" = { class = "durable" }
 "owned-set.revised" = { class = "durable" }
+# A person's controls over one attention row matter only while it is open; claims stay whole until
+# a per-row slot rule exists (seen keeps the earliest, snooze the newest).
+"person.attention-seen" = { class = "current", pending = "needs a per-row keep-earliest rule; newest-per-slot would move seen_at later" }
+"person.attention-snoozed" = { class = "current", pending = "needs a per-row newest-per-slot rule keyed by attention_id" }
 "person.delegation-set" = { class = "durable" }
 "person.directive-note-set" = { class = "durable" }
+"person.status-set" = { class = "durable" }
+"person.interruptions-set" = { class = "durable" }
+"person.deadline-clock-set" = { class = "durable" }
+"person.presence-observed" = { class = "current", pending = "the presence fold reads each source's newest report; no per-source checkpoint slot yet" }
 "person.rename.completed" = { class = "durable" }
 "planning-session.approved" = { class = "durable" }
 "planning-session.cancelled" = { class = "durable" }
@@ -147,7 +167,15 @@
 "planning-session.started" = { class = "durable" }
 "principal.key-granted" = { class = "durable" }
 "principal.key-revoked" = { class = "durable" }
+# A program run's journal: replay reads every completed and failed entry of its step run.
+"program.step" = { class = "durable" }
+# Invocation correlation must outlive collector sampling and trace-backend retention.
+"mission.run.trace" = { class = "durable" }
+"program.attempt.trace" = { class = "durable" }
 "publication.operation" = { class = "durable" }
+# Only each person's largest position per conversation matters, but a newest-per-slot rule could
+# drop a larger concurrent advance; claims stay whole until a keep-largest planner exists.
+"read-position.advanced" = { class = "current", pending = "needs a keep-largest at_ms rule; newest-per-slot could drop a larger concurrent advance" }
 "reconcile.fault" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "record.repaired" = { class = "durable" }
 # Only the node that made them reads render receipts and the readiness deadline, whose attention
@@ -174,6 +202,7 @@
 "runtime.observed" = { class = "current", pending = "only the seat status history rule retains its sources" }
 "runtime.readiness-deadline-reached" = { class = "transition", window = "7d", log = "local" }
 "runtime.reconcile-decision" = { class = "current" }
+"runtime.refresh" = { class = "current", pending = "retain authoritative episode state until a seat/incumbent checkpoint rule preserves unresolved episodes" }
 "runtime.restart-window-reset" = { class = "transition", window = "7d", pending = "restart windows read every reset" }
 "schedule.occurrence-cancelled" = { class = "durable" }
 "schedule.occurrence-reached" = { class = "durable" }
@@ -187,6 +216,10 @@
 "sekret.changed" = { class = "transition", window = "7d", log = "local" }
 "sekret.exited" = { class = "transition", window = "7d", log = "local" }
 "sekret.refused" = { class = "transition", window = "7d", log = "local" }
+"source.audited" = { class = "durable" }
+"source.debt.closed" = { class = "durable" }
+"source.debt.recorded" = { class = "durable" }
+"source.mapped" = { class = "durable" }
 "step-run.carried" = { class = "durable" }
 "step-run.retried" = { class = "durable" }
 "step-run.state" = { class = "durable" }
@@ -219,6 +252,7 @@
 "work.person-reassigned" = { class = "durable" }
 "work.progress" = { class = "durable" }
 "work.released" = { class = "durable" }
+"work.handoff-returned" = { class = "durable" }
 "work.renewed" = { class = "current", pending = "the step timing fold reads every renewal" }
 "work.submitted" = { class = "durable" }
 "workspace.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
@@ -337,7 +371,7 @@ min_age = "5d"
 [[rules]]
 kind = "harness.usage"
 when = ["semantics=response_rollup"]
-slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host"]
+slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host", "execution_id"]
 keep = "newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that"
 
 [[rules]]

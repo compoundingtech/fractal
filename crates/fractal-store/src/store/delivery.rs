@@ -1,12 +1,15 @@
 use super::*;
 
+/// Messages at least one day old belong to the stale mailbox band.
+pub const MAILBOX_STALE_AFTER_MS: u128 = 86_400_000;
+
 impl Store {
     /// Summarize accepted, unread messages for one recipient, without a delivery-page cap.
     ///
     /// The indexed candidate walk is bounded by this recipient's retained `message.sent`
     /// history (including aliases), not fleet message bodies. Projection work is bounded by
     /// the claim history of its unread candidate subjects. Repeated sends count only once,
-    /// using their oldest accepted timestamp. Empty states are omitted.
+    /// using their oldest accepted timestamp. Empty (state, age band) pairs are omitted.
     ///
     /// When held classification is unavailable, `include_held=false` leaves sent silent
     /// messages in pending rather than dropping them from the unread total.
@@ -14,7 +17,8 @@ impl Store {
         &self,
         recipient: &str,
         include_held: bool,
-    ) -> Result<Vec<(String, u64, u128)>> {
+        now: u128,
+    ) -> Result<Vec<(String, &'static str, u64, u128)>> {
         let connection = self.readers.get();
         let recipient = super::identities::resolve_reference_conn(
             &connection,
@@ -60,33 +64,53 @@ impl Store {
                 .or_insert((created_index, accepted));
         }
         drop(statement);
-        let mut states = BTreeMap::<&str, (u64, u128)>::new();
-        for (subject, (created_index, accepted)) in candidates {
-            let message = self.message_view_cached(&connection, &subject, created_index)?;
-            if message.to != recipient || matches!(message.status.as_str(), "read" | "closed") {
-                continue;
+        let mut states = BTreeMap::<(&str, &str), (u64, u128)>::new();
+        let mut count = |message: &MessageView, accepted: u128| {
+            if message.to != recipient || matches!(message.status.as_str(), "read" | "closed" | "expired") {
+                return;
             }
-            let state = if include_held && crate::silent::waits_for_turn(&message) {
+            let state = if include_held && crate::silent::waits_for_turn(message) {
                 "held"
             } else {
                 match message.status.as_str() {
                     "sent" | "staged" => "pending",
                     "delivered" => "delivered",
-                    _ => continue,
+                    _ => return,
                 }
             };
-            smallclaims::touched::note_read(|| subject.clone());
+            smallclaims::touched::note_read(|| message.subject.clone());
+            let band = if now.saturating_sub(accepted) >= MAILBOX_STALE_AFTER_MS {
+                "stale"
+            } else {
+                "recent"
+            };
             states
-                .entry(state)
+                .entry((state, band))
                 .and_modify(|(count, oldest)| {
                     *count += 1;
                     *oldest = (*oldest).min(accepted);
                 })
                 .or_insert((1, accepted));
+        };
+        for (subject, (created_index, accepted)) in &candidates {
+            count(&self.message_view_cached(&connection, subject, *created_index)?, *accepted);
+        }
+        // The stream items to this mailbox, unread and not closed here, at the mirror's sent time.
+        for message in super::messages_shard::mailbox_reads::delivery_items(self, &recipient)? {
+            if candidates.contains_key(&message.subject) {
+                continue;
+            }
+            let accepted: Option<i64> = connection
+                .prepare_cached("SELECT sent_ms FROM local_stream_sent WHERE subject=?1")?
+                .query_row(/* sqlite-large-value: allow-for-now lv-hb7c02123e5e8 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [&message.subject], |row| row.get(0))
+                .optional()?;
+            if let Some(accepted) = accepted {
+                count(&message, u128::try_from(accepted.max(0))?);
+            }
         }
         Ok(states
             .into_iter()
-            .map(|(state, (count, oldest))| (state.to_owned(), count, oldest))
+            .map(|((state, band), (count, oldest))| (state.to_owned(), band, count, oldest))
             .collect())
     }
 
@@ -116,6 +140,28 @@ impl Store {
         through: u64,
         delivery: bool,
     ) -> Result<Vec<MessageView>> {
+        self.messages_through_listing(recipient, include_closed, through, delivery, false)
+    }
+
+    /// A delivery listing of only the mail a stream can offer: sent, staged or delivered.
+    /// Read mail that is not closed is most of a long-lived seat's mailbox, and a stream drops it;
+    /// this reads its status from the newest claims alone and never builds its view.
+    pub fn offerable_messages_for_delivery_through(
+        &self,
+        recipient: &str,
+        through: u64,
+    ) -> Result<Vec<MessageView>> {
+        self.messages_through_listing(Some(recipient), false, through, true, true)
+    }
+
+    fn messages_through_listing(
+        &self,
+        recipient: Option<&str>,
+        include_closed: bool,
+        through: u64,
+        delivery: bool,
+        offerable: bool,
+    ) -> Result<Vec<MessageView>> {
         smallclaims::touched::note_read(|| match recipient {
             Some(recipient) => format!("mailbox:{recipient}"),
             None => "kind:message.sent".to_owned(),
@@ -123,8 +169,11 @@ impl Store {
         let mut after = None;
         let mut all = Vec::new();
         loop {
-            let (items, next) =
-                self.messages_page_from(recipient, include_closed, after, through, 200, delivery, false)?;
+            // A delivery listing stays graph-only (mailbox_reads.rs delivers stream mail); every
+            // other listing pages on into the stream items after the graph's.
+            let (items, next) = self.messages_page_from(
+                recipient, include_closed, after, through, 200, delivery, !delivery, offerable,
+            )?;
             all.extend(items);
             match next {
                 Some(cursor) => after = Some(cursor),
@@ -142,6 +191,10 @@ impl Store {
     }
 
     pub fn message(&self, subject: &str) -> Result<Option<MessageView>> {
+        if !super::messages_shard::graph_sent(self, subject)?
+            && let Some(message) = super::messages_shard::message_view(self, subject)? {
+            return Ok(Some(message));
+        }
         let connection = self.readers.get();
         let created_index = connection.query_row(
             "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
@@ -194,6 +247,7 @@ impl Store {
                 let Some(message) = super::messages_shard::message_view(self, &subject)? else {
                     continue;
                 };
+                if filter.open_only && message.status == "expired" { continue; }
                 if keep.as_mut().is_some_and(|keep| !keep(&message)) {
                     continue;
                 }
@@ -287,9 +341,9 @@ impl Store {
     }
 
     /// A page of a mailbox, or of every message without a recipient. A page outside delivery
-    /// continues into the messages shard once the graph's messages are listed; delivery pages
-    /// and the unpaged readers, which order and hold graph mail, stay on the graph until they
-    /// learn stream items.
+    /// continues into the messages shard once the graph's messages are listed; other delivery
+    /// pages and the unpaged readers, which order and hold graph mail, stay on the graph (a
+    /// seat's own poll goes on: [`Self::messages_page_for_seat`]).
     /// A cursor past the graph is only good for its own `through`: a new listing starts over.
     pub fn messages_page_inner(
         &self,
@@ -300,11 +354,52 @@ impl Store {
         limit: usize,
         delivery: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery)
+        self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery, false)
+    }
+
+    /// A seat's own poll of its open mail (`GET /v1/messages?to=` from the seat): the delivery
+    /// listing of its graph mail, then on into its stream items, as every other page goes on.
+    /// Mail routed to the stream (4c-2b) reaches a seat that polls as it reaches one on the
+    /// mailbox stream.
+    pub fn messages_page_for_seat(
+        &self,
+        recipient: &str,
+        after: Option<u64>,
+        through: u64,
+        limit: usize,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        self.messages_page_from(Some(recipient), false, after, through, limit, true, true, false)
+    }
+
+    /// [`Self::messages_page_once`], read on past a page that lists nothing yet has a cursor. The
+    /// recipient and closed checks run on the query's rows, after its LIMIT, so every row of a
+    /// page can drop out; a page is then read again from its cursor, so a page is empty only at
+    /// the end.
+    #[allow(clippy::too_many_arguments)]
+    fn messages_page_from(
+        &self,
+        recipient: Option<&str>,
+        include_closed: bool,
+        mut after: Option<u64>,
+        through: u64,
+        limit: usize,
+        delivery: bool,
+        stream: bool,
+        offerable: bool,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        loop {
+            let (page, next) = self.messages_page_once(
+                recipient, include_closed, after, through, limit, delivery, stream, offerable,
+            )?;
+            if !page.is_empty() || next.is_none() || next == after {
+                return Ok((page, next));
+            }
+            after = next;
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn messages_page_from(
+    fn messages_page_once(
         &self,
         recipient: Option<&str>,
         include_closed: bool,
@@ -313,6 +408,7 @@ impl Store {
         limit: usize,
         delivery: bool,
         stream: bool,
+        offerable: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
         let connection = self.readers.get();
         let recipient = recipient.map(|recipient|
@@ -324,7 +420,7 @@ impl Store {
         let fast_recipient = recipient.as_deref();
         let bare_recipient = fast_recipient.map(message_bare_recipient);
         if let (Some(recipient), Some(bare_recipient)) = (fast_recipient, bare_recipient) {
-            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb1df5e67cfcb owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h33d3af81f481 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ if delivery {
                 concat!("WITH candidates(subject) AS (
                      SELECT subject FROM claims INDEXED BY claims_message_to_index
                      WHERE kind='message.sent'
@@ -346,6 +442,9 @@ impl Store {
                             SUM(COALESCE(meta.held,0)) OVER () held_total
                      FROM created LEFT JOIN coordination_sends meta ON meta.subject=created.subject
                      WHERE created_index<=?4
+                       AND NOT EXISTS (
+                         SELECT 1 FROM unread_mail_expired WHERE subject=created.subject
+                       )
                  )
                  SELECT subject, created_index, CASE WHEN ?7 THEN MAX(held_total-8,0) ELSE 0 END FROM ranked
                  WHERE created_index>?3 AND created_index<=?4
@@ -411,11 +510,13 @@ impl Store {
                 .then(|| subjects.last().map(|(_, index, _)| *index))
                 .flatten();
             let mut output = Vec::new();
-            let listed = subjects.len();
             let last_listed = subjects.last().map(|(_, index, _)| *index);
             for (subject, created_index, remaining) in subjects {
+                if offerable && !offerable_status(&connection, &subject)? {
+                    continue;
+                }
                 let mut message = self.message_view_cached(&connection, &subject, created_index)?;
-                if message.to == recipient && (include_closed || message.status != "closed") {
+                if message.to == recipient && (include_closed || !matches!(message.status.as_str(), "closed" | "expired")) {
                     if remaining > 0 && crate::silent::waits_for_turn(&message) {
                         message
                             .tags
@@ -428,15 +529,16 @@ impl Store {
             if has_more || !stream || super::messages_shard::shard(self).is_none() {
                 return Ok((output, next_after));
             }
-            // The graph's messages are all listed; the page goes on into the stream. A page the
-            // graph filled ends at its last graph message, and the next page starts the stream.
+            // The graph's messages are all listed; the page goes on into the stream, filling what
+            // the graph's rows left, those the checks above dropped included. A page the graph
+            // filled ends at its last graph message, and the next page starts the stream.
             let names = recipient_names(&connection, recipient, bare_recipient)?;
             let filter = super::messages_shard::Filter {
                 recipients: Some(&names),
                 senders: None,
                 open_only: !include_closed,
             };
-            let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
+            let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - output.len(), None)?;
             output.extend(stream);
             let next = stream_cursor(more, &output, last_listed);
             return Ok((output, next));
@@ -467,7 +569,6 @@ impl Store {
         let next_after = has_more
             .then(|| subjects.last().map(|(_, index)| *index))
             .flatten();
-        let listed = subjects.len();
         let last_listed = subjects.last().map(|(_, index)| *index);
         let mut output = Vec::new();
         for (subject, created_index) in subjects {
@@ -475,7 +576,7 @@ impl Store {
             if recipient
                 .as_deref()
                 .is_none_or(|recipient| recipient == message.to)
-                && (include_closed || message.status != "closed")
+                && (include_closed || !matches!(message.status.as_str(), "closed" | "expired"))
             {
                 output.push(message);
             }
@@ -485,7 +586,7 @@ impl Store {
         }
         // Every message, as the graph's are listed: the page goes on into the whole stream.
         let filter = super::messages_shard::Filter { recipients: None, senders: None, open_only: !include_closed };
-        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - listed, None)?;
+        let (stream, more) = self.stream_page_after(filter, after.unwrap_or(0), limit - output.len(), None)?;
         output.extend(stream);
         let next = stream_cursor(more, &output, last_listed);
         Ok((output, next))
@@ -575,6 +676,34 @@ impl Store {
 
 const MESSAGE_CACHE_LIMIT: usize = 4096;
 
+/// Whether a message's view shows it sent, staged or delivered, the statuses a delivery stream
+/// offers. The view's own rule: the newest canonical `status` field (`sent` without one), raised
+/// by a local mark that ranks above it. A read or close mark decides alone, as no offerable
+/// status ranks above it; otherwise only the newest claims are read, and the body of a message
+/// whose newest claim is its send.
+fn offerable_status(connection: &Connection, subject: &str) -> Result<bool> {
+    use super::message_marks::rank;
+    if let Some(status) = super::message_expiry::status(connection, subject)? {
+        return Ok(matches!(status, "sent" | "staged" | "delivered"));
+    }
+    let marked = super::message_marks::status(connection, subject)?;
+    if marked.is_some_and(|marked| rank(marked) >= rank("read")) {
+        return Ok(false);
+    }
+    let claimed = super::latest_actual_fields_at(connection, subject, None, &["status"])?;
+    let mut status = claimed
+        .as_ref()
+        .and_then(|actual| actual.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("sent");
+    if let Some(marked) = marked
+        && rank(marked) > rank(status)
+    {
+        status = marked;
+    }
+    Ok(matches!(status, "sent" | "staged" | "delivered"))
+}
+
 /// A failed subscription request stays a fault while its subscription runs. A failed request is
 /// never retried, so only a stop ends it on its own: a stopped subscription starts nothing more.
 fn subscription_failure_is_current_tx(
@@ -610,6 +739,10 @@ pub fn recipient_names(
 }
 
 #[cfg(test)]
+#[path = "offerable_mail_tests.rs"]
+mod offerable_mail_tests;
+
+#[cfg(test)]
 mod mailbox_metrics_tests {
     use super::*;
 
@@ -620,7 +753,7 @@ mod mailbox_metrics_tests {
             .append_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: format!("message.{status}"),
-                actor: Some("agent/example.old".into()),
+                actor: Some(if status == "expired" { "daemon/runtime" } else { "agent/example.old" }.into()),
                 fields,
                 evidence: Vec::new(),
                 expected_subject: None,
@@ -633,6 +766,31 @@ mod mailbox_metrics_tests {
         append(store, subject, "sent", json!({
             "to": to, "from": from, "tags": tags, "content": "example"
         }))
+    }
+
+    #[test]
+    fn expired_silent_mail_does_not_consume_held_batch_slots() {
+        let store = Store::open_memory("node").unwrap();
+        let recipient = "agent/example.worker";
+        for index in 0..18 {
+            let subject = format!("message/held-{index}");
+            sent(&store, &subject, recipient, "agent/example.sender", &["st3-silent"]);
+            if index >= 10 {
+                append(&store, &subject, "expired", json!({"reason": "cutoff-never-offered"}));
+            }
+        }
+        // An upgraded store can retain held flags computed before expiry was understood.
+        store.connection.write().execute("UPDATE coordination_sends SET held=1", []).unwrap();
+        sent(&store, "message/wake", recipient, "person/example", &[]);
+        let offered = store.offerable_messages_for_delivery_through(recipient, store.index().unwrap()).unwrap();
+        let expected: Vec<_> = (2..10).map(|index| format!("message/held-{index}"))
+            .chain(std::iter::once("message/wake".into())).collect();
+        assert_eq!(offered.iter().map(|message| &message.subject).collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
+        for message in &offered[..8] {
+            assert!(message.tags.contains(&format!("{}2", crate::silent::REMAINING_PREFIX)));
+        }
+        assert_eq!(store.messages(Some(recipient), true).unwrap().iter()
+            .filter(|message| message.status == "expired").count(), 8);
     }
 
     #[test]
@@ -656,18 +814,37 @@ mod mailbox_metrics_tests {
         }
         sent(&store, "message/other", "agent/example.other", "agent/example.sender", &[]);
         assert_eq!(
-            store.mailbox_unread_summary("agent/example.worker", true).unwrap(),
+            store.mailbox_unread_summary("agent/example.worker", true, 0).unwrap(),
             vec![
-                ("delivered".into(), 1, delivered.accepted_at_unix_ms),
-                ("held".into(), 20, held_oldest),
-                ("pending".into(), 3, pending.accepted_at_unix_ms.min(staged.accepted_at_unix_ms).min(waking.accepted_at_unix_ms)),
+                ("delivered".into(), "recent", 1, delivered.accepted_at_unix_ms),
+                ("held".into(), "recent", 20, held_oldest),
+                ("pending".into(), "recent", 3, pending.accepted_at_unix_ms.min(staged.accepted_at_unix_ms).min(waking.accepted_at_unix_ms)),
             ],
         );
-        let incomplete = store.mailbox_unread_summary("example.worker", false).unwrap();
+        let incomplete = store.mailbox_unread_summary("example.worker", false, 0).unwrap();
         assert_eq!(incomplete.len(), 2);
         assert_eq!(incomplete[1].0, "pending");
-        assert_eq!(incomplete[1].1, 23);
-        assert!(store.mailbox_unread_summary("agent/example.empty", true).unwrap().is_empty());
+        assert_eq!(incomplete[1].2, 23);
+        assert!(store.mailbox_unread_summary("agent/example.empty", true, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mailbox_age_bands_keep_recent_mail_separate_at_the_exact_boundary() {
+        let store = Store::open_memory("node").unwrap();
+        for (subject, accepted) in [("message/stale", 100), ("message/recent", 101)] {
+            let claim = sent(&store, subject, "agent/example.worker", "agent/example.sender", &[]);
+            store.connection.write().execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                params![accepted.to_string(), claim.id],
+            ).unwrap();
+        }
+        assert_eq!(
+            store.mailbox_unread_summary("agent/example.worker", true, MAILBOX_STALE_AFTER_MS + 100).unwrap(),
+            vec![
+                ("pending".into(), "recent", 1, 101),
+                ("pending".into(), "stale", 1, 100),
+            ],
+        );
     }
 
     #[test]
@@ -705,12 +882,12 @@ mod mailbox_metrics_tests {
             [],
         ).unwrap();
         assert_eq!(
-            store.mailbox_unread_summary("agent/example.worker", true).unwrap(),
-            vec![("pending".into(), 1, 100)],
+            store.mailbox_unread_summary("agent/example.worker", true, MAILBOX_STALE_AFTER_MS + 100).unwrap(),
+            vec![("pending".into(), "stale", 1, 100)],
         );
         assert_eq!(
-            store.mailbox_unread_summary("agent/example.old", true).unwrap(),
-            vec![("pending".into(), 1, 100)],
+            store.mailbox_unread_summary("agent/example.old", true, MAILBOX_STALE_AFTER_MS + 100).unwrap(),
+            vec![("pending".into(), "stale", 1, 100)],
         );
     }
 }

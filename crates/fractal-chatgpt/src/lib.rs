@@ -6,16 +6,62 @@ use rmcp::transport::streamable_http_server::{StreamableHttpService, StreamableH
 use serde_json::{Value, json};
 use std::{io::{self, Read}, path::Path, os::unix::fs::{OpenOptionsExt, MetadataExt}};
 
+pub mod cli;
+
+/// Wire-compatible adapter profiles. Authority always comes from the paired
+/// credential's daemon grant, never from this local presentation setting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Profile {
+    server_name: &'static str,
+    assistant_principal: &'static str,
+    tool_descriptions: &'static [(&'static str, &'static str)],
+    structured_output: bool,
+}
+impl Profile {
+    // Keep profile selection spelled consistently with the original variants.
+    #[allow(non_upper_case_globals)]
+    pub const ChatGpt: Self = Self {
+        server_name: "fractal-chatgpt",
+        assistant_principal: "assistant/chatgpt",
+        tool_descriptions: &[],
+        structured_output: false,
+    };
+    #[allow(non_upper_case_globals)]
+    pub const Mcp: Self = Self {
+        server_name: "fractal-mcp",
+        assistant_principal: "assistant/mcp",
+        tool_descriptions: &[
+            (MESSAGE_SEND, "Send one exact message to an existing agent under write.assistant.messages and the paired assistant/mcp grant. Obtain human confirmation before calling. Person recipients are refused."),
+            (ALERT_ANSWER, "Execute one typed person-ask answer under write.assistant.answers and the paired assistant/mcp grant using the alert's current episode and fence. Obtain human confirmation before calling."),
+        ],
+        structured_output: true,
+    };
+    pub const fn server_name(self) -> &'static str { self.server_name }
+    pub const fn assistant_principal(self) -> &'static str { self.assistant_principal }
+    const fn structured_output(self) -> bool { self.structured_output }
+    fn description(self, name: &str, legacy: &'static str) -> &'static str {
+        self.tool_descriptions.iter().find(|(tool, _)| *tool == name)
+            .map_or(legacy, |(_, description)| *description)
+    }
+}
+
 #[derive(Clone)]
-pub struct Adapter { client: reqwest::Client, bearer: String }
+pub struct Adapter { client: reqwest::Client, bearer: String, profile: Profile }
 impl Adapter {
     pub fn new(socket: &Path, credential_file: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        if socket.file_name().and_then(|name| name.to_str()) != Some("st3-client.sock") {
-            return Err("only the paired gateway st3-client.sock is permitted".into());
+        Self::with_profile(socket, credential_file, Profile::ChatGpt)
+    }
+    pub fn with_profile(socket: &Path, credential_file: &Path, profile: Profile) -> Result<Self, Box<dyn std::error::Error>> {
+        let permitted = socket.file_name().and_then(|name| name.to_str()) == Some("fractal-client.sock");
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+        let permitted = permitted || socket.file_name().and_then(|name| name.to_str()) == Some("st3-client.sock");
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+        if !permitted {
+            return Err("only the paired gateway fractal-client.sock is permitted".into());
         }
         let bearer = read_credential(credential_file)?;
         let client = reqwest::Client::builder().unix_socket(socket).build()?;
-        Ok(Self { client, bearer })
+        Ok(Self { client, bearer, profile })
     }
 }
 
@@ -48,12 +94,15 @@ pub const ALERT_GET: &str = "fractal_alert_get";
 pub const ALERT_ANSWER: &str = "fractal_alert_answer";
 pub const MISSIONS_LIST: &str = "fractal_missions_list";
 pub const AGENTS_LIST: &str = "fractal_agents_list";
+pub const AVAILABILITY_GET: &str = "fractal_availability_get";
 pub const CONVERSATIONS_LIST: &str = "fractal_conversations_list";
 pub const CONVERSATION_DETAIL: &str = "fractal_conversation_detail";
 pub const CONVERSATION_TIMELINE: &str = "fractal_conversation_timeline";
 pub const CONVERSATION_SEARCH: &str = "fractal_conversation_search";
 pub const CONVERSATION_READ: &str = "fractal_conversation_read";
 pub const MESSAGE_SEND: &str = "fractal_message_send";
+pub const SLO_LIST: &str = "fractal_slo_list";
+pub const SLO_HISTORY: &str = "fractal_slo_history";
 
 // Deprecated for the 0.1.0 adapter release; remove in fractal-chatgpt 0.2.0.
 // Johannes's ChatGPT connector caches tools/list. Keep old calls working without
@@ -71,12 +120,15 @@ const TOOLS: &[(&str, &str, bool)] = &[
     (ALERT_ANSWER, "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
     (MISSIONS_LIST, "List mission metadata.", true),
     (AGENTS_LIST, "List agent metadata. For a known canonical agent ID, set agent_id to avoid paging through the fleet. This does not read priorities or conversation content.", true),
+    (AVAILABILITY_GET, "Read the grant person's own availability and current directive note. availability.status is the effective status (available or away; status_source says whether a manual override, valid until status_until, or device presence set it, or is unreported when no device has reported within 24 hours, which means available); raw device presence is never shown to assistants, so presence and presence_observed_at are always null; interruptions is all, urgent or none; deadline_clock is run, hold-routine or hold-all and says whether ask deadlines are paused. directive_note is the person's current standing instruction, or null. Its text is cut on a character boundary to fit max_response_bytes and directive_note_truncated is then true; read again with a larger max_response_bytes (up to 16384) for the whole note. The availability fields are never cut. While the person is away or interruptions is none, park blocking asks instead of interrupting them.", true),
     (CONVERSATIONS_LIST, "Discover source-bounded conversation metadata and read handles without conversation content. Each value.items entry supplies agent_id and session_id for fractal_conversation_timeline and a read object containing all fractal_conversation_read arguments (null when the bounded current timeline page has no readable text handle; use timeline to continue). Pass read unchanged to fractal_conversation_read; use value.page.next_cursor to page this list. Pages fit max_response_bytes; an item that cannot fit alone is named in the error.", true),
     (CONVERSATION_DETAIL, "Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. Use agent_id from fractal_conversations_list; pass each non-null timeline item's read object unchanged to fractal_conversation_read. Content may be sensitive.", true),
     (CONVERSATION_TIMELINE, "Page bounded chat excerpts and revision-pinned read handles. Copy agent_id and session_id from fractal_conversations_list to select the discovered session; omit session_id only to select the current session. Pass each non-null value.items[].read object unchanged to fractal_conversation_read, and use value.page.next_cursor only to continue this timeline. Content may be sensitive.", true),
     (CONVERSATION_SEARCH, "Search bounded plain conversation text snippets. Content may be sensitive.", true),
     (CONVERSATION_READ, "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from fractal_conversations_list or fractal_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
     (MESSAGE_SEND, "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
+    (SLO_LIST, "List every Fractal objective and budget row the daemon reports. An objective row (kind objective) states a service-level target, its current measurement, the window it is measured over, and remaining_percent: how much of its error budget is left. A budget row (kind budget, with an account) states an allowance, current use, the window until it resets, and how much remains, with a forecast when one is known. status and tone say whether the row is met and how urgent it is. Rows arrive in pages that fit max_response_bytes; while value.page.next_cursor is non-null, call again with that cursor to read the next rows.", true),
+    (SLO_HISTORY, "Chart what was left (remaining_percent) of one objective or budget row across a period. Copy id exactly from fractal_slo_list. since_ms and until_ms are Unix milliseconds (default: the last 24 hours, at most 7 days); steps (1 to 1000, default 120) is how many equal steps to answer in; each step holds its lowest reading and is null when nothing was read.", true),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
@@ -109,6 +161,7 @@ fn schema(name: &str) -> Value {
     let props = match name {
         ALERT_ANSWER => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
         MESSAGE_SEND => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
+        AVAILABILITY_GET => json!({"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         ALERT_GET => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         CONVERSATION_DETAIL => json!({"agent_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         CONVERSATION_TIMELINE => json!({"agent_id":{"type":"string","description":"Copy value.items[].agent_id from fractal_conversations_list."},"session_id":{"type":"string","description":"Copy the same conversation item's session_id to pin the discovered session; omitted selects the current session."},"cursor":{"type":"string","description":"Copy value.page.next_cursor from the preceding timeline page; omit for the first page."},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
@@ -116,6 +169,7 @@ fn schema(name: &str) -> Value {
         CONVERSATION_READ => json!({"agent_id":{"type":"string","description":"Copy read.agent_id from a discovered conversation or timeline item."},"session_id":{"type":"string","description":"Copy read.session_id from the same handle; do not infer from agent_id."},"reference":{"type":"string","description":"Copy read.reference, an opaque content reference, not a pagination cursor."},"revision":{"type":"string","description":"Copy read.revision paired with this content reference to pin the source version."},"start":{"type":"integer","minimum":0,"description":"Copy read.start, the inclusive range start."},"end":{"type":"integer","minimum":0,"description":"Copy read.end, the exclusive range end."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         ALERTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         AGENTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        SLO_HISTORY => json!({"id":{"type":"string","pattern":"^[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact objective or budget id from fractal_slo_list."},"since_ms":{"type":"integer","minimum":0,"description":"Period start in Unix milliseconds; defaults to 24 hours before until_ms."},"until_ms":{"type":"integer","minimum":0,"description":"Period end in Unix milliseconds; defaults to now."},"steps":{"type":"integer","minimum":1,"maximum":1000,"description":"Equal steps to answer in; defaults to 120."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
     };
     let required = match name {
@@ -125,6 +179,7 @@ fn schema(name: &str) -> Value {
         CONVERSATION_DETAIL | CONVERSATION_TIMELINE => vec!["agent_id"],
         CONVERSATION_SEARCH => vec!["text"],
         CONVERSATION_READ => vec!["agent_id","session_id","reference","revision","start","end"],
+        SLO_HISTORY => vec!["id"],
         _ => vec![],
     };
     json!({"type":"object","properties":props,"required":required,"additionalProperties":false})
@@ -186,16 +241,110 @@ fn validate_arguments(name: &str, args: &Value) -> Result<(), Value> {
     }
     Ok(())
 }
-fn tool_definitions() -> Vec<Tool> {
-    TOOLS.iter().map(|(name,description,read)| serde_json::from_value(json!({
-        "name":name,"description":description,"inputSchema":schema(name),
-        "annotations":{"readOnlyHint":read,"destructiveHint":*name==ALERT_ANSWER,"idempotentHint":true,"openWorldHint":*name==MESSAGE_SEND}
-    })).expect("static tool definition")).collect()
+fn tool_definitions(profile: Profile) -> Vec<Tool> {
+    TOOLS.iter().map(|(name,description,read)| {
+        let mut definition = json!({
+            "name":name,"description":profile.description(name, description),"inputSchema":schema(name),
+            "annotations":{"readOnlyHint":read,"destructiveHint":*name==ALERT_ANSWER,"idempotentHint":true,"openWorldHint":*name==MESSAGE_SEND}
+        });
+        if profile.structured_output() { definition["outputSchema"] = output_schema(name); }
+        serde_json::from_value(definition).expect("static tool definition")
+    }).collect()
+}
+
+/// Describe the gateway envelope, retaining its provenance rather than wrapping it
+/// in a second success envelope. Item records remain extensible daemon contracts.
+fn output_schema(name: &str) -> Value {
+    let page = json!({"type":"object","properties":{
+        "limit":{"type":["integer","null"]},"has_more":{"type":"boolean"},
+        "next_cursor":{"type":["string","null"]},"cursor_expires_at":{"type":["string","null"]}
+    },"required":["limit","has_more","next_cursor"]});
+    let value = match name {
+        ALERT_GET => json!({"type":"object","properties":{
+            "id":{"type":["string","null"]},"episode":{"type":["string","null"]},
+            "kind":{"type":["string","null"]},"title":{},"detail":{},"request":{}
+        },"required":["id","episode","kind","title","detail","request"]}),
+        ALERT_ANSWER | MESSAGE_SEND => json!({"type":"object","properties":{
+            "kind":{"const":"action-result"},"action_id":{"type":"string"},
+            "operation_id":{"type":"string"},"status":{"type":"string"},
+            "affected_ids":{"type":"array","items":{"type":"string"}},"snapshot_id":{"type":"string"}
+        },"required":["kind","action_id","status"]}),
+        AVAILABILITY_GET => {
+            let at = json!({"type":["string","null"],"format":"date-time"});
+            json!({"type":"object","properties":{
+                "kind":{"const":"person-availability"},
+                "availability":{"type":"object","properties":{
+                    "person":{"type":"string","pattern":"^person/[^/\\s]+$"},
+                    "status":{"enum":["available","away"]},"status_source":{"enum":["override","presence","unreported"]},
+                    "status_until":at,"presence":{"type":"null"},
+                    "presence_observed_at":{"type":"null"},"interruptions":{"enum":["all","urgent","none"]},
+                    "interruptions_until":at,"deadline_clock":{"enum":["run","hold-routine","hold-all"]},
+                    "deadline_clock_since":at,"deadline_clock_until":at
+                },"required":["person","status","status_source","status_until","presence","presence_observed_at",
+                    "interruptions","interruptions_until","deadline_clock","deadline_clock_since","deadline_clock_until"]},
+                "directive_note":{"type":["object","null"],"properties":{
+                    "person":{"type":"string"},"author":{"type":"string"},"time":{"type":"string"},
+                    "text":{"type":"string"},"expires_at":at,"revision":{"type":"string"}
+                },"required":["person","author","time","text","expires_at","revision"]},
+                "directive_note_truncated":{"type":"boolean"}
+            },"required":["kind","availability","directive_note","directive_note_truncated"]})
+        }
+        CONVERSATION_READ => json!({"type":"object","properties":{
+            "kind":{"const":"assistant-conversation-content"},"agent_id":{"type":"string"},
+            "session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},
+            "start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0},
+            "text":{"type":"string"},"returned_bytes":{"type":"integer","minimum":0},
+            "truncated":{"type":"boolean"},"next_range":{"type":["object","null"]}
+        },"required":["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]}),
+        SLO_HISTORY => json!({"type":"object","properties":{
+            "kind":{"const":"slo-history"},"id":{"type":"string"},
+            "since_ms":{"type":"integer","minimum":0},"until_ms":{"type":"integer","minimum":0},
+            "samples":{"type":"integer","minimum":0},"steps":{"type":"array","items":{"type":["number","null"]}}
+        },"required":["kind","id","since_ms","until_ms","samples","steps"]}),
+        _ => {
+            let mut result = json!({"type":"object","properties":{
+                "kind":{"type":"string"},"items":{"type":"array","items":{"type":"object"}},"page":page
+            },"required":["kind","items","page"]});
+            if matches!(name, CONVERSATION_DETAIL | CONVERSATION_TIMELINE) {
+                result["properties"]["kind"] = json!({"const":if name == CONVERSATION_DETAIL {"conversation-detail"} else {"conversation-timeline"}});
+                for key in ["agent_id", "session_id", "current_session_id"] {
+                    result["properties"][key] = json!({"type":"string"});
+                    result["required"].as_array_mut().expect("array").push(json!(key));
+                }
+            }
+            else {
+                result["properties"]["kind"] = json!({"const":if name == CONVERSATION_SEARCH {"conversation-search"} else {"page"}});
+            }
+            result
+        }
+    };
+    json!({"type":"object","title":format!("{name} result"),"oneOf":[
+        {"type":"object","properties":{
+            "api_version":{"const":"st3.client.v0"},"request_id":{"type":"string"},
+            "snapshot":{"type":"object","properties":{"id":{"type":"string"},"host_id":{"type":"string"},"store_index":{"type":"integer","minimum":0}}},
+            "value":value
+        },"required":["api_version","request_id","snapshot","value"]},
+        {"type":"object","properties":{
+            "code":{"enum":["unknown-tool","invalid-arguments","unavailable","invalid-daemon-response","incomplete","daemon-denied"]},
+            "message":{"type":"string"},"http_status":{"type":"integer"},"daemon":{}
+        },"required":["code"],"additionalProperties":false}
+    ]})
+}
+
+fn tool_result(profile: Profile, value: Value, error: bool) -> CallToolResult {
+    if profile.structured_output() {
+        // MCP 2025-11-25 tools/structured-content SHOULD also serialize the
+        // JSON in a TextContent block for older clients. rmcp 3.5.1's structured
+        // constructors implement that exact mirror for success and errors.
+        if error { CallToolResult::structured_error(value) } else { CallToolResult::structured(value) }
+    } else if error { CallToolResult::error(vec![ContentBlock::text(value.to_string())]) }
+    else { CallToolResult::success(vec![ContentBlock::text(value.to_string())]) }
 }
 /// Only closed tool names and locally selected codes enter telemetry. A dropped
 /// dispatch future emits cancellation too, without retaining any tool arguments.
 struct CallObservation {
     tool: &'static str,
+    profile: Profile,
     started: std::time::Instant,
     outcome: &'static str,
     code: &'static str,
@@ -203,8 +352,9 @@ struct CallObservation {
     response_bytes: Option<u64>,
 }
 impl CallObservation {
-    fn new(name: &str) -> Self {
+    fn new(name: &str, profile: Profile) -> Self {
         Self {
+            profile,
             tool: TOOLS.iter().find(|(tool, _, _)| *tool == name)
                 .map_or("unknown", |(tool, _, _)| *tool),
             started: std::time::Instant::now(),
@@ -231,17 +381,17 @@ impl CallObservation {
 }
 impl Drop for CallObservation {
     fn drop(&mut self) {
-        tracing::info!(target: "st_chatgpt::call",
+        tracing::info!(target: "fractal_chatgpt::call",
             tool = self.tool, outcome = self.outcome, code = self.code,
             daemon_request_id = self.request_id.as_deref(),
             duration_ms = self.started.elapsed().as_secs_f64() * 1000.0,
             response_bytes = self.response_bytes,
-            "ChatGPT tool call finished");
+            "{}", if self.profile.structured_output() { "MCP tool call finished" } else { "ChatGPT tool call finished" });
     }
 }
 async fn call(adapter: &Adapter, name: &str, args: &Value) -> Result<Value,Value> {
     let name = canonical_tool_name(name);
-    let mut observation = CallObservation::new(name);
+    let mut observation = CallObservation::new(name, adapter.profile);
     let result = dispatch(adapter, name, args, &mut observation).await;
     observation.outcome = if result.is_ok() { "success" } else { "error" };
     observation.code = match &result {
@@ -266,11 +416,14 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         ALERT_GET => "attention-content",
         MISSIONS_LIST => "missions-rich",
         AGENTS_LIST => "agents-rich",
+        AVAILABILITY_GET => "availability",
         CONVERSATIONS_LIST => "conversations",
         CONVERSATION_DETAIL => "conversation-detail",
         CONVERSATION_TIMELINE => "conversation-timeline",
         CONVERSATION_SEARCH => "conversation-search",
         CONVERSATION_READ => "conversation-content",
+        SLO_LIST => "slo",
+        SLO_HISTORY => "slo-history",
         _ => "propose",
     };
     let url = format!("http://localhost/v1/client/assistant/{route}");
@@ -283,29 +436,32 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         let query: Vec<_> = object.iter().map(|(k,v)| (k.as_str(),v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string()))).collect();
         adapter.client.get(url).query(&query)
     };
-    let response = request.bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired st daemon is unavailable."}))?;
+    let response = request.header("x-st3-client", concat!("fractal-chatgpt ", env!("CARGO_PKG_VERSION")))
+        .bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired Fractal daemon is unavailable."}))?;
     let status = response.status();
     // reqwest's JSON decoder already buffers the body. Reuse that exact buffer
     // for byte accounting, without reserializing content or trusting Content-Length.
     let bytes = response.bytes().await.map_err(|_|json!({"code":"invalid-daemon-response"}))?;
     observation.response_bytes = Some(bytes.len() as u64);
     let value: Value = serde_json::from_slice(&bytes).map_err(|_|json!({"code":"invalid-daemon-response"}))?;
+    if adapter.profile.structured_output() && !value.is_object() {
+        return Err(json!({"code":"invalid-daemon-response"}));
+    }
     observation.response(&value);
     if status.is_success() {Ok(value)} else {Err(json!({"code":if status.as_u16()==413 {"incomplete"} else {"daemon-denied"},"http_status":status.as_u16(),"daemon":value}))}
 }
 impl ServerHandler for Adapter {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("st-chatgpt",env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(self.profile.server_name(),env!("CARGO_PKG_VERSION")))
     }
     async fn list_tools(&self, _:Option<PaginatedRequestParams>, _:RequestContext<RoleServer>) -> Result<ListToolsResult,ErrorData> {
-        Ok(ListToolsResult { tools: tool_definitions(), ..Default::default() })
+        Ok(ListToolsResult { tools: tool_definitions(self.profile), ..Default::default() })
     }
     async fn call_tool(&self, request:CallToolRequestParams, _:RequestContext<RoleServer>) -> Result<CallToolResponse,ErrorData> {
         let args=request.arguments.map(Value::Object).unwrap_or_else(||json!({}));
         let (value,error)=match call(self,&request.name,&args).await {Ok(v)=>(v,false),Err(v)=>(v,true)};
-        let result=if error {CallToolResult::error(vec![ContentBlock::text(value.to_string())])}
-            else {CallToolResult::success(vec![ContentBlock::text(value.to_string())])};
+        let result=tool_result(self.profile,value,error);
         Ok(result.into())
     }
 }

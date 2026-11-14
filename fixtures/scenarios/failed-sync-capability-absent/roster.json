@@ -50,6 +50,7 @@
         "reachability": "local",
         "revision": "ag35",
         "runtime_ids": [
+          "runtime/example-atlas-builder-shell",
           "runtime/example-atlas-builder"
         ],
         "since": "2030-01-01T11:22:00.000Z",

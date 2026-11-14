@@ -36,11 +36,41 @@ function createRuntimeAdoptionStore() {
     publish: (next: ReadonlySet<string>, snapshot: ConversationRuntimeOptions) => { ids = next; adopted = snapshot; for (const listener of listeners) listener() },
   }
 }
+const historyAdoptionBatchSize = 8
+/**
+ * The runtime eagerly builds message resources even for rows the transcript leaves unmounted.
+ * Adopt an older prefix in small paint-sized batches, retaining the current suffix throughout,
+ * starting on the frame after the prepend: React flushes a discrete update's passive effects
+ * before that frame paints, so adopting here would rebuild the runtime inside the frame that
+ * delivered the page. Replacements and live tail changes remain immediate.
+ */
+function useHistoryAdoption(options: ConversationRuntimeOptions): ConversationRuntimeOptions {
+  const [window, setWindow] = React.useState({ source: options, offset: 0 })
+  let offset = window.offset
+  if (window.source !== options) {
+    const previous = window.source.messages?.slice(window.offset)
+    const messages = options.messages
+    const added = messages === undefined || previous === undefined ? 0 : messages.length - previous.length
+    offset = messages !== undefined && previous !== undefined && added > 0 && previous.length > 0 && previous.every((item, index) => messages[added + index] === item)
+      ? added
+      : 0
+    setWindow({ source: options, offset })
+  }
+  React.useEffect(() => {
+    if (offset === 0) return
+    const frame = requestAnimationFrame(() => setWindow(current => current.source === options
+      ? { source: options, offset: Math.max(0, current.offset - historyAdoptionBatchSize) }
+      : current))
+    return () => cancelAnimationFrame(frame)
+  }, [options, offset])
+  return React.useMemo(() => offset === 0 || options.messages === undefined ? options : { ...options, messages: options.messages.slice(offset) }, [options, offset])
+}
 export function EmbraceRuntimeProvider({ options, children }: { readonly options: ConversationRuntimeOptions; readonly children: React.ReactNode }) {
-  const runtime = useConversationRuntime(options)
+  const adoptedOptions = useHistoryAdoption(options)
+  const runtime = useConversationRuntime(adoptedOptions)
   const [store] = React.useState(createRuntimeAdoptionStore)
   // Declared after the runtime hook, so it reads the runtime after that hook's adoption effect for the same snapshot.
-  React.useEffect(() => store.publish(new Set(runtime.thread.getState().messages.map(message => message.id)), options), [runtime, options, store])
+  React.useEffect(() => store.publish(new Set(runtime.thread.getState().messages.map(message => message.id)), adoptedOptions), [runtime, adoptedOptions, store])
   // Each render's context compares against its own snapshot, so a discarded render never marks adoption.
   const adoption = React.useMemo<RuntimeAdoption>(() => ({ get: store.get, subscribe: store.subscribe, isSnapshotAdopted: () => store.getAdopted() === options }), [store, options])
   return <AssistantRuntimeProvider runtime={runtime}><RuntimeAdoptedIds.Provider value={adoption}>{children}</RuntimeAdoptedIds.Provider></AssistantRuntimeProvider>

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retire the uncalled standalone pi-family catalog channels",
+  "replay": {
+    "status": "none",
+    "detail": "The live managed CLI and EventObserver still record current native-session events."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Native binding, checkpoint, outbox, observed-record and transcript formats are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Ownership, resume fences, question/todo/inventory validation and current delivery admission are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Removes unused workspace Rust standalone run/run_omp entrypoints, ChannelKind, protocol constant and login helper. No repository caller uses them; current native CLI framing and the managed observer remain. The exact-head Clippy measurement lowers the fractal-drivers too_many_arguments baseline from 7 to 6, with no ceiling increased."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No provider or daemon restart required by this source cleanup."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or stored-state cleanup required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the unused standalone source path without rewriting stored state."
+  }
+}

@@ -39,12 +39,14 @@ impl Daemon {
 
     fn state(root: &Path) -> AppState {
         AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(Store::open(&root.join("graph.db"), NODE).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: NODE.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.into(),
             pty_root: root.join("pty"),
             pty_binary: "pty".into(),

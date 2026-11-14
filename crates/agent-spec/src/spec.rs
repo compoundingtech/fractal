@@ -18,7 +18,8 @@
 #[path = "spec_validation.rs"]
 mod spec_validation;
 pub use spec_validation::{
-    validate_agent_address, validate_agent_id, validate_desired_state_reason, validate_presentation,
+    validate_agent_address, validate_agent_id, validate_description, validate_desired_state_reason,
+    validate_presentation,
 };
 pub(crate) use spec_validation::{
     lower_desired_state, parse_task_lifecycle, validate_launch,
@@ -32,8 +33,9 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum Unicode scalar count for an agent's human-facing label.
 pub const AGENT_NAME_MAX_CHARS: usize = 160;
-/// Maximum Unicode scalar count for an agent's enduring responsibility description.
-pub const AGENT_DESCRIPTION_MAX_CHARS: usize = 1_000;
+/// Maximum UTF-8 byte length of an agent's description, its charter: the long-running
+/// responsibility the agent carries across missions.
+pub const AGENT_DESCRIPTION_MAX_BYTES: usize = 8 * 1024;
 /// Maximum UTF-8 byte length for a non-running desired-state rationale.
 pub const AGENT_DESIRED_STATE_REASON_MAX_BYTES: usize = 160;
 /// Maximum ASCII length of an explicit agent address (R24).
@@ -1332,11 +1334,7 @@ impl RawSpec {
         path: PathBuf,
     ) -> anyhow::Result<AgentSpec> {
         validate_presentation("name", self.name.as_deref(), AGENT_NAME_MAX_CHARS)?;
-        validate_presentation(
-            "description",
-            self.description.as_deref(),
-            AGENT_DESCRIPTION_MAX_CHARS,
-        )?;
+        validate_description(self.description.as_deref())?;
         if let Some(id) = self.id.as_deref() {
             validate_agent_id(id)?;
         }

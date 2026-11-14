@@ -151,12 +151,14 @@ fn state(root: &Path, node: &str) -> AppState {
     // locked: claims` from `st work ask`.
     let store = Store::open(&root.join("claims.sqlite3"), node).unwrap();
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(store),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: node.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused-pty"),

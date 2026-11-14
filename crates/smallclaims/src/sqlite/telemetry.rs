@@ -23,6 +23,69 @@ pub fn phase_spans_enabled() -> bool {
     EXPORT_ENABLED.load(Ordering::Relaxed)
 }
 
+/// One caller's writer lifetime, independent of opt-in slow-batch root spans.
+/// The disabled path keeps no span, request handle, or caller-site allocation.
+pub(crate) struct WriterOperation {
+    context: opentelemetry::Context,
+    request: Option<Arc<WriterWait>>,
+    acquired: Option<std::time::Instant>,
+}
+
+impl WriterOperation {
+    #[track_caller]
+    pub(crate) fn start(queue: &'static str, operation: &'static str) -> Option<Self> {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _};
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        let mut parent = opentelemetry::Context::current();
+        if !parent.span().span_context().is_valid() {
+            let current = tracing::Span::current();
+            if current.is_disabled() { return None; }
+            parent = current.context();
+        }
+        let span_context = parent.span().span_context().clone();
+        if !span_context.is_valid() || !span_context.is_sampled() { return None; }
+        let caller = std::panic::Location::caller();
+        let tracer = opentelemetry::global::tracer("smallclaims.sqlite");
+        let span = tracer.span_builder("st.db.writer")
+            .with_attributes([
+                KeyValue::new("span.label", operation),
+                KeyValue::new("db.system.name", "sqlite"),
+                KeyValue::new("db.operation.name", operation),
+                KeyValue::new("queue", queue),
+                KeyValue::new("code.file.path", caller.file()),
+                KeyValue::new("code.line.number", i64::from(caller.line())),
+                KeyValue::new("code.column.number", i64::from(caller.column())),
+            ])
+            .start_with_context(&tracer, &parent);
+        Some(Self {
+            context: parent.with_span(span),
+            request: current_request(),
+            acquired: None,
+        })
+    }
+
+    pub(crate) fn acquired(&mut self, waited: Duration) {
+        use opentelemetry::trace::TraceContextExt as _;
+        if self.acquired.is_some() { return; }
+        self.acquired = Some(std::time::Instant::now());
+        self.context.span().set_attribute(KeyValue::new("writer_wait_ms", waited.as_secs_f64() * 1000.));
+    }
+
+    pub(crate) fn enter(&self) -> (opentelemetry::ContextGuard, RequestScope) {
+        (self.context.clone().attach(), enter_request(self.request.clone()))
+    }
+}
+
+impl Drop for WriterOperation {
+    fn drop(&mut self) {
+        use opentelemetry::trace::TraceContextExt as _;
+        if let Some(acquired) = self.acquired {
+            self.context.span().set_attribute(KeyValue::new("writer_hold_ms", acquired.elapsed().as_secs_f64() * 1000.));
+        }
+        self.context.span().end();
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Origin(OriginLabel);
 
@@ -67,6 +130,9 @@ static TASK_ORIGINS: &[&str] = &[
     "task mailbox-fence", "task mailbox-report", "task mailbox-replay", "task mailbox-primary",
     "task mailbox-rollout", "task mailbox-attachment", "task mailbox-own-post", "task mailbox-loss",
     "maintenance.client_message_selectors", "maintenance.completion_health",
+    "replication.inventory_full", "replication.sealing_recovery", "operations.audit",
+    "operations.doctor_report", "maintenance.claim_ranges", "maintenance.operation_claim_digests",
+    "maintenance.gate_runner_history",
 ];
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -686,6 +752,82 @@ mod tests {
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
     #[test]
+    fn writer_children_keep_request_context_and_complete_after_finalization() {
+        // Isolate the global tracer provider and opt-in phase flag from sibling tests.
+        const CHILD: &str = "ST3_WRITER_CHILD_SPANS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "sqlite::telemetry::tests::writer_children_keep_request_context_and_complete_after_finalization", "--nocapture"])
+                .env(CHILD, "1")
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        use opentelemetry::trace::{Span as _, TraceContextExt as _, Tracer as _, TracerProvider as _};
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone()).build();
+        opentelemetry::global::set_tracer_provider(provider.clone());
+        assert!(!phase_spans_enabled());
+        assert!(WriterOperation::start("foreground", "write.lend").is_none());
+        let request_span = provider.tracer("writer.test").start("request");
+        let parent_id = request_span.span_context().span_id();
+        let context = opentelemetry::Context::current_with_span(request_span);
+        let _attached = context.attach();
+        let request = Arc::new(WriterWait::default());
+        let _request = enter_request(Some(request.clone()));
+        let writer = super::super::WriterConnection::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let finalized = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finalized_in_hook = finalized.clone();
+        let finalizer_exporter = exporter.clone();
+        writer.install_transaction_maintenance(move |_| {
+            assert!(!finalizer_exporter.get_finished_spans().unwrap().iter()
+                .any(|span| span.name == "st.db.writer"
+                    && span.attributes.contains(&KeyValue::new("db.operation.name", "write.batched"))));
+            finalized_in_hook.store(true, Ordering::Release);
+            Ok(())
+        }).unwrap();
+        // Installing hooks takes a foreground fence loan; inspect only the calls below.
+        exporter.reset();
+        let expected_request = request.clone();
+        let batch_line = line!() + 1;
+        writer.batched(move |_| -> Result<(), ()> {
+            assert!(Arc::ptr_eq(&current_request().unwrap(), &expected_request));
+            let current = opentelemetry::Context::current();
+            assert_ne!(current.span().span_context().span_id(), parent_id);
+            assert!(current.span().span_context().is_valid());
+            Ok(())
+        }).unwrap().unwrap();
+        assert!(finalized.load(Ordering::Acquire));
+        assert_eq!(exporter.get_finished_spans().unwrap().len(), 1);
+        let foreground_line = line!() + 1;
+        drop(writer.write());
+        let background_line = line!() + 1;
+        drop(writer.write_background());
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 3);
+        for (span, (queue, line)) in spans.iter().zip([
+            ("foreground", batch_line), ("foreground", foreground_line), ("background", background_line),
+        ]) {
+            assert_eq!(span.name, "st.db.writer");
+            assert_eq!(span.parent_span_id, parent_id);
+            assert!(span.attributes.contains(&KeyValue::new("queue", queue)));
+            assert!(span.attributes.contains(&KeyValue::new("code.file.path", file!())));
+            assert!(span.attributes.contains(&KeyValue::new("code.line.number", i64::from(line))));
+            for key in ["writer_wait_ms", "writer_hold_ms"] {
+                assert!(span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == key
+                        && matches!(attribute.value, opentelemetry::Value::F64(value) if value >= 0.)
+                }));
+            }
+        }
+        assert!(Arc::ptr_eq(&current_request().unwrap(), &request));
+    }
+
+    #[test]
     fn checkpoint_histogram_exports_operation_and_report_outcome() {
         use opentelemetry::metrics::MeterProvider as _;
         let exporter = InMemoryMetricExporter::default();
@@ -762,6 +904,8 @@ mod tests {
             "task mailbox-fence", "task mailbox-report", "task mailbox-replay", "task mailbox-primary",
             "task mailbox-rollout", "task mailbox-attachment", "task mailbox-own-post", "task mailbox-loss",
             "maintenance.client_message_selectors", "maintenance.completion_health",
+            "replication.inventory_full", "replication.sealing_recovery", "operations.audit",
+            "operations.doctor_report", "maintenance.claim_ranges", "maintenance.operation_claim_digests",
         ] {
             assert_eq!(task_origin(label).attribute("origin").value, opentelemetry::Value::from(label));
             crate::profile::task(label, || {

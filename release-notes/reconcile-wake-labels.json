@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Two reconciler wakes are named in /v1/performance's reconciler_wakes: a completed background launch identity measurement now counts as a `launch identity` wake (it notified the reconciler without being counted), and a replication receive that wakes it is counted under the claim kind it brought most of, as API claim wakes are. OpenTelemetry's closed wake registry gains `launch_identity` (18 values)",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "What wakes the reconciler, and when, is unchanged; only how a wake is counted changes. A waking replication receive runs one more read of the kinds it brought."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed-version safe: no wire, client or stored-format change. A collector that reads st.reconcile.wakes or st.reconcile.wake_cause can see the new closed value `launch_identity`; older daemons never emit it."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back counts identity measurement wakes nowhere again and replication receive wakes without a kind."
+  }
+}

@@ -590,7 +590,7 @@ impl Ui {
             .filter(|item| {
                 item.is_alert()
                     && item.is_in(agent)
-                    && !self.snoozed.contains(&item.id)
+                    && !item.snoozed(self.world.at)
                     && !self.closed.contains(&item.id)
             })
             .collect()
@@ -1362,6 +1362,7 @@ impl Ui {
                             action: "prompt.respond".into(),
                             reason: None,
                             answer: Some(sent),
+                            option_notes: Vec::new(),
                         },
                         format!("Answering “{}”…", self.answer_words(item, answer)),
                     )
@@ -1381,6 +1382,7 @@ impl Ui {
                             action: "work.done".into(),
                             reason: Some(option.label.clone()),
                             answer: Some(option.id.clone()),
+                            option_notes: self.option_notes(id, Some(&option.id)),
                         },
                         format!("Answering “{}”…", option.label),
                     )
@@ -1396,6 +1398,7 @@ impl Ui {
                         action: "work.done".into(),
                         reason: Some(answer.to_owned()),
                         answer: None,
+                        option_notes: Vec::new(),
                     },
                     format!("Answering “{answer}”…"),
                 ))
@@ -1477,6 +1480,7 @@ mod tests {
         Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: "builder is waiting for permission".into(),
@@ -2375,6 +2379,7 @@ mod tests {
         Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             id: "attention/release".into(),
             tier: Tier::Stopped,
             title: "How far does the release go?".into(),

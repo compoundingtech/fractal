@@ -181,6 +181,7 @@ mission "garden/review" state="ready" {
     act(&store, &prune, &birch, "wait", Some(2 * 60 * MINUTE as u64), "wait-prune");
     store
         .ask_person(&PersonAskRequest {
+            priority: None,
             legacy_request: None,
             person: "person/ada".into(),
             title: "Which beds stay?".into(),
@@ -251,6 +252,93 @@ fn a_stopped_seat_is_the_cause_of_the_step_it_would_take() {
     assert_eq!(open(&waiting, "plant").seat_state.as_deref(), Some("running"));
     let blocked = blocked_runs(&work, &rows, t0 + MINUTE, QUIET);
     assert_eq!(blocked.groups.iter().map(|group| group.cause).collect::<Vec<_>>(), [WaitKind::SeatDown]);
+}
+
+#[test]
+fn a_program_step_names_its_innermost_open_key_and_stalls_past_its_stalled_after() {
+    use sha2::Digest as _;
+    let t0 = start_time();
+    set_thread_clock(Some(t0));
+    let _clock = Clock;
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("graph.db"), "cedar").unwrap();
+    let bundle = b"export default {}";
+    let hash = hex::encode(sha2::Sha256::digest(bundle));
+    store.put_blob(bundle).unwrap();
+    publish(
+        &store,
+        &format!(
+            r#"version 2
+mission "garden/program" state="ready" {{
+  goal "Grow the garden by program."
+  step "land" {{ program "/bundles/land.mjs" sha256="{hash}" stalled-after="10m" }}
+}}"#
+        ),
+        "publish-garden-program",
+    );
+    let run = start(&store, "garden/program", "program-1");
+    let land = run.steps.iter().find(|step| step.step == "land").unwrap().subject.clone();
+    store.set_step_state(&land, "working", None).unwrap();
+    let entry = |key: &str, status: &str, child: Option<&str>| {
+        let mut fields = BTreeMap::from([
+            ("key".to_owned(), json!(key)),
+            ("status".to_owned(), json!(status)),
+            ("attempt".to_owned(), json!(1)),
+            ("program".to_owned(), json!(hash)),
+        ]);
+        if let Some(child) = child {
+            fields.insert("child".to_owned(), json!(child));
+        }
+        store
+            .append_claim(&crate::model::ClaimInput {
+                subject: land.clone(),
+                kind: "program.step".into(),
+                actor: None,
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    };
+    // The store stamps entries with its own clock, a moment after `t0`: read half a minute past
+    // the whole minute.
+    entry("render", "started", None);
+    entry("render", "completed", None);
+    entry("review", "started", Some("mission-run/garden/child"));
+
+    // The journal moved a minute ago: the program runs, and its innermost key waits on a child.
+    let waiting = waits(&store, &run.subject, t0 + MINUTE + MINUTE / 2, QUIET);
+    let (work, _) = published(&store);
+    assert_eq!(work.rows.rows[&land].value["gate_kind"], "program");
+    let landing = open(&waiting, "land");
+    assert_eq!(landing.kind, WaitKind::Program, "a program step is never `watching`: {waiting:#?}");
+    assert_eq!(landing.detail.as_deref(), Some("review waits on mission-run/garden/child"));
+    assert_eq!(waiting.verdict, RunVerdict::Moving);
+    assert_eq!(
+        waiting.reason,
+        "land: program, last journal entry 1m ago: review waits on mission-run/garden/child"
+    );
+
+    // A running effect is named with how long it has run.
+    entry("review", "completed", Some("mission-run/garden/child"));
+    entry("merge", "started", None);
+    let waiting = waits(&store, &run.subject, t0 + 5 * MINUTE + MINUTE / 2, QUIET);
+    assert_eq!(open(&waiting, "land").detail.as_deref(), Some("merge running for 5m"));
+
+    // Past its stalled-after with no new entry, well inside the quiet limit: no progress.
+    let waiting = waits(&store, &run.subject, t0 + 14 * MINUTE + MINUTE / 2, QUIET);
+    assert_eq!((waiting.verdict, waiting.cause), (RunVerdict::Stalled, Some(WaitKind::NoProgress)));
+    assert!(waiting.reason.starts_with("land: st holds it, no progress for 14m: merge running for 14m"), "{}", waiting.reason);
+
+    // `missions show` projects the same journal under the step.
+    let view = store.mission_run(&run.id).unwrap().unwrap();
+    let program = &view.programs[0];
+    assert_eq!((program.path.as_str(), program.stalled_after_ms, program.fault.as_ref()), ("land", 600_000, None));
+    let keys = program.journal.entries.iter().map(|entry| (entry.key.as_str(), entry.status.as_str())).collect::<Vec<_>>();
+    assert_eq!(keys, [("render", "completed"), ("review", "completed"), ("merge", "started")]);
+    assert_eq!(program.journal.entries[1].child.as_deref(), Some("mission-run/garden/child"));
+    assert_eq!(program.journal.open, ["merge"]);
 }
 
 #[tokio::test]

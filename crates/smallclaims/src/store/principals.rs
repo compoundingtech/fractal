@@ -165,9 +165,8 @@ const REQUEUE: &str = "claim_candidate_requeue:";
 /// The first key after every `REQUEUE` key.
 const REQUEUE_END: &str = "claim_candidate_requeue;";
 const REQUEUE_PAGE: usize = 1024;
-/// Loans one ordinary verdict pass takes (projection tail, admission, sealed export, startup).
-/// The rest stays due for the next pass and for the paced signature job, so a large backlog
-/// never holds the projection lock or the writer for long.
+/// Loans one ordinary pass takes for freshly signed claims (projection, admission, export).
+/// Historical requeues and unfinished candidates stay due for the paced signature job.
 pub const VERDICT_SLICE_LOANS: usize = 8;
 pub(super) const OWN_NODE_KEY: &str = "principal_node_key";
 
@@ -417,7 +416,7 @@ fn attach_expected_signature_inner_tx(
                 &signature.nonce,
                 serving_legacy,
             )? {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "device-signature-replayed",
                     "another live claim already carries this signature's nonce",
                 )
@@ -1237,11 +1236,11 @@ impl Store {
         &self,
         input: &ClaimInput,
         signature: &ClaimSignature,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         let actor = input
             .actor
             .clone()
-            .ok_or_else(|| St3Error::new("invalid-signature", "a signed claim names its actor"))?;
+            .ok_or_else(|| FractalError::new("invalid-signature", "a signed claim names its actor"))?;
         let key = (input.subject.clone(), input.kind.clone(), actor);
         let text = serde_json::to_string(signature).map_err(internal)?;
         {
@@ -1279,16 +1278,16 @@ impl Store {
         person: &str,
         key: &str,
         label: &str,
-    ) -> Result<Vec<String>, St3Error> {
+    ) -> Result<Vec<String>, FractalError> {
         if Family::of(person) != Some(Family::Person) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-person",
                 "only a person enrols devices",
             ));
         }
         self.ensure_principal_key(person)?;
         let root = self.held_root(person).ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "no-person-key",
                 "this node holds no root key for the person, so it cannot enrol a device",
             )
@@ -1319,9 +1318,9 @@ impl Store {
 
     /// Public trust anchor for local pairing, from the exact root enrollment uses.
     /// Returns no key on legacy unsigned nodes. Never exposes private key material.
-    pub fn person_root_grant(&self, person: &str) -> Result<Option<(String, String)>, St3Error> {
+    pub fn person_root_grant(&self, person: &str) -> Result<Option<(String, String)>, FractalError> {
         if Family::of(person) != Some(Family::Person) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-person",
                 "only a person pairs devices",
             ));
@@ -1334,8 +1333,18 @@ impl Store {
         }))
     }
 
+    /// Sign a device-renewal offer with the person's local root.
+    pub fn sign_device_renewal_offer(&self, person: &str, tuple: &Value) -> Result<String, FractalError> {
+        self.person_root_grant(person)?;
+        let root = self.held_root(person).ok_or_else(|| {
+            FractalError::new("no-person-key", "this member holds no person root")
+        })?;
+        let message = format!("fractal-device-renewal-offer-v1\n{tuple}");
+        Ok(root.key.sign(message.as_bytes()))
+    }
+
     /// Withdraw a device key of `person`, as the node.
-    pub fn revoke_device_key(&self, person: &str, key: &str, reason: &str) -> Result<(), St3Error> {
+    pub fn revoke_device_key(&self, person: &str, key: &str, reason: &str) -> Result<(), FractalError> {
         self.append_claim(&ClaimInput {
             subject: person.into(),
             kind: KEY_REVOKED.into(),
@@ -1407,8 +1416,13 @@ impl Store {
 
     /// Make sure this node holds a signing key for `actor` when it is a person or an agent,
     /// minting one and writing its delegation the first time. Without a node key nothing is
-    /// minted, and claims stay unsigned as before.
-    pub fn ensure_principal_key(&self, actor: &str) -> Result<(), St3Error> {
+    /// minted, and claims stay unsigned as before. A shard mints none either: principal facts
+    /// live in the default store it takes its fleet from, and a shard's envelopes are signed by
+    /// the member key alone.
+    pub fn ensure_principal_key(&self, actor: &str) -> Result<(), FractalError> {
+        if self.fleet_authority.get().is_some() {
+            return Ok(());
+        }
         let family = match Family::of(actor) {
             Some(family @ (Family::Person | Family::Agent)) => family,
             _ => return Ok(()),
@@ -1433,7 +1447,7 @@ impl Store {
                      issuer: &str,
                      issuer_key: &str,
                      label: Option<String>|
-         -> Result<ClaimRecord, St3Error> {
+         -> Result<ClaimRecord, FractalError> {
             self.runtime
                 .append_claim(
                     self,
@@ -1518,7 +1532,7 @@ impl Store {
         role: Role,
         key: Arc<crate::fleet::MemberKey>,
         chain: Vec<String>,
-    ) -> Result<HeldKey, St3Error> {
+    ) -> Result<HeldKey, FractalError> {
         let role_name = serde_json::to_value(role)
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
@@ -1639,24 +1653,24 @@ impl Store {
             // alone owns the historical shadow queue until activation.
             return legacy::judge_claims(self, check_roots);
         }
-        self.record_judgment_failure(self.judge_claims_inner(check_roots, None))
+        self.record_judgment_failure(self.judge_claims_inner(check_roots, None, false))
     }
 
-    /// As [`Self::judge_claims`], bounded to [`VERDICT_SLICE_LOANS`] loans for the daemon's
-    /// ordinary passes. Work left over keeps `verdicts_due` set.
+    /// Judge newly signed claims in ordinary passes, bounded to [`VERDICT_SLICE_LOANS`].
+    /// Advance at most one requeue page; historical judgments belong to the paced worker.
     pub fn judge_claims_slice(&self, check_roots: bool) -> Result<usize> {
         if legacy::active(&self.readers.get())? {
             return legacy::judge_claims(self, check_roots);
         }
         let judged = self.record_judgment_failure(
-            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS)),
+            self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS), true),
         )?;
         self.hand_off_pending_verdicts()?;
         Ok(judged)
     }
 
-    /// Leave verdict work that is still pending to the next ordinary pass and to the paced
-    /// signature job, which owns it; a faulted member waits for resume. Nothing pending wakes
+    /// Leave pending verdict work to the paced signature job; a faulted member waits for
+    /// resume. Fresh work can also finish in the next ordinary pass. Nothing pending wakes
     /// nothing, so a pass that finishes its work never wakes the job again.
     pub(crate) fn hand_off_pending_verdicts(&self) -> Result<()> {
         if !self.verdicts_pending()? {
@@ -1674,7 +1688,7 @@ impl Store {
     /// One resumable judgment loan for the paced signature worker: the bootstrap's shadow
     /// judgment, and after it any backlog a resume or a trust-root change left.
     pub fn advance_signature_judgment(&self) -> Result<usize> {
-        self.record_judgment_failure(self.judge_claims_inner(true, Some(1)))
+        self.record_judgment_failure(self.judge_claims_inner(true, Some(1), false))
     }
 
     fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
@@ -1698,7 +1712,12 @@ impl Store {
         }
         result
     }
-    fn judge_claims_inner(&self, check_roots: bool, max_loans: Option<usize>) -> Result<usize> {
+    fn judge_claims_inner(
+        &self,
+        check_roots: bool,
+        max_loans: Option<usize>,
+        fresh_only: bool,
+    ) -> Result<usize> {
         let migration = self.signature_migration()?;
         if migration.fault.is_some() || !matches!(migration.phase.as_str(), "done" | "judging") {
             return Ok(0);
@@ -1719,9 +1738,10 @@ impl Store {
         }
         let mut judged = 0;
         let mut loans = 0;
+        let mut ordinary_claims = BTreeSet::new();
         loop {
             loans += 1;
-            let mut connection = self.connection.write();
+            let mut connection = self.connection.write_background();
             let transaction =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let roots = self.trust_roots(&transaction, &self.origin)?;
@@ -1735,7 +1755,13 @@ impl Store {
                     start_root_requeue_tx(&transaction, &roots_digest)?;
                 }
             }
-            let requeuing = advance_requeue_tx(&transaction)?;
+            // Finish a small dependency cursor before judging fresh claims; otherwise their
+            // new links would still read as ahead of that cursor. Never page once per loan.
+            let requeuing = if fresh_only && loans > 1 {
+                requeue_pending(&transaction)?
+            } else {
+                advance_requeue_tx(&transaction)?
+            };
             let fresh = transaction
                 .prepare_cached("SELECT claim_id FROM claim_verdict_fresh LIMIT ?1")?
                 .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
@@ -1752,10 +1778,32 @@ impl Store {
                     )?
                     .execute(/* sqlite-large-value: allow-for-now lv-h9c7ea890a098 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim_id])?;
             }
-            let queued = transaction
-                .prepare_cached("SELECT claim_id FROM claim_verdict_queue LIMIT ?1")?
-                .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let fresh_empty = fresh.is_empty();
+            // A membership change can queue millions of old verdicts. Ordinary exchanges
+            // judge only their fresh work; the paced worker owns that historical backlog.
+            let queued = if fresh_only {
+                // Fresh delegations and nonce collisions can requeue another fresh claim
+                // already visited in this pass. Reconcile those IDs, never the old backlog.
+                ordinary_claims.extend(fresh);
+                let mut pending = transaction.prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue WHERE claim_id=?1)",
+                )?;
+                let mut queued = Vec::new();
+                for claim in &ordinary_claims {
+                    if pending.query_row(/* sqlite-large-value: allow-for-now lv-hb07ab08c8a29 owner=smallclaims::store::principals TODO=trace-statement-and-value-representation */ [claim], |row| row.get::<_, bool>(0))? {
+                        queued.push(claim.clone());
+                        if queued.len() == JUDGE_CHUNK {
+                            break;
+                        }
+                    }
+                }
+                queued
+            } else {
+                transaction
+                    .prepare_cached("SELECT claim_id FROM claim_verdict_queue LIMIT ?1")?
+                    .query_map([JUDGE_CHUNK as i64], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
             let memo = RefCell::new(BTreeMap::new());
             let mut candidates_judged = 0;
             for claim_id in &queued {
@@ -1792,12 +1840,17 @@ impl Store {
             if track_bootstrap && candidates_judged != 0 {
                 migration::note_work(&transaction, candidates_judged)?;
             }
-            let drained = fresh.is_empty() && queued.is_empty() && !requeuing;
+            let drained = fresh_empty && queued.is_empty() && !requeuing
+                && (!fresh_only || !transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM claim_verdict_queue)", [], |row| row.get::<_, bool>(0),
+                )?);
             if drained {
                 migration::finish_judging(&transaction)?;
             }
             transaction.commit()?;
-            if drained || max_loans.is_some_and(|max| loans >= max) {
+            if drained || (fresh_only && fresh_empty && queued.is_empty())
+                || max_loans.is_some_and(|max| loans >= max)
+            {
                 return Ok(judged);
             }
         }
@@ -1806,7 +1859,7 @@ impl Store {
     /// Exercise a real bounded loan, then allow another real writer to change inputs.
     #[cfg(feature = "test-support")]
     pub fn judge_claim_page_for_test(&self, check_roots: bool) -> Result<usize> {
-        self.judge_claims_inner(check_roots, Some(1))
+        self.judge_claims_inner(check_roots, Some(1), false)
     }
 
     pub fn signature_model(&self) -> Result<SignatureModel> {
@@ -2030,7 +2083,7 @@ pub fn rules_gate_tx(
         if Family::of(actor) == Some(Family::Person) {
             return Ok(());
         }
-        return Err(anyhow::Error::new(St3Error::new(
+        return Err(anyhow::Error::new(FractalError::new(
             "rule-denied",
             format!("only a person sets rules, not {actor}"),
         )));
@@ -2047,7 +2100,7 @@ pub fn rules_gate_tx(
     let rules = current_rules_tx(transaction)?;
     let decision = crate::rules::decide(&rules, actor, kind, subject);
     if let Some(denied) = decision.denied {
-        return Err(anyhow::Error::new(St3Error::new(
+        return Err(anyhow::Error::new(FractalError::new(
             "rule-denied",
             format!(
                 "rule `{}` refuses {actor} writing {kind} on {subject}{}",
@@ -2090,9 +2143,9 @@ impl Store {
         name: &str,
         rule: &crate::rules::Rule,
         person: &str,
-    ) -> Result<ClaimRecord, St3Error> {
+    ) -> Result<ClaimRecord, FractalError> {
         if name.is_empty() || name.contains('/') {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-rule-name",
                 "a rule name is one path segment",
             ));
@@ -2346,6 +2399,47 @@ mod paced_verdict_tests {
     }
 
     #[test]
+    fn bootstrap_verdict_loans_revalidate_changed_roots_before_activation() {
+        let store = root_linked(REQUEUE_PAGE + 1);
+        store.connection.write().execute(
+            "UPDATE claim_signature_migration SET phase='judging' WHERE id=1",
+            [],
+        ).unwrap();
+        // Skip the optional root-check preflight: bootstrap must revalidate inside each
+        // bounded loan, including the transaction that eventually activates the fold.
+        store.judge_claims_inner(false, Some(1), false).unwrap();
+        let before = fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap().unwrap();
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
+        assert_eq!(store.signature_migration().unwrap().phase, "judging");
+        {
+            let connection = store.connection.write();
+            set_meta_tx(&connection, OWN_NODE_KEY, "changed-between-verdict-loans").unwrap();
+        }
+        let expected = {
+            let connection = store.readers.get();
+            crate::hash::canonical_hash(&store.trust_roots(&connection, &store.origin).unwrap())
+                .unwrap()
+        };
+        assert_ne!(before, expected);
+        store.judge_claims_inner(false, Some(1), false).unwrap();
+        assert_eq!(
+            fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap(),
+            Some(expected.clone()),
+        );
+        // The changed roots restart dependency paging rather than continue past the first
+        // page under a digest that no longer describes the current authority.
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
+        assert_eq!(store.signature_migration().unwrap().phase, "judging");
+        store.judge_claims_inner(false, None, false).unwrap();
+        assert_eq!(store.signature_migration().unwrap().phase, "done");
+        assert_eq!(cursor(&store, "root"), None);
+        assert_eq!(
+            fleet_meta(&store.readers.get(), VERDICT_ROOTS).unwrap(),
+            Some(expected),
+        );
+    }
+
+    #[test]
     fn a_claim_sealed_after_the_startup_pass_is_handed_to_the_paced_job_and_judged() {
         // A single node with no fleet: nothing exchanges, so nothing else judges. Its node key
         // signs its claims as they are sealed.
@@ -2449,13 +2543,15 @@ mod paced_verdict_tests {
     }
 
     #[test]
-    fn an_ordinary_pass_takes_a_slice_and_leaves_the_rest_due() {
+    fn an_ordinary_pass_queues_at_most_one_page_and_defers_historical_judgments() {
         let store = root_linked(REQUEUE_PAGE * 2);
         store.judge_claims_slice(true).unwrap();
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM claim_verdict_queue"), REQUEUE_PAGE as u64);
+        assert_eq!(cursor(&store, "root").as_deref(), Some("claim/01023"));
         assert!(store.verdicts_pending().unwrap());
         assert!(
             store.verdicts_due.load(Ordering::Acquire),
-            "the next pass takes the next slice"
+            "the paced job owns the historical replay"
         );
         // A full pass, as tests and rechecks use, still drains everything.
         store.judge_claims(true).unwrap();

@@ -51,7 +51,7 @@ impl NativeCut {
 fn temporary_schema_safe(connection: &Connection) -> bool {
     // Compare the actual catalog definitions, not trusted names. SQLite stores the CREATE
     // text beginning at the object name (TEMP / IF NOT EXISTS are not retained); normalize
-    // whitespace only. Only the exact native tables and body-free preparation
+    // whitespace only. Only the exact native tables and body-free native
     // queue notifiers are eligible; changed definitions or other objects are not.
     // https://www.sqlite.org/schematab.html and bundled sqlite3.c sqlite3EndTable.
     let check = || -> rusqlite::Result<bool> {
@@ -80,14 +80,15 @@ fn temporary_schema_safe(connection: &Connection) -> bool {
                     "trigger",
                     /* sqlite-large-value: allow-for-now lv-h7676b0cc0ec9 owner=fractal_store::store::resource_preparation TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER preparation_work_dirty AFTER INSERT ON main.local_resource_preparation_dirty BEGIN SELECT resource_preparation_work_pending(); END",
                 ),
-                _ => return Ok(false),
+                _ => match custom::work_notifier_definitions().get(&name) {
+                    Some(definition) => ("trigger", definition.as_str()),
+                    None => return Ok(false),
+                },
             };
             if kind != expected_kind
-                || sql
-                    .as_deref()
-                    .map(|sql| sql.split_ascii_whitespace().collect::<Vec<_>>().join(" "))
-                    .as_deref()
-                    != Some(expected)
+                || !sql.as_deref().is_some_and(|sql| {
+                    sql.split_ascii_whitespace().eq(expected.split_ascii_whitespace())
+                })
             {
                 return Ok(false);
             }

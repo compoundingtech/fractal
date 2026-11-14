@@ -80,6 +80,11 @@ pub struct World {
     /// another. Not part of the shared contract.
     #[serde(skip)]
     pub settled: bool,
+    /// The agents whose conversation has prose newer than where the person last read it on this
+    /// device (`read_store`). Kept by the UI from its read positions, never by st. Not part of
+    /// the shared contract.
+    #[serde(skip)]
+    pub unread: std::collections::BTreeSet<String>,
     /// The number of active missions st reports, when the mission rows are not followed.
     #[serde(skip)]
     pub active_missions: Option<usize>,
@@ -129,12 +134,22 @@ pub struct World {
     pub inventory_supported: Option<bool>,
     #[serde(skip)]
     pub inventory_partial: Vec<String>,
+    /// The clock this world was adapted at: ages, deadlines and snoozes are all told against it.
+    #[serde(skip)]
+    pub at: chrono::DateTime<chrono::FixedOffset>,
+}
+
+impl World {
+    /// When the next row put off comes back: the world must be adapted again then to show it.
+    pub fn snooze_ends(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+        self.attention.items().iter().filter_map(|item| item.snoozed_until).filter(|until| *until > self.at).min()
+    }
 }
 
 /// A client connected to this member, as it describes itself.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Connected {
-    /// Its reported name and build, "stui 0.1.0+ab12cd3"; empty when it sent none.
+    /// Its reported name and build, "fractal-tui 0.1.0+ab12cd3"; empty when it sent none.
     pub client: String,
     /// The person or agent it acts for, and the paired device when one is acting.
     pub who: String,
@@ -206,6 +221,10 @@ pub struct Attention {
     /// Every agent conversation this item shows in, as st names them: the item is an alert in
     /// each. Empty when st does not name one (an older st), and then `agent` is the guess.
     pub conversations: Vec<String>,
+    /// Until when the person put it off (`attention.snooze`), as st says on every device of
+    /// theirs. It stays open meanwhile, and its deadline does not move.
+    #[serde(skip)]
+    pub snoozed_until: Option<chrono::DateTime<chrono::FixedOffset>>,
 }
 
 impl Attention {
@@ -222,6 +241,11 @@ impl Attention {
         } else {
             self.conversations.iter().any(|conversation| conversation == agent)
         }
+    }
+
+    /// Whether its person put it off past `now`: it stays off Home and out of triage until then.
+    pub fn snoozed(&self, now: chrono::DateTime<chrono::FixedOffset>) -> bool {
+        self.snoozed_until.is_some_and(|until| until > now)
     }
 }
 
@@ -466,6 +490,10 @@ pub struct Agent {
     /// The client shows it as reported and derives nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reported: Option<String>,
+    /// When it last said something (st's `last_prose_at`), in ms since the epoch: what unread
+    /// compares with the read position. Absent from an older st.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_prose_ms: Option<i64>,
 }
 
 /// A subagent an agent's harness runs inside its own session. It belongs to the agent and is not

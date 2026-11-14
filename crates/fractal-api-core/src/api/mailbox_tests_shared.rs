@@ -13,9 +13,9 @@ use crate::api::mailbox::*;
 use crate::client::{Client, Endpoint};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Backdate a send past the recovery window of the recipient's current boot. The
-    /// window is measured from the boot floor, so age from it (or from now, before any
-    /// boot): a slow runner between boot and this call must not make the mail recent.
+/// Backdate a send past the recipient's one-hour backlog boundary.
+    /// Measure from the boot floor (or now, before any boot), so a slow runner between boot
+    /// and this call cannot make the mail recent.
     pub fn age_sent(store: &Store, database: &Path, subject: &str) {
         let claim = store
             .latest_claim(subject, Some("message.sent"))

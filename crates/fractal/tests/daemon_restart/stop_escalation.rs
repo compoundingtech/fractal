@@ -6,7 +6,7 @@
 //! Linux uses pidfds and macOS uses kqueue NOTE_EXIT; both watch exact owned processes.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use super::{Daemon, TestSeat, seat_command};
+use super::{Daemon, TestSeat, managed_seat_command, seat_command};
 use sha2::{Digest as _, Sha256};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::process::ExitStatusExt as _;
@@ -167,7 +167,11 @@ async fn spawn_driver(
 ) -> (TestSeat, OwnedFd, OwnedFd, PathBuf) {
     let ready_path = root.join("ready.sock");
     let ready = tokio::net::UnixDatagram::bind(&ready_path).unwrap();
-    let mut command = seat_command(root, &daemon.socket);
+    let mut command = if driver == "claude" {
+        managed_seat_command(root, &daemon.socket, SUBJECT, driver, "python3")
+    } else {
+        seat_command(root, &daemon.socket)
+    };
     declare(daemon, driver);
     daemon.observe_running(SUBJECT, "stop-orchid:one");
     daemon.start_admitted_protocol().await;

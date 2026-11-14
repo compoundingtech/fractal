@@ -12,8 +12,9 @@
  */
 import { SIDEBAR_ARRANGEMENT_UUID, FractalClient } from '@fractal/client'
 import type { Arrangement, CollectionSocketFactory, CollectionStream, Snapshot } from '@fractal/client'
-import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema'
+import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema/read'
 import { Schema } from 'effect'
+import { browserSocket } from './sdk-browser/trace.ts'
 
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 // Generated Arrangement.id is a generic subject Id; the winner rule needs the full UUIDv7 form.
@@ -33,11 +34,12 @@ export interface ArrangementInventoryGateway {
 }
 
 /** The generated client cancels each request through its own `requestOptions.signal`; discovery stays shared. */
-export const fractalInventoryGateway = ({ baseUrl, fetchImpl }: {
+export const fractalInventoryGateway = ({ baseUrl, fetchImpl, client: clientName }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof globalThis.fetch
+  readonly client?: string
 }): ArrangementInventoryGateway & Pick<FractalClient, 'discover'> => {
-  const client = new FractalClient({ baseUrl, fetchImpl })
+  const client = new FractalClient({ baseUrl, fetchImpl, socket: browserSocket, ...(clientName === undefined ? {} : { client: clientName }) })
   return {
     discover: () => client.discover(),
     collectionStream: (options) => client.collectionStream(options),

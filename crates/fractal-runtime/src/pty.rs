@@ -22,6 +22,7 @@ mod legacy_start_closure;
 pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses};
 mod producer;
 
+mod registry_snapshot;
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -236,6 +237,17 @@ pub enum PtyLookup {
     Indeterminate(KeyedSessionError),
 }
 
+/// Retained child wait status and publication-safe terminal output for one incarnation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyExitEvidence {
+    pub incarnation: String,
+    pub exit_code: Option<i64>,
+    pub signal: Option<i32>,
+    /// Withheld unless the producer positively proves complete raw output context.
+    pub output_tail: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PtyStats {
@@ -268,6 +280,7 @@ pub struct PtyRuntime {
     command_timeout: Duration,
     command_environment: Option<BTreeMap<String, String>>,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
+    registry_snapshot: std::sync::Arc<Mutex<registry_snapshot::RegistrySnapshot>>,
 }
 
 impl std::fmt::Debug for PtyRuntime {
@@ -291,6 +304,7 @@ impl PtyRuntime {
             command_timeout: PTY_COMMAND_TIMEOUT,
             command_environment: None,
             unlaned_seat: None,
+            registry_snapshot: std::sync::Arc::default(),
         }
     }
 
@@ -324,7 +338,9 @@ impl PtyRuntime {
     }
 
     pub fn snapshot(&self) -> Result<Vec<PtyObservation>> {
-        self.sessions()?.into_iter().map(observation).collect()
+        crate::procfs::require_matching_procfs()?;
+        self.registry_snapshot.lock().map_err(|_| anyhow::anyhow!("PTY snapshot lock poisoned"))?
+            .sessions(&self.root)?.into_iter().map(observation).collect()
     }
 
     /// Observe one immutable runtime id without enumerating the PTY registry.
@@ -340,6 +356,29 @@ impl PtyRuntime {
             KeyedSession::Missing => Ok(PtyLookup::Missing),
             KeyedSession::Indeterminate(error) => Ok(PtyLookup::Indeterminate(error)),
         }
+    }
+
+    /// Read a bounded retained exit receipt even after the live registry was reaped.
+    /// A missing/evicted receipt never authorizes borrowing another incarnation's output.
+    pub fn exit_evidence(&self, id: &str, incarnation: &str) -> Result<Option<PtyExitEvidence>> {
+        let Some((pid, created_at)) = incarnation.split_once(':') else {
+            return Ok(None);
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            return Ok(None);
+        };
+        let Some(receipt) = pty_core::registry::retained_session_exit_in(
+            &self.root, id, pid, created_at,
+        ).context("read retained PTY exit evidence")? else {
+            return Ok(None);
+        };
+        Ok(Some(PtyExitEvidence {
+            incarnation: incarnation.to_owned(),
+            exit_code: receipt.exit_code.map(i64::from),
+            signal: receipt.signal,
+            output_tail: receipt.output_complete
+                .then(|| crate::transcript::exit_output_tail(&receipt.output_tail)).flatten(),
+        }))
     }
 
     /// One bounded read of the registry. `pty_client` lists an unreadable root as empty, but the
@@ -505,6 +544,28 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
+        // Only API-created default terminals opt into home resolution. A seat or mission
+        // workspace of "." retains its ordinary working-directory semantics.
+        let home = if cwd == Path::new(".")
+            && tags.get("st3.cwd").is_some_and(|value| value == "home")
+        {
+            if let Some(home) = std::env::home_dir() {
+                anyhow::ensure!(
+                    home.is_absolute(),
+                    "default terminal home directory must be absolute"
+                );
+                Some(home)
+            } else {
+                tracing::warn!(
+                    runtime_id = id,
+                    "default terminal home is unavailable; retaining '.' for shell-side home resolution"
+                );
+                None
+            }
+        } else {
+            None
+        };
+        let cwd = home.as_deref().unwrap_or(cwd);
         // The lane is the scope's, never the harness's environment.
         let mut env = env.clone();
         let capacity = crate::lane::Capacity::take(&mut env);
@@ -1599,6 +1660,29 @@ mod tests {
         let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
         assert!(configured.unlaned_seat.is_some());
     }
+
+    #[test]
+    fn legacy_or_incomplete_exit_receipts_keep_status_but_withhold_output() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().to_owned());
+        for complete in [None, Some(false), Some(true)] {
+            let mut receipt = serde_json::json!({
+                "name": "work", "generation": "g", "daemonPid": 42, "createdAt": "now",
+                "exitCode": 23, "signal": null, "outputTail": "fatal: fixture failure"
+            });
+            if let Some(complete) = complete { receipt["outputComplete"] = complete.into(); }
+            fs::write(
+                root.path().join(pty_core::registry::retained_exit::RETAINED_EXIT_FILE_NAME),
+                serde_json::to_vec(&vec![receipt]).unwrap(),
+            ).unwrap();
+            let evidence = runtime.exit_evidence("work", "42:now").unwrap().unwrap();
+            assert_eq!(evidence.exit_code, Some(23));
+            assert_eq!(evidence.signal, None);
+            assert_eq!(evidence.output_tail.as_deref(),
+                (complete == Some(true)).then_some("fatal: fixture failure"));
+        }
+    }
+    use crate::test_executable::fake_executable;
     use std::fs;
     use std::io::{Read as _, Write as _};
     use std::os::unix::net::UnixListener;
@@ -1690,22 +1774,6 @@ mod tests {
         let pid = child.id();
         assert!(child.wait().unwrap().success());
         assert!(!process_runs(pid).unwrap());
-    }
-
-    fn fake_executable(root: &Path, name: &str, body: &str) -> PathBuf {
-        let source = root.join(format!("{name}.source"));
-        let binary = root.join(name);
-        fs::write(&source, body).unwrap();
-        // A parallel test can fork while this process owns a writable file.
-        // Let install create the executable so no child inherits that writer.
-        let output = Command::new("install")
-            .args(["-m", "700"])
-            .arg(&source)
-            .arg(&binary)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "install failed: {output:?}");
-        binary
     }
 
     /// A fake `pty` whose `run` records its arguments and launch count, then runs `on_run`, which
@@ -2213,6 +2281,71 @@ exit 0
         if crate::isolation_mode() == crate::Isolation::Scope {
             assert!(arguments.contains("st3.scope-unit=st3-work-"));
         }
+    }
+
+    #[test]
+    fn default_terminal_forwards_absolute_host_home_as_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-home-cwd", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+
+        runtime
+            .spawn(
+                "work",
+                &Launch::Argv(vec!["true".into()]),
+                Path::new("."),
+                &BTreeMap::new(),
+                None,
+                &BTreeMap::from([("st3.cwd".into(), "home".into())]),
+                None,
+            )
+            .unwrap();
+
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        let cwd = arguments
+            .lines()
+            .skip_while(|arg| *arg != "--cwd")
+            .nth(1)
+            .unwrap();
+        assert!(Path::new(cwd).is_absolute(), "{arguments}");
+        assert_eq!(Path::new(cwd), std::env::home_dir().unwrap());
+    }
+
+    #[test]
+    fn explicit_terminal_cwd_is_forwarded_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-explicit-cwd", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+
+        spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
+
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        let cwd = arguments
+            .lines()
+            .skip_while(|arg| *arg != "--cwd")
+            .nth(1)
+            .unwrap();
+        assert_eq!(Path::new(cwd), root.path());
+    }
+
+    #[test]
+    fn untagged_dot_workspace_is_forwarded_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-dot-cwd", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+
+        spawn_work(&runtime, Path::new("."), &BTreeMap::new()).unwrap();
+
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        let cwd = arguments
+            .lines()
+            .skip_while(|arg| *arg != "--cwd")
+            .nth(1)
+            .unwrap();
+        assert_eq!(cwd, ".");
     }
 
     #[test]
@@ -3086,6 +3219,67 @@ exit 0
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }
+        }
+    }
+
+    #[test]
+    fn failed_harness_evidence_survives_registry_reaping_and_runtime_recreation() {
+        let environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap_or_default())]);
+        let Ok(pty) = crate::resolve_executable("pty", &environment) else {
+            assert_ne!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"),
+                "hosted CI must install the real pty binary for exit evidence");
+            eprintln!("skipped: no pty binary outside hosted CI");
+            return;
+        };
+        for (print, expected) in [
+            ("printf 'fatal: fixture launch failed\\n' >&2", Some("fatal: fixture launch failed")),
+            ("printf '%78s' ''; printf 'sk-fixture-secret\\n'", Some("[REDACTED: sensitive terminal output]")),
+            ("printf 'sk-'; printf '%09000d' 0; printf '\\nfatal: safe footer\\n'", None),
+            ("printf '%09000d Authorization:\\nfixture-secret\\n' 0", None),
+            ("printf 'Authorization:\\n'; i=0; while [ \"$i\" -lt 12000 ]; do printf '\\n'; i=$((i+1)); done; printf 'fixture-secret\\n'", None),
+            ("printf 'Authorization:\\033[2J\\033[Hfixture-secret\\n'", None),
+            ("printf 'fatal:\\b fixture failure\\n'", None),
+            ("printf '\\377fatal: fixture failure\\n'", None),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let gate = root.path().join("release");
+            let session = Started {
+                runtime: PtyRuntime::new(root.path().join("r")).with_binary(pty.to_string_lossy()),
+                id: "failed-harness-evidence".into(), root, harness: 0, orphan: 0,
+            };
+            session.runtime.spawn(
+                &session.id,
+                &Launch::Argv(vec![
+                    "sh".into(), "-c".into(),
+                    format!("while [ ! -f '{}' ]; do sleep 0.01; done; {print}; exit 23", gate.display()),
+                ]),
+                session.root.path(), &environment, None, &BTreeMap::new(),
+                Some(TerminalSize { rows: 24, columns: 80 }),
+            ).unwrap();
+            let incarnation = session.incarnation();
+            fs::write(gate, "").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let observed = session.runtime.keyed_observation(&session.id).unwrap();
+                if matches!(observed, PtyLookup::Missing) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "PTY registry was not reaped: {observed:?}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let recreated = PtyRuntime::new(session.runtime.root().to_owned());
+            let evidence = recreated.exit_evidence(&session.id, &incarnation).unwrap().unwrap();
+            assert_eq!(evidence.incarnation, incarnation);
+            assert_eq!(evidence.exit_code, Some(23));
+            assert_eq!(evidence.signal, None);
+            if let Some(expected) = expected {
+                let tail = evidence.output_tail.unwrap();
+                assert!(tail.contains(expected), "{tail:?}");
+                assert!(!tail.contains("fixture-secret"), "terminal wrapping must not bypass redaction");
+            } else {
+                assert_eq!(evidence.output_tail, None, "lost or unsafe output context must be withheld");
+            }
+            assert!(recreated.exit_evidence(&session.id, "42:another-generation").unwrap().is_none());
         }
     }
 

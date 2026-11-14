@@ -5,12 +5,14 @@
     "apps/fractal-web",
     "apps/ios",
     "clients/typescript/fractal-client",
+    "clients/typescript/fractal-declarations",
     "clients/typescript/fractal-scenarios",
     "clients/typescript/fractal-views",
+    "packages/fractal",
     "packages/fractal-sdk",
     "packages/fractal-ui"
   ],
-  "packageManager": "pnpm@12.15.0",
+  "packageManager": "pnpm@12.17.0",
   "$genie": {
     "source": "package.json.genie.ts",
     "warning": "DO NOT EDIT - changes will be overwritten"

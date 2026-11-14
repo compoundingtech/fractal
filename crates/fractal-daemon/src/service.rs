@@ -25,6 +25,8 @@ pub use lookup::ConflictingServices;
 mod stage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use stage::stage_fractal;
+#[cfg(unix)]
+pub mod launchd_domain;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn stage_fractal(_config: Config, _config_path: Option<&Path>) -> Result<()> {
@@ -443,7 +445,7 @@ fn validate_reset_target(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Stop the PTY runtimes this daemon owns, as `st3 service reset` does.
+/// Stop the PTY and exec runtimes this daemon owns, as `st3 service reset` does.
 pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
     let pty_root = config
         .pty_root
@@ -489,17 +491,35 @@ pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
             .collect::<Vec<_>>();
         ids.sort();
         ids.dedup();
-        for id in &ids {
-            if let Some(fractal_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
-                exec.stop_if(id, Some(&generation.generation_id))?;
+        let mut errors = Vec::new();
+        for (hard, signal) in [(false, "SIGTERM"), (true, "SIGKILL")] {
+            if hard {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            for id in &ids {
+                let result = exec.observe(id).and_then(|observation| match observation {
+                    Some(fractal_runtime::ExecObservation::Running(generation)) => {
+                        if hard {
+                            exec.kill_if(id, Some(&generation.generation_id))
+                        } else {
+                            exec.stop_if(id, Some(&generation.generation_id))
+                        }
+                    }
+                    Some(fractal_runtime::ExecObservation::Indeterminate(reason)) => {
+                        anyhow::bail!("exec generation is indeterminate: {reason}")
+                    }
+                    _ => Ok(()),
+                });
+                if let Err(error) = result {
+                    errors.push(format!("{signal} exec {id}: {error:#}"));
+                }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        for id in &ids {
-            if let Some(fractal_runtime::ExecObservation::Running(generation)) = exec.observe(id)? {
-                exec.kill_if(id, Some(&generation.generation_id))?;
-            }
-        }
+        anyhow::ensure!(
+            errors.is_empty(),
+            "exec shutdown failed:\n{}",
+            errors.join("\n")
+        );
     }
     Ok(())
 }
@@ -1422,6 +1442,124 @@ mod tests {
     use super::*;
     use crate::config::PeerConfig;
 
+    #[cfg(target_os = "linux")]
+    fn shutdown_with_unreadable_first_exec(indeterminate: bool) -> Result<()> {
+        use std::time::{Duration, Instant};
+
+        let root = tempfile::tempdir()?;
+        let runtime =
+            fractal_runtime::ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        struct Cleanup {
+            runtime: fractal_runtime::ExecRuntime,
+            records: Vec<(String, PathBuf, Vec<u8>, String)>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for (id, path, bytes, generation) in &self.records {
+                    if path.is_dir() {
+                        let _ = fs::remove_dir(path);
+                    }
+                    let _ = fs::write(path, bytes);
+                    let _ = self.runtime.kill_if(id, Some(generation));
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < deadline {
+                        if matches!(
+                            self.runtime.observe(id),
+                            Ok(Some(fractal_runtime::ExecObservation::Exited(_)))
+                        ) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        }
+        let mut cleanup = Cleanup {
+            runtime: runtime.clone(),
+            records: Vec::new(),
+        };
+        let mut generations = Vec::new();
+        for id in ["a-unreadable", "b-live"] {
+            let generation = runtime.spawn(
+                id,
+                &fractal_runtime::Launch::Shell(format!(
+                    "trap '' TERM; echo ready > {id}.ready; while :; do sleep 60; done"
+                )),
+                root.path(),
+                &env::vars().collect(),
+            )?;
+            let path = root.path().join("exec").join(format!("{id}.json"));
+            cleanup.records.push((
+                id.into(),
+                path.clone(),
+                fs::read(&path)?,
+                generation.generation_id.clone(),
+            ));
+            generations.push(generation);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !["a-unreadable.ready", "b-live.ready"]
+            .iter()
+            .all(|name| root.path().join(name).exists())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the TERM-resistant execs did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let first = &cleanup.records[0].1;
+        if indeterminate {
+            fs::write(first, b"unreadable generation")?;
+        } else {
+            // EISDIR makes observe itself fail, before a signal guard can run.
+            fs::remove_file(first)?;
+            fs::create_dir(first)?;
+        }
+        let config = Config {
+            state_dir: root.path().into(),
+            pty_root: None,
+            ..Config::default()
+        };
+        let error = stop_owned_runtimes(&config).expect_err("unreadable evidence must remain an error");
+        assert!(fractal_runtime::process_generation_alive(
+            generations[0].pid,
+            generations[0].start_token
+        )?);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let ended = loop {
+            if let Some(fractal_runtime::ExecObservation::Exited(generation)) =
+                runtime.observe("b-live")?
+            {
+                break generation;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the later exec did not receive SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(ended.exit_signal, Some(libc::SIGKILL));
+        assert!(ended.group_exited);
+        let message = format!("{error:#}");
+        for signal in ["SIGTERM", "SIGKILL"] {
+            assert!(message.contains(&format!("{signal} exec a-unreadable")), "{message}");
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn indeterminate_exec_does_not_block_later_shutdown_signals() -> Result<()> {
+        shutdown_with_unreadable_first_exec(true)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_observation_error_does_not_block_later_shutdown_signals() -> Result<()> {
+        shutdown_with_unreadable_first_exec(false)
+    }
+
     #[cfg(unix)]
     #[test]
     fn stopping_a_daemon_refuses_a_process_that_is_not_one() -> Result<()> {
@@ -1511,6 +1649,9 @@ mod tests {
         let arguments = spec.program_arguments();
         assert!(arguments.windows(2).any(|pair| pair[0] == "--config" && pair[1].ends_with("custom/config.toml")));
         assert!(arguments.windows(2).any(|pair| pair[0] == "--pty-binary" && pair[1].ends_with("/pty")));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--client-gateway-socket" && pair[1].ends_with("/fractal-client.sock")));
+        assert!(render_systemd_user_unit(&spec).contains("fractal-client.sock"));
+        assert!(render_launchd_plist(&spec).contains("fractal-client.sock"));
         assert!(spec.replication_program_arguments().contains(&"--config".into()));
         Ok(())
     }
@@ -1522,8 +1663,8 @@ mod tests {
             fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
             shared_secret_file: Some("/var/lib/st3/fleet/secret".into()),
             state_dir: "/var/lib/st3".into(),
-            socket: "/run/user/1000/st3.sock".into(),
-            client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+            socket: "/run/user/1000/fractal.sock".into(),
+            client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
             peer_listen: Some("127.0.0.1:31313".into()),
             peers: vec![PeerConfig {
                 name: "node-b".into(),
@@ -1560,6 +1701,10 @@ mod tests {
     #[test]
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
+        quota_source: None,
+        usage_limits: None,
+        host_envelope_file: None,
+        usage_hub: None,
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
@@ -1569,13 +1714,16 @@ mod tests {
         seat_admission: None,
         lanes: None,
         person: None,
+        browser_pairing_login: None,
+        pairing_legacy_allowances: Vec::new(),
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
         state_dir: "/var/lib/st3".into(),
         store_dir: None,
         pty_root: Some("/var/lib/pty".into()),
-        socket: "/run/user/1000/st3.sock".into(),
-        client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+        socket: "/run/user/1000/fractal.sock".into(),
+        socket_is_explicit: true,
+        client_gateway_socket: "/run/user/1000/fractal-client.sock".into(),
         peer_listen: Some("0.0.0.0:31313".into()),
         work_root: None,
         peer_listen_allow_plain_http: true,
@@ -1584,15 +1732,20 @@ mod tests {
             url: "http://127.0.0.1:31314".into(),
         }], planner: crate::model::PlannerSpec::default(), private_notes_catalogs: Vec::new(), observations: crate::config::ObservationsConfig::default(),
         github: crate::config::GithubConfig::default(),
+        agent_population_enabled: false,
+        agent_population_repositories: Vec::new(),
         changes: crate::changes::config::Config::default(),
         checkpoint: crate::config::CheckpointConfig::default(),
         trim: crate::config::TrimConfig::default(),
         limits: crate::config::LimitsConfig::default(),
         logging: crate::config::LoggingConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        programs: crate::config::ProgramsConfig::default(),
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
         wait_for_peers_after_start: None,
+        readiness_slo: None,
+        agents_request_slo_fault: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
         let unit = render_systemd_user_unit(&spec);
@@ -1600,7 +1753,7 @@ mod tests {
         assert!(unit.contains("ExecStart=/usr/bin/st3 up --node node-a"));
         assert!(unit.contains("--state-dir /var/lib/st3"));
         assert!(unit.contains("--pty-root /var/lib/pty"));
-        assert!(unit.contains("--client-gateway-socket /run/user/1000/st3-client.sock"));
+        assert!(unit.contains("--client-gateway-socket /run/user/1000/fractal-client.sock"));
         assert!(unit.contains("--peer node-b=http://127.0.0.1:31314"));
         assert!(unit.contains("--peer-listen 0.0.0.0:31313 --peer-listen-allow-plain-http"));
         assert!(unit.contains("MemoryMax=1024M"));

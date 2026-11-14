@@ -149,6 +149,14 @@ class Node:
                     "XDG_DATA_HOME": str(root / "home/.local/share"),
                     "XDG_RUNTIME_DIR": str(root / "run"), "ST3_ENDPOINT": str(self.endpoint),
                     "ST3_DAEMON_WAIT": "0"}
+        # Managed harness launch reads its wrappers from the runtime profile, so point it at the
+        # stand-ins: the launched omp, claude or codex is this directory's executable of that name.
+        runtime_profile = root / "runtime-profile.json"
+        runtime_profile.write_text(json.dumps({
+            "personas": {"launch": {"generalist": {"harnessBin": str(root / "bin")}}},
+        }))
+        self.env["AGENT_RUNTIME_PROFILE"] = str(runtime_profile)
+        self.env["AGENT_PERSONA"] = "generalist"
         # The daemon rebuilds PATH from a login shell; pin it to the isolated one.
         profile = f"export PATH={shlex.quote(self.path)}\n"
         for name in (".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshenv"):
@@ -535,6 +543,26 @@ def native_mention_count(node, reference):
                for row in receipts(node, "a"))
 
 
+def local_marks(node, reference):
+    """The lifecycle steps this member recorded for `reference` as local marks, by kind.
+
+    A seat's host records its seat's delivery, read and close as marks in local_message_marks
+    (#4782, db break-up 4b-2) and its staging in local_message_staged once every member counts it
+    (#5219). Marks never replicate and no claim list shows them, so a count of a message's receipts
+    adds them to its claims: a mark without its claim counts, and one step recorded both ways still
+    counts twice. A later move of these steps to another record has to be counted here too.
+    """
+    import sqlite3
+
+    connection = sqlite3.connect((node.root / "state/claims.sqlite3").as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        marks = connection.execute("SELECT kind FROM local_message_marks WHERE message=?", (reference,)).fetchall()
+        staged = connection.execute("SELECT COUNT(*) FROM local_message_staged WHERE message=?", (reference,)).fetchone()[0]
+    finally:
+        connection.close()
+    return Counter(kind for (kind,) in marks) + Counter({"message.staged": staged})
+
+
 def age_mail_fixture(node, subject):
     """Backdate isolated mail while preserving the store's transactional row digest."""
     import hashlib
@@ -561,10 +589,10 @@ def age_mail_fixture(node, subject):
         connection.create_function("st_projection_change", 6, projection_change, deterministic=True)
         changed = connection.execute(
             "UPDATE claims SET accepted_at_unix_ms=? WHERE subject=? AND kind='message.sent'",
-            (str(time.time_ns() // 1_000_000 - 3_600_001), subject),
+            (str(time.time_ns() // 1_000_000 - 604_800_001), subject),
         ).rowcount
         if changed != 1:
-            fail("the hour-old fixture has no unique sent claim")
+            fail("the expired fixture has no unique sent claim")
 
 
 def suspend_and_resume(node, seats, harness):
@@ -601,7 +629,7 @@ def suspend_and_resume(node, seats, harness):
     # Mail to a suspended seat waits, and its restart policy does not wake it.
     sent = node.json("conversations", "send", subject, "--from", "person/eval",
                      "--subject", "while suspended", "--body", "boot canary suspended")["subject"]
-    # Old means the same one-hour age as the backlog; only this isolated fixture is changed.
+    # Beyond the stream's seven-day recovery cutoff; only this isolated fixture is changed.
     age_mail_fixture(node, sent)
     time.sleep(5)
     held = node.api("/v1/messages/read/" + sent) or {}
@@ -631,7 +659,7 @@ def suspend_and_resume(node, seats, harness):
             fail(f"the resumed omp was not given the staged transcript path {staged}: {argv}")
         if not Path(selected).is_symlink():
             fail(f"the staged transcript {selected} is no longer the symlink the control installed")
-    # Recent never-offered mail survives the boot, while hour-old mail stays listable.
+    # Recent never-offered mail survives the boot, while expired mail stays listable.
     until(lambda: (node.api("/v1/messages/read/" + recent) or {}).get("status") in ("read", "closed"),
           seats.bound, "the resumed seat did not recover recent unoffered mail")
     if native_offer_count(node, recent) != 1:
@@ -795,7 +823,7 @@ def claude_attachment(node, seats, mode):
     until(lambda: native_offer_count(node, early) == 1, seats.bound, "early mail was not offered once")
     def exact_receipts(reference):
         claims = (node.api("/v1/claims?subject=" + reference + "&limit=100") or {}).get("claims", [])
-        phases = Counter(row.get("kind") for row in claims)
+        phases = Counter(row.get("kind") for row in claims) + local_marks(node, reference)
         for kind in ("message.staged", "message.delivered", "message.read"):
             if phases[kind] != 1:
                 fail(f"{reference} has {phases[kind]} {kind} receipts, expected one")
@@ -820,11 +848,16 @@ def claude_attachment(node, seats, mode):
 
 
 def claude_channel_parked(node, seats):
-    """A permanently missing channel exhausts a durable budget and keeps mail held."""
-    (node.root / "ws/claude-channel-mode").write_text("missing")
+    """A channel failing again for the cause its charged attempt named spends no budget and does
+    not loop; one that keeps failing for new causes exhausts a durable budget and keeps mail held.
+
+    Only a new channel failure charges the budget (#4789, fixed by #4801). The uncharged restarts for a repeated
+    cause come on a backoff of minutes, with a fault after three, so the reconciler's own tests
+    cover them; this checks that a repeated cause is neither charged nor restarted inside the short
+    schedule. Then the stand-in changes the cause for each launch, so three charged attempts park."""
+    mode = node.root / "ws/claude-channel-mode"
+    mode.write_text("missing")
     node.cli("agents", "restart", seat_subject("a"), "--now", "--as", "person/eval", check=False)
-    early = node.json("conversations", "send", seat_subject("a"), "--from", "person/eval",
-                      "--subject", "parked attachment probe", "--body", "mail while unattached")["subject"]
     processes = until(
         lambda: replacement_processes(node, seat_subject("a"), seats.incarnations["a"]),
         seats.bound, "the replacement generation never supplied fresh seat processes")
@@ -835,19 +868,55 @@ def claude_channel_parked(node, seats):
         return [row for row in claims if row.get("kind") == "runtime.action.requested"
                 and row.get("body", {}).get("fields", {}).get("operation") in ("claude-channel-recovery", "claude-channel-recovery-window-v1")]
 
-    # Each incarnation needs the driver's 20 s detection window, then the reconciler's
-    # 10/20/40 s backoff, then a restart: about 170 s in all before any load. Bound each
-    # recovery step on its own event, not the whole schedule by one wall-clock budget.
+    def started():
+        return len([row for row in receipts(node, "a") if row.get("event") == "started"])
+
+    # The channel fails for one cause every launch: the first failure is charged, and its
+    # replacement, failing again for that cause, is not.
+    until(attempts, seats.bound, "the first channel failure was never charged")
+    first = attempts()[0].get("body", {}).get("fields", {}).get("incarnation_id")
+
+    def repeated_blocked():
+        view = seats.view("a")[0]
+        return view.get("incarnation_id") not in (None, first) and "claude-channel-unattached" in json.dumps(view)
+    until(repeated_blocked, seats.bound, "the charged attempt's replacement never blocked for the same cause")
+    starts = started()
+    # A charge would follow one detection window and the short backoff; wait out both with margin.
+    time.sleep((CHANNEL_ATTACH_WINDOW_MS + 4 * CHANNEL_BACKOFF_MS) / 1000 + 2)
+    if len(attempts()) != 1:
+        fail(f"a channel failing again for the charged cause spent budget: {attempts()}")
+    if started() != starts:
+        fail("a channel failing again for the charged cause was restarted in a loop")
+
+    # Now each launch fails for another cause than the last; an operator's restart starts a new budget.
+    # The stand-in flips the project's own `st` server after the driver read it, so declare it here
+    # for the first launch: the cause above had none.
+    project = node.root / "ws/.mcp.json"
+    config = json.loads(project.read_text()) if project.exists() else {}
+    config.setdefault("mcpServers", {})["st"] = {"command": "true"}
+    project.write_text(json.dumps(config))
+    mode.write_text("missing-new-cause")
+    earlier = {row.get("id") for row in attempts()}
+    node.cli("agents", "restart", seat_subject("a"), "--now", "--as", "person/eval", check=False)
+    early = node.json("conversations", "send", seat_subject("a"), "--from", "person/eval",
+                      "--subject", "parked attachment probe", "--body", "mail while unattached")["subject"]
+
+    def charged():
+        return [row for row in attempts() if row.get("id") not in earlier]
+
+    # Each incarnation needs the driver's detection window, then the reconciler's short backoff,
+    # then a restart. Bound each recovery step on its own event, not the whole schedule by one
+    # wall-clock budget.
     for attempt in range(1, 4):
-        until(lambda: len(attempts()) >= attempt, seats.bound,
+        until(lambda: len(charged()) >= attempt, seats.bound,
               f"channel recovery attempt {attempt} was never requested")
     until(lambda: parked(node, seat_subject("a")), seats.bound, "permanent channel failure never parked")
     until(lambda: "claude-channel-unattached" in json.dumps(seats.view("a")[0]),
           10, "parked channel failure lost its visible reason")
 
-    if len(attempts()) != 3:
-        fail(f"channel failure used {len(attempts())} recovery attempts, expected three")
-    starts = len([row for row in receipts(node, "a") if row.get("event") == "started"])
+    if len(charged()) != 3:
+        fail(f"channel failure used {len(charged())} recovery attempts, expected three")
+    starts = started()
     until(lambda: len([row for row in receipts(node, "a") if row.get("event") == "ended"]) == starts,
           20, "parked channel did not stop its provider")
     node.kill_daemon()
@@ -855,7 +924,7 @@ def claude_channel_parked(node, seats):
     # A lost budget would charge a fourth attempt after one detection window and the largest
     # backoff of the schedule; wait out both with margin.
     time.sleep((CHANNEL_ATTACH_WINDOW_MS + 4 * CHANNEL_BACKOFF_MS) / 1000 + 2)
-    if len(attempts()) != 3 or len([row for row in receipts(node, "a") if row.get("event") == "started"]) != starts:
+    if len(charged()) != 3 or started() != starts:
         fail("parked channel restarted after the daemon lost its in-memory budget")
     if native_mention_count(node, early) != 0:
         fail("parked channel offered mail without attachment")

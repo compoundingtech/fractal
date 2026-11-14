@@ -7,13 +7,13 @@ pub async fn start_planning_session(
     Json(request): Json<PlanningSessionStartRequest>,
 ) -> Result<Json<PlanningSessionView>, ApiError> {
     let request_text = std::str::from_utf8(&request.request).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-request-not-text",
             "a launch request must contain valid UTF-8",
         ))
     })?;
     if request_text.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-launch-request",
             "a launch request cannot be empty",
         )));
@@ -31,7 +31,7 @@ pub async fn start_planning_session(
     if let Some(run) = &target_run
         && (!matches!(run.status.as_str(), "running" | "blocked") || run.phase != "normal")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "mission-run-not-revisable",
             format!(
                 "mission run `{}` is {} in its {} phase",
@@ -76,7 +76,7 @@ pub async fn start_planning_session(
         provider.as_str(),
         "codex" | "claude" | "pi" | "omp" | "opencode"
     ) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-planner",
             "the planner must use an eligible typed harness driver",
         )));
@@ -96,7 +96,7 @@ pub async fn start_planning_session(
         }),
     };
     if planner_config.provider == "opencode" && planner_config.effort.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "unsupported-planner-effort",
             "the OpenCode harness does not accept an effort override",
         )));
@@ -247,19 +247,19 @@ async fn submit_planning_variant(
     validate_planning_variant(&variant)?;
     let session = required_planning_session(&state, &id)?;
     let markdown = std::str::from_utf8(&request.markdown).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-markdown-not-text",
             "planning Markdown must contain valid UTF-8",
         ))
     })?;
     if markdown.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-launch-markdown",
             "planning Markdown cannot be empty",
         )));
     }
     let kdl = std::str::from_utf8(&request.kdl).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-kdl-not-text",
             "planning KDL must contain valid UTF-8",
         ))
@@ -267,7 +267,7 @@ async fn submit_planning_variant(
     let (intent, _) = mission_source(&state, kdl, None)?;
     let mission = launch_candidate_mission(&intent, &session.mission).map_err(ApiError::bad)?;
     if mission.state != crate::model::MissionState::Ready {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-mission-not-ready",
             "a planning candidate must contain a ready mission",
         )));
@@ -365,7 +365,7 @@ async fn preview_planning_variant(
     validate_planning_variant(&variant)?;
     let session = required_planning_session(&state, &id)?;
     if session.status != "review" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-not-reviewable",
             format!("launch `{}` is {}", session.id, session.status),
         )));
@@ -376,7 +376,7 @@ async fn preview_planning_variant(
         .find(|candidate| candidate.name == variant)
         .map(|variant| &variant.candidate)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-launch-candidate",
                 "the launch has no candidate",
             ))
@@ -496,7 +496,7 @@ pub async fn propose_planning_variant(
     }
     let session = required_planning_session(&state, &id)?;
     let run_subject = session.target_mission_run.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-has-no-run",
             "this launch creates a new mission and cannot propose a run revision",
         ))
@@ -507,7 +507,7 @@ pub async fn propose_planning_variant(
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("the target mission run does not exist"))?;
     if session.source_generation.as_deref() != Some(current.generation.as_str()) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-launch-generation",
             "the launch variants target a superseded generation",
         )));
@@ -518,13 +518,13 @@ pub async fn propose_planning_variant(
         .find(|candidate| candidate.name == variant)
         .ok_or_else(|| ApiError::not_found(format!("launch variant `{variant}` does not exist")))?;
     let preview = variant.preview.as_ref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-launch-preview",
             "preview the named variant before proposal",
         ))
     })?;
     if !preview.mission.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-preview-blocked",
             preview.mission.blockers.join("; "),
         )));
@@ -534,66 +534,30 @@ pub async fn propose_planning_variant(
     let intent = crate::store::identities::normalize_intent(&state.store.readers.get(), &intent)
         .map_err(ApiError::bad)?;
     let mission = &intent.missions[&session.mission];
-    let old = state
-        .store
-        .mission_spec(&session.mission, Some(&current.revision))
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::internal("the current mission revision is unavailable"))?;
-    let (_, reviewers) = crate::store::analyze_mission_revision(&old, mission, &current.requester)
-        .map_err(ApiError::bad)?;
-    state
-        .store
-        .apply(
-            &intent,
-            &preview.mission.subject_tokens,
-            &format!("{}:publish", request.idempotency_key),
-        )
-        .map_err(ApiError::bad)?;
-    let result =
-        if reviewers.is_empty() && matches!(old.revision_cutover, RevisionCutover::RestartActive) {
-            RevisionSubmissionView {
-                provenance: state
-                    .store
-                    .mission_provenance(&session.mission, &mission.revision)
-                    .map_err(ApiError::internal)?,
-                status: "applied".into(),
-                mission_run: state
-                    .store
-                    .adopt_mission_revision(
-                        run_subject,
-                        mission,
-                        &request.actor,
-                        &request.reason,
-                        &format!("{}:cutover", request.idempotency_key),
-                    )
-                    .map_err(ApiError::bad)?,
-                proposal: None,
-            }
-        } else {
-            let proposal = state
-                .store
-                .create_revision_proposal(
-                    run_subject,
-                    mission,
-                    &request.actor,
-                    &request.reason,
-                    &format!("{}:proposal", request.idempotency_key),
-                )
-                .map_err(ApiError::bad)?;
-            RevisionSubmissionView {
-                provenance: state
-                    .store
-                    .mission_provenance(&session.mission, &mission.revision)
-                    .map_err(ApiError::internal)?,
-                status: proposal.status.clone(),
-                mission_run: state
-                    .store
-                    .mission_run(run_subject)
-                    .map_err(ApiError::internal)?
-                    .expect("the target mission run exists"),
-                proposal: Some(proposal),
-            }
-        };
+    state.store.apply_run_revision(
+        &intent,
+        &preview.mission.subject_tokens,
+        &format!("{}:publish", request.idempotency_key),
+        fractal_store::store::RunRevisionApply {
+            actor: &request.actor,
+            run: run_subject,
+            operation: &crate::model::MissionRevisionOperation {
+                id: request.idempotency_key.clone(),
+                mission: mission.id.clone(),
+                revision: mission.revision.clone(),
+                from_generation: current.generation,
+                reason: request.reason.clone(),
+                cancellation: None,
+            },
+            direct_key: &format!("{}:cutover", request.idempotency_key),
+            proposal_key: &format!("{}:proposal", request.idempotency_key),
+        },
+    ).map_err(ApiError::bad)?;
+    let result = cached_revision_submission(
+        &state,
+        &format!("{}:cutover", request.idempotency_key),
+        &format!("{}:proposal", request.idempotency_key),
+    )?.ok_or_else(|| ApiError::internal("the atomic revision response is unavailable"))?;
     let mut result = result;
     runs::present_mission_run(&state.store, &mut result.mission_run).map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -607,7 +571,7 @@ fn validate_planning_variant(variant: &str) -> Result<(), ApiError> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-variant",
             "a launch variant must use 1 through 80 letters, digits, dots, dashes, or underscores",
         )));
@@ -623,13 +587,13 @@ pub async fn revise_planning_session(
     let session = required_planning_session(&state, &id)?;
     authorize_planning_reviewer(&session, &request.actor)?;
     if request.feedback.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-launch-feedback",
             "launch feedback cannot be empty",
         )));
     }
     std::str::from_utf8(&request.feedback).map_err(|_| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "launch-feedback-not-text",
             "launch feedback must contain valid UTF-8",
         ))
@@ -680,19 +644,19 @@ pub async fn approve_planning_session(
     let session = required_planning_session(&state, &id)?;
     authorize_planning_reviewer(&session, &request.actor)?;
     if session.status != "review" && session.status != "approved" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-not-reviewable",
             format!("launch `{}` is {}", session.id, session.status),
         )));
     }
     let candidate = session.candidate.as_ref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-launch-candidate",
             "the launch has no candidate",
         ))
     })?;
     let preview = session.preview.as_ref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-launch-preview",
             "preview the candidate before approval",
         ))
@@ -714,7 +678,7 @@ pub async fn approve_planning_session(
     if (preview.hash != request.preview_hash && approval_token != request.preview_hash)
         || preview.candidate_revision != candidate.revision
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-launch-preview",
             "the approval does not name the current preview",
         )));
@@ -732,7 +696,7 @@ pub async fn approve_planning_session(
         )));
     }
     if !preview.mission.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-preview-blocked",
             preview.mission.blockers.join("; "),
         )));
@@ -744,7 +708,7 @@ pub async fn approve_planning_session(
             .map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::not_found("the target mission run does not exist"))?;
         if session.source_generation.as_deref() != Some(current.generation.as_str()) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "stale-launch-generation",
                 "the launch approval targets a superseded generation",
             )));
@@ -756,62 +720,51 @@ pub async fn approve_planning_session(
     let intent =
         parse_intent(&preview.mission.resolved_intent.kdl, &state.node).map_err(ApiError::bad)?;
     let approval_key = format!("planning-approval:{}:{}", session.id, preview.hash);
-    state
-        .store
-        .apply(
+    if let Some((run_subject, current)) = target {
+        let mission = &intent.missions[&session.mission];
+        state.store.apply_run_revision(
             &intent,
             &preview.mission.subject_tokens,
             &format!("{approval_key}:publish"),
-        )
-        .map_err(ApiError::bad)?;
-    if let Some((run_subject, current)) = target {
-        let mission = &intent.missions[&session.mission];
-        let old = state
-            .store
-            .mission_spec(&session.mission, Some(&current.revision))
-            .map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::internal("the current mission revision is unavailable"))?;
-        let (_, reviewers) =
-            crate::store::analyze_mission_revision(&old, mission, &current.requester)
-                .map_err(ApiError::bad)?;
-        if reviewers.is_empty() && matches!(old.revision_cutover, RevisionCutover::RestartActive) {
-            state
-                .store
-                .adopt_mission_revision(
-                    &run_subject,
-                    mission,
-                    &request.actor,
-                    "the requester approved the launch revision",
-                    &format!("{approval_key}:cutover"),
-                )
-                .map_err(ApiError::bad)?;
-        } else {
-            let proposal = state
-                .store
-                .create_revision_proposal(
-                    &run_subject,
-                    mission,
-                    &request.actor,
-                    "the requester approved the launch revision",
-                    &format!("{approval_key}:proposal"),
-                )
-                .map_err(ApiError::bad)?;
-            if proposal.reviewers.contains(&request.actor) {
-                let revision_preview = proposal
-                    .preview_hash
-                    .as_deref()
-                    .ok_or_else(|| ApiError::internal("the revision proposal has no preview"))?;
-                state
-                    .store
-                    .approve_revision_proposal(
-                        &proposal.subject,
-                        &request.actor,
-                        revision_preview,
-                        &format!("{approval_key}:revision-approval"),
-                    )
-                    .map_err(ApiError::bad)?;
-            }
+            fractal_store::store::RunRevisionApply {
+                actor: &request.actor,
+                run: &run_subject,
+                operation: &crate::model::MissionRevisionOperation {
+                    id: approval_key.clone(),
+                    mission: mission.id.clone(),
+                    revision: mission.revision.clone(),
+                    from_generation: current.generation,
+                    reason: "the requester approved the launch revision".into(),
+                    cancellation: None,
+                },
+                direct_key: &format!("{approval_key}:cutover"),
+                proposal_key: &format!("{approval_key}:proposal"),
+            },
+        ).map_err(ApiError::bad)?;
+        let revision = cached_revision_submission(
+            &state,
+            &format!("{approval_key}:cutover"),
+            &format!("{approval_key}:proposal"),
+        )?.ok_or_else(|| ApiError::internal("the atomic revision response is unavailable"))?;
+        if let Some(proposal) = revision.proposal
+            && proposal.reviewers.contains(&request.actor)
+        {
+            let revision_preview = proposal.preview_hash.as_deref()
+                .ok_or_else(|| ApiError::internal("the revision proposal has no preview"))?;
+            state.store.approve_revision_proposal(
+                &proposal.subject,
+                &request.actor,
+                revision_preview,
+                &format!("{approval_key}:revision-approval"),
+            ).map_err(ApiError::bad)?;
         }
+    } else {
+        state.store.apply_as(
+            &intent,
+            &preview.mission.subject_tokens,
+            &format!("{approval_key}:publish"),
+            Some(&request.actor),
+        ).map_err(ApiError::bad)?;
     }
     let response = state
         .store
@@ -861,13 +814,13 @@ pub async fn start_approved_launch(
     let session = required_planning_session(&state, &id)?;
     authorize_planning_reviewer(&session, &request.actor)?;
     if session.status != "approved" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-not-approved",
             format!("launch `{}` is {}", session.id, session.status),
         )));
     }
     if session.target_mission_run.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-target-already-running",
             "a launch targeting an existing run is applied in place and cannot start another run",
         )));
@@ -937,14 +890,14 @@ pub async fn request_launch_decision(
 ) -> Result<Json<Value>, ApiError> {
     let session = required_planning_session(&state, &id)?;
     if normalize_message_party(&request.actor) != session.planner {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-decision-not-authorized",
             "only the launch planner can request a decision",
         )));
     }
     let question = request.question.trim();
     if question.is_empty() || question.len() > 2_000 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-question",
             "a launch question must contain 1 through 2000 bytes",
         )));
@@ -976,7 +929,7 @@ pub async fn request_launch_decision(
             .any(|option| option.id.is_empty() || option.label.is_empty())
         || unique.len() != options.len()
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-options",
             "boolean questions have no options; choice and rank questions need 1 through 20 options with distinct non-empty IDs and labels",
         )));
@@ -1043,7 +996,7 @@ pub async fn answer_launch_decision(
             ApiError::not_found(format!("launch decision `{decision_id}` does not exist"))
         })?;
     if request.expected_revision != 1 {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-launch-decision",
             "the launch decision revision changed",
         )));
@@ -1062,7 +1015,7 @@ pub async fn answer_launch_decision(
         {
             return Ok(Json(current.clone()));
         }
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "launch-decision-immutable",
             "a launch decision answer is immutable",
         )));
@@ -1074,7 +1027,7 @@ pub async fn answer_launch_decision(
         .map_err(|_| ApiError::internal("launch decision has invalid options"))?;
     let valid = valid_launch_decision_response(&decision_type, &options, &request.response);
     if !valid {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-launch-answer",
             "the structured response must match the decision type and contain unique option IDs from the offered options; rank responses must include every option exactly once",
         )));
@@ -1192,7 +1145,7 @@ fn authorize_planning_reviewer(session: &PlanningSessionView, actor: &str) -> Re
     if normalize_planning_reviewer(actor) == session.requester {
         return Ok(());
     }
-    Err(ApiError::bad(St3Error::new(
+    Err(ApiError::bad(FractalError::new(
         "launch-review-not-authorized",
         format!("`{actor}` cannot review launch `{}`", session.id),
     )))
@@ -1402,7 +1355,7 @@ pub async fn mission(
 fn ignored_authority_warnings(
     intent: &crate::model::NormalizedIntent,
     node: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut ignored = intent
         .subjects
         .values()
@@ -1439,10 +1392,10 @@ fn ignored_authority_warnings(
 
 pub async fn apply_with_bound(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<ApplyRequest>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
-    apply_with_authority(state, request, bound.as_ref().map(|bound| bound.0.0.as_str())).await
+    apply_with_authority(state, request, bound.as_ref().map(BoundActor::actor)).await
 }
 
 pub async fn get_mission(
@@ -1483,7 +1436,7 @@ pub async fn retire_mission(
     let actor = person_or_agent_actor(&request.actor, "mission-retire-authority-denied")?;
     let store = state.store.clone();
     let retired =
-        blocking_action(move || store.retire_mission(&id, &actor, &request.idempotency_key))
+        blocking_action(move || store.retire_mission(&id, &actor, &request.idempotency_key, request.force_reason.as_deref()))
             .await?;
     signal_changed(&state);
     let mut retired = retired;

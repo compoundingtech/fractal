@@ -1,5 +1,5 @@
 /** Explicit presentation adapter for the canonical st3.client.v0 usage.period projection. */
-import { UsagePeriod } from '@fractal/client/schema'
+import { UsagePeriod } from '@fractal/client/schema/read'
 import type { UsageAccount, UsageLimit } from '@fractal/client/schema'
 import { Result, Schema } from 'effect'
 
@@ -119,7 +119,7 @@ export const projectNativeQuota = (input: unknown, now: number):
           usage: {
             unit: 'usd', used, limit: budget, remaining: Math.max(0, budget - used),
             ...(usedFraction === undefined ? {} : { usedFraction }),
-            ...(credits.unpriced_tokens > 0 ? { rawStatus: 'some tokens had no price, so the spend is at least this' } : {}),
+            ...(credits.unpriced_tokens > 0 || (credits.unpriced_responses ?? 0) > 0 ? { rawStatus: 'some responses had no price, so the spend is at least this' } : {}),
             exhaustion: { state: usedFraction === undefined ? 'unknown' : usedFraction >= 1 ? 'exhausted' : 'available',
               basis: usedFraction === undefined ? 'unknown' : 'utilization', conflict: false },
           },

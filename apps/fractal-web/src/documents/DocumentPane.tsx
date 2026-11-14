@@ -5,6 +5,7 @@ import * as Aria from 'react-aria-components'
 import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource } from '../data/react.tsx'
+import { credentialExpiredMessage } from '../data/source.ts'
 import { DOCUMENT_REF, documentVersion, type DocumentRead } from './document-port.ts'
 import { documentReferences } from './DocumentLink.tsx'
 
@@ -50,15 +51,15 @@ export const DocumentPane = ({
       <header {...stylex.props(styles.header)}>
         <strong {...stylex.props(styles.name)}>{shown.name}</strong>
         {shown.version ? <span {...stylex.props(styles.meta)} title={state._tag === 'Text' || state._tag === 'Binary' ? state.reference : undefined}>version {shown.version}</span> : null}
-        <Aria.Button onPress={() => setAttempt((value) => value + 1)} isDisabled={state._tag === 'Reading'} {...stylex.props(styles.button)}>
+        {state._tag === 'Unavailable' && state.reason === 'unauthorized' ? null : <Aria.Button onPress={() => setAttempt((value) => value + 1)} isDisabled={state._tag === 'Reading'} {...stylex.props(styles.button)}>
           {documentVersion(name).version ? 'Read again' : 'Read the newest'}
-        </Aria.Button>
+        </Aria.Button>}
       </header>
       <div {...stylex.props(styles.body)}>
         {state._tag === 'Reading' ? (
           <p role="status" {...stylex.props(styles.notice)}>Reading {shown.name}…</p>
         ) : state._tag === 'Unavailable' ? (
-          <p role="status" {...stylex.props(styles.notice)}>{state.detail}</p>
+          <p role="status" {...stylex.props(styles.notice)}>{state.reason === 'unauthorized' ? credentialExpiredMessage : state.detail}</p>
         ) : state._tag === 'Binary' ? (
           <p role="status" {...stylex.props(styles.notice)}>This document is not text ({state.size} bytes). Read it with fractal documents get {state.reference}.</p>
         ) : (

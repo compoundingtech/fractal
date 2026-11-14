@@ -1,6 +1,7 @@
 //! Initial terminal attachment lifecycle; callbacks are fenced before any selected-view effects.
 use super::{Command, Direct, Fetched, Following, Ui, connecting_text, screen_lines};
 use crate::feed::TerminalUpdate;
+use crate::ui::attach_trace::Trace;
 use std::{collections::BTreeMap, future::Future, net::Shutdown, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -17,9 +18,63 @@ pub(super) const GATEWAY: Duration = Duration::from_secs(8);
 pub(super) const DEADLINE: Duration = Duration::from_secs(DISCOVERY.as_secs() + DIRECT.as_secs() + GATEWAY.as_secs() * 2 + 3);
 pub(super) const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 
-pub(super) async fn phase<T>(name: &str, budget: Duration, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
-    tokio::time::timeout(budget, future).await.map_err(|_| format!("{name} timed out"))?
+/// Only capability issuance is safe to repeat without a remote cancellation receipt:
+/// it creates an expiring capability, never an owner PTY attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SetupPhase {
+    Capability,
+    Upgrade,
+    FirstFrame,
 }
+
+impl SetupPhase {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Capability => "raw terminal capability",
+            // Authentication and owner-open happen before the server answers the upgrade.
+            Self::Upgrade => "raw terminal connect/upgrade (including auth and owner-open)",
+            Self::FirstFrame => "raw terminal first-frame",
+        }
+    }
+
+    pub(super) fn timeout(reason: &str) -> Option<Self> {
+        let name = reason.strip_suffix(" timed out")?;
+        [Self::Capability, Self::Upgrade, Self::FirstFrame]
+            .into_iter()
+            .find(|phase| name == phase.name())
+    }
+
+    pub(super) fn retry_safe(self) -> bool {
+        self == Self::Capability
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn phase<T>(name: &'static str, budget: Duration, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    traced_phase(None, name, budget, future).await
+}
+
+pub(super) async fn traced_phase<T>(trace: Option<&Trace>, name: &'static str, budget: Duration, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    let guard = trace.map(|trace| trace.start_phase(name));
+    let result = tokio::time::timeout(budget, future).await;
+    let outcome = match &result { Err(_) => "timeout", Ok(Err(_)) => "failure", Ok(Ok(_)) => "success" };
+    if let Some(guard) = guard { guard.end(outcome); }
+    result.map_err(|_| format!("{name} timed out"))?
+}
+/// Own cancellation even when a spawned setup future is never polled.
+pub(super) struct SetupOwner(Option<Trace>);
+
+impl SetupOwner {
+    pub(super) fn new(trace: Option<Trace>) -> Self { Self(trace) }
+    pub(super) fn handed_off(&mut self) { self.0 = None; }
+}
+
+impl Drop for SetupOwner {
+    fn drop(&mut self) {
+        if let Some(trace) = &self.0 { trace.finish("setup-dropped"); }
+    }
+}
+
 
 #[derive(Default)]
 pub(super) struct State {
@@ -32,16 +87,23 @@ pub(super) struct State {
     wanted: BTreeMap<String, Arc<AtomicBool>>,
     pub(super) tasks: BTreeMap<String, JoinHandle<()>>,
     pub(super) opens: BTreeMap<String, Instant>,
+    traces: BTreeMap<String, Trace>,
 }
 
 impl Drop for State {
     fn drop(&mut self) {
+        for trace in self.traces.values() { trace.finish("state-dropped"); }
         for task in self.tasks.values() { task.abort(); }
     }
 }
 
 impl State {
     pub(super) fn cancel(&mut self, agent: &str) {
+        self.cancel_reason(agent, "cancelled");
+    }
+
+    fn cancel_reason(&mut self, agent: &str, reason: &'static str) {
+        if let Some(trace) = self.traces.remove(agent) { trace.finish(reason); }
         self.pending.remove(agent);
         if let Some(task) = self.tasks.get(agent) { task.abort(); }
         if let Some(wanted) = self.wanted.remove(agent) { wanted.store(false, Ordering::Relaxed); }
@@ -51,7 +113,7 @@ impl State {
         if self.selected.as_deref() == selected { return; }
         self.generation += 1;
         if let Some(previous) = self.selected.take() {
-            self.cancel(&previous);
+            self.cancel_reason(&previous, "selection-changed");
             if let Some(view) = ui.terminal_view_mut(&previous)
                 && view.native.is_none()
                 && view.stale.as_deref().is_some_and(|status| status.starts_with("connecting"))
@@ -79,8 +141,11 @@ impl State {
         self.opens.insert(agent.to_owned(), Instant::now());
         let wanted = Arc::new(AtomicBool::new(true));
         self.wanted.insert(agent.to_owned(), wanted.clone());
+        self.traces.insert(agent.to_owned(), Trace::new(agent));
         (self.generation, wanted, serial)
     }
+
+    pub(super) fn trace(&self, agent: &str) -> Option<Trace> { self.traces.get(agent).cloned() }
 
     pub(super) fn resume_fallback(&mut self, view: &mut crate::ui::TerminalView, runtime_ids: &[String], commands: &mpsc::UnboundedSender<Command>) {
         // A shell has no runtime-resolved fallback. Only Ctrl+R may restart its failed setup.
@@ -118,6 +183,7 @@ impl State {
     pub(super) fn tick(&mut self, ui: &mut Ui) {
         for (agent, task) in &self.tasks {
             if ui.terminal_view(agent).is_none() {
+                if let Some(trace) = self.traces.remove(agent) { trace.finish("view-closed"); }
                 task.abort();
                 self.pending.remove(agent);
                 if let Some(wanted) = self.wanted.remove(agent) { wanted.store(false, Ordering::Relaxed); }
@@ -127,7 +193,7 @@ impl State {
         let Some(started) = self.started else { return; };
         if started.elapsed() >= DEADLINE {
             if let Some(agent) = self.selected.take() {
-                self.cancel(&agent);
+                self.cancel_reason(&agent, "outer-deadline");
                 if let Some(view) = ui.terminal_view_mut(&agent) { view.stale = Some(failed("attach setup timed out")); }
                 self.selected = Some(agent);
             }
@@ -161,9 +227,10 @@ impl State {
                 if let Some(view) = ui.terminal_view_mut(&agent).filter(|view| view.native.is_none()) {
                     view.name = format!("{} · {route}", view.name);
                     view.title = view.name.clone();
-                    view.native = Some(crate::ui::pty::NativeTerminal::spawn(direct.stream, &direct.name, direct.incarnation, rows, columns));
+                    view.native = Some(crate::ui::pty::NativeTerminal::spawn(direct.stream, &direct.name, direct.incarnation, rows, columns, self.traces.get(&agent).cloned()));
                     view.stale = None;
                 } else {
+                    if let Some(trace) = self.traces.remove(&agent) { trace.finish("view-unavailable"); }
                     close(direct);
                 }
                 if current { ui.flash(format!("Attached · {route}")); }
@@ -174,6 +241,7 @@ impl State {
             }
             Fetched::NativeFailed { agent, generation, runtime_ids, reason } => {
                 if !self.current(&agent, generation) { return; }
+                if let Some(trace) = self.traces.remove(&agent) { trace.finish("setup-failed"); }
                 self.note = None;
                 self.started = None;
                 if self.opens.remove(&agent).is_some() { crate::ui::slo::METRICS.add("terminal_open_errors", 1); }
@@ -276,6 +344,72 @@ mod tests {
     use crate::ui::{Pane, TerminalView, glass::Open};
     use std::os::unix::net::UnixStream;
 
+    #[test]
+    fn dropping_unpolled_setup_finishes_while_state_retains_trace() {
+        let (trace, events) = Trace::captured("agent/A");
+        let owner = SetupOwner::new(Some(trace.clone()));
+        let future = async move { let _owner = owner; std::future::pending::<()>().await; };
+        drop(future);
+        trace.finish("state-dropped");
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] != "start").count(), 1);
+        assert_eq!(events.last().unwrap()["outcome"], "setup-dropped");
+    }
+
+    fn poll_setup(future: std::pin::Pin<&mut impl Future<Output = Result<(), String>>>) {
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        assert!(future.poll(&mut context).is_pending());
+    }
+
+    #[tokio::test]
+    async fn every_setup_phase_expires_with_correlated_outcome() {
+        for name in ["terminal discovery", "direct open", SetupPhase::Capability.name(), SetupPhase::Upgrade.name(), SetupPhase::FirstFrame.name()] {
+            let (trace, events) = Trace::captured("agent/test");
+            // A zero budget and a permanently pending operation deterministically expires;
+            // no wall-clock sleep or Tokio test-util feature is needed.
+            let result = traced_phase(Some(&trace), name, Duration::ZERO, std::future::pending::<Result<(), String>>()).await;
+            assert_eq!(result.unwrap_err(), format!("{name} timed out"));
+            trace.finish("setup-failed");
+            let events = events.lock().unwrap();
+            assert!(events.iter().any(|event| event["phase"] == name && event["outcome"] == "timeout" && event["level"] == "INFO"));
+            assert!(events.iter().all(|event| event["attempt_id"] == events[0]["attempt_id"] && event["agent"] == "agent/test"));
+        }
+    }
+
+    #[tokio::test]
+    async fn outer_deadline_ends_every_active_phase_once() {
+        for name in ["terminal discovery", "direct open", SetupPhase::Capability.name(), SetupPhase::Upgrade.name(), SetupPhase::FirstFrame.name()] {
+            let (mut state, mut ui, _, _) = selected("agent/A");
+            let (trace, events) = Trace::captured("agent/A");
+            state.traces.insert("agent/A".into(), trace.clone());
+            let mut setup = Box::pin(traced_phase(Some(&trace), name, DEADLINE, std::future::pending::<Result<(), String>>()));
+            poll_setup(setup.as_mut());
+            state.started = Some(Instant::now() - DEADLINE);
+            state.tick(&mut ui);
+            drop(setup);
+            let events = events.lock().unwrap();
+            assert_eq!(events.iter().filter(|event| event["phase"] == name && event["outcome"] != "start").count(), 1);
+            assert!(events.iter().any(|event| event["phase"] == name && event["outcome"] == "outer-deadline"));
+            assert_eq!(events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] == "outer-deadline").count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn selecting_another_agent_finishes_before_setup_abort() {
+        let (mut state, mut ui, _, _) = selected("agent/A");
+        let (trace, events) = Trace::captured("agent/A");
+        state.traces.insert("agent/A".into(), trace.clone());
+        let mut setup = Box::pin(traced_phase(Some(&trace), SetupPhase::Upgrade.name(), GATEWAY, std::future::pending::<Result<(), String>>()));
+        poll_setup(setup.as_mut());
+        state.select(&mut ui, Some("agent/B"));
+        drop(setup);
+        trace.finish("dropped");
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| event["phase"] == "attempt" && event["outcome"] != "start").count(), 1);
+        assert!(events.iter().any(|event| event["phase"] == SetupPhase::Upgrade.name() && event["outcome"] == "selection-changed"));
+    }
+
     fn view(agent: &str) -> TerminalView {
         TerminalView { agent: agent.into(), title: agent.into(), name: agent.into(), lines: Vec::new(), cursor: None, stale: Some("connecting".into()), ended: None, native: None }
     }
@@ -321,11 +455,12 @@ mod tests {
         ui.terminal = Some(view("agent/B"));
         let at = sentinel(&mut state, &mut ui);
         let (msg, mut peer) = success("agent/A", old);
+        // macOS may reject socket options after apply_fetched closes the other end.
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         state.apply_fetched(&mut ui, msg, &tx);
         unchanged(&state, &ui, &mut rx, at);
         assert!(ui.terminal_view("agent/A").unwrap().native.is_none());
         use std::io::Read;
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         assert_eq!(peer.read(&mut [0]).unwrap(), 0, "cancelled late stream is closed");
     }
 
@@ -350,9 +485,9 @@ mod tests {
         assert_ne!(old, state.generation);
         let at = sentinel(&mut state, &mut ui);
         let (msg, mut peer) = success("agent/A", old);
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         state.apply_fetched(&mut ui, msg, &tx);
         use std::io::Read;
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
         assert_eq!(peer.read(&mut [0]).unwrap(), 0, "discarded stream is explicitly closed");
         state.apply_fetched(&mut ui, Fetched::NativeFailed { agent: "agent/A".into(), generation: old, runtime_ids: vec!["runtime/A".into()], reason: "refused".into() }, &tx);
         state.apply_fetched(&mut ui, Fetched::AttachWaiting { agent: "agent/A".into(), generation: old, reason: "old wait".into() }, &tx);
@@ -366,9 +501,9 @@ mod tests {
         let generation = state.generation;
         state.apply_fetched(&mut ui, Fetched::NativeFailed {
             agent: "agent/A".into(), generation, runtime_ids: vec!["runtime/A".into()],
-            reason: "raw terminal attachment timed out".into(),
+            reason: format!("{} timed out", SetupPhase::Upgrade.name()),
         }, &tx);
-        assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: raw terminal attachment timed out · Ctrl+R to retry"));
+        assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: raw terminal connect/upgrade (including auth and owner-open) timed out · Ctrl+R to retry"));
         assert!(state.started.is_none());
         assert!(state.note.is_none());
         assert!(rx.try_recv().is_err());

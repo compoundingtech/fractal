@@ -54,6 +54,40 @@ fn js(value: &Value) -> String {
     value.to_string()
 }
 
+/// RFC 3986 Appendix A grammar, including relative references and IP literals.
+/// A URL constructor is not a substitute: it normalizes spaces and accepts IRIs.
+pub(super) fn uri_reference_pattern() -> String {
+    let atom = r"(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-Fa-f]{2})";
+    let pchar = r"(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})";
+    let h16 = r"[0-9A-Fa-f]{1,4}";
+    let octet = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+    let ipv4 = format!(r"{octet}(?:\.{octet}){{3}}");
+    let ls32 = format!("(?:{h16}:{h16}|{ipv4})");
+    let ipv6 = [
+        format!("(?:{h16}:){{6}}{ls32}"),
+        format!("::(?:{h16}:){{5}}{ls32}"),
+        format!("(?:{h16})?::(?:{h16}:){{4}}{ls32}"),
+        format!("(?:(?:{h16}:){{0,1}}{h16})?::(?:{h16}:){{3}}{ls32}"),
+        format!("(?:(?:{h16}:){{0,2}}{h16})?::(?:{h16}:){{2}}{ls32}"),
+        format!("(?:(?:{h16}:){{0,3}}{h16})?::{h16}:{ls32}"),
+        format!("(?:(?:{h16}:){{0,4}}{h16})?::{ls32}"),
+        format!("(?:(?:{h16}:){{0,5}}{h16})?::{h16}"),
+        format!("(?:(?:{h16}:){{0,6}}{h16})?::"),
+    ].join("|");
+    let future = r"[vV][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+";
+    let host = format!(r"(?:\[(?:{ipv6}|{future})\]|{atom}*)");
+    let authority = format!("(?:(?:{atom}|:)*@)?{host}(?::[0-9]*)?");
+    let tail = format!("(?:/{pchar}*)*");
+    let absolute = format!("/(?:{pchar}+{tail})?");
+    let network = format!("//{authority}{tail}");
+    let rootless = format!("{pchar}+{tail}");
+    let no_scheme = format!("(?:{atom}|@)+{tail}");
+    let query = format!("(?:{pchar}|[/?])*");
+    format!(
+        r"^(?:[A-Za-z][A-Za-z0-9+.-]*:(?:{network}|{absolute}|{rootless}|)|{network}|{absolute}|{no_scheme}|)(?:\?{query})?(?:#{query})?$(?![\s\S])"
+    )
+}
+
 /// Lists of this many string cases or more are written one case per line, so two changes that add
 /// different cases merge instead of conflicting on the one line that held them all.
 pub const ONE_PER_LINE_FROM: usize = 8;
@@ -488,16 +522,19 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
         ));
     }
     if let Some(min) = object.get("minLength") {
-        checks.push(format!("Schema.isMinLength({min})"));
+        checks.push(format!("Schema.isMinCodePoints({min})"));
     }
     if let Some(max) = object.get("maxLength") {
-        checks.push(format!("Schema.isMaxLength({max})"));
+        checks.push(format!("Schema.isMaxCodePoints({max})"));
     }
     match object.get("format").and_then(Value::as_str) {
         Some("date-time") => checks.push(
             "Schema.isPattern(DATE_TIME, { expected: \"an RFC 3339 date-time\" })".into(),
         ),
-        Some("uri-reference") | None => {}
+        Some("uri-reference") => checks.push(
+            "Schema.isPattern(URI_REFERENCE, { expected: \"an RFC 3986 URI reference\" })".into(),
+        ),
+        None => {}
         Some(other) => bail!("unsupported string format `{other}`"),
     }
     let base = match object.get("x-st-ref") {
@@ -538,6 +575,9 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             None => schema,
             Some("timestamp") if object.get("format") == Some(&json!("date-time")) => format!(
                 "{schema}.check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso))"
+            ),
+            Some("lossless-timestamp") if object.get("format") == Some(&json!("date-time")) => format!(
+                "{schema}.check(isLosslessInstant).pipe(Schema.decodeTo(LosslessTimestamp, losslessFromIso))"
             ),
             Some("redacted") => format!("Schema.RedactedFromValue({schema})"),
             Some(other) => bail!("string codec `{other}` not translated here"),
@@ -623,7 +663,7 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
         let kind = object.get("type").and_then(Value::as_str);
         if !matches!(
             (kind, codec),
-            (Some("string"), "timestamp" | "redacted")
+            (Some("string"), "timestamp" | "lossless-timestamp" | "redacted")
                 | (Some("integer"), "duration-ms" | "duration-s" | "epoch-ms")
         ) {
             bail!("codec `{codec}` is not supported for type {kind:?}");
@@ -1297,6 +1337,9 @@ fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
         .or_else(|| object.contains_key("properties").then_some("object"));
     Ok(match kind {
         Some("string") if !encoded && codec == Some("timestamp") => "DateTime.Utc".into(),
+        Some("string") if !encoded && codec == Some("lossless-timestamp") => {
+            "typeof LosslessTimestamp.Type".into()
+        }
         Some("string") if !encoded && codec == Some("redacted") => {
             "Redacted.Redacted<string>".into()
         }
@@ -1592,8 +1635,73 @@ const epochRange = /*#__PURE__*/ Schema.makeIsBetween({ order: DateTime.Order })
 const NULL_NONE = { onNoneEncoding: null } as const
 "#;
 
+const SHARED_IMPORT: &str = r#"import { DATE_TIME, URI_REFERENCE, optionalKey, subjectRef, rfc3339Range, isInstant, utcFromIso, isLosslessInstant, LosslessTimestamp, losslessFromIso, unknownCase, openEnum, wholeUnits, durationMillisRange, durationSecondsRange, epochRange, NULL_NONE } from "./SchemaSupport.generated.ts"
+import type { Brand, Option, Redacted } from "effect"
+import type { SubjectRef, UnknownCase } from "./SchemaSupport.generated.ts"
+export { API_VERSION, containsUnknownCase, decodeUnknownSync, decodeUnknownEffect } from "./SchemaSupport.generated.ts"
+export type { SubjectRef, UnknownCase, DecodeMode } from "./SchemaSupport.generated.ts"
+"#;
+
+/// The read closure excludes terminal session/screen operations, not terminal resource metadata.
+pub fn partitioned_models(schema: &Value, operations: &Value) -> Result<Vec<(&'static str, String)>> {
+    let mut schema = schema.clone();
+    let defs = schema["$defs"].as_object_mut().context("schema definitions")?;
+    // Raw blob reads and stream-name telemetry sit outside the read response roots.
+    let mut pending = BTreeSet::from(["BlobChunk".to_owned(), "CollectionName".to_owned()]);
+    for read in operations["reads"].as_array().context("read operations")? {
+        let id = read["id"].as_str().context("read id")?;
+        if id == "terminal.screen" || id == "assistant.terminal-content" {
+            continue;
+        }
+        for key in ["response", "anonymous_response", "query_model", "proof"] {
+            if let Some(name) = read[key].as_str() {
+                // The wire envelope is shared with terminal content, but conversation reads
+                // need only their own branch. The complete union stays on the full surface.
+                pending.insert(if name == "AssistantContentPage" {
+                    "AssistantConversationContent".to_owned()
+                } else {
+                    name.to_owned()
+                });
+            }
+        }
+    }
+    for stream in operations["streams"].as_array().context("stream operations")? {
+        for key in ["command", "frame"] {
+            let name = stream[key].as_str().context("stream model")?;
+            let mut read_model = defs.get(name).context("stream definition")?.clone();
+            read_model["oneOf"]
+                .as_array_mut()
+                .context("stream union")?
+                .retain(|branch| branch["properties"]["collection"]["const"] != "terminal");
+            let read_name = format!("Read{name}");
+            defs.insert(read_name.clone(), read_model);
+            pending.insert(read_name);
+        }
+    }
+    let mut read_names = BTreeSet::new();
+    while let Some(name) = pending.pop_first() {
+        if read_names.insert(name.clone()) {
+            refs(defs.get(&name).context("read definition")?, &mut pending);
+        }
+    }
+    let (read, optional, support) = emit_models(&schema, Some(&read_names))?;
+    Ok(vec![
+        ("SchemaSupport.generated.ts", support),
+        ("ReadSchema.generated.ts", read),
+        ("Schema.generated.ts", optional),
+    ])
+}
+
 /// Every `$defs` entry as a rich Effect Schema, dependency-ordered.
+#[cfg(test)]
 pub fn models(schema: &Value) -> Result<String> {
+    Ok(emit_models(schema, None)?.0)
+}
+
+fn emit_models(
+    schema: &Value,
+    read_names: Option<&BTreeSet<String>>,
+) -> Result<(String, String, String)> {
     match schema.get("x-st-integers").and_then(Value::as_str) {
         Some("json-safe") => {}
         other => {
@@ -1661,9 +1769,25 @@ pub fn models(schema: &Value) -> Result<String> {
     }
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
     let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n// Sources: docs/st3/client-v0/schemas/client-v0.schema.json, operations.json\n// Generator: crates/fractal-client-codegen/src/rich.rs\n// Regenerate: cargo run -p fractal-client-codegen; verify: cargo run -p fractal-client-codegen -- --check\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\nimport {{ DateTime, Duration, Schema, SchemaTransformation }} from \"effect\"\n\nexport const API_VERSION = \"st3.client.v0\" as const\nconst DATE_TIME = new RegExp({}, \"u\")\n{PRELUDE}\n",
-        js(&json!(DATE_TIME))
+        "// @generated by st3-client-codegen; do not edit.\n// Sources: docs/st3/client-v0/schemas/client-v0.schema.json, operations.json\n// Generator: crates/fractal-client-codegen/src/rich.rs\n// Regenerate: cargo run -p fractal-client-codegen; verify: cargo run -p fractal-client-codegen -- --check\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\nimport {{ DateTime, Duration, Schema, SchemaTransformation }} from \"effect\"\n\nexport const API_VERSION = \"st3.client.v0\" as const\nconst DATE_TIME = new RegExp({}, \"u\")\nconst URI_REFERENCE = new RegExp({}, \"u\")\n{PRELUDE}\n",
+        js(&json!(DATE_TIME)), js(&json!(uri_reference_pattern()))
     );
+    out.push_str(include_str!("../templates/LosslessTimestamp.ts.in"));
+    let mut optional = String::new();
+    let mut support = String::new();
+    if let Some(names) = read_names {
+        let header_end = out.find("import { DateTime,").context("schema header")?;
+        let header = &out[..header_end];
+        support = out.replace("\nconst ", "\nexport const ");
+        let entry = format!("{header}import {{ DateTime, Duration, Schema, SchemaTransformation }} from \"effect\"\n{SHARED_IMPORT}\n");
+        optional.clone_from(&entry);
+        let imports = names.iter().cloned().collect::<Vec<_>>().join(", ");
+        writeln!(optional, "import {{ {imports} }} from \"./ReadSchema.generated.ts\"")?;
+        let encoded = names.iter().map(|name| format!("{name}Encoded")).collect::<Vec<_>>().join(", ");
+        writeln!(optional, "import type {{ {encoded} }} from \"./ReadSchema.generated.ts\"")?;
+        writeln!(optional, "export * from \"./ReadSchema.generated.ts\"\n")?;
+        out = entry;
+    }
     let mut cx = Cx {
         defs,
         normalized: &normalized,
@@ -1672,9 +1796,14 @@ pub fn models(schema: &Value) -> Result<String> {
     for name in order {
         let decl = def_decl(&name, &normalized[&name], &mut cx)
             .with_context(|| format!("emit `{name}`"))?;
-        writeln!(out, "{decl}")?;
+        let target = if read_names.is_some_and(|names| !names.contains(&name)) {
+            &mut optional
+        } else {
+            &mut out
+        };
+        writeln!(target, "{decl}")?;
     }
-    Ok(out)
+    Ok((out, optional, support))
 }
 
 #[cfg(test)]
@@ -1692,8 +1821,8 @@ mod tests {
         });
         let output = emit_string(schema.as_object().context("string schema")?)?;
         assert!(output.contains("subjectRef<string>"));
-        assert!(output.contains("Schema.isMinLength(8)"));
-        assert!(output.contains("Schema.isMaxLength(256)"));
+        assert!(output.contains("Schema.isMinCodePoints(8)"));
+        assert!(output.contains("Schema.isMaxCodePoints(256)"));
         Ok(())
     }
 
@@ -1984,6 +2113,21 @@ mod tests {
             let schema = json!({ "x-st-integers": "json-safe", "$defs": { "Value": input } });
             assert!(models(&schema).is_err(), "{schema}");
         }
+    }
+
+    #[test]
+    fn lossless_timestamp_codec_is_opt_in_and_requires_date_time() {
+        let mut schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": {"PreciseInstant": {
+                "type": "string", "format": "date-time", "x-st-codec": "lossless-timestamp"
+            }}
+        });
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("Schema.decodeTo(LosslessTimestamp, losslessFromIso)"));
+        assert!(generated.contains("encode: (value: typeof LosslessTimestamp.Type) => value.wire"));
+        schema["$defs"]["PreciseInstant"].as_object_mut().unwrap().remove("format");
+        assert!(models(&schema).is_err());
     }
 
     #[test]

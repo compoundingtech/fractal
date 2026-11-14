@@ -1,9 +1,7 @@
 //! Human entry points and the actions to take after creating durable work.
 use std::fmt::Write as _;
 
-use clap::CommandFactory as _;
-
-use super::{Cli, presentation::shell_argument};
+use super::{command_graph, presentation::shell_argument};
 
 const GROUPS: &[(&str, &[&str])] = &[
     (
@@ -15,11 +13,13 @@ const GROUPS: &[(&str, &[&str])] = &[
             "agents",
             "conversations",
             "note",
+            "availability",
             "missions",
             "schedules",
             "alerts",
             "usage",
             "slo",
+            "budgets",
             "terminals",
             "machines",
             "launch",
@@ -42,11 +42,13 @@ const GROUPS: &[(&str, &[&str])] = &[
             "service",
             "migrate",
             "fleet",
+            "hosts",
             "deploy",
             "replication",
             "apply",
             "validate",
             "sets",
+            "source",
             "backup",
             "doctor",
             "admission",
@@ -64,6 +66,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "schema",
             "actor-contract",
             "subject",
+            "claims",
             "harness-questions",
             "documents",
             "evidence",
@@ -84,7 +87,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
     }
     // Use the real global options to find the root command, so option values such as a
     // device name or endpoint containing "help" cannot accidentally trigger this path.
-    let parser = Cli::command().disable_help_subcommand(true).subcommand(
+    let parser = command_graph().disable_help_subcommand(true).subcommand(
         clap::Command::new("help").arg(
             clap::Arg::new("all")
                 .long("all")
@@ -102,7 +105,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
 }
 
 pub(super) fn root_help(all: bool) -> String {
-    let command = Cli::command();
+    let command = command_graph();
     let mut output = String::from(
         "See what needs you:\n  fractal now\n\nRun fractal in a terminal to open the interface:\n  fractal\n  fractal ui --space NAME\n\nStart an agent and talk to it:\n  fractal agents new NAME --harness claude --attach\n\nSee what is running:\n  fractal missions ls\n  fractal agents ls\n\nFrom an agent:\n  fractal skill\n  fractal work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or fractal work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: fractal [OPTIONS] <COMMAND>\n",
     );
@@ -153,12 +156,12 @@ pub(super) fn agent_state(
             fault.unwrap_or("the agent process failed")
         ),
         "stopped" => "Stopped — the agent is no longer running.".into(),
-        "down" => "Down — st sees no running session for the agent; `fractal agents show` says since when.".into(),
+        "down" => "Down — Fractal sees no running session for the agent; `fractal agents show` says since when.".into(),
         "suspended" => {
             "Suspended — the agent stopped at a quiet moment; `fractal agents resume` brings back its session.".into()
         }
         "waiting" if reachability == "indeterminate" => {
-            "Unknown — st cannot tell which host runs this agent; its processes may be running. `fractal terminals` says the same until the claims agree.".into()
+            "Unknown — Fractal cannot tell which host runs this agent; its processes may be running. `fractal terminals` says the same until the claims agree.".into()
         }
         "waiting" if reachability != "reachable" => {
             "Still starting — the agent process cannot currently be reached.".into()
@@ -167,10 +170,10 @@ pub(super) fn agent_state(
             Some("unauthenticated" | "needs-login") => {
                 "Waiting for you — attach to sign in to the agent's provider.".into()
             }
-            // st withdraws an idle report it has not heard renewed in 90 s (idle seats renew every
-            // five minutes): nothing is known to be waiting on a person.
+            // Fractal withdraws an idle report older than the shared harness observation
+            // freshness window: nothing is known to be waiting on a person.
             Some("indeterminate") => {
-                "Quiet — st has no current report from the agent's harness; an idle agent reports every few minutes. Attach to inspect.".into()
+                "Quiet — Fractal has no current report from the agent's harness; an idle agent reports every few minutes. Attach to inspect.".into()
             }
             _ => "Waiting for you — attach to inspect what the agent needs.".into(),
         },
@@ -269,7 +272,7 @@ pub(super) fn launch_next_steps(launch: &super::PlanningSessionView) -> String {
 pub(super) fn pairing_next_steps(person: &str) -> String {
     let person = shell_argument(person);
     next_steps(
-        "Waiting for your device — enter the pairing code in its st client before it expires.",
+        "Waiting for your device — enter the pairing code in its Fractal client before it expires.",
         &[
             (
                 "Complete on the device",
@@ -354,7 +357,7 @@ mod tests {
                 inspect(child);
             }
         }
-        inspect(&mut Cli::command());
+        inspect(&mut command_graph());
     }
 
     #[test]
@@ -379,7 +382,7 @@ mod tests {
         let sender_guidance = fractal_daemon::skill::message_sender_guidance();
         assert_eq!(default.matches(sender_guidance).count(), 1);
         assert_eq!(all.matches(sender_guidance).count(), 1);
-        for command in Cli::command()
+        for command in command_graph()
             .get_subcommands()
             .filter(|command| !command.is_hide_set())
         {
@@ -405,9 +408,9 @@ mod tests {
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
             ("waiting", Some("blocked"), "Waiting for you"),
-            ("waiting", Some("indeterminate"), "Quiet — st has no current report"),
+            ("waiting", Some("indeterminate"), "Quiet — Fractal has no current report"),
             ("failed", None, "Could not start"),
-            ("down", None, "Down — st sees no running session"),
+            ("down", None, "Down — Fractal sees no running session"),
         ] {
             let state = agent_state(state, harness, None, "reachable");
             assert!(state.contains(expected), "{state}");

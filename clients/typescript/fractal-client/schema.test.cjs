@@ -4,6 +4,169 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('read entrypoint loads no mutation or PTY validators, even without tree shaking', () => {
+    const { spawnSync } = require('node:child_process');
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', String.raw`
+        import { registerHooks } from 'node:module';
+        import assert from 'node:assert/strict';
+        const loaded = [];
+        registerHooks({ load(url, context, nextLoad) {
+            const result = nextLoad(url, context);
+            if (/fractal-client\/.*generated\.ts$/.test(url)) {
+                loaded.push(url.split('/').at(-1));
+                assert.doesNotMatch(String(result.source),
+                    /export const (?:ActionCommon|ActionRequest|ActionResult|TerminalScreen|TerminalAttachment|TerminalLine|TerminalRun|TerminalModes|TerminalColor|TerminalLink|AssistantTerminalContent|\w+Parameters)\b/);
+            }
+            return result;
+        } });
+        const read = await import('@fractal/client/schema/read');
+        assert.ok(read.Agent && read.TimelineEntry && read.ReadCollectionFrame && read.ReadCollectionCommand);
+        assert.deepEqual(loaded.sort(), ['ReadSchema.generated.ts', 'SchemaSupport.generated.ts']);
+    `], { cwd: __dirname, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+});
+
+test('full and read entrypoints share validators and strict unknown-case tracking', async () => {
+    const [, full] = await modules;
+    const read = await import('./ReadSchema.generated.ts');
+    assert.equal(full.Agent, read.Agent);
+    assert.equal(full.decodeUnknownSync, read.decodeUnknownSync);
+    const unknown = read.decodeUnknownSync(read.ErrorCode)('future-error');
+    assert.equal(full.containsUnknownCase(unknown), true);
+    assert.throws(() => full.decodeUnknownSync(read.ErrorCode, 'strict')('future-error'));
+    assert.ok(full.ActionRequest && full.ActionResult && full.TerminalScreen && full.TerminalAttachment);
+    const terminal = { kind: 'subscribe', id: 'screen', collection: 'terminal', terminal: 'terminal/test', capability: 'test' };
+    assert.equal(full.decodeUnknownSync(full.CollectionCommand)(terminal).collection, 'terminal');
+    assert.throws(() => read.decodeUnknownSync(read.ReadCollectionCommand)(terminal));
+    const conversation = { kind: 'subscribe', id: 'thread', collection: 'conversation', conversation: 'agent/test' };
+    assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
+});
+
+test('mission supersession lineage is optional nonnullable and preserves retry lineage', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        id: 'mission-run/example/current', requester: 'person/operator',
+        status: 'running', phase: 'normal', must_act: 'system',
+        state_since: '2026-11-12T12:00:00.000Z',
+        progress: { done: 0, total: 1 }, current_steps: [],
+        retry_of: 'mission-run/example/failed', retried_by: ['mission-run/example/retry'],
+    };
+    const lineage = {
+        supersedes: 'mission-run/example/previous',
+        superseded_by: 'mission-run/example/replacement',
+        supersession_fault: 'revision old -> new: missing [replacement]; extra [value]',
+    };
+    for (const mode of ['tolerant', 'strict']) {
+        const decode = Rich.decodeUnknownSync(Rich.MissionRunSummary, mode);
+        const legacy = Schema.encodeSync(Rich.MissionRunSummary)(decode(wire));
+        for (const field of Object.keys(lineage)) {
+            assert.equal(Object.hasOwn(legacy, field), false);
+        }
+        const encoded = Schema.encodeSync(Rich.MissionRunSummary)(decode({ ...wire, ...lineage }));
+        for (const [field, value] of Object.entries(lineage)) {
+            assert.equal(encoded[field], value);
+        }
+        assert.equal(encoded.retry_of, wire.retry_of);
+        assert.deepEqual(encoded.retried_by, wire.retried_by);
+    }
+    const strict = Rich.decodeUnknownSync(Rich.MissionRunSummary, 'strict');
+    for (const field of Object.keys(lineage)) {
+        assert.throws(() => strict({ ...wire, [field]: null }));
+        assert.throws(() => strict({ ...wire, [field]: 42 }));
+    }
+    for (const field of ['supersedes', 'superseded_by']) {
+        assert.throws(() => strict({ ...wire, [field]: 'step-run/example/wrong-kind' }));
+    }
+});
+
+test('JSON Schema string bounds count Unicode code points, not UTF-16 units', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const name = Rich.decodeUnknownSync(Rich.ArrangementName, 'strict');
+    assert.equal(name('😀'.repeat(256)), '😀'.repeat(256));
+    assert.throws(() => name('😀'.repeat(257)));
+    const cursor = Rich.decodeUnknownSync(Rich.Cursor, 'strict');
+    assert.equal(cursor('😀'.repeat(8)), '😀'.repeat(8));
+    assert.throws(() => cursor('😀'.repeat(7)));
+    assert.equal(Schema.encodeSync(Rich.ArrangementName)('😀'.repeat(256)), '😀'.repeat(256));
+    assert.throws(() => Schema.encodeSync(Rich.ArrangementName)('😀'.repeat(257)));
+});
+
+test('URI-reference formats validate RFC3986 without URL normalization', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const capabilities = require('../../../docs/st3/client-v0/fixtures/capabilities.json').value;
+    const decode = Rich.decodeUnknownSync(Rich.Capabilities, 'strict');
+    for (const uri of ['', '../schema.json', '?q=a/b?c', '#fragment', 'urn:example:test',
+        'https://example.com/a%20b', '//user:pass@example.com:8080/path',
+        'https://[2001:db8::1]/', 'https://[::ffff:192.0.2.1]/', 'scheme://[v1.example]/']) {
+        const wire = { ...capabilities, schemas: [uri] };
+        assert.deepEqual(Schema.encodeSync(Rich.Capabilities)(decode(wire)), wire, uri);
+    }
+    for (const uri of ['https://example.com/a b', 'https://example.com/%xy', '/trailing\n',
+        'https://[::::]/', 'https://[1:2:3:4:5:6:7:8:9]/', 'https://example.com:port/',
+        'https://example.com/\\path', 'https://example.com/😀', ':not-a-relative-path']) {
+        assert.throws(() => decode({ ...capabilities, schemas: [uri] }), uri);
+    }
+});
+
+test('declared admission is optional nonnullable data with lossless future enums', async () => {
+    const [{ Effect, Schema }, Rich] = await modules;
+    const admission = {
+        priority: 'normal', lane: 'check',
+        budgets: { cpu_seconds: 300, memory_max: '8G', disk_max: '20G', token_budget: 100000 },
+    };
+    const resources = [
+        [Rich.Agent, { id: 'agent/example/worker', kind: 'agent', name: 'Worker',
+            revision: 'claim/one', updated_at: '2026-11-01T00:00:00.000Z',
+            state: 'running', reachability: 'local', runtime_ids: [] }],
+        [Rich.Mission, { id: 'mission/example', kind: 'mission', title: 'Example',
+            revision: 'claim/one', updated_at: '2026-11-01T00:00:00.000Z',
+            state: 'ready', mission_revision: 'claim/one', runs: [], run_generations: {} }],
+        [Rich.AgentDeclaration, { id: 'agent/example/worker', revision: 'claim/one',
+            tree: {}, kdl: '', revisions: ['claim/one'] }],
+    ];
+    for (const [model, wire] of resources) {
+        for (const mode of ['tolerant', 'strict']) {
+            const decode = Rich.decodeUnknownSync(model, mode);
+            assert.equal(Object.hasOwn(decode(wire), 'declared_admission'), false);
+            assert.equal(Object.hasOwn(Schema.encodeSync(model)(decode(wire)), 'declared_admission'), false);
+            const decoded = decode({ ...wire, declared_admission: admission });
+            assert.deepEqual(decoded.declared_admission, admission);
+            assert.deepEqual(Schema.encodeSync(model)(decoded).declared_admission, admission);
+            assert.deepEqual(Effect.runSync(Rich.decodeUnknownEffect(model, mode)(
+                { ...wire, declared_admission: admission })).declared_admission, admission);
+            assert.deepEqual(decode({ ...wire, declared_admission: { lane: 'build' } }).declared_admission, { lane: 'build' });
+        }
+        const future = { ...admission, priority: 'future-level', lane: 'future-lane' };
+        const decoded = Rich.decodeUnknownSync(model)({ ...wire, declared_admission: future });
+        assert.deepEqual(decoded.declared_admission.priority, { _tag: 'Unknown', raw: 'future-level' });
+        assert.deepEqual(decoded.declared_admission.lane, { _tag: 'Unknown', raw: 'future-lane' });
+        assert.deepEqual(Schema.encodeSync(model)(decoded).declared_admission, future);
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...wire, declared_admission: future }));
+        assert.equal(Object.hasOwn(Rich.decodeUnknownSync(model)(
+            { ...wire, declared_admission: null }), 'declared_admission'), false);
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...wire, declared_admission: null }));
+        const extra = { ...admission, future: true, budgets: { ...admission.budgets, future: true } };
+        assert.deepEqual(Schema.encodeSync(model)(Rich.decodeUnknownSync(model)(
+            { ...wire, declared_admission: extra })).declared_admission, admission);
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...wire, declared_admission: extra }));
+        if (wire.kind !== undefined) {
+            const resource = Rich.decodeUnknownSync(Rich.Resource)(
+                { ...wire, declared_admission: future });
+            assert.deepEqual(Schema.encodeSync(Rich.Resource)(resource).declared_admission, future);
+        }
+    }
+    for (const priority of ['background', 'normal'])
+        assert.equal(Rich.decodeUnknownSync(Rich.DeclaredPriority, 'strict')(priority), priority);
+    for (const lane of ['check', 'build'])
+        assert.equal(Rich.decodeUnknownSync(Rich.DeclaredLane, 'strict')(lane), lane);
+    for (const field of ['cpu_seconds', 'token_budget']) {
+        const decode = Rich.decodeUnknownSync(Rich.DeclaredBudgets, 'strict');
+        for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null])
+            assert.throws(() => decode({ [field]: invalid }));
+        assert.deepEqual(decode({ [field]: Number.MAX_SAFE_INTEGER }), { [field]: Number.MAX_SAFE_INTEGER });
+    }
+});
+
 test('harness questions retain canonical private metadata and open response enums', async () => {
     const [{ DateTime, Option, Schema }, Rich] = await modules;
     const wire = {
@@ -95,6 +258,14 @@ test('harness refusal details stay closed while result statuses remain lossless'
     const known = { status: 'accepted', resolution: { status: 'answered', revision: 'claim/observed', answers: {}, resolved_at: 1793008801000 } };
     assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(known)), known);
 });
+test('placement migration is a strict typed arrangement operation', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const operation = { op: 'membership.migrate' };
+    const decoded = Rich.decodeUnknownSync(Rich.ArrangementOperation, 'strict')(operation);
+    assert.deepEqual(Schema.encodeSync(Rich.ArrangementOperation)(decoded), operation);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.ArrangementOperation, 'strict')({ ...operation, version: 2 }));
+});
+
 test('revisioned agents opt-in and frames are strict disjoint branches with lossless provenance', async () => {
     const [{ Schema }, Rich] = await modules;
     const command = require('../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json');
@@ -344,7 +515,7 @@ test('prompt answers keep ordinary text bounds and optional delegation across th
     }
 });
 
-test('queued mission deadlines decode null and admission timestamps', async () => {
+test('mission runs decode queued deadlines and zero-sample ETA with no remaining steps', async () => {
     const [{ Option, Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
     for (const mode of ['strict', 'tolerant']) {
@@ -359,6 +530,12 @@ test('queued mission deadlines decode null and admission timestamps', async () =
         assert(Option.isSome(decode(queued).run_details[0].deadline));
         assert.equal(Schema.encodeSync(Rich.Mission)(decode(queued)).run_details[0].deadline,
             '2026-09-20T11:05:00.000Z');
+        for (const method of ['per-step', 'critical-path']) {
+            queued.run_details[0].eta = { as_of: 0, remaining_low_ms: 0, remaining_high_ms: 0, basis: { method, samples: 0 } };
+            assert.deepEqual(Schema.encodeSync(Rich.Mission)(decode(queued)).run_details[0].eta, queued.run_details[0].eta);
+            queued.run_details[0].eta.basis.samples = -1;
+            assert.throws(() => decode(queued));
+        }
     }
 });
 
@@ -395,6 +572,55 @@ test('directive notes decode metadata and expiry without becoming gate evidence'
     const invalid = structuredClone(wire);
     invalid.notes[0].time = '2026-02-30T09:00:00Z';
     assert.throws(() => decode(invalid));
+});
+
+test('availability decodes the coarse view, the full view and a status clear', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const people = Rich.decodeUnknownSync(Rich.PersonAvailabilities, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-availability.json').value;
+    const result = Schema.encodeSync(Rich.PersonAvailabilities)(people(wire));
+    assert.equal(result.people[0].presence, null);
+    assert.equal(result.people[0].status_until, '2026-11-12T12:00:00.000Z');
+    assert.equal(result.people[1].deadline_clock, 'hold-routine');
+    assert.deepEqual([result.people[2].status, result.people[2].status_source], ['available', 'unreported']);
+    // Words a newer daemon adds stay readable.
+    const future = { ...wire.people[0], status: 'busy', status_source: 'calendar', presence: 'in-call', interruptions: 'priority', deadline_clock: 'hold-weekend' };
+    const decodedFuture = Rich.decodeUnknownSync(Rich.PersonAvailability)(future);
+    assert.equal(Rich.containsUnknownCase(decodedFuture), true);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict')(future));
+    const kept = Schema.encodeSync(Rich.PersonAvailability)(decodedFuture);
+    assert.deepEqual([kept.status, kept.status_source, kept.presence, kept.interruptions, kept.deadline_clock], ['busy', 'calendar', 'in-call', 'priority', 'hold-weekend']);
+    const own = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json').value;
+    const full = Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict');
+    assert.equal(Schema.encodeSync(Rich.PersonAvailability)(full(own)).presence, 'present');
+    const set = Rich.decodeUnknownSync(Rich.AvailabilitySet, 'strict');
+    assert.equal(Schema.encodeSync(Rich.AvailabilitySet)(set({ status: { value: null } })).status.value, null);
+    for (const invalid of [{ interruptions: { value: 'focus' } }, { status: { value: 'away' }, person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const report = Rich.decodeUnknownSync(Rich.PresenceReport, 'strict');
+    report(require('../../../docs/st3/client-v0/fixtures/presence-report.json'));
+    assert.throws(() => report({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' }));
+    assert.throws(() => report({ presence: 'present', observed_at: '2026-11-12T09:58:00Z' }));
+    const reportResult = Rich.decodeUnknownSync(Rich.PresenceReportResult, 'strict');
+    const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json').value;
+    assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(reportResult(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
+});
+
+test('a note write requires text, clears with null and never names the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const set = Rich.decodeUnknownSync(Rich.DirectiveNoteSet, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set(wire)).expires_at, '2026-11-16T09:00:00.000Z');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set({ text: null })).text, null);
+    for (const invalid of [{}, { text: '' }, { text: 'Approved', person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const result = Rich.decodeUnknownSync(Rich.DirectiveNoteSetResult, 'strict');
+    const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json').value;
+    const encode = Schema.encodeSync(Rich.DirectiveNoteSetResult);
+    assert.equal(encode(result(written)).note.person, 'person/ada');
+    assert.equal(encode(result({ note: null })).note, null);
 });
 
 test('person-ask mission rows retain actor references through the generated decoder', async () => {
@@ -1095,6 +1321,39 @@ test('an ask resolved at its deadline decodes, and what the decoder from before 
     }));
 });
 
+test('person option notes round trip inside input and stored answer without changing legacy payloads', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const notes = [{ id: 'hold', text: 'Keep this as a fallback.' }];
+    for (const [model, legacy] of [
+        [Rich.PersonAnswerInput, { id: 'land', text: 'Ship it.' }],
+        [Rich.PersonAnswer, { type: 'decision', outcome: 'accept', id: 'land', text: 'Ship it.' }],
+    ]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const decode = Rich.decodeUnknownSync(model, mode);
+            for (const wire of [legacy, { ...legacy, option_notes: notes }]) {
+                assert.deepEqual(Schema.encodeSync(model)(decode(wire)), wire);
+            }
+        }
+        for (const option_notes of [null, {}, [{ id: 'hold' }], [{ text: 'fallback' }], [{ id: 'hold', text: '' }], [{ id: 'hold', text: ' \n\t ' }], [{ id: 'hold', text: 'x'.repeat(8001) }]]) {
+            assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({ ...legacy, option_notes }));
+        }
+        assert.throws(() => Rich.decodeUnknownSync(model, 'strict')({
+            ...legacy, option_notes: [{ ...notes[0], label: 'Unexpected' }],
+        }));
+    }
+});
+
+test('pre-option-notes readers reject strictly or lose notes tolerantly, so summary must remain readable', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const { option_notes, ...before } = Rich.PersonAnswer.fields;
+    assert.ok(option_notes);
+    const previous = Schema.Struct(before);
+    const wire = { type: 'decision', outcome: 'accept', id: 'land',
+        option_notes: [{ id: 'hold', text: 'Fallback only.' }] };
+    assert.throws(() => Rich.decodeUnknownSync(previous, 'strict')(wire));
+    assert.equal('option_notes' in Rich.decodeUnknownSync(previous, 'tolerant')(wire), false);
+});
+
 test('a later daemon adding a tone word does not fail the objectives and budgets read', async () => {
     const [, Rich] = await modules;
     const row = { id: 'anthropic-weekly', kind: 'budget', about: 'a', target: '100% per week', current: '94% used', window: 'weekly',
@@ -1106,4 +1365,59 @@ test('a later daemon adding a tone word does not fail the objectives and budgets
         assert.deepEqual(list.rows.map(found => found.tone), ['red', 'blue', undefined]);
         assert.equal(list.rows.length, 3);
     }
+});
+
+test('notice summary bounds match JSON Schema at 200 Unicode code points', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const input = require('../../../docs/st3/client-v0/fixtures/notice-conformance.json').snapshot.input;
+    const decode = Rich.decodeUnknownSync(Rich.NoticeCreated, 'strict');
+    const boundary = { ...input, summary: '😀'.repeat(200) };
+    assert.equal(Schema.encodeSync(Rich.NoticeCreated)(decode(boundary)).summary, boundary.summary);
+    assert.throws(() => decode({ ...input, summary: '😀'.repeat(201) }));
+    for (const url of ['https://example.com/a b', 'https://example.com/%xy', '/relative']) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.NoticeLink, 'strict')({ label: 'Result', url }));
+    }
+});
+
+test('notice fixtures preserve rich Options, identifiers and lossless timestamps', async () => {
+    const [{ Schema, Option, DateTime }, Rich] = await modules;
+    const fixture = require('../../../docs/st3/client-v0/fixtures/notice-conformance.json');
+    const roundTrip = (schema, wire) => {
+        const decoded = Rich.decodeUnknownSync(schema, 'strict')(wire);
+        assert.deepEqual(Schema.encodeSync(schema)(decoded), wire);
+        return decoded;
+    };
+    const snapshot = roundTrip(Rich.NoticeSnapshot, fixture.snapshot);
+    assert.equal(snapshot.id, fixture.snapshot.id);
+    assert.equal(snapshot.source_id, fixture.snapshot.source_id);
+    assert.equal(snapshot.basis_claim, fixture.snapshot.basis_claim);
+    assert.equal(snapshot.runtime, fixture.snapshot.runtime);
+    assert.equal(snapshot.input.recipient, fixture.snapshot.input.recipient);
+    for (const key of ['seen_at', 'dismissed_at', 'snoozed_until', 'control_revision'])
+        assert.ok(Option.isNone(snapshot[key]), key);
+    const seen = roundTrip(Rich.NoticeSnapshot, { ...fixture.snapshot, seen_at: fixture.valid_timestamps[1], control_revision: 'control-v1' });
+    assert.equal(Option.getOrThrow(seen.seen_at).wire, fixture.valid_timestamps[1]);
+    assert.equal(Option.getOrThrow(seen.control_revision), 'control-v1');
+    for (const value of fixture.valid_delivery) roundTrip(Rich.NoticeDelivery, value);
+    for (const value of fixture.valid_integrity) roundTrip(Rich.NoticeIntegrity, value);
+    for (const { pointer, value } of fixture.invalid_snapshot) {
+        const mutated = structuredClone(fixture.snapshot), parts = pointer.slice(1).split('/');
+        let parent = mutated;
+        for (const key of parts.slice(0, -1)) parent = parent[key];
+        parent[parts.at(-1)] = value;
+        assert.throws(() => Rich.decodeUnknownSync(Rich.NoticeSnapshot, 'strict')(mutated), pointer);
+    }
+    for (const wire of fixture.valid_timestamps) {
+        const decoded = roundTrip(Rich.NoticeTimestamp, wire);
+        assert.equal(decoded.wire, wire);
+        assert.equal(Option.isNone(decoded.instant), wire.slice(17, 19) === '60');
+        if (Option.isSome(decoded.instant)) assert.equal(DateTime.toEpochMillis(decoded.instant.value), Date.parse(wire));
+        roundTrip(Rich.NoticeSnapshot, { ...fixture.snapshot, updated_at: wire });
+    }
+    for (const wire of fixture.invalid_timestamps)
+        assert.throws(() => Rich.decodeUnknownSync(Rich.NoticeTimestamp, 'strict')(wire), wire);
+    const wire = fixture.valid_timestamps[0];
+    assert.throws(() => Schema.encodeSync(Rich.NoticeTimestamp)({ wire, instant: Option.none() }));
+    // Existing timestamp annotations retain the established DateTime.Utc contract.
+    assert.equal(DateTime.toEpochMillis(Rich.decodeUnknownSync(Rich.Timestamp)(wire)), Date.parse(wire));
 });

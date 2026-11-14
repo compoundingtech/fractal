@@ -6,6 +6,79 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testMissionRunSupersessionLineageAndLegacyOmission() throws {
+        let legacy = Data(#"{"id":"mission-run/example/current","requester":"person/operator","status":"running","phase":"normal","must_act":"system","state_since":"2026-11-12T12:00:00Z","progress":{"done":0,"total":1},"current_steps":[]}"#.utf8)
+        let decoded = try JSONDecoder().decode(MissionRunSummary.self, from: legacy)
+        XCTAssertNil(decoded.supersedes)
+        XCTAssertNil(decoded.supersededBy)
+        XCTAssertNil(decoded.supersessionFault)
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+        for field in ["supersedes", "superseded_by", "supersession_fault"] {
+            XCTAssertNil(encoded[field])
+        }
+        var linked = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        linked["retry_of"] = "mission-run/example/failed"
+        linked["retried_by"] = ["mission-run/example/retry"]
+        linked["supersedes"] = "mission-run/example/previous"
+        linked["superseded_by"] = "mission-run/example/replacement"
+        linked["supersession_fault"] = "revision old -> new: missing [replacement]; extra [value]"
+        let run = try JSONDecoder().decode(MissionRunSummary.self, from: JSONSerialization.data(withJSONObject: linked))
+        XCTAssertEqual(run.retryOf, "mission-run/example/failed")
+        XCTAssertEqual(run.retriedBy, ["mission-run/example/retry"])
+        XCTAssertEqual(run.supersedes, "mission-run/example/previous")
+        XCTAssertEqual(run.supersededBy, "mission-run/example/replacement")
+        XCTAssertEqual(run.supersessionFault, "revision old -> new: missing [replacement]; extra [value]")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(run)) as? NSDictionary, linked as NSDictionary)
+    }
+
+    func testPersonOptionNotesRoundTripAndEmptyOmission() throws {
+        let legacy = Data(#"{"id":"land","text":"Ship it."}"#.utf8)
+        let decoded = try JSONDecoder().decode(PersonAnswerInput.self, from: legacy)
+        XCTAssertTrue(decoded.optionNotes.isEmpty)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: legacy) as? NSDictionary)
+        let notes = [PersonOptionNote(id: "hold", text: "Keep as a fallback.")]
+        let input = PersonAnswerInput(id: "land", text: "Ship it.", optionNotes: notes)
+        let wire = try JSONEncoder().encode(input)
+        XCTAssertEqual(try JSONDecoder().decode(PersonAnswerInput.self, from: wire).optionNotes, notes)
+        let stored = Data(#"{"type":"decision","outcome":"accept","id":"land","text":"Ship it.","option_notes":[{"id":"hold","text":"Keep as a fallback."}]}"#.utf8)
+        let answer = try JSONDecoder().decode(PersonAnswer.self, from: stored)
+        XCTAssertEqual(answer.optionNotes, notes)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(answer)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: stored) as? NSDictionary)
+        let empty = try JSONDecoder().decode(PersonAnswer.self,
+            from: Data(#"{"type":"decision","outcome":"accept","id":"land","option_notes":[]}"#.utf8))
+        let emptyWire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(empty)) as? [String: Any])
+        XCTAssertNil(emptyWire["option_notes"])
+    }
+
+    func testDeviceCommandTypedArgumentsAndResourceRoundTrip() throws {
+        let request = DeviceCommandRequest(device: "device/phone",
+            command: .navigate(.conversation(target: "agent/example/worker", sessionID: "session/example")), ttlMS: 30000)
+        let data = try JSONEncoder().encode(request)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["kind"] as? String, "phone.navigate")
+        XCTAssertEqual(object["device"] as? String, "device/phone")
+        let args = try XCTUnwrap(object["args"] as? [String: Any])
+        XCTAssertEqual(args["screen"] as? String, "Conversation")
+        let params = try XCTUnwrap(args["params"] as? [String: String])
+        XCTAssertEqual(params, ["target": "agent/example/worker", "sessionId": "session/example"])
+        XCTAssertEqual(try JSONDecoder().decode(DeviceCommandRequest.self, from: data).command, request.command)
+        let resourceData = Data(#"{"id":"device-command/example","kind":"device-command","revision":"revision/one","updated_at":"2026-10-30T12:00:00.000Z","command_kind":"phone.inspect","args":{},"device_id":"device/phone","session_actor":"person/ada/session/phone","issued_by":"person/ada","issued_at":"2026-10-30T12:00:00.000Z","expires_at":"2026-10-30T12:00:30.000Z","state":"pending"}"#.utf8)
+        guard case .deviceCommand(let command) = try JSONDecoder().decode(Resource.self, from: resourceData) else {
+            return XCTFail("Expected a typed device-command resource")
+        }
+        XCTAssertEqual(command.command, .inspect)
+        XCTAssertEqual(command.state, .pending)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(command)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: resourceData) as? NSDictionary)
+        let report = DeviceResult(commandID: command.id, outcome: .completed, result: .object(["foreground": .bool(true)]))
+        let reportData = try JSONEncoder().encode(report)
+        XCTAssertEqual(try JSONDecoder().decode(DeviceResult.self, from: reportData).outcome, .completed)
+        XCTAssertThrowsError(try JSONDecoder().decode(PhoneNavigateArgs.self,
+            from: Data(#"{"screen":"Terminal","params":{"target":"agent/example/worker"}}"#.utf8)))
+    }
+
     func testRevisionedAgentsCommandAndGoldenFrames() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -44,6 +117,19 @@ final class FractalClientTests: XCTestCase {
         let legacy = try JSONDecoder().decode(CollectionNotice.self, from: Data(#"{"kind":"resync","id":"roster"}"#.utf8))
         XCTAssertNil(legacy.collection)
         XCTAssertNil(legacy.retryable)
+    }
+
+    func testAgentRelationshipsPreserveAbsentAndEmptyWireValues() throws {
+        let base = #"{"id":"agent/a","kind":"agent","revision":"claim/a","updated_at":"2026-10-10T12:00:00Z","name":"A","state":"stopped","reachability":"local","runtime_ids":[]}"#
+        for present in [false, true] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(base.utf8)) as? [String: Any])
+            if present { object["under"] = [] as [Any] }
+            let agent = try JSONDecoder().decode(AgentResource.self, from: JSONSerialization.data(withJSONObject: object))
+            if present { XCTAssertEqual(agent.under?.count, 0) } else { XCTAssertNil(agent.under) }
+            let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(agent)) as? [String: Any])
+            XCTAssertEqual(encoded.keys.contains("under"), present)
+            if present { XCTAssertEqual((encoded["under"] as? [Any])?.count, 0) }
+        }
     }
 
     func testPushRegistrationRoundTripAndRedactedDescription() throws {
@@ -207,6 +293,60 @@ final class FractalClientTests: XCTestCase {
         XCTAssertEqual(note.revision, "claim/example")
         let empty = try JSONDecoder().decode(DirectiveNotes.self, from: Data(#"{"notes":[]}"#.utf8))
         XCTAssertTrue(empty.notes.isEmpty)
+    }
+
+    func testDirectiveNoteSetFixturesDecodeAndEncodeAClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let set = try JSONDecoder().decode(DirectiveNoteSet.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set.json")))
+        XCTAssertEqual(set.expiresAt, "2026-11-16T09:00:00Z")
+        let result = try JSONDecoder().decode(Envelope<DirectiveNoteSetResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("directive-note-set-result.json")))
+        XCTAssertEqual(result.value.note?.text, set.text)
+        let cleared = try JSONDecoder().decode(DirectiveNoteSetResult.self, from: Data(#"{"note":null}"#.utf8))
+        XCTAssertNil(cleared.note)
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DirectiveNoteSet(text: nil))) as? NSDictionary
+        XCTAssertEqual(clear, ["text": NSNull()] as NSDictionary)
+    }
+
+    func testAvailabilityFixturesDecodeBothViewsAndEncodeAStatusClearAsNull() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let fixtures = root.appendingPathComponent("docs/st3/client-v0/fixtures")
+        let read = try JSONDecoder().decode(Envelope<PersonAvailabilities>.self, from: Data(contentsOf: fixtures.appendingPathComponent("person-availability.json")))
+        XCTAssertEqual(read.value.people.map(\.person), ["person/ada", "person/avery", "person/blair"])
+        XCTAssertEqual(read.value.people[0].statusSource, .override)
+        XCTAssertNil(read.value.people[0].presence)
+        XCTAssertEqual(read.value.people[1].deadlineClock, .holdRoutine)
+        XCTAssertEqual(read.value.people[1].deadlineClockUntil, "2026-11-12T17:00:00Z")
+        XCTAssertEqual(read.value.people[2].status, .available)
+        XCTAssertEqual(read.value.people[2].statusSource, .unreported)
+        let own = try JSONDecoder().decode(Envelope<PersonAvailability>.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set-result.json")))
+        XCTAssertEqual(own.value.presence, .present)
+        let set = try JSONDecoder().decode(AvailabilitySet.self, from: Data(contentsOf: fixtures.appendingPathComponent("availability-set.json")))
+        XCTAssertEqual(set.deadlineClock?.value, "run")
+        let clear = try JSONSerialization.jsonObject(with: JSONEncoder().encode(AvailabilitySet(status: AvailabilityStatusChange(value: nil)))) as? NSDictionary
+        XCTAssertEqual(clear, ["status": ["value": NSNull()]] as NSDictionary)
+        let report = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "active", lastInputAt: "2026-11-12T09:57:30Z", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(report, try JSONSerialization.jsonObject(with: Data(contentsOf: fixtures.appendingPathComponent("presence-report.json"))) as? NSDictionary)
+        let locked = try JSONSerialization.jsonObject(with: JSONEncoder().encode(PresenceReport(state: "locked", observedAt: "2026-11-12T09:58:00Z"))) as? NSDictionary
+        XCTAssertEqual(locked, ["state": "locked", "observed_at": "2026-11-12T09:58:00Z"] as NSDictionary)
+        let reported = try JSONDecoder().decode(Envelope<PresenceReportResult>.self, from: Data(contentsOf: fixtures.appendingPathComponent("presence-report-result.json")))
+        XCTAssertEqual(reported.value.availability.presence, .present)
+        XCTAssertEqual(reported.value.reportAgainAt, "2026-11-12T10:07:30Z")
+    }
+
+    func testAvailabilityWordsANewerDaemonAddsDecodeAsUnknownAndReencode() throws {
+        let row = #"{"person":"person/ada","status":"busy","status_source":"calendar","status_until":null,"presence":"in-call","presence_observed_at":null,"interruptions":"priority","interruptions_until":null,"deadline_clock":"hold-weekend","deadline_clock_since":null,"deadline_clock_until":null}"#
+        let future = try JSONDecoder().decode(PersonAvailability.self, from: Data(row.utf8))
+        XCTAssertEqual(future.status, .unknown("busy"))
+        XCTAssertEqual(future.statusSource, .unknown("calendar"))
+        XCTAssertEqual(future.presence, .unknown("in-call"))
+        XCTAssertEqual(future.interruptions, .unknown("priority"))
+        XCTAssertEqual(future.deadlineClock, .unknown("hold-weekend"))
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(future.deadlineClock), as: UTF8.self), #""hold-weekend""#)
+        XCTAssertEqual(AvailabilityDeadlineClock(word: "hold-all"), .holdAll)
+        XCTAssertEqual(AvailabilityPresence.unreported.word, "unreported")
     }
 
     func testCreationActionFixtures() throws {
@@ -424,40 +564,43 @@ final class FractalClientTests: XCTestCase {
         for _ in 0..<6 { root.deleteLastPathComponent() }
         let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/resources.json"))
         let resources = try JSONDecoder().decode([Resource].self, from: data)
-        XCTAssertEqual(resources.count, 18)
-        guard case .attention(let attention) = resources[0] else { return XCTFail("attention discriminator lost") }
+        XCTAssertEqual(resources.count, 19)
+        func resource(_ id: String) throws -> Resource {
+            try XCTUnwrap(resources.first { $0.id == id })
+        }
+        guard case .attention(let attention) = try resource("attention/release-review") else { return XCTFail("attention discriminator lost") }
         XCTAssertEqual(attention.priority, "high")
         XCTAssertEqual(attention.actions, ["launch.approve", "launch.cancel"])
-        guard case .launch(let launch) = resources[2] else { return XCTFail("launch discriminator lost") }
+        guard case .launch(let launch) = try resource("launch/release") else { return XCTFail("launch discriminator lost") }
         XCTAssertEqual(launch.variants, ["launch-variant/release/default"])
         XCTAssertEqual(launch.visualization?.version, "st3.visualization.v0")
         XCTAssertEqual(launch.visualization?.nodes.first?.goals, ["Build artifacts"])
         XCTAssertEqual(launch.visualization?.decisions.first?.decisionType, .singleChoice)
         XCTAssertEqual(launch.visualization?.diffs.first?.changes.count, 1)
         XCTAssertEqual(launch.visualization?.swimlanes.first?.nodes, ["step/build"])
-        guard case .mission(let mission) = resources[6] else { return XCTFail("mission discriminator lost") }
+        guard case .mission(let mission) = try resource("mission/release") else { return XCTFail("mission discriminator lost") }
         XCTAssertEqual(mission.runGenerations["mission-run/release/1"], "run-generation/release/1/g1")
         XCTAssertEqual(mission.visualization?.mission, "mission/release")
-        guard case .work(let work) = resources[7] else { return XCTFail("work discriminator lost") }
+        guard case .work(let work) = try resource("work/release/1/build") else { return XCTFail("work discriminator lost") }
         XCTAssertEqual(work.readinessEpoch, 3)
         XCTAssertEqual(work.goals, ["Build artifacts"])
         XCTAssertNil(work.blockedReason)
         XCTAssertEqual(work.blockers, [])
-        guard case .agent(let agent) = resources[8] else { return XCTFail("agent discriminator lost") }
+        guard case .agent(let agent) = try resource("agent/release") else { return XCTFail("agent discriminator lost") }
         XCTAssertEqual(agent.runtimeIDs, ["runtime/release-agent"])
         XCTAssertEqual(agent.workspace, "/srv/example/release")
         XCTAssertEqual(agent.checkout?.branch, "release")
-        guard case .runtime(let runtime) = resources[9] else { return XCTFail("runtime discriminator lost") }
+        guard case .runtime(let runtime) = try resource("runtime/release-agent") else { return XCTFail("runtime discriminator lost") }
         XCTAssertEqual(runtime.ownerHostID, "host/host-a")
         XCTAssertEqual(runtime.incarnationID, "runtime-9:2026-09-20T11:06:30Z")
-        guard case .machine(let machine) = resources[13] else { return XCTFail("machine discriminator lost") }
+        guard case .machine(let machine) = try resource("machine/host-a") else { return XCTFail("machine discriminator lost") }
         XCTAssertEqual(machine.hostID, "host/host-a")
         XCTAssertEqual(machine.capacity.state, "unknown")
         XCTAssertEqual(machine.occupancy.runningRuntimes, 1)
         XCTAssertEqual(machine.projects, [])
-        guard case .history(let history) = resources[16] else { return XCTFail("history discriminator lost") }
+        guard case .history(let history) = try resource("history/1842") else { return XCTFail("history discriminator lost") }
         XCTAssertEqual(history.storeIndex, 1842)
-        guard case .session(let session) = resources[17] else { return XCTFail("session discriminator lost") }
+        guard case .session(let session) = try resource("session/release-agent/9") else { return XCTFail("session discriminator lost") }
         XCTAssertEqual(session.timelineCursor, "timeline-cursor/release-agent/9/8")
     }
 
@@ -891,6 +1034,12 @@ private final class TraceHTTPProtocol: URLProtocol, @unchecked Sendable {
 private final class WebSocketCaptureSession: URLSession, @unchecked Sendable {
     let capture = TraceRequestCapture()
     private let backing = URLSession(configuration: .ephemeral)
+
+    #if canImport(FoundationNetworking)
+    init() {
+        super.init(configuration: .ephemeral)
+    }
+    #endif
 
     override func webSocketTask(with request: URLRequest) -> URLSessionWebSocketTask {
         capture.append(request)

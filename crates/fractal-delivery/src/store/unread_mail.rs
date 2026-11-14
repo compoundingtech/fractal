@@ -21,14 +21,21 @@ fn flush_pending(connection: &Connection) -> Result<()> {
     }
     let mut remove = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3b5efa6a0e33 owner=fractal_delivery::store::unread_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM unread_mail WHERE subject=?1")?;
     let mut insert = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-hc5a0f50c7cd6 owner=fractal_delivery::store::unread_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO unread_mail(subject,sent_time)
-         SELECT ?1,MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
-         WHERE subject=?1 AND kind='message.sent'
-         AND NOT EXISTS (
+        /* sqlite-large-value: allow-for-now lv-h530faa15f55a owner=fractal_delivery::store::unread_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO unread_mail(subject,sent_time)
+         SELECT ?1,MAX(sent_time) FROM (
+             SELECT CAST(accepted_at_unix_ms AS INTEGER) AS sent_time FROM claims
+             WHERE subject=?1 AND kind='message.sent'
+             UNION ALL SELECT sent_ms FROM local_stream_sent WHERE subject=?1)
+         WHERE NOT EXISTS (
+             SELECT 1 FROM unread_mail_expired WHERE subject=?1
+         ) AND NOT EXISTS (
              SELECT 1 FROM claims WHERE subject=?1
              AND kind IN ('message.read','message.closed')
          ) AND NOT EXISTS (
              SELECT 1 FROM local_message_marks WHERE message=?1
+             AND kind IN ('message.read','message.closed')
+         ) AND NOT EXISTS (
+             SELECT 1 FROM local_stream_lifecycle WHERE subject=?1
              AND kind IN ('message.read','message.closed')
          ) HAVING COUNT(*)>0",
     )?;
@@ -52,11 +59,16 @@ pub fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -> Resul
     let delta: i64 = connection
         .prepare_cached(
             "SELECT COALESCE(SUM(
-            CASE WHEN (SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims
-                       WHERE subject=pending.subject AND kind='message.sent') < ?1
+            CASE WHEN (SELECT MAX(sent_time) FROM (
+                           SELECT CAST(accepted_at_unix_ms AS INTEGER) AS sent_time FROM claims
+                           WHERE subject=pending.subject AND kind='message.sent'
+                           UNION ALL SELECT sent_ms FROM local_stream_sent WHERE subject=pending.subject)) < ?1
+                 AND NOT EXISTS (SELECT 1 FROM unread_mail_expired WHERE subject=pending.subject)
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject
                                  AND kind IN ('message.read','message.closed'))
                  AND NOT EXISTS (SELECT 1 FROM local_message_marks WHERE message=pending.subject
+                                 AND kind IN ('message.read','message.closed'))
+                 AND NOT EXISTS (SELECT 1 FROM local_stream_lifecycle WHERE subject=pending.subject
                                  AND kind IN ('message.read','message.closed'))
                  THEN 1 ELSE 0 END
             - CASE WHEN EXISTS (SELECT 1 FROM unread_mail
@@ -80,13 +92,16 @@ pub struct UnreadSent {
 pub fn sent_before(connection: &Connection, before_unix_ms: u128) -> Result<Vec<UnreadSent>> {
     let before = i64::try_from(before_unix_ms).unwrap_or(i64::MAX);
     let mut statement = connection.prepare_cached(
-        "SELECT json_extract(sent.body,'$.fields.to'), json_extract(sent.body,'$.fields.from'),
-                json_extract(sent.body,'$.fields.tags'), held.sent_ms
+        "SELECT COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to')),
+                COALESCE(json_extract(sent.body,'$.fields.from'), json_extract(stream.fields,'$.from')),
+                COALESCE(json_extract(sent.body,'$.fields.tags'), json_extract(stream.fields,'$.tags')), held.sent_ms
          FROM coordination_sends held INDEXED BY coordination_sends_held
-         JOIN claims sent ON sent.id=(SELECT id FROM claims
+         LEFT JOIN claims sent ON sent.id=(SELECT id FROM claims
              WHERE subject=held.subject AND kind='message.sent'
              ORDER BY CAST(accepted_at_unix_ms AS INTEGER),id LIMIT 1)
+         LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
          WHERE held.held=1 AND held.sent_ms < ?1
+           AND (sent.id IS NOT NULL OR stream.subject IS NOT NULL)
          ORDER BY held.sent_ms,held.subject LIMIT 128",
     )?;
     let rows = statement.query_map([before], |row| {
@@ -140,7 +155,7 @@ mod tests {
                 &origin,
                 subject,
                 kind,
-                Some("person/operator"),
+                Some(if kind == "message.expired" { "daemon/runtime" } else { "person/operator" }),
                 &json!({"fields":{"status":kind.strip_prefix("message.").unwrap()}}),
                 &[],
                 None,
@@ -206,6 +221,20 @@ mod tests {
         append("message/prefix-0", "message.sent", 2);
         let mut expected = times.to_vec();
         expected[0] = 256;
+        check(&expected);
+        append("message/prefix-3", "message.expired", 600);
+        {
+            let connection = store.connection.write();
+            // An older build has the cached unread row but no expiry refold queued.
+            connection.execute_batch(
+                "DELETE FROM unread_mail_pending; DELETE FROM meta WHERE key='unread_mail_expiry_v1';",
+            ).unwrap();
+            create_schema(&connection).unwrap();
+        }
+        expected.retain(|time| *time != 257);
+        check(&expected);
+        append("message/prefix-3", "message.delivered", 601);
+        expected.push(257);
         check(&expected);
         append("message/prefix-1", "message.read", 600);
         append("message/prefix-2", "message.closed", 600);

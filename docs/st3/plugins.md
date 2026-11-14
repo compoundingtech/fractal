@@ -116,11 +116,12 @@ example `github-event/github/acme/garden/pull-request/7/checks/SHA/fail`.
 
 ### The graph kinds
 
-The GitHub plugin's manifest allows two kinds. A poller writes both:
+The GitHub plugin's manifest allows three kinds. A poller writes:
 
 - a `vcs.item.state` in the transaction that records a look, whenever an item's compact facts
   change;
-- each event its mirror derives, as one `github.event` claim.
+- each event its mirror derives, as one `github.event` claim;
+- each completed Workspace CI run, as one `github.workflow-run` claim (below).
 
 Before it hands out an event key, it checks the graph's `github.event` subjects as well as its
 own key table, so a key another poller already wrote is never reused.
@@ -133,6 +134,23 @@ own key table, so a key another poller already wrote is never reused.
 - **`github.event` v1**, once per event subject: `version`, `item`, `event`, `observer`, `at`,
   `head_sha`, and a small `detail`. Bound: 1 KiB.
 
+The event subject is global; its operation identifies one observation, not the event itself.
+The idempotency key is `github-event-observation:v1:DIGEST`, where `DIGEST` is
+`smallclaims::hash::canonical_hash` of `("github-event-observation.v1", subject, fields)`,
+with every field value recursively canonicalized. This includes `observer`, `at`, `head_sha`
+when present, and all of `detail`: even two pollers of the same observer can differ. Exact
+retries share a key; distinct observations keep their provenance without an operation conflict.
+Generic claim request hashing is unchanged.
+
+Local admission remains once per subject. Concurrent pollers can nevertheless replicate several
+observations of the same event. Graph event listings and the idle hold's queue-exit reader select
+the canonical first claim per subject, including older claims with the global
+`github-event:SUBJECT` operation key and node-local fields. No history is rewritten. Subscriptions
+and watches still deliver from item facts, semantic event keys and existing delivery receipts,
+not these observation operations, so another event observation is not another delivery.
+New and old operation keys cannot collide; two unmodified old pollers can still conflict with
+each other and need the separate operation-conflict recovery path.
+
 Readers on this build take an item's newest state. A `vcs.item.state` accepted no earlier than the
 item's newest `resource.observed` lays its compact facts over the observed ones; facts it does not
 carry, such as the title or recent comments, stay. This holds for the local resource projection
@@ -143,6 +161,41 @@ attention on a pull request, and the idle hold's merge-queue check, which also t
 
 Each member advertises `features.github_plugin` in its `daemon.started` claim: 1 from step 3a of
 the plugin store, and 2 from step 3b, which also takes typed relayed reads.
+
+### Workflow runs
+
+A `github.repository` observer whose fields include `main_performance_failures` also records
+Workspace CI (`.github/workflows/fleet.yml`, named `Workspace CI`), the runs the fleet's CI
+objectives read ([objectives](objectives.md#fractals-own-ci)). With the same token, conditional
+cache and cadence it reads two list-runs pages: completed `pull_request` runs (not on a
+`gh-readonly-queue/` branch) and completed `merge_group` runs, each created since the start of the
+previous UTC day. A listing that overflows, falls short of its own total, or answers empty while
+the workflow's newest run is inside the window fails the read; runs listed but none of them named
+`Workspace CI` at that path (a renamed workflow) fail it too.
+
+Each run whose subject holds no claim yet, from this poller or replicated from another, and that
+completed within the last 20 hours, has its artifacts listed once
+(`GET .../actions/runs/ID/artifacts?per_page=100`) and is then written. Workspace CI's test lanes
+name their flaky test count in a one-day artifact, `nextest-flaky-<lane>-<N>` (none for 0, see
+`docs/ci.md`), so a run older than 20 hours is not written: its count could be gone. At most 20
+runs a poll, newest first, so a member that starts polling cannot burst; the rest follow on the
+next polls. A failed listing writes nothing for its run and ends the poll's listings; a later poll
+tries again. A failed read never fails the observation. The graph is the only memory: no run is
+kept in the process.
+
+- **`github.workflow-run` v1**, once per run, on `github-workflow-run/OWNER/REPO/RUN_ID`
+  (lowercase): `version`, `observer`, `repository`, `workflow`, `run_id`, `attempt`, `event`
+  (`pull_request` or `merge_group`), `conclusion`, `head_sha`, `created_at`, `started_at`
+  (`run_started_at`), `completed_at` (the completed run's `updated_at`), `duration_ms`
+  (`completed_at − started_at`), `flaky_tests` (the sum of the run's flaky artifact counts) and
+  `flakes` (`flaky_tests`, plus 1 for a merge group that concluded `failure`, an ejected group).
+  Bound: 1 KiB.
+
+A run is written once, at the attempt the poller first sees completed; a later re-run of it is not
+written again. The idempotency key is `github-workflow-run-observation:v1:DIGEST`, the digest of
+`("github-workflow-run-observation.v1", subject, fields)` as for an event, so two pollers that saw
+different attempts keep both observations without an operation conflict, and objectives read the
+earliest per subject. About one listing and one claim per Workspace CI run, a few hundred a day.
 
 ### Compact mode
 
@@ -215,7 +268,7 @@ Every answer names the `repository`, its `resource`, `observer` and `poller` (`h
 
   A graph answer has no head history: `heads` is null, which means unknown.
 
-A repository no member polls is `404 not-found`. `st gh watch OWNER/REPO#N` declares its observer.
+A repository no member polls is `404 not-found`. `fractal gh watch OWNER/REPO#N` declares its observer.
 
 A member relays only to a poller that advertises the plugin, and each hop checks that the next one
 grants the operation's capability:
@@ -227,9 +280,9 @@ grants the operation's capability:
 
 ### The CLI
 
-- `st gh prs OWNER/REPO [--state open|closed|all] [--limit N]`
-- `st gh pr OWNER/REPO#N`
-- `st gh checks OWNER/REPO#N`
+- `fractal gh prs OWNER/REPO [--state open|closed|all] [--limit N]`
+- `fractal gh pr OWNER/REPO#N`
+- `fractal gh checks OWNER/REPO#N`
 
 Each reads as `--as` (or `ST_AGENT`, or the configured person), which a relayed read needs. Each
 prints where its answer came from. `--json` prints the whole answer.

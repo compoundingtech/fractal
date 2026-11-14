@@ -5,7 +5,7 @@ import { expect, it, vi } from 'vitest'
 import type * as Native from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
-const data = vi.hoisted(() => ({ attention: [] as unknown[], act: vi.fn() }))
+const data = vi.hoisted(() => ({ attention: [] as unknown[], act: vi.fn(), actions: 'granted' }))
 vi.mock('@stylexjs/stylex', () => ({
   create: (styles: unknown) => styles,
   defineVars: (variables: unknown) => variables,
@@ -16,9 +16,11 @@ vi.mock('@stylexjs/stylex', () => ({
 vi.mock('../../data/react.tsx', () => ({
   useAttention: () => ({ _tag: 'Observed', value: data.attention, freshness: 'live' }),
   useDataSource: () => ({ alertActions: { act: data.act } }),
+  useGrants: () => ({ actions: data.actions }),
 }))
 
 import { LiveAgentAlerts } from './AgentAlerts.tsx'
+import { AlertAnswersContext, createAlertAnswers } from './alertAnswers.ts'
 import type { UxTelemetry } from '../../telemetry/ux.ts'
 
 const seat = 'agent/example/atlas'
@@ -30,39 +32,102 @@ const ask = (id: string): Native.Attention =>
     conversation_ids: [seat], alert: true, actions: ['work.done'],
   }) as unknown as Native.Attention
 
-const click = async (container: HTMLElement, label: string) =>
+const press = async (container: HTMLElement, label: string) =>
   act(async () => [...container.querySelectorAll('button')].find((each) => each.textContent === label)!.click())
+const choose = async (container: HTMLElement, label: string) =>
+  act(async () => [...container.querySelectorAll('label')].find((each) => each.textContent?.includes(label))!.querySelector('input')!.click())
 
-it('times each answered alert until the strip no longer shows it, and drops refused answers', async () => {
+const mount = (ux?: UxTelemetry) => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  const landed = vi.fn(() => () => {})
-  const cancel = vi.fn()
-  const ux = { beginAlertAnswer: vi.fn(() => ({ landed, cancel })) } as unknown as UxTelemetry
-  data.attention = [ask('attention/one'), ask('attention/two')]
-  data.act.mockResolvedValueOnce({ _tag: 'Refused', detail: 'Fractal no longer offers this answer here.' }).mockResolvedValueOnce({ _tag: 'Sent' })
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
-  const render = () => act(async () => root.render(<LiveAgentAlerts agentRef={seat} items={[]} ux={ux} />))
+  const store = createAlertAnswers()
+  const render = () => act(async () => root.render(<AlertAnswersContext.Provider value={store}><LiveAgentAlerts agentRef={seat} {...(ux === undefined ? {} : { ux })} /></AlertAnswersContext.Provider>))
+  return { container, root, store, render, dispose: async () => { await act(async () => root.unmount()); container.remove() } }
+}
+
+it('advances to the next alert before the server replies, keeps stale frames hidden, and rolls back without taking focus or drafts', async () => {
+  const landed = vi.fn(() => () => {})
+  const cancel = vi.fn()
+  const ux = { beginAlertAnswer: vi.fn(() => ({ landed, cancel })) } as unknown as UxTelemetry
+  const first = ask('attention/one')
+  const second = ask('attention/two')
+  data.attention = [first, second]
+  let reply!: (result: unknown) => void
+  data.act.mockReturnValueOnce(new Promise((resolve) => { reply = resolve }))
+  const { container, store, render, dispose } = mount(ux)
   await render()
-  expect(container.textContent).toContain('◆ 2 alerts')
+  expect(container.textContent).toContain('1 of 2')
 
-  await click(container, 'Yes')
-  await click(container, 'Send')
-  expect(container.querySelector('[role="status"]')?.textContent).toBe('Fractal no longer offers this answer here.')
+  // Answer: withhold the server's reply, deliberately.
+  await choose(container, 'Yes')
+  await press(container, 'Send')
+  expect(data.act).toHaveBeenLastCalledWith({ alert: first, action: { type: 'work.done', summary: 'Yes' } })
+  expect(container.querySelector('section[aria-label="attention/two?"]')).not.toBeNull()
+  expect(container.querySelector('section[aria-label="attention/one?"]')).toBeNull()
+  expect(container.textContent).toContain('You answered Yes')
+
+  // A stale frame still holding the answered alert does not bring it back.
+  data.attention = [first, second]
+  await render()
+  expect(container.querySelector('section[aria-label="attention/one?"]')).toBeNull()
+
+  // The person starts on the next alert; the refusal arrives.
+  store.setWords(second.id, 'new draft')
+  const words = container.querySelector('textarea')!
+  words.focus()
+  await act(async () => { reply({ _tag: 'Refused', detail: 'Fractal no longer offers this answer here.' }) })
   expect(cancel).toHaveBeenCalledOnce()
+  expect(document.activeElement).toBe(words)
+  expect(container.querySelector('section[aria-label="attention/two?"]')).not.toBeNull()
+  expect(store.words(second.id)).toBe('new draft')
+  expect(container.textContent).toContain('2 of 2')
+  expect(store.getSnapshot().flash).toMatchObject({ id: first.id, detail: 'Fractal no longer offers this answer here.' })
+  expect(store.failure(first)).toBe('Fractal no longer offers this answer here.')
+  expect(store.getSnapshot().pending.size).toBe(0)
+  await dispose()
+})
 
-  await click(container, 'Yes')
-  await click(container, 'Send')
-  expect(data.act).toHaveBeenLastCalledWith({ alert: data.attention[0], action: { type: 'work.done', summary: 'Yes' } })
+it('confirms only when the action was accepted and the feed dropped the alert, and times that as alert_landed', async () => {
+  const landed = vi.fn(() => () => {})
+  const ux = { beginAlertAnswer: vi.fn(() => ({ landed, cancel: vi.fn() })) } as unknown as UxTelemetry
+  const first = ask('attention/one')
+  data.attention = [first, ask('attention/two')]
+  data.act.mockResolvedValueOnce({ _tag: 'Sent' })
+  const { container, store, render, dispose } = mount(ux)
+  await render()
+  await choose(container, 'Yes')
+  await press(container, 'Send')
+  // Accepted, but the feed still holds it: hidden, not done, not landed.
+  expect(store.getSnapshot().pending.get(first.id)?.phase).toBe('sent')
   expect(landed).not.toHaveBeenCalled()
-
-  // Fractal records the answer: the alert leaves the attention collection and the strip.
   data.attention = [ask('attention/two')]
   await render()
   expect(landed).toHaveBeenCalledOnce()
-  expect(container.textContent).not.toContain('attention/one?')
-  expect(ux.beginAlertAnswer).toHaveBeenCalledTimes(2)
-  act(() => root.unmount())
-  container.remove()
+  expect(store.getSnapshot().pending.get(first.id)?.phase).toBe('confirmed')
+  expect(container.textContent).toContain('You answered Yes')
+  await dispose()
+})
+
+it('shows options disabled on a device without the action grant', async () => {
+  data.actions = 'ungranted'
+  data.attention = [ask('attention/one')]
+  const { container, render, dispose } = mount()
+  await render()
+  expect(container.textContent).toContain('This device is read-only')
+  expect(container.querySelector<HTMLInputElement>('input[type="radio"]')!.disabled).toBe(true)
+  data.actions = 'granted'
+  await dispose()
+})
+
+it('removes a served prompt card when its authoritative attention row closes', async () => {
+  data.attention = [{ ...ask('attention/question'), attention_kind: 'harness-prompt', title: 'Choose a color' }]
+  const { container, render, dispose } = mount()
+  await render()
+  expect(container.textContent).toContain('Choose a color')
+  data.attention = [{ ...data.attention[0] as Native.Attention, state: 'resolved' }]
+  await render()
+  expect(container.querySelector('[data-testid="conversation-alerts"]')).toBeNull()
+  await dispose()
 })

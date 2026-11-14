@@ -25,12 +25,20 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
     fixture_for_owner(scopes,pin_trust,OWNER).await
 }
 
+async fn fixture_principal(scopes: &[&str], pin_trust: bool, principal: &str) -> Fixture {
+    fixture_for_owner_and_principal(scopes, pin_trust, OWNER, principal).await
+}
+
 async fn fixture_for_owner(scopes: &[&str], pin_trust: bool, owner: &str) -> Fixture {
+    fixture_for_owner_and_principal(scopes, pin_trust, owner, PRINCIPAL).await
+}
+
+async fn fixture_for_owner_and_principal(scopes: &[&str], pin_trust: bool, owner: &str, principal: &str) -> Fixture {
     let root=tempfile::tempdir().unwrap();
     let mut state=super::super::super::tests::test_state_named(root.path(),"assistant-proof-tests");
     state.owning_person=Some(owner.into());
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
-        "device_name":"assistant","assistant_id":PRINCIPAL,"scopes":scopes,
+        "device_name":"assistant","assistant_id":principal,"scopes":scopes,
         "disclosure_consent":true,"consent_evidence":"axe:igubz7"})).unwrap();
     let Json(challenge)=begin(state.clone(),ClientSession::local(Some(owner)).unwrap(),request).await.unwrap();
     let device_key=signing_key();
@@ -63,7 +71,8 @@ impl Fixture {
     fn payload(&self, route: &str, query: &str) -> ReadPayload {
         let uri=format!("/v1/client/assistant/{route}{query}").parse::<axum::http::Uri>().unwrap();
         let parameters=parameters(&uri).unwrap();
-        ReadPayload {issuer:"scg/approval-host".into(),identity:"chatgpt".into(),assistant_id:PRINCIPAL.into(),
+        let principal = self.session().authority_actor;
+        ReadPayload {issuer:"scg/approval-host".into(),identity:principal.strip_prefix("assistant/").unwrap().into(),assistant_id:principal,
             grant_id:self.grant.clone(),policy_revision:self.revision,key_id:"approval-key/test".into(),
             approval_id:"approval/test".into(),execution_id:"execution/test".into(),projection:route.into(),
             max_response_bytes:parameters.get("max_response_bytes").map(|value| value.parse().unwrap()).unwrap_or(DEFAULT_RESPONSE_BYTES),
@@ -179,6 +188,56 @@ async fn assistant_approved_pages_decode_native_sync_through_typed_sdk() {
 }
 
 #[tokio::test]
+async fn assistant_slo_reads_need_their_scope_and_return_allowlisted_rows() {
+    let granted = fixture(SCOPES, true).await;
+    // Named through ROUTES: the bare route name as a string literal reads as the top-level
+    // slo/ tree to scripts/rust-test-inputs-scan, because this file also builds paths.
+    let list = ROUTES.iter().find(|(route, scope)| *scope == "read.assistant.slo" && !route.contains('-'))
+        .map(|(route, _)| *route).unwrap();
+    let query = "?max_response_bytes=16384";
+    let payload = granted.payload(list, query);
+    let (status, value, _) = granted.request(&format!("/v1/client/assistant/slo{query}"),
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["kind"], "page");
+    assert_eq!(value["value"]["collection"], "assistant.slo");
+    for item in value["value"]["items"].as_array().unwrap() {
+        assert!(item["id"].is_string(), "{item}");
+        assert!(item.as_object().unwrap().keys().all(|key| [
+            "id", "kind", "account", "about", "target", "current", "window", "remaining_percent",
+            "status", "tone", "resets_at_unix_ms", "measured_at_unix_ms", "forecast_used_percent",
+            "forecast_basis_minutes", "runs_out_at_unix_ms",
+        ].contains(&key.as_str())), "{item}");
+    }
+
+    let query = "?id=cpu&steps=4";
+    let payload = granted.payload("slo-history", query);
+    let (status, value, _) = granted.request(&format!("/v1/client/assistant/slo-history{query}"),
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["value"]["kind"], "slo-history");
+    assert_eq!(value["value"]["id"], "cpu");
+    assert_eq!(value["value"]["steps"].as_array().unwrap().len(), 4);
+
+    for query in ["?id=cpu&steps=often", "?id=no%20spaces", "?steps=4", "?id=cpu&extra=1"] {
+        let payload = granted.payload("slo-history", query);
+        let (status, value, _) = granted.request(&format!("/v1/client/assistant/slo-history{query}"),
+            Some(&granted.header(&payload, &granted.attestor))).await;
+        assert!(status.is_client_error() && status != StatusCode::FORBIDDEN, "{query}: {status} {value}");
+        assert!(value.get("value").is_none());
+    }
+
+    let without = fixture(&SCOPES[..4], true).await;
+    for (path, query) in [(list, ""), ("slo-history", "?id=cpu")] {
+        let payload = without.payload(path, query);
+        let (status, value, _) = without.request(&format!("/v1/client/assistant/{path}{query}"),
+            Some(&without.header(&payload, &without.attestor))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {value}");
+        assert!(value.get("value").is_none());
+    }
+}
+
+#[tokio::test]
 async fn assistant_all_six_reads_require_proof_even_on_native_router() {
     let fixture=fixture(SCOPES,true).await;
     for (route,_) in ROUTES {
@@ -189,6 +248,30 @@ async fn assistant_all_six_reads_require_proof_even_on_native_router() {
             assert_eq!(status,StatusCode::FORBIDDEN,"{path} {value}");
             assert!(value.get("value").is_none());
         }
+    }
+}
+
+#[tokio::test]
+async fn proof_principal_and_identity_must_match_the_persisted_grant() {
+    for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+        let fixture = fixture_principal(SCOPES, true, principal).await;
+        let payload = fixture.payload("summary", "");
+        let parameters = payload.parameters.clone();
+        for identity_only in [false, true] {
+            let mut forged = payload.clone();
+            let other = if principal == MCP_PRINCIPAL { PRINCIPAL } else { MCP_PRINCIPAL };
+            if identity_only {
+                forged.identity = other.strip_prefix("assistant/").unwrap().into();
+            } else {
+                forged.assistant_id = other.into();
+            }
+            let authorization = ReadAuthorization { domain:ReadDomain::default(), signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                fixture.attestor.sign(signing_bytes(&forged).unwrap().as_bytes()).as_ref()), payload:forged };
+            assert!(verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).is_err());
+        }
+        let authorization = ReadAuthorization { domain:ReadDomain::default(), signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            fixture.attestor.sign(signing_bytes(&payload).unwrap().as_bytes()).as_ref()), payload };
+        verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).unwrap();
     }
 }
 
@@ -226,6 +309,18 @@ async fn assistant_read_trust_rejects_shim_as_attestor_and_remote_pinning() {
         AxumPath(fixture.grant.clone()),Json(trust)).await.unwrap_err().status,StatusCode::FORBIDDEN);
     assert_eq!(pin(State(fixture.state.clone()),Extension(fixture.session()),AxumPath(fixture.grant.clone()),
         Json(fixture.trust_request())).await.unwrap_err().status,StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn assistant_read_trust_accepts_legacy_and_fractal_versions() {
+    let fixture=fixture(SCOPES,false).await;
+    for version in ["st3.client.v0", "fractal.client.v0"] {
+        let mut trust=fixture.trust_request();
+        trust.api_version=version.into();
+        let Json(grant)=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()),Json(trust)).await.unwrap();
+        assert!(grant["policy_revision"].as_u64().is_some());
+    }
 }
 
 #[tokio::test]
@@ -695,6 +790,29 @@ async fn projection_read_mode(fixture: &mut Fixture, mode: &str) {
 }
 
 #[tokio::test]
+async fn assistant_read_receipts_keep_the_grant_principal_in_both_read_modes() {
+    for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+        for caller_bound in [false, true] {
+            let mut fixture = fixture_principal(SCOPES, !caller_bound, principal).await;
+            if caller_bound {
+                projection_read_mode(&mut fixture, "caller-bound-allow").await;
+            }
+            let payload = fixture.payload("summary", "");
+            let header = (!caller_bound).then(|| fixture.header(&payload, &fixture.attestor));
+            let (status, value, _) = fixture.request("/v1/client/assistant/summary", header.as_deref()).await;
+            assert_eq!(status, StatusCode::OK, "{principal}: {value}");
+            fixture.state.assistant_receipts.flush().await.unwrap();
+            for kind in ["custom.client.assistant.v1.read-used", OUTCOME] {
+                let claims = fixture.state.store.claims_for_kind_at(kind, None, true, 100).unwrap().claims;
+                assert_eq!(claims.len(), 1);
+                assert_eq!(claims[0].actor.as_deref(), Some(fixture.session().actor.as_str()));
+                assert_eq!(claims[0].body["fields"]["principal"], principal);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn assistant_caller_bound_response_does_not_wait_for_receipt_commit() {
     let mut fixture=fixture_for_owner(SCOPES,false,"person/robin").await;
     projection_read_mode(&mut fixture,"caller-bound-allow").await;
@@ -1051,4 +1169,94 @@ async fn assistant_other_read_deadline_errors_keep_the_denial_audit() {
     assert!(audits.iter().any(|claim| claim.body["fields"]["operation"]=="read"
         && claim.body["fields"]["denial_code"]=="read-deadline"));
     fixture.state.assistant_receipts.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_availability_reads_need_their_scope_and_return_only_the_grant_person() {
+    use fractal_api_core::DirectiveNotesStore as _;
+    use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore as _, DeviceReport, DeviceState, Interruptions, Status};
+    let granted = fixture(SCOPES, true).await;
+    let store = &granted.state.store;
+    // Directive notes need an anchored fleet member; the shared fixture enables one.
+    fractal_store::store::directive_notes::tests_shared_seats::enable(store);
+    let now = client_now_ms();
+    store.set_person_availability(OWNER, "host/example", &[AvailabilityChange::Status(Some(Status::Away), Some(now + 3_600_000)),
+        AvailabilityChange::Interruptions(Interruptions::None, None)], now).unwrap();
+    store.report_person_presence(OWNER, "host/example",
+        DeviceReport { state: DeviceState::Locked, last_input_at: None, observed_at: now }, now).unwrap();
+    store.set_directive_note(OWNER, OWNER, "host/example", Some("Hold routine asks until the review lands"), None).unwrap();
+    store.set_person_availability("person/ada", "host/example", &[AvailabilityChange::Status(Some(Status::Available), None)], now).unwrap();
+    store.set_directive_note("person/ada", "person/ada", "host/example", Some("Another person's note"), None).unwrap();
+
+    let payload = granted.payload("availability", "");
+    let (status, value, _) = granted.request("/v1/client/assistant/availability",
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let read = &value["value"];
+    assert_eq!(read["kind"], "person-availability");
+    let availability: fractal_store::store::availability::PersonAvailability =
+        serde_json::from_value(read["availability"].clone()).unwrap();
+    assert_eq!((availability.person.as_str(), availability.status, availability.interruptions),
+        (OWNER, Status::Away, Interruptions::None));
+    assert!(availability.status_until.is_some());
+    // An assistant is not the person: raw presence never reaches it, only the effective status.
+    assert_eq!((availability.presence, availability.presence_observed_at), (None, None));
+    assert!(!read["availability"].to_string().contains("locked"), "{value}");
+    assert_eq!(read["directive_note"]["person"], OWNER);
+    assert_eq!(read["directive_note"]["text"], "Hold routine asks until the review lands");
+    assert!(!value.to_string().contains("person/ada"), "{value}");
+    assert_eq!(read["directive_note_truncated"], false);
+
+    for query in ["?person=person%2Fada", "?actor=person%2Fada"] {
+        let payload = granted.payload("availability", query);
+        let (status, value, _) = granted.request(&format!("/v1/client/assistant/availability{query}"),
+            Some(&granted.header(&payload, &granted.attestor))).await;
+        assert!(status.is_client_error() && status != StatusCode::FORBIDDEN, "{query}: {status} {value}");
+        assert!(value.get("value").is_none());
+    }
+
+    let without = fixture(&SCOPES[..4], true).await;
+    let payload = without.payload("availability", "");
+    let (status, value, _) = without.request("/v1/client/assistant/availability",
+        Some(&without.header(&payload, &without.attestor))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{value}");
+    assert!(value.get("value").is_none());
+}
+
+#[tokio::test]
+async fn assistant_availability_cuts_the_note_to_the_response_budget_and_says_so() {
+    use fractal_api_core::DirectiveNotesStore as _;
+    let granted = fixture(SCOPES, true).await;
+    let store = &granted.state.store;
+    fractal_store::store::directive_notes::tests_shared_seats::enable(store);
+    // A largest note whose escapes and multibyte characters make its encoding longer than its bytes.
+    let line = "Hold \"routine\" asks — für später\n";
+    let mut note = String::new();
+    while note.len() + line.len() <= fractal_schema::directive_notes::MAX_TEXT_BYTES {
+        note.push_str(line);
+    }
+    note.extend(std::iter::repeat_n('x', fractal_schema::directive_notes::MAX_TEXT_BYTES - note.len()));
+    store.set_directive_note(OWNER, OWNER, "host/example", Some(note.as_str()), None).unwrap();
+
+    // The default budget holds the whole response; the note is cut on a character boundary.
+    let payload = granted.payload("availability", "");
+    let (status, value, bytes) = granted.request("/v1/client/assistant/availability",
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(bytes <= DEFAULT_RESPONSE_BYTES && bytes > DEFAULT_RESPONSE_BYTES - 8, "{bytes}");
+    let read = &value["value"];
+    assert_eq!(read["directive_note_truncated"], true);
+    assert_eq!(read["availability"]["person"], OWNER);
+    let cut = read["directive_note"]["text"].as_str().unwrap();
+    assert!(!cut.is_empty() && cut.len() < note.len() && note.starts_with(cut), "{cut}");
+
+    // The largest budget returns the whole note.
+    let query = "?max_response_bytes=16384";
+    let payload = granted.payload("availability", query);
+    let (status, value, bytes) = granted.request(&format!("/v1/client/assistant/availability{query}"),
+        Some(&granted.header(&payload, &granted.attestor))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert!(bytes <= MAX_RESPONSE_BYTES, "{bytes}");
+    assert_eq!(value["value"]["directive_note_truncated"], false);
+    assert_eq!(value["value"]["directive_note"]["text"], note.as_str());
 }

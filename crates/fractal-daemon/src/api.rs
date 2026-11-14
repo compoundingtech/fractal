@@ -7,6 +7,13 @@ pub use fractal_api_mailbox::api::mailbox;
 use axum::Router;
 mod worker_ingress;
 pub use worker_ingress::{worker_authenticated, worker_observer};
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+mod socket_alias;
+pub use socket_alias::{
+    ReservedUnixSocket, reserve_unix_socket, serve_reserved_unix_with_ready, serve_unix,
+    serve_unix_bound, serve_unix_bound_with_ready, serve_unix_with_ready,
+};
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
 
 /// Every route family the daemon serves beside fractal-api-core's own routes.
 pub const ROUTE_FAMILIES: &[RouteFamily] = &[mailbox::routes, client_v0::routes];
@@ -22,3 +29,6 @@ pub fn router(state: AppState) -> Router {
 pub fn fabric_router(state: AppState) -> Router {
     fabric_router_with(state, ROUTE_FAMILIES)
 }
+
+#[cfg(test)]
+mod service_read_tests;

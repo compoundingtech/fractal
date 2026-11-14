@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Mission run authority is enforced by default: a claim a program writes as `mission-run/RUN` outside its declared authority, intersected with its starter's, is refused with `run-authority-denied`; `[programs] authority = \"audit\"` lets it through and records it instead",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "changed", "detail": "The default of `[programs] authority` changes from `audit` to `enforce`, both in the config and in the store before the daemon reads its config. Writers that are not mission runs are untouched."},
+  "compatibility": {"status": "changed", "detail": "A program whose mission does not declare the authority its effects use now has those writes refused. Programs land in production only from the next milestone; a daemon that needs to discover grants first sets `[programs] authority = \"audit\"`."},
+  "downtime": {"status": "none", "detail": "The mode is read when the daemon starts; changing it needs a restart."},
+  "manual": {"status": "none", "detail": "No operator action is required for existing work, since nothing wrote as a run before program dispatch carried run credentials."},
+  "recovery": {"status": "none", "detail": "Set `[programs] authority = \"audit\"` and restart to let refused writes proceed while their grants are declared."}
+}

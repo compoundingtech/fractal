@@ -12,9 +12,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         let status = &self.seat_admission.status;
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         {
-            let state = status.state();
-            if state.lane_bursts.is_empty() && state.burst_touched.is_empty() {
+            let mut state = status.state();
+            if state.lane_bursts.is_empty() && state.burst_touched.is_empty() && state.lane_found.is_empty() {
                 return Ok(());
+            }
+            // A raise found at start that no holder's renewal restored within a lease comes down.
+            if now_ms() >= self.found_lanes_kept_until() {
+                for (agent, lane) in std::mem::take(&mut state.lane_found) {
+                    eprintln!("st3: WARN {agent}'s lane was raised to {} when this daemon started and no burst holder renewed it: it goes back to what its steps hold",
+                        show_lane(lane));
+                    state.burst_touched.insert(agent);
+                }
             }
         }
         for agent in status.burst_expire(now) {
@@ -55,6 +63,51 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Once, before this daemon judges any room: each of its laned seats' slices, read for a raise
+    /// it has no record of. A daemon that restarted has none of the bursts the one before it
+    /// granted, while their slices stay raised and their holders' runs go on in them. Such a raise
+    /// counts as held at once (`held_lanes`, the burst reserve), so no start or other burst is given
+    /// its room, and the lane stays raised until the holder's renewal restores the grant
+    /// (`burst_ask`) or one burst lease after this daemon started.
+    pub(super) fn find_raised_lanes(&self) -> Result<()> {
+        if self.seat_admission.lanes.is_none() || self.seat_admission.status.state().lanes_found {
+            return Ok(());
+        }
+        let mut found = false;
+        for desired in self.store.desired_subjects()? {
+            let Some(member) = desired.member.as_ref().filter(|member| member.host == self.host) else { continue };
+            let Some(base) = member.capacity.filter(|_| desired.kind == "agent") else { continue };
+            let Some(live) = self.runtime.live_lane(&member.runtime_id)
+                .filter(|live| live.cores > base.cores || live.memory > base.memory)
+            else { continue };
+            let mut state = self.seat_admission.status.state();
+            // A renewal served before this pass already restored it (burst_ask).
+            if state.lane_bursts.iter().any(|burst| burst.subject == desired.subject) {
+                continue;
+            }
+            state.lane_found.insert(desired.subject.clone(), live);
+            let raised = state.lane_raised.get(&desired.subject).copied().unwrap_or(base);
+            state.lane_raised.insert(desired.subject.clone(), Capacity {
+                cores: raised.cores.max(live.cores),
+                memory: raised.memory.max(live.memory),
+            });
+            eprintln!("st3: {}'s lane is raised to {} above its own: it counts as held and stays raised for a burst holder's renewal",
+                desired.subject, show_lane(live));
+            found = true;
+        }
+        self.seat_admission.status.state().lanes_found = true;
+        if found {
+            smallclaims::touched::note_due(self.found_lanes_kept_until());
+        }
+        Ok(())
+    }
+
+    /// When a raise this daemon found at start stops being kept for its holder: one burst lease
+    /// after it started, the longest the daemon before it would have kept the grant unrenewed.
+    fn found_lanes_kept_until(&self) -> u128 {
+        self.started_at_unix_ms + u128::from(fractal_runtime::seat_admission_status::BURST_LEASE_SECS) * 1000
+    }
+
     /// Whether `agent`'s burst to `asked` can be held now, beside this host's other lanes and what
     /// its seats outside lanes hold. Bursts wait in order: one behind `first` waits for it.
     fn judge_lane_burst(&self, agent: &str, asked: Capacity, first: Option<&str>, now: u64) -> Result<BurstJudged> {
@@ -82,7 +135,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let outside = (host.outside)().unwrap_or(0);
         // A seat that has waited long to start is served before more bursts: the host drains to
         // fit for it, as it does for the first seat in line. One that would not fit even once
-        // every raise were given back gains nothing from the wait, so bursts go on beside it.
+        // every raise were given back, beside the room kept for a burst, gains nothing from the
+        // wait, so bursts go on beside it.
         if let Some((seat, waited)) = self.seat_admission.status.aged_lane_head(now, BURST_YIELDS_TO_START_AFTER_SECS)
             .filter(|(seat, _)| seat != agent)
             && let Some(seat_lane) = self.store.desired_subject_with_writer(&seat)?
@@ -90,6 +144,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .filter(|member| member.host == self.host)
                 .and_then(|member| member.capacity)
             && seat_lane.memory <= room.memory.saturating_sub(self.held_base_lanes(&seat, now)?).saturating_sub(outside)
+                .saturating_sub(self.burst_reserve(&seat, seat_lane)?.full)
         {
             return Ok(BurstJudged::Waits(format!(
                 "burst lane {} for {agent} waits behind {seat}, which has waited {} min to start", show_lane(lane), waited / 60)));

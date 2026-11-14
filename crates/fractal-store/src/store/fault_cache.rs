@@ -5,7 +5,7 @@
 //! the feed cannot name (`UNKEYED_READ`). A full rebuild on a timer compares every answer with
 //! the cache; a difference is a correction, counted in `doctor --performance`, and means a read
 //! is missing its key.
-use super::attention_snapshot::UNKEYED_READ;
+use super::attention_snapshot::{OperationalFault, UNKEYED_READ};
 use super::*;
 use crate::incremental::{FULL_PASS_INTERVAL_MS, Incremental};
 
@@ -36,7 +36,7 @@ struct Entry {
 }
 
 /// What one failure gives: its operational fault and its broken-gate fault for an agent.
-type Faults = (Option<AttentionItemView>, Option<AttentionItemView>);
+type Faults = (Option<OperationalFault>, Option<AttentionItemView>);
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -52,7 +52,7 @@ impl Store {
     pub(super) fn cached_failure_faults(
         &self,
         as_of: u128,
-    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionItemView>)> {
+    ) -> Result<(Vec<OperationalFault>, Vec<AttentionItemView>)> {
         // Lock order: a caller takes its snapshot's reader before this lock, and every read
         // under it uses that pinned reader, so holding the lock never waits for the pool.
         debug_assert!(
@@ -156,7 +156,7 @@ impl Store {
         &self,
         failures: &[AttentionRequestView],
         as_of: u128,
-    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionItemView>)> {
+    ) -> Result<(Vec<OperationalFault>, Vec<AttentionItemView>)> {
         let connection = self.readers.get();
         let mut incarnations = BTreeMap::new();
         let (mut operational, mut gates) = (Vec::new(), Vec::new());

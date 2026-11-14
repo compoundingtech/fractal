@@ -7,6 +7,8 @@
 mod attempt;
 #[cfg(test)]
 mod attempt_tests;
+#[cfg(test)]
+mod identity_tests;
 pub(crate) mod fixture;
 mod omp;
 pub use attempt::AttemptDiagnostic;
@@ -14,10 +16,11 @@ use attempt::Capture;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -669,11 +672,235 @@ pub(crate) fn resolve_executable(binary: &str) -> Result<PathBuf> {
 /// Fingerprint the executable, script runtime and installation metadata without traversing
 /// package assets. Bundled code belongs to the executable; package manifests and lockfiles
 /// identify dependency releases. This is build identity, not an integrity scan of every asset.
-fn executable_identity(path: &Path) -> Result<String> {
-    let mut hash = Sha256::new();
-    // Changing the identity policy invalidates both old measurements and old exceptions.
-    hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
-    hash_identity_file(path, &mut hash)?;
+pub fn executable_identity(path: &Path) -> Result<String> {
+    executable_identity_with(path, &resolve_executable)
+}
+
+/// [`executable_identity`] if it is already measured; otherwise `None`, measuring it off the
+/// caller (see [`executable_identity_ready_with`]).
+pub fn executable_identity_ready(path: &Path) -> Result<Option<String>> {
+    executable_identity_ready_with(path, &resolve_executable)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdentityMetadata {
+    device: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl From<fs::Metadata> for IdentityMetadata {
+    fn from(metadata: fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            mode: metadata.mode(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdentityDependency {
+    path: PathBuf,
+    resolved: Option<PathBuf>,
+    link: Option<IdentityMetadata>,
+    target: Option<IdentityMetadata>,
+}
+
+fn identity_dependency(path: &Path) -> Result<IdentityDependency> {
+    fn optional<T>(result: std::io::Result<T>) -> Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    Ok(IdentityDependency {
+        path: path.to_owned(),
+        resolved: optional(fs::canonicalize(path))?,
+        link: optional(fs::symlink_metadata(path))?.map(Into::into),
+        target: optional(fs::metadata(path))?.map(Into::into),
+    })
+}
+
+struct IdentityCacheEntry {
+    dependencies: Vec<IdentityDependency>,
+    identity: String,
+}
+
+// Bound retained paths and identities independently of the number of installed providers.
+static IDENTITY_CACHE: Mutex<Vec<IdentityCacheEntry>> = Mutex::new(Vec::new());
+
+/// Fingerprint with the launch environment's resolver for an `env` shebang.
+/// Unchanged dependencies reuse the admission-compatible identity without streaming bytes.
+pub fn executable_identity_with(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Result<String> {
+    executable_identity_recorded(path, resolve, SystemTime::now)
+}
+
+/// The identity if these exact files are already measured. Otherwise `None`, after starting one
+/// background measurement of them: a request names the identity it has without ever streaming an
+/// executable's bytes, and a later call answers once the measurement settles. A changed file has
+/// new metadata, so it is measured again.
+pub fn executable_identity_ready_with(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Result<Option<String>> {
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, &|_| Ok(()))
+}
+
+/// Observe resolution dependencies even while identity measurement is pending.
+pub fn executable_identity_ready_observed(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>,
+    input: &dyn Fn(&Path) -> Result<()>,
+) -> Result<Option<String>> {
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, input)
+}
+
+fn executable_identity_ready_recorded(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+    recorded_at: fn() -> SystemTime,
+    input: &dyn Fn(&Path) -> Result<()>,
+) -> Result<Option<String>> {
+    let (files, probes) = identity_inputs(path, resolve, input)?;
+    let dependencies = identity_snapshot(&probes)?;
+    if let Some(identity) = cached_identity(&dependencies) {
+        return Ok(Some(identity));
+    }
+    // A completed measurement of these exact files answers even when the racy-git rule kept it
+    // out of the cache, and so does its error. An unsettled result cannot prove the bytes are
+    // unchanged (a same-size rewrite within one timestamp tick keeps the metadata), so every
+    // answer from it also measures again; once its files settle, the identity reaches the cache.
+    let measured = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter().find(|entry| entry.dependencies == dependencies)
+        .map(|entry| (entry.result.clone(), entry.settled));
+    let Some((result, settled)) = measured else {
+        start_measurement(files, probes, dependencies, recorded_at);
+        return Ok(None);
+    };
+    if !settled {
+        start_measurement(files, probes, dependencies, recorded_at);
+    }
+    result.map(Some).map_err(anyhow::Error::msg)
+}
+
+/// Measure these files on a background thread unless that is already happening, and keep the
+/// result (or its error) for the ready path.
+fn start_measurement(
+    files: Vec<(PathBuf, bool)>,
+    probes: Vec<PathBuf>,
+    dependencies: Vec<IdentityDependency>,
+    recorded_at: fn() -> SystemTime,
+) {
+    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if measuring.contains(&dependencies) {
+        return;
+    }
+    measuring.push(dependencies.clone());
+    #[cfg(test)]
+    identity_tests::MEASUREMENTS_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    thread::spawn(move || {
+        let (result, settled) = match recorded_at().duration_since(UNIX_EPOCH) {
+            Ok(now) => {
+                let before = settled_before(now);
+                let settled = dependencies_settled(&dependencies, before);
+                (measure_identity(&files, &probes, dependencies.clone(), before), settled)
+            }
+            Err(error) => (Err(error.into()), false),
+        };
+        if let Err(error) = &result {
+            eprintln!("st3: measuring an executable's identity: {error:#}");
+        }
+        let mut ready = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        ready.retain(|entry| entry.dependencies != dependencies);
+        if ready.len() == 128 {
+            ready.remove(0);
+        }
+        ready.push(ReadyIdentity {
+            dependencies: dependencies.clone(),
+            result: result.map_err(|error| format!("{error:#}")),
+            settled,
+        });
+        drop(ready);
+        let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        measuring.retain(|pending| *pending != dependencies);
+        IDENTITY_MEASURING.1.notify_all();
+        drop(measuring);
+        IDENTITY_WAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|wake| {
+            if let Some(wake) = wake.upgrade() { wake(); true } else { false }
+        });
+    });
+}
+
+/// A background measurement's outcome, for files the cache may have declined to keep.
+struct ReadyIdentity {
+    dependencies: Vec<IdentityDependency>,
+    result: Result<String, String>,
+    settled: bool,
+}
+
+static IDENTITY_READY: Mutex<Vec<ReadyIdentity>> = Mutex::new(Vec::new());
+
+type IdentityWake = dyn Fn() + Send + Sync;
+static IDENTITY_WAKES: Mutex<Vec<std::sync::Weak<IdentityWake>>> = Mutex::new(Vec::new());
+/// Subscribe without retaining the host reconciler after it shuts down.
+pub fn watch_identity_measurements(wake: std::sync::Weak<IdentityWake>) {
+    IDENTITY_WAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(wake);
+}
+
+
+/// Whether every dependency's timestamps precede `settled_before` (the racy-git rule).
+fn dependencies_settled(dependencies: &[IdentityDependency], settled_before: i128) -> bool {
+    dependencies.iter().flat_map(|d| [&d.link, &d.target]).flatten().all(|m|
+        [m.modified, m.changed].iter().all(|(s, ns)| i128::from(*s) * 1_000_000_000 + i128::from(*ns) < settled_before))
+}
+
+/// Wait until no background identity measurement is running, so a reader that saw `None` can
+/// expect an answer.
+pub fn identity_measurements_settled() {
+    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while !measuring.is_empty() {
+        measuring = IDENTITY_MEASURING.1.wait(measuring).unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+/// Background measurements in flight, by the dependencies they measure.
+static IDENTITY_MEASURING: (Mutex<Vec<Vec<IdentityDependency>>>, std::sync::Condvar) =
+    (Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+/// Racy-git rule: cache only writes whose timestamps precede measurement start by a full tick.
+fn settled_before(now: Duration) -> i128 {
+    now.as_nanos().saturating_sub(1_000_000_000) as i128
+}
+
+fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, recorded_at: impl FnOnce() -> SystemTime) -> Result<String> {
+    let settled_before = settled_before(recorded_at().duration_since(UNIX_EPOCH)?);
+    let (files, probes) = identity_inputs(path, resolve, &|_| Ok(()))?;
+    let dependencies = identity_snapshot(&probes)?;
+    if let Some(identity) = cached_identity(&dependencies) {
+        return Ok(identity);
+    }
+    measure_identity(&files, &probes, dependencies, settled_before)
+}
+
+/// The files an identity hashes (and whether each is optional), and the paths whose metadata
+/// decides whether a cached identity still holds.
+type IdentityInputs = (Vec<(PathBuf, bool)>, Vec<PathBuf>);
+
+/// An identity's inputs. Reads at most 256 bytes.
+fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, input: &dyn Fn(&Path) -> Result<()>) -> Result<IdentityInputs> {
+    let mut files = vec![(path.to_owned(), false)];
+    let mut probes = Vec::new();
+    let mut probe = |path: PathBuf| -> Result<()> { input(&path)?; probes.push(path); Ok(()) };
+    probe(path.to_owned())?;
     let mut prefix = [0_u8; 256];
     let n = File::open(path)?.read(&mut prefix)?;
     if let Some(shebang) = String::from_utf8_lossy(&prefix[..n])
@@ -683,21 +910,24 @@ fn executable_identity(path: &Path) -> Result<String> {
     {
         let parts = shebang.split_whitespace().collect::<Vec<_>>();
         if let Some(interpreter) = parts.first() {
+            probe(PathBuf::from(*interpreter))?;
             let interpreter = if interpreter.ends_with("/env") {
-                parts.get(1).context("missing script interpreter")?
+                resolve(parts.get(1).context("missing script interpreter")?)?
             } else {
-                interpreter
+                resolve_executable(interpreter)?
             };
-            hash_identity_file(&resolve_executable(interpreter)?, &mut hash)?;
+            if interpreter.as_path() != Path::new(parts[0]) { probe(interpreter.clone())?; }
+            files.push((interpreter, false));
         }
     }
-    if let Some(package) = path
-        .ancestors()
-        .skip(1)
-        .take(3)
-        .find(|p| p.join("package.json").is_file())
-    {
-        hash_identity_file(&package.join("package.json"), &mut hash)?;
+    let mut package = None;
+    for parent in path.ancestors().skip(1).take(3) {
+        let manifest = parent.join("package.json");
+        probe(manifest.clone())?;
+        if manifest.is_file() { package = Some(parent); break; }
+    }
+    if let Some(package) = package {
+        files.push((package.join("package.json"), false));
         for name in [
             "package-lock.json",
             "npm-shrinkwrap.json",
@@ -706,17 +936,68 @@ fn executable_identity(path: &Path) -> Result<String> {
             "yarn.lock",
             "pnpm-lock.yaml",
         ] {
-            hash_optional_identity_file(&package.join(name), &mut hash)?;
+            let lock = package.join(name);
+            probe(lock.clone())?;
+            files.push((lock, true));
         }
         // npm's hidden lock lives beside the installed packages, including scoped packages.
         if let Some(modules) = package
             .ancestors()
             .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
         {
-            hash_optional_identity_file(&modules.join(".package-lock.json"), &mut hash)?;
+            let lock = modules.join(".package-lock.json");
+            probe(lock.clone())?;
+            files.push((lock, true));
         }
     }
-    Ok(format!("{hash:x}", hash = hash.finalize()))
+    Ok((files, probes))
+}
+
+fn identity_snapshot(probes: &[PathBuf]) -> Result<Vec<IdentityDependency>> {
+    probes.iter().map(|p| identity_dependency(p)).collect()
+}
+
+fn cached_identity(dependencies: &[IdentityDependency]) -> Option<String> {
+    IDENTITY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|entry| entry.dependencies == dependencies)
+        .map(|entry| entry.identity.clone())
+}
+
+/// Stream every file into the identity, and cache it if nothing changed while it was read.
+fn measure_identity(
+    files: &[(PathBuf, bool)],
+    probes: &[PathBuf],
+    dependencies: Vec<IdentityDependency>,
+    settled_before: i128,
+) -> Result<String> {
+    let mut hash = Sha256::new();
+    // Preserve the identity policy: existing measurements and exceptions remain valid.
+    hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
+    for (file, optional) in files {
+        if *optional {
+            hash_optional_identity_file(file, &mut hash)?;
+        } else {
+            hash_identity_file(file, &mut hash)?;
+        }
+    }
+    let identity = format!("{hash:x}", hash = hash.finalize());
+    // Do not retain a result if any dependency changed while bytes were being read.
+    if dependencies_settled(&dependencies, settled_before) && dependencies == identity_snapshot(probes)? {
+        let mut cache = IDENTITY_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.len() == 128 {
+            cache.remove(0);
+        }
+        cache.push(IdentityCacheEntry {
+            dependencies,
+            identity: identity.clone(),
+        });
+    }
+    Ok(identity)
 }
 
 fn hash_optional_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
@@ -733,6 +1014,8 @@ fn hash_optional_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
 }
 
 fn hash_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
+    #[cfg(test)]
+    identity_tests::HASHED_FILES.with(|count| count.set(count.get() + 1));
     let resolved = fs::canonicalize(path)?;
     let mut file = File::open(&resolved)?;
     let metadata = file.metadata()?;
@@ -1418,6 +1701,24 @@ pub(crate) mod tests {
             &state,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn identity_watch_surface_includes_missing_probes_and_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("program");
+        fs::write(&binary, "binary").unwrap();
+        fs::write(root.path().join("package.json"), "{}").unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let wake: std::sync::Arc<IdentityWake> = std::sync::Arc::new(move || { let _ = send.send(()); });
+        watch_identity_measurements(std::sync::Arc::downgrade(&wake));
+        let seen = std::cell::RefCell::new(Vec::new());
+        assert!(executable_identity_ready_observed(&binary, &|_| unreachable!(),
+            &|path| { seen.borrow_mut().push(path.to_owned()); Ok(()) }).unwrap().is_none());
+        assert!(seen.borrow().contains(&root.path().join("package-lock.json")));
+        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        identity_measurements_settled();
+        assert!(executable_identity_ready_with(&binary, &|_| unreachable!()).unwrap().is_some());
     }
 
     #[test]

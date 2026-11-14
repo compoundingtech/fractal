@@ -1,0 +1,8 @@
+{
+  "status": "moved",
+  "to": {
+    "owner": "acme-garden",
+    "repo": "garden",
+    "number": 7
+  }
+}

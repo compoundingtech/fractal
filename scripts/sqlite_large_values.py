@@ -287,6 +287,40 @@ def record(site: Site) -> dict:
             "disposition": "allow-for-now", "line_hint": site.line, "excerpt": site.excerpt}
 
 
+REGENERATE = "python3 scripts/check-sqlite-large-values --format"
+
+
+def manifest_text(manifest: dict) -> str:
+    """Canonical JSON: hash-ordered sites, one array record per physical line.
+
+    Preserve reviewed metadata (including reviewed_base), not the current HEAD.
+    Formatting never accepts a new exception or refreshes source-derived data.
+    """
+    out = ["{"]
+    keys = list(manifest)
+    for i, key in enumerate(keys):
+        value = manifest[key]
+        comma = "," if i < len(keys) - 1 else ""
+        if key == "sites":
+            value = sorted(value, key=lambda entry: entry["id"])
+        if isinstance(value, list) and value:
+            out.append(f"  {json.dumps(key)}: [")
+            for j, entry in enumerate(value):
+                out.append("    " + json.dumps(entry, ensure_ascii=False) +
+                           ("," if j < len(value) - 1 else ""))
+            out.append("  ]" + comma)
+        else:
+            out.append(f"  {json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}{comma}")
+    out.append("}")
+    return "\n".join(out) + "\n"
+
+
+def formatting_findings(text: str, manifest: dict) -> list[str]:
+    if text != manifest_text(manifest):
+        return [f"non-canonical inventory order/format; regenerate with: {REGENERATE}"]
+    return []
+
+
 def scan(root: Path, cache: dict | None = None):
     sites = []
     markers = []

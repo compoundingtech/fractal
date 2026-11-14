@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
-import { AgentRowDetails, sidebarRowAccessibleName, sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { agentSeatChildren, missionChildRowId, sidebarMissionChild, sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
+import { missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
+import { rowAttention, rowStatusLabel } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
+import { AgentRowDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx'
+import { sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -25,10 +29,17 @@ describe('agent status glyph vocabulary', () => {
     expect(html.includes('data-frozen="true"')).toBe(freshness !== 'live')
     expect(html).not.toContain('<svg')
   })
-  it.each(['SG-1', 'SG-2', 'SG-3'] as const)('preserves the existing %s SVG presentation', variant => {
+  it.each(['SG-1', 'SG-2'] as const)('preserves the existing %s SVG presentation', variant => {
     const html = renderToStaticMarkup(createElement(SidebarStatus, { status: 'working', variant, freshness: 'live', iconOnly: true }))
     expect(html).toContain('<svg')
     expect(html).not.toContain('data-agent-glyph')
+    expect(html).not.toContain('data-live-ring')
+  })
+  it('draws working in the stroke-only SG-3 set as the shared ring, labelled on its slot', () => {
+    const html = renderToStaticMarkup(createElement(SidebarStatus, { status: 'working', variant: 'SG-3', freshness: 'live', iconOnly: true }))
+    expect(html).toContain('data-live-ring')
+    expect(html).toMatch(/role="img" aria-label="[^"]*live observation/)
+    expect(html).not.toContain('<svg')
   })
 })
 describe('mission feed evidence', () => {
@@ -133,8 +144,8 @@ describe('controlled native sidebar observations', () => {
     }
     expect(row({ activity: 'working', status: 'working' })).toMatchObject({ status: 'working', statusLabel: 'Working' })
     expect(row()).toMatchObject({ status: 'idle', statusLabel: 'Idle' })
-    expect(row({ activity: 'waiting', status: 'waiting' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
-    expect(row({ activity: 'waiting', status: 'waiting for you (question)' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
+    expect(row({ activity: 'waiting', status: 'waiting' })).toMatchObject({ status: 'waiting', statusLabel: 'Waiting' })
+    expect(row({ activity: 'waiting', status: 'waiting for you (question)' })).toMatchObject({ status: 'waiting', statusLabel: 'Waiting' })
     expect(row({ activity: 'errored', status: 'errored' })).toMatchObject({ status: 'failed', statusLabel: 'Failed' })
     expect(row({ state: 'stopped' }, true)).toMatchObject({ status: 'ended', statusLabel: 'Last verified · Ended' })
   })
@@ -246,6 +257,7 @@ describe('retained mission row context', () => {
   const run: MissionRunSummary = {
     id: work.runId, requester: 'agent/example-worker', status: 'running', phase: 'working',
     state_since: mission.updated_at, progress: { done: 2, total: 5 }, current_steps: [],
+    started_at: Option.none(), completed_at: Option.none(), eta: Option.none(),
     after: Option.none(), blocker: Option.none(), deadline: Option.none(),
     last_progress: Option.none(), outcome: Option.none(), steps: Option.none(), must_act: 'agent',
   }
@@ -259,6 +271,19 @@ describe('retained mission row context', () => {
     expect(project([])).toMatchObject({ progress: { _tag: 'Unknown' } })
     expect(project([{ ...hydrated, run_details: [{ ...run, id: 'mission-run/example/other' }] }]))
       .toMatchObject({ progress: { _tag: 'Unknown' } })
+  })
+
+  it('preserves only the open run served ETA and hides missing estimates', () => {
+    const eta = { remaining_low_ms: 720_000, remaining_high_ms: 1_080_000,
+      basis: { method: 'critical-path' as const, samples: 12 }, as_of: 1_794_000_000_000 }
+    const withRun = (summary: MissionRunSummary) => project([{ ...hydrated, run_details: [summary] }])
+    expect(withRun({ ...run, eta: Option.some(eta) })).toMatchObject({ eta })
+    expect(withRun({ ...run, eta: Option.none() })).toMatchObject({ eta: undefined })
+    for (const status of ['completed', 'failed', 'cancelled']) {
+      expect(withRun({ ...run, status, eta: Option.some(eta) })).toMatchObject({ eta: undefined })
+    }
+    expect(withRun({ ...run, completed_at: Option.some(eta.as_of), eta: Option.some(eta) }))
+      .toMatchObject({ eta: undefined })
   })
 
   it('does not borrow progress from a different generation', () => {
@@ -325,6 +350,26 @@ describe('retained mission row context', () => {
   })
 })
 
+it('titles missions for readers: never a content hash, the work title before its goal', () => {
+  const hash = 'd45524b5ff5388299cd145fd8bef8c7e'
+  const work = { id: 'work/current', missionId: `mission/person-ask/${hash}`, runId: 'run', path: 'ask', goal: 'Ask about the release', state: 'claimed' }
+  const queued = (id: string, fields: { readonly title?: string; readonly goal?: string }) => ({ ...work, ...fields, id: `work/${id}`, missionId: `mission/${id}`, goal: fields.goal as string })
+  const context = sidebarRow({ stale: false, agent: { ...agent, currentWork: [work], upcomingWork: [
+    queued(`person-ask/${hash}0`, { title: 'Named step', goal: 'A goal' }),
+    queued(`spontaneous-work/${hash}1`, { goal: 'Only a goal' }),
+    queued(`person-update/${hash}2`, {}),
+    queued('example/standing', { title: 'A step', goal: 'A goal' }),
+  ] } }).missionContext
+  expect(context).toMatchObject({ title: 'Ask about the release', step: { _tag: 'Step', name: 'Ask about the release' } })
+  expect(context?._tag === 'Mission' && context.queued.map(mission => mission.title)).toEqual(['Named step', 'Only a goal', 'Untitled mission', 'example/standing'])
+})
+
+it('lists further current missions with their own step and excludes them from the queue', () => {
+  const current = (name: string) => ({ id: `work/${name}`, missionId: `mission/example/${name}`, runId: `run/${name}`, path: 'work', title: `${name} step`, state: 'claimed' })
+  const context = sidebarRow({ stale: false, agent: { ...agent, currentWork: [current('one'), current('two')], upcomingWork: [current('two'), current('three')] } }).missionContext
+  expect(context).toMatchObject({ alsoCurrent: [{ slug: 'two', step: { _tag: 'Step', name: 'two step' }, progress: { _tag: 'Unknown' } }], queued: [{ slug: 'three' }] })
+})
+
 it('queued mission projection preserves first occurrence order for arbitrary bounded windows', () => {
   fc.assert(fc.property(fc.array(fc.constantFrom('current', 'alpha', 'beta')), names => {
     const currentWork = [{ id: 'work/example/current', missionId: 'mission/example/current',
@@ -335,4 +380,49 @@ it('queued mission projection preserves first occurrence order for arbitrary bou
     if (context?._tag !== 'Mission') return
     expect(context.queued.map(mission => mission.slug)).toEqual([...new Set(names.filter(name => name !== 'current'))])
   }))
+})
+
+describe('the row system', () => {
+  const hash = 'd45524b5ff5388299cd145fd8bef8c7e'
+  const work = (id: string, missionId: string, fields: { readonly title?: string; readonly goal?: string } = {}) => ({ id: `work/${id}`, missionId, runId: `run/${id}`, path: id, state: 'claimed', ...fields })
+  const multi: Agent = { ...agent, currentWork: [work('a', 'mission/example/first'), work('b', 'mission/example/second'), work('b2', 'mission/example/second'), work('c', `mission/person-ask/${hash}`, { goal: 'Ask about the release' })] }
+
+  it('says Waiting for a waiting agent, and Needs you only for the set the counts use', () => {
+    const waiting = { ...agent, activity: 'waiting' as const, status: 'waiting' }
+    const quiet = sidebarRow({ agent: waiting, stale: false })
+    expect(rowStatusLabel(quiet)).toBe('Waiting')
+    expect(rowAttention(quiet)).toBeUndefined()
+    const asked = sidebarRow({ agent: waiting, stale: false, needsMe: true })
+    expect(rowStatusLabel(asked)).toBe('Needs you')
+    expect(rowAttention(asked)).toBe('needs-you')
+    expect(sidebarRowAccessibleName(asked)).toContain('Needs you')
+    expect(rowStatusLabel(sidebarRow({ agent: waiting, stale: true, needsMe: true }))).toBe('Last verified · Needs you')
+  })
+
+  it('lets failure outrank an ask, and keeps other states uncolored', () => {
+    expect(rowAttention(sidebarRow({ agent: { ...agent, activity: 'errored' }, stale: false, needsMe: true }))).toBe('failed')
+    expect(rowAttention(sidebarRow({ agent: { ...agent, activity: 'working' }, stale: false }))).toBeUndefined()
+  })
+
+  it('makes each further current mission one child row, before subagents, and never labels one with a hash', () => {
+    const children = agentSeatChildren(multi)!
+    expect(children.map(child => child.missionId)).toEqual(['mission/example/second', `mission/person-ask/${hash}`])
+    expect(children.every(child => !child.label.includes(hash))).toBe(true)
+    expect(children[1]).toMatchObject({ id: missionChildRowId({ parent: agent.ref, mission: `mission/person-ask/${hash}` }), parent: agent.ref, label: 'Ask about the release' })
+    expect(agentSeatChildren(agent)).toBeUndefined()
+    expect(sidebarRow({ agent: multi, stale: false }).missionContext).toMatchObject({ id: 'mission/example/first', queued: [] })
+  })
+
+  it('names a child row without its hash, and draws it even when the mission feeds hold nothing', () => {
+    const child = sidebarMissionChild({ agent: multi, missionId: `mission/person-ask/${hash}` })
+    expect(missionChildAccessibleName({ ...child, title: 'Ask about the release' })).toBe('Ask about the release, Mission')
+    expect(missionChildAccessibleName({ id: 'mission/x', slug: hash, progress: { _tag: 'Unknown' }, step: { _tag: 'Unknown' } })).toBe('Untitled mission, Mission')
+    expect(sidebarMissionChild({ agent: agent, missionId: 'mission/gone' })).toMatchObject({ slug: 'gone', progress: { _tag: 'Unknown' } })
+  })
+
+  it('never speaks an ad hoc hash in the row name', () => {
+    const adHoc = sidebarRow({ agent: { ...agent, currentWork: [work('c', `mission/person-ask/${hash}`, { goal: 'Ask about the release' })] }, stale: false })
+    expect(sidebarRowAccessibleName(adHoc)).toContain('Mission Ask about the release')
+    expect(sidebarRowAccessibleName(adHoc)).not.toContain(hash)
+  })
 })

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Added: data-only local attention-budget reports through client-v0 and fractal budgets attention for recipients and authorized agents and clients.",
+  "replay": {
+    "status": "none",
+    "detail": "Reads retained native asks and existing mission declarations and lineage; no replay or backfill. Results are replica-local, never fleet-complete."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Uses existing indexes; no database, claim format, migration, or storage-version change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Data only: no admission, limit enforcement, scheduling, delivery, approval, or write behavior changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive attention-budget GET /v1/client/attention-budget with mission, optional person, and optional at Unix milliseconds. Embedded-web recipient sessions may read their own reports; local agents and ordinary paired clients with read.projections may also read reports, including over Unix and Fabric. External assistant grants cannot read the report. Missing scope and expired sessions are refused; raw Unix person headers grant no recipient authority. Existing person_filter restrictions limit person sessions to their own report, defaulting person to the session person and refusing another person. Agents without a session person must specify person; omission never reads all people. CLI: fractal budgets attention MISSION [--as ACTOR] [--person PERSON] [--at UNIX_MS] [--json]. The acting identity is separate from the person filter. Reports include local index/window bounds, declared or undeclared asks, charged/inclusive/not-charged/unattributed counts, and at most 128 newest ID/subject-only request references with explicit completeness. Older daemons lack this operation; existing clients are unaffected."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional downtime or index construction required by this read."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade the serving daemon before using the new client operation or fractal budgets attention. Use an embedded-web recipient session or a local agent or ordinary paired client authorized for read.projections; external assistant grants cannot read the report. Unix CLI agents use --as or their harness agent identity and must supply --person as a separate query filter. No state, grant, or identity migration."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback removes the new read surface without rewriting retained asks, declarations, or policy."
+  }
+}

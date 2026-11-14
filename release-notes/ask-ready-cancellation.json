@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose human gates when steps become ready and fail native waits when asks are cancelled",
+  "replay": {"status": "changed", "detail": "Native ask cancellation projects failure only onto the exact waiting ask and origin attempt. Historical automatic cancellations without an explicit episode use their direct asking-claim predecessor; explicit mismatching episodes remain refused. Replayed stale cancellation effects cannot fail a newer attempt or a different asking episode; program journals retain their meaning."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "changed", "detail": "Step human gates open before a worker claims or submits work, in declaration order so same-reviewer questions remain answerable. Cancelling a native person ask fails its exact waiting step attempt with the cancelling actor in the reason; ordinary failure and finally handling follows. Programs retain the typed AskCancelled failure, which can be handled or propagated."},
+  "downtime": {"status": "none", "detail": "No downtime beyond the ordinary daemon restart."},
+  "manual": {"status": "none", "detail": "Ready steps request human review automatically on reconciliation; no worker claim is needed."},
+  "recovery": {"status": "none", "detail": "Revert the runtime change to restore prior behavior; no stored-data migration is required."}
+}

@@ -442,7 +442,7 @@ fn subject_claim_pages_seek_the_subject_index() {
         .unwrap();
     let connection = store.readers.get();
     for descending in [false, true] {
-        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(true, descending));
+        let query = format!("EXPLAIN QUERY PLAN {}", claims_page_query(ClaimsSubject::Exact, false, descending, false));
         let plan = connection
             .prepare(/* sqlite-large-value: allow-for-now lv-h8911c1538a9c owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &query)
             .unwrap()
@@ -2328,8 +2328,10 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                     json!({"fields":{"state":"ready"}, "_operation":{"id":"op/malformed"}}),
                 ),
                 "operation-conflict" => (
-                    "harness.observed",
-                    json!({"fields":{"state":"ready"}, "_operation":operation}),
+                    "work.nudged",
+                    json!({"fields":{"attempt":1,"agent":"agent/node.test",
+                        "message":"message/invented-nudge","idle_since_unix_ms":"1",
+                        "reason":"invented control","waits":[]}, "_operation":operation}),
                 ),
                 "incremental-error:internal" => ("intent.desired", json!({})),
                 _ => ("harness.observed", json!({"fields":{"state":"ready"}})),
@@ -2527,6 +2529,7 @@ fn simple_replication_registers_unambiguous_event_operations() {
     }
     assert!(store.operation_projection_drift().unwrap().is_empty());
     assert!(store.project_replication_backlog().unwrap());
+    let replays = FULL_REPLAYS.with(std::cell::Cell::get);
     {
         let mut connection = store.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
@@ -2543,19 +2546,80 @@ fn simple_replication_registers_unambiguous_event_operations() {
             None,
         )
         .unwrap();
-        assert!(!try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap());
+        assert!(try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap());
         transaction.commit().unwrap();
     }
-    assert!(store.project_replication_backlog().unwrap());
-    assert!(store.operation_projection_drift().unwrap().is_empty());
-    let connection = store.connection.lock().unwrap();
     assert_eq!(
-        operation_tx(&connection, "op/simple-event")
+        operation_tx(&store.readers.get(), "op/simple-event")
             .unwrap()
             .unwrap()
             .2,
         "conflict"
     );
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), replays);
+    assert!(store.operation_projection_drift().unwrap().is_empty());
+    assert!(store.project_replication_backlog().unwrap());
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), replays);
+    let operations =
+        crate::store::message_send_tests_shared_delivery::operation_rows(&store.readers.get());
+    let digests = store
+        .replication_snapshot()
+        .unwrap()
+        .projection_digests
+        .clone();
+    store.replay_replication_graph().unwrap();
+    assert_eq!(
+        crate::store::message_send_tests_shared_delivery::operation_rows(&store.readers.get()),
+        operations
+    );
+    assert_eq!(
+        store.replication_snapshot().unwrap().projection_digests,
+        digests
+    );
+}
+
+#[test]
+fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
+    let store = Store::open_memory("node").unwrap();
+    store.project_replication_backlog().unwrap();
+    for (index, digest) in ["digest-one", "digest-two"].into_iter().enumerate() {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction,
+            &store.origin,
+            "step-run/invented-nudge",
+            WORK_NUDGED_KIND,
+            Some("daemon/runtime"),
+            &json!({"fields": {
+                "attempt": 1, "agent": "agent/node.test", "message": "message/invented-nudge",
+                "idle_since_unix_ms": "1", "reason": digest, "waits": []
+            }, "_operation": {"id": "op/structural-event", "request_digest": digest}}),
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap(),
+            index == 0
+        );
+        transaction.commit().unwrap();
+        drop(connection);
+        let replays = FULL_REPLAYS.with(std::cell::Cell::get);
+        store.project_replication_backlog().unwrap();
+        assert_eq!(
+            FULL_REPLAYS.with(std::cell::Cell::get),
+            replays + usize::from(index == 1)
+        );
+    }
+    assert_eq!(
+        operation_tx(&store.readers.get(), "op/structural-event")
+            .unwrap()
+            .unwrap()
+            .2,
+        "conflict"
+    );
+    assert!(store.operation_projection_drift().unwrap().is_empty());
 }
 
 pub(super) fn rewrite_envelope(
@@ -3363,7 +3427,8 @@ fn a_prefixs_subjects_are_read_one_seek_per_subject() {
 fn seat_steps_are_read_from_the_open_steps() {
     let store = Store::open_memory("node").unwrap();
     for agent in [None, Some("agent/seat")] {
-        let steps = query_plan(&store, SEAT_STEP_ROWS, params![agent, now_ms().to_string()]);
+        let spellings = agent.map(work_actor_spellings_json);
+        let steps = query_plan(&store, SEAT_STEP_ROWS, params![spellings, now_ms().to_string()]);
         assert!(
             steps
                 .iter()
@@ -3559,6 +3624,96 @@ fn declaration_restart_observation_waits_on_an_older_registry() {
         ReplicatedClaimAdmission::UnknownField));
     assert!(matches!(classify_replicated_claim_with_registry(&record, fractal_schema::registry()).unwrap(),
         ReplicatedClaimAdmission::Valid));
+}
+
+#[test]
+fn traced_program_journals_remain_readable_with_an_older_registry() {
+    use super::fleet_admission_tests_shared_seats::{admit, key, node, sync};
+
+    let mut older_registry = fractal_schema::registry().clone();
+    older_registry.claims.remove("mission.run.trace").unwrap();
+    older_registry.claims.remove("program.attempt.trace").unwrap();
+    older_registry.claims.get_mut("program.step").unwrap().fields.remove("trace");
+    assert!(
+        !fractal_schema::registry().claims["program.step"].fields.contains_key("trace"),
+        "trace correlation belongs in evidence, not a new field on the existing journal kind"
+    );
+
+    let anchor = key();
+    let older_key = key();
+    let current = node("current", Some(&anchor), Some(&anchor));
+    admit(&current, "current", &anchor, "anchor", None);
+    admit(&current, "older", &older_key, "invite", None);
+    let older = node("older", Some(&older_key), Some(&anchor));
+    older.set_claim_registry(older_registry.clone());
+    sync(&current, &older);
+
+    let step = "step-run/example/build";
+    let trace = current.append_claim(&ClaimInput {
+        subject: step.into(),
+        kind: "program.attempt.trace".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
+            "attempt": 1,
+            "trace": {
+                "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+            }
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(matches!(
+        classify_replicated_claim_with_registry(&trace, &older_registry).unwrap(),
+        ReplicatedClaimAdmission::UnknownKind
+    ));
+    assert!(matches!(
+        classify_replicated_claim_with_registry(&trace, fractal_schema::registry()).unwrap(),
+        ReplicatedClaimAdmission::Valid
+    ));
+
+    let mut journals = Vec::new();
+    for (key, status, result) in [
+        ("build", "started", json!({})),
+        ("build", "completed", json!({"value": {"built": true}, "ms": 3})),
+        ("check", "failed", json!({"error": {"message": "check failed"}, "ms": 2})),
+        ("$result", "completed", json!({"value": {"ok": true, "value": "done"}})),
+    ] {
+        let mut fields = BTreeMap::from([
+            ("key".into(), json!(key)),
+            ("status".into(), json!(status)),
+            ("attempt".into(), json!(1)),
+            ("program".into(), json!("example")),
+        ]);
+        fields.extend(result.as_object().unwrap().iter().map(|(key, value)| (key.clone(), value.clone())));
+        let journal = current.append_claim(&ClaimInput {
+            subject: step.into(),
+            kind: "program.step".into(),
+            actor: None,
+            fields,
+            evidence: vec![trace.id.clone()],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(journal.body["evidence"], json!([trace.id]));
+        assert!(journal.body["fields"].get("trace").is_none());
+        assert!(matches!(
+            classify_replicated_claim_with_registry(&journal, &older_registry).unwrap(),
+            ReplicatedClaimAdmission::Valid
+        ), "{key} {status} must remain known despite its unknown trace evidence");
+        journals.push(journal);
+    }
+
+    // Real admission must not withhold a known journal because its evidence kind is newer.
+    let admission = sync(&current, &older);
+    assert_eq!((admission.unknown, admission.invalid), (1, 0));
+    assert!(older.claim_by_id(&trace.id).unwrap().is_none());
+    let received = older.claims_for(step, Some("program.step")).unwrap();
+    assert_eq!(received.len(), journals.len());
+    for journal in journals {
+        assert_eq!(older.claim_by_id(&journal.id).unwrap().unwrap().body, journal.body);
+        assert!(received.iter().any(|record| record.id == journal.id && record.body == journal.body));
+    }
 }
 
 #[test]
@@ -6135,7 +6290,7 @@ fn a_node_that_rejected_insertion_order_hashes_admits_them_once_upgraded() {
     record_invalid_replica_envelope(
         &target.connection.lock().unwrap(),
         &legacy,
-        &St3Error::new("claim-hash-mismatch", "failed verification"),
+        &FractalError::new("claim-hash-mismatch", "failed verification"),
     )
     .unwrap();
     assert_eq!(target.replica_records(true).unwrap().len(), 1);
@@ -8276,6 +8431,92 @@ fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
     // Replayed later, a response from before the step began is not charged to it.
     let before = respond("before", activated - 1);
     assert!(before["step_id"].is_null(), "{before}");
+}
+
+#[test]
+fn metadata_only_response_is_evidence_not_zero_spend() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    let mut claim = timeline_observation(subject, "inc-one", "metadata-only");
+    claim.fields.insert("entry_type".into(), json!("usage"));
+    claim.fields.insert("body".into(), json!({
+        "semantics":"response", "model":"claude-opus-5-5", "provider":"anthropic",
+        "response_id":"response-metadata-only", "duration_ms":12.5
+    }));
+    let stored = store.append_claim_outcome(&claim).unwrap().0;
+    assert_eq!(stored.body["fields"]["body"]["response_id"], "response-metadata-only");
+    assert_eq!(stored.body["fields"]["body"]["duration_ms"], 12.5);
+    assert!(stored.body["fields"].get("spend").is_none());
+    let connection = store.connection.lock().unwrap();
+    for table in ["local_usage_responses", "local_usage_spend", "local_usage_provenance"] {
+        let count: u64 = connection.query_row(
+            /* sqlite-large-value: allow-for-now lv-h94f5986a16ef owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */
+            &format!("SELECT COUNT(*) FROM {table} WHERE subject=?1"),
+            [subject],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "{table} must not count unknown usage as spend");
+    }
+}
+
+#[test]
+fn incomplete_response_counters_are_unpriced_not_zero_filled_estimates() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    for (entry, usage) in [
+        ("missing-buckets", json!({
+            "semantics":"response", "model":"claude-opus-5-5", "input_tokens":10, "total_tokens":20
+        })),
+        ("unknown-write-ttl", json!({
+            "semantics":"response", "model":"claude-opus-5-5",
+            "input_tokens":1, "output_tokens":1, "cached_tokens":0,
+            "cache_write_tokens":10, "total_tokens":12
+        })),
+    ] {
+        let mut claim = timeline_observation(subject, "inc-one", entry);
+        claim.fields.insert("entry_type".into(), json!("usage"));
+        claim.fields.insert("body".into(), usage);
+        let stored = store.append_claim_outcome(&claim).unwrap().0;
+        assert_eq!(stored.body["fields"]["spend"]["basis"], "unpriced");
+    }
+    let connection = store.connection.lock().unwrap();
+    let (cost, unpriced): (u64, u64) = connection.query_row(
+        "SELECT SUM(cost_microusd), SUM(unpriced_tokens) FROM local_usage_spend WHERE subject=?1",
+        [subject],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(cost, 0);
+    assert_eq!(unpriced, 32);
+}
+
+#[test]
+fn observed_zero_cost_or_complete_zero_counters_are_accounting_evidence() {
+    let store = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.worker";
+    for (entry, usage, basis) in [
+        ("reported-zero", json!({
+            "semantics":"response", "model":"claude-opus-5-5", "cost":0
+        }), "reported"),
+        ("complete-zero", json!({
+            "semantics":"response", "model":"claude-opus-5-5",
+            "input_tokens":0, "output_tokens":0, "cached_tokens":0,
+            "cache_write_tokens":0, "total_tokens":0
+        }), "estimated"),
+    ] {
+        let mut claim = timeline_observation(subject, "inc-one", entry);
+        claim.fields.insert("entry_type".into(), json!("usage"));
+        claim.fields.insert("body".into(), usage);
+        let stored = store.append_claim_outcome(&claim).unwrap().0;
+        assert_eq!(stored.body["fields"]["spend"]["basis"], basis);
+        assert_eq!(stored.body["fields"]["spend"]["cost_microusd"], 0);
+    }
+    let connection = store.connection.lock().unwrap();
+    let count: u64 = connection.query_row(
+        "SELECT COUNT(*) FROM local_usage_responses WHERE subject=?1",
+        [subject],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 2);
 }
 
 #[test]
@@ -10506,6 +10747,7 @@ fn a_native_prompt_is_an_alert_until_its_harness_or_terminal_says_it_is_gone() {
     store
         .apply_as(&intent, &preview.subject_tokens, "prompt-seat", Some("person/avery"))
         .unwrap();
+    store.question_principal_default.set(store.agent_person("agent/node.worker").unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {
@@ -10736,6 +10978,7 @@ fn a_claude_permission_prompt_is_answered_once_by_its_person_while_it_waits() {
         .apply_as(&intent, &preview.subject_tokens, "answer-seat", Some("person/avery"))
         .unwrap();
     let seat = "agent/node.worker";
+    store.question_principal_default.set(store.agent_person(seat).unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {
@@ -10984,6 +11227,7 @@ fn a_claude_question_is_answered_with_its_choices() {
         .apply_as(&intent, &preview.subject_tokens, "question-seat", Some("person/avery"))
         .unwrap();
     let seat = "agent/node.worker";
+    store.question_principal_default.set(store.agent_person(seat).unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {
@@ -11148,6 +11392,72 @@ fn a_subagents_prompt_is_answered_only_with_deny() {
             answer: "deny".into()
         }
     );
+}
+
+/// A subagent's prompt that st's hook denied, because nobody answered it in time, leaves the
+/// person's home as soon as the subagent moves on: its next tool event or its stop closes the
+/// prompt (`fractal_drivers::claude_prompts`), and the seat's next observation no longer waits on a
+/// person.
+#[test]
+fn a_subagents_prompt_leaves_the_persons_home_once_the_subagent_moves_on() {
+    let store = Store::open_memory("node").unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = format!(
+        "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+        workspace.path().display().to_string()
+    );
+    let intent = parse_intent(&source, "node").unwrap();
+    let preview = store
+        .mission(
+            &intent,
+            IntentInput {
+                kdl: source,
+                source_name: None,
+            },
+        )
+        .unwrap();
+    store
+        .apply_as(&intent, &preview.subject_tokens, "subagent-seat", Some("person/avery"))
+        .unwrap();
+    let seat = "agent/node.worker";
+    let append = |kind: &str, fields: Value| {
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: kind.into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let prompts = |store: &Store| {
+        store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.kind == "harness-prompt")
+            .count()
+    };
+    append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+    append(
+        "harness.observed",
+        json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"permission", "reason":"subagent:Bash",
+            "ownership_sequence":1, "transition_sequence":3}),
+    );
+    assert_eq!(prompts(&store), 1);
+    // The hook denied it and the subagent moved on: the seat's own state again, as the closing
+    // event writes it.
+    append(
+        "harness.observed",
+        json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"none", "ownership_sequence":1, "transition_sequence":4}),
+    );
+    assert_eq!(prompts(&store), 0, "the denied prompt still waits on the person's home");
+    assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
 }
 
 /// A prompt names the exact call it asks about, as its hook published it for that very
@@ -11351,6 +11661,7 @@ fn a_codex_permission_prompt_is_answered_and_records_its_driver() {
         .apply_as(&intent, &preview.subject_tokens, "answer-seat", Some("person/avery"))
         .unwrap();
     let seat = "agent/node.worker";
+    store.question_principal_default.set(store.agent_person(seat).unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {

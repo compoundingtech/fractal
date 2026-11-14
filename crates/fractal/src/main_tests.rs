@@ -1,3 +1,72 @@
+#[test]
+fn fleet_transports_accept_leading_actor_and_fail_closed_like_restart() {
+    for (subcommand, transport) in [("add", "fabric"), ("remove", "fabric"), ("prefer", "tailscale")] {
+        for actor in ["agent/example", "agent/other", "person/example"] {
+            let cli = Cli::try_parse_from(["fractal", "fleet", "transports", subcommand, "--as", actor, transport]).unwrap();
+            let restart = Cli::try_parse_from(["fractal", "agents", "restart", "--as", actor, "agent/example"]).unwrap();
+            assert_eq!(
+                guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_ok(),
+                guard_mutating_cli_actor(&restart.command, Some("agent/example"), None).is_ok(),
+            );
+        }
+        let cli = Cli::try_parse_from(["fractal", "fleet", "transports", subcommand, transport]).unwrap();
+        assert!(guard_mutating_cli_actor(&cli.command, Some("agent/example"), None).is_err());
+    }
+}
+#[tokio::test]
+async fn transport_cli_retry_reuses_committed_mutation_after_lost_response() {
+    use fractal_store::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node};
+    for (changed_base, actor, changed_endpoints, abandoned, count) in [(false, "agent/example", false, false, 1), (true, "agent/example", false, false, 2), (false, "agent/other", false, false, 2), (false, "agent/example", true, false, 1), (false, "agent/example", false, true, 2)] {
+        let root = tempfile::tempdir().unwrap();
+        let config = Config { node: "local".into(), state_dir: root.path().into(), ..Config::default() };
+        let file = fractal_daemon::config::FleetFile {
+            fleet_id: FLEET.into(), port: Some(123), transports: vec!["tailscale".into(), "fabric".into(), "loopback".into()], ..Default::default()
+        };
+        file.save(root.path()).unwrap();
+        let path = fractal_daemon::config::FleetFile::path(root.path());
+        let before = fs::read(&path).unwrap();
+        let anchor = key();
+        let store = Arc::new(node("local", Some(&anchor), Some(&anchor)));
+        admit(&store, "local", &anchor, "anchor", None);
+        let published = store.clone();
+        let membership = store.clone();
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let observations = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = observations.clone();
+        let app = axum::Router::new()
+            .route("/v1/fleet/membership", axum::routing::get(move || {
+                let mut view = membership.fleet_view().unwrap();
+                view.members[0].endpoints = if observed.load(std::sync::atomic::Ordering::SeqCst) { vec![] } else { vec![json!({"transport":"tailscale", "address":"100.64.0.1:123"})] };
+                async move { axum::Json(json!({"api_version": "st3.v1", "value": view})) }
+            }))
+            .route("/v1/fleet/transports", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let store = published.clone();
+                let lost = body["dry_run"] != true && fail.swap(false, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if body["dry_run"] != true {
+                        store.publish_fleet_endpoints(body["mode"].as_str().unwrap(), body["endpoints"].as_array().unwrap(), "test",
+                            Some((body["actor"].as_str().unwrap(), body["mutation_id"].as_str().unwrap()))).unwrap();
+                    }
+                    (if lost { axum::http::StatusCode::INTERNAL_SERVER_ERROR } else { axum::http::StatusCode::OK }, axum::Json(json!({"api_version": "st3.v1", "value": {}})))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let prefer = |actor: &str| FleetTransportsCommand::Prefer { actor: Some(actor.into()), transport: "fabric".into(), no_service: true };
+        assert!(fleet_cli::run_fleet_transports(&client, &config, prefer("agent/example"), true).await.is_err()); assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(path.with_extension("transport-change.json").exists());
+        if changed_base { let mut edited = file.clone(); edited.transports.swap(1, 2); fs::write(&path, toml::to_string(&edited).unwrap()).unwrap(); }
+        observations.store(changed_endpoints, std::sync::atomic::Ordering::SeqCst);
+        if abandoned { let mut other = file.clone(); other.transports.swap(0, 2); other.save(root.path()).unwrap(); file.save(root.path()).unwrap(); }
+        fleet_cli::run_fleet_transports(&client, &config, prefer(actor), true).await.unwrap(); assert_eq!(store.claims_for("host/local", Some("fleet.member-endpoints")).unwrap().len(), count);
+        assert_eq!(store.latest_claim("host/local", Some("fleet.member-endpoints")).unwrap().unwrap().actor.as_deref(), Some(actor));
+        assert_eq!(fractal_daemon::config::FleetFile::load(root.path()).unwrap().unwrap().transports, ["fabric", "tailscale", "loopback"]);
+        assert!(!path.with_extension("transport-change.json").exists());
+        server.abort();
+    }
+}
+
 use super::*;
 
 #[test]
@@ -51,6 +120,26 @@ fn demo_environment_excludes_both_tui_configuration_spellings() {
 }
 
 #[test]
+fn assistant_pairing_principal_defaults_to_chatgpt_and_accepts_mcp() {
+    for (flag, expected) in [
+        (None, AssistantPrincipal::Chatgpt),
+        (Some("assistant/chatgpt"), AssistantPrincipal::Chatgpt),
+        (Some("assistant/mcp"), AssistantPrincipal::Mcp),
+    ] {
+        let cli = Cli::try_parse_from(
+            ["fractal", "devices", "--as", "person/robin", "pair", "--assistant"]
+                .into_iter().chain(flag),
+        ).unwrap();
+        assert!(matches!(cli.command, Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Pair { assistant: Some(principal), .. }), ..
+        }) if principal == expected));
+    }
+    assert!(Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/robin", "pair", "--assistant", "assistant/forged",
+    ]).is_err());
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",
@@ -95,6 +184,16 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
     assert!(validate_repair_plan_filters(&plan, &[], &[]).is_ok());
     assert!(validate_repair_plan_filters(&plan, &["agent/example-first".into()], &[]).is_err());
     assert!(validate_repair_plan_filters(&plan, &[], &["revoked-legacy-runtime-start".into()]).is_err());
+}
+
+#[test]
+fn mission_outcomes_refuse_an_old_daemon_unfiltered_page() {
+    let old = json!({"collection": "missions", "items": [], "has_more": false});
+    let new = json!({"collection": "missions", "mission": "mission/example", "items": []});
+    assert!(require_mission_echo(&old, None).is_ok());
+    let refusal = require_mission_echo(&old, Some("mission/example")).unwrap_err();
+    assert_eq!(refusal.to_string(), "this daemon does not support --mission; upgrade the daemon");
+    assert!(require_mission_echo(&new, Some("mission/example")).is_ok());
 }
 
 #[test]
@@ -296,6 +395,21 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
 }
 
 #[test]
+fn slo_list_and_explanation_show_observation_source_host_and_unsupported() {
+    let row = json!({"id":"claude/example/5h","kind":"budget","status":"unsupported",
+        "current":"unsupported","target":"100% allowance","window":"5-hour",
+        "source":"omp-usage","host":"example-host","remaining_percent":null,
+        "explain":"The provider does not support this window."});
+    let list = render_slo_list(std::slice::from_ref(&row));
+    assert!(list.contains("SOURCE"));
+    assert!(list.contains("HOST"));
+    assert!(list.contains("unsupported"));
+    assert!(list.contains("omp-usage"));
+    assert!(list.contains("example-host"));
+    assert!(render_slo_explanation(&row).contains("SOURCE   omp-usage · example-host"));
+}
+
+#[test]
 fn slo_chart_draws_the_lowest_reading_of_each_column_and_marks_gaps() {
     let row = json!({"id": "person-read", "kind": "objective"});
     let history = json!({
@@ -353,6 +467,7 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
         excused: Default::default(),
         left: Default::default(),
         machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
+        verification_attempt: None,
     };
     let output = render_checkpoint_status(&status);
     assert!(output.contains("last daemon start (advertised build)"));
@@ -529,11 +644,12 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
-        node: "todo-liveness".into(), state_dir: root.path().into(),
+        node: "todo-liveness".into(), api_socket: root.path().join("api.sock"),state_dir: root.path().into(),
         pty_root: root.path().join("pty"), pty_binary: "pty".into(),
         fleet_id: None, configured_peers: vec![], client_relay: None,
         native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
@@ -976,6 +1092,116 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
 }
 
 #[test]
+fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
+    let missing = Cli::try_parse_from(["fractal", "budgets", "attention"])
+        .err()
+        .expect("attention budget requires a mission");
+    assert_eq!(missing.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(Cli::try_parse_from([
+        "fractal", "budgets", "attention", "--mission", "mission/example",
+    ]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "fractal", "budgets", "attention", "mission/example",
+    ]).expect("positional mission parses without optional filters");
+    assert!(!cli.json);
+    let Command::Budgets {
+        command: BudgetsCommand::Attention { mission, actor: _, person, at },
+    } = cli.command else {
+        panic!("expected budgets attention");
+    };
+    assert_eq!(mission, "mission/example");
+    assert_eq!(person, None);
+    assert_eq!(at, None);
+
+    for arguments in [
+        vec![
+            "fractal", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000", "--json",
+        ],
+        vec![
+            "fractal", "--json", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments)
+            .expect("attention budget filters and global JSON parse");
+        assert!(cli.json);
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { mission, actor, person, at },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(mission, "mission/example");
+        assert_eq!(actor.as_deref(), Some("agent/node.desk"));
+        assert_eq!(person.as_deref(), Some("person/operator"));
+        assert_eq!(at, Some(1_794_182_400_000_u128));
+    }
+    for actor in ["person/operator", "agent/node.desk"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "budgets", "attention", "mission/example", "--as", actor,
+        ]).expect("attention budget accepts a concrete acting person or agent");
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { actor: parsed, person, .. },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(parsed.as_deref(), Some(actor));
+        assert_eq!(person, None, "acting identity is not the recipient filter");
+    }
+}
+
+#[tokio::test]
+async fn attention_budget_generated_unix_client_requires_an_acting_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = fractal_daemon::api::tests_shared::state(directory.path());
+    let source = r#"version 2
+agent "desk" { workspace "."; command "true"; restart always; }
+mission "example/budget" state="ready" {
+  goal "Gather decisions."
+  step "work" { assigned-to "agent/node.desk"; goal "Ask the recipient." }
+}
+"#;
+    let intent = fractal_daemon::graph::parse_intent(source, "node").unwrap();
+    let preview = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    state.store.apply_as(
+        &intent, &preview.subject_tokens, "budget-cli-fixture", Some("person/operator"),
+    ).unwrap();
+
+    let socket = directory.path().join("budget.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = fractal_daemon::api::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let actor = fractal_drivers::contracts::env("ST_AGENT")
+        .filter(|actor| actor.starts_with("agent/"))
+        .unwrap_or_else(|| "agent/node.desk".into());
+    let response = attention_budget_client(
+        &endpoint, Some(&actor), Some("person/operator"),
+    ).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap();
+    assert_eq!(response.value.mission, "mission/example/budget");
+    assert_eq!(response.value.person, "person/operator");
+    assert_eq!(response.value.inclusive, 0);
+
+    let error = generated_client(&endpoint, None).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap_err();
+    let GeneratedClientError::Api(ClientErrorCode::Forbidden, message, envelope) = error else {
+        panic!("expected the actorless client's revalidation error, got {error:?}");
+    };
+    assert_eq!(message, "the client session grant is absent");
+    assert_eq!(envelope.code, ClientErrorCode::Forbidden);
+    server.abort();
+    let _ = server.await;
+}
+
+#[test]
 fn missions_tree_fixture_renders_all_sections() {
     let fixture: Value =
         serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h5c4f751108a0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.json"))
@@ -1065,6 +1291,20 @@ fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
         "{orphan}"
     );
     assert!(!orphan.contains("Whenit"), "{orphan}");
+}
+
+#[test]
+fn usage_report_marks_unpriced_responses_without_inventing_tokens() {
+    let report = json!({"rows":[{"agent":"agent/incomplete","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":1}]});
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("SPEND  $0.00+ · 0 tokens"));
+    assert!(output.contains("UNPRICED  1 responses without a known price"));
+    let zero = json!({"rows":[{"agent":"agent/zero","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":0}]});
+    let output = render_usage_report(&zero, 24, None);
+    assert!(output.contains("SPEND  $0.00 · 0 tokens"));
+    assert!(!output.contains("UNPRICED"));
 }
 
 #[test]
@@ -1584,6 +1824,157 @@ fn a_harness_cannot_act_as_another_agent() {
 }
 
 #[test]
+fn a_program_effect_acts_as_its_run() {
+    assert_eq!(run_actor(Some("secret"), Some("abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(Some("secret"), Some("mission-run/abc")).as_deref(), Some("mission-run/abc"));
+    assert_eq!(run_actor(None, Some("abc")), None);
+    assert_eq!(run_actor(Some(""), Some("abc")), None);
+    assert_eq!(run_actor(Some("secret"), Some("")), None);
+    assert_eq!(parse_actor_subject("mission-run/abc").as_deref(), Ok("mission-run/abc"));
+    assert!(parse_actor_subject("mission-run/").is_err());
+}
+
+/// A run publishes missions as itself: `apply` and `missions publish` take `--as mission-run/RUN`,
+/// and `apply` defaults to it when it holds a run credential. The commands a run's authority cannot
+/// grant still take only a person or an agent.
+#[test]
+fn a_run_is_a_mission_publication_actor() {
+    for actor in ["person/operator", "agent/example/worker", "mission-run/abc"] {
+        assert_eq!(parse_mission_publication_actor(actor).as_deref(), Ok(actor));
+    }
+    for actor in ["mission-run/", "mission-run/abc/", "mission/abc", "person/", "abc"] {
+        assert!(parse_mission_publication_actor(actor).is_err(), "{actor}");
+    }
+    assert!(parse_publication_actor("mission-run/abc").is_err());
+    for command in [
+        vec!["st", "apply", "notes.kdl", "--as", "mission-run/abc"],
+        vec!["st", "missions", "publish", "notes.kdl", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_ok(), "{command:?}");
+    }
+    for command in [
+        vec!["st", "missions", "retire", "x/notes", "--as", "mission-run/abc"],
+        vec!["st", "agents", "rollout", "fleet/worker", "--as", "mission-run/abc"],
+    ] {
+        assert!(Cli::try_parse_from(&command).is_err(), "{command:?}");
+    }
+    let Command::Apply(args) = Cli::try_parse_from(["st", "apply", "notes.kdl", "--as", "mission-run/abc"])
+        .unwrap()
+        .command
+    else {
+        panic!("expected apply")
+    };
+    assert_eq!(own_publication_actor(args.actor, "apply").unwrap(), "mission-run/abc");
+    // Without `--as`, apply resolves its actor from its environment when it runs.
+    assert!(Cli::try_parse_from(["st", "apply", "notes.kdl"]).is_ok());
+}
+
+/// A run's authority grants mission publication, never an owned set: `apply --set` as a run is
+/// refused before anything is read or written, while a person still publishes the set.
+#[test]
+fn a_run_cannot_publish_an_owned_set() {
+    let apply = |actor: &str| {
+        let Command::Apply(args) = Cli::try_parse_from([
+            "st", "apply", "missing.kdl", "--set", "garden", "--repository", "fixture/garden",
+            "--ref", "main", "--sha", "abc", "--source-sequence", "1", "--expect-set", "absent",
+            "--as", actor,
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected apply")
+        };
+        apply_actor(&args)
+    };
+    let refusal = apply("mission-run/abc").unwrap_err().to_string();
+    assert!(refusal.contains("fractal apply --set cannot publish as `mission-run/abc`"), "{refusal}");
+    assert_eq!(apply("person/operator").unwrap(), "person/operator");
+}
+
+#[test]
+fn execution_actor_options_parse_and_fail_closed() {
+    for (path, tail) in [
+        (["changes", "sync"], vec!["--repository", "fixture/garden"]),
+        (["missions", "check"], vec!["mission.kdl"]),
+        (["gate", "cargo-test"], vec!["fixture", "--package", "fixture"]),
+    ] {
+        for actor in ["agent/example/caller", "agent/example/peer", "person/operator"] {
+            let mut argv = vec!["fractal", path[0], path[1], "--as", actor];
+            argv.extend(tail.iter().copied());
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert_eq!(
+                guard_mutating_cli_actor(&cli.command, Some("agent/example/caller"), None).is_ok(),
+                actor == "agent/example/caller",
+            );
+            match cli.command {
+                Command::Changes(change_cli::ChangesArgs {
+                    command: change_cli::ChangesCommand::Sync { actor: value, .. },
+                }) | Command::Gate {
+                    command: GateCommand::CargoTest { actor: value, .. },
+                } => assert_eq!(value.as_deref(), Some(actor)),
+                Command::Missions { command: MissionViewCommand::Check(args) } => {
+                    assert_eq!(args.actor.as_deref(), Some(actor));
+                }
+                _ => panic!("unexpected execution command"),
+            }
+        }
+        let mut argv = vec!["fractal", path[0], path[1]];
+        argv.extend(tail);
+        assert!(Cli::try_parse_from(argv).is_ok(), "the actor remains optional");
+    }
+}
+
+#[tokio::test]
+async fn execution_requests_carry_actor_without_changing_the_work() {
+    use axum::{Json, Router, http::HeaderMap};
+    for actor in ["person/operator", "agent/example/caller"] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("execution.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let app = Router::new()
+            .route("/v1/client/changes/sync", axum::routing::post(
+                move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["x-st3-person"], actor);
+                    assert_eq!(body, json!({"repository": "fixture/garden"}));
+                    Json(json!({"api_version": "st3.v1", "value": {}}))
+                },
+            ))
+            .route("/v1/gate-checks", axum::routing::post(
+                move |headers: HeaderMap, Json(body): Json<Value>| async move {
+                    assert_eq!(headers["x-st3-person"], actor);
+                    assert_eq!(body["intent"]["kdl"], "// fixture");
+                    assert_eq!(body["inputs"], json!({"revision": "fixture"}));
+                    Json(json!({"api_version": "st3.v1", "value": {"id": "fixture", "host": "fixture", "finished": true, "gates": []}}))
+                },
+            ));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let endpoint = Endpoint::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Defaults {
+            runtime: socket.clone(),
+            published: socket.clone(),
+        });
+        let client = execution_client(&endpoint, actor.into()).unwrap();
+        assert!(matches!(&client.endpoint, Endpoint::DiscoveredUnix(
+            fractal_client::UnixSocketDiscovery::Defaults { runtime, published }
+        ) if runtime == &socket && published == &socket));
+        change_cli::run(&client, change_cli::ChangesArgs {
+            command: change_cli::ChangesCommand::Sync {
+                actor: Some(actor.into()), repository: "fixture/garden".into(),
+            },
+        }, true).await.unwrap();
+        let file = directory.path().join("mission.kdl");
+        std::fs::write(&file, "// fixture").unwrap();
+        run_mission_view(&cli_client(&endpoint), &endpoint, MissionViewCommand::Check(
+            MissionCheckArgs {
+                actor: Some(actor.into()), file, workspace: directory.path().into(),
+                inputs: vec![("revision".into(), "fixture".into())],
+            },
+        ), true).await.unwrap();
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[test]
 fn mission_start_requires_an_explicit_actor() {
     assert!(Cli::try_parse_from(["st3", "missions", "start", "mission/demo"]).is_err());
 }
@@ -1672,15 +2063,15 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
 }
 
 #[test]
-fn harness_actor_rejection_keeps_st_work_ask_at_the_error_rendering_boundary() {
+fn harness_actor_rejection_uses_fractal_work_ask_at_the_error_rendering_boundary() {
     let cli = Cli::try_parse_from([
         "fractal", "work", "wake", "step-run/example/work", "--as", "person/operator",
     ]).unwrap();
     let error = guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).unwrap_err();
     for native_driver in [false, true] {
         let output = cli_error_message(&error, native_driver);
-        assert!(output.contains("`st work ask --as \"$ST_AGENT\"`"), "{output}");
-        assert!(!output.contains("fractal work ask"), "{output}");
+        assert!(output.contains("`fractal work ask --as \"$ST_AGENT\"`"), "{output}");
+        assert!(!output.contains("`st work ask"), "{output}");
     }
 }
 
@@ -2275,6 +2666,32 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
 }
 
 #[test]
+fn declared_admission_human_output_is_explicitly_not_enforced() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("Declared admission"));
+    // Historical agent responses still decode and display mission-only numeric
+    // budgets; this is read compatibility, not a new-authoring fixture.
+    agent.declared_admission = Some(serde_json::from_value(serde_json::json!({
+        "priority": "normal", "lane": "check",
+        "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
+    })).unwrap());
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("Declared admission — declared, not enforced.\n"));
+    assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.\n"));
+    for field in ["priority: normal", "lane: check", "cpu_seconds: 300", "memory_max: 8G", "disk_max: 20G", "token_budget: 100000"] {
+        assert!(rendered.contains(field), "{rendered}");
+    }
+}
+
+#[test]
+fn agent_charter_prints_every_line_without_terminal_controls() {
+    assert_eq!(
+        render_agent_charter("Keep main green.\n\nOwn \u{1b}[31mreleases\u{1b}[0m and notes."),
+        "Charter\n  Keep main green.\n\n  Own releases and notes.\n"
+    );
+}
+
+#[test]
 fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
     let parked = stopped_agent(serde_json::json!({
         "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
@@ -2453,15 +2870,13 @@ fn agent_card_shows_the_current_step_and_its_last_progress() {
             Some(("Tests pass\nnext: docs", 60_000)),
         ),
         step("step-run/two/review", "Review the parser", None),
-        StepRunView {
-            status: "verifying".into(),
-            completion_summary: Some("Published the guide".into()),
-            ..step(
-                "step-run/two/docs",
-                "Write the guide",
-                Some(("Drafting", 0)),
-            )
-        },
+        StepRunView { executions: None, status: "verifying".into(),
+        completion_summary: Some("Published the guide".into()),
+        ..step(
+            "step-run/two/docs",
+            "Write the guide",
+            Some(("Drafting", 0)),
+        ) },
     ];
 
     let card = render_client_agent(&agent, &current, 360_000);
@@ -2615,12 +3030,14 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "pi-delivery-test".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -2712,12 +3129,14 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "trace-cursor-test".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -2792,12 +3211,14 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "wait-cursor-test".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -3189,21 +3610,28 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
     #[cfg(test)]
     const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
+    #[cfg(test)]
+    const CLAIMS_SOURCE: &str = include_str!("claims_cli.rs");
+    #[cfg(test)]
+    const SOURCE_SOURCE: &str = include_str!("source_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
         ("agents", /* sqlite-large-value: allow-for-now lv-h98e4919fbef1 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
+        ("claims", CLAIMS_SOURCE),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
         ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
+        ("hosts", /* sqlite-large-value: allow-for-now lv-h04ee6ce18457 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("hosts_cli.rs")),
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
+        ("source", SOURCE_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
         ("validate", VALIDATE_SOURCE),
@@ -3607,7 +4035,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
             diverged_since: None,
         }],
     });
-    let output = render_now_page(&page, "fractal now --as person/alex");
+    let output = render_now_page(&page, &[], "fractal now --as person/alex");
     assert!(
         output.starts_with(
             "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
@@ -3643,7 +4071,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
     );
 
     page.sync = None;
-    assert!(!render_now_page(&page, "fractal now").contains("SYNCING"));
+    assert!(!render_now_page(&page, &[], "fractal now").contains("SYNCING"));
 }
 
 #[test]
@@ -3816,6 +4244,7 @@ fn an_attention_item_names_its_kind_sender_and_age() {
         about: "message/abc".into(),
         subjects: Vec::new(),
         summary: None,
+        speech: None,
     });
     assert_eq!(
         attention_heading(&item, now),
@@ -3842,6 +4271,7 @@ fn an_attention_item_names_its_kind_sender_and_age() {
 fn now_page_without_work_does_not_claim_zero_working() {
     let attention_only = render_now_page(
         &fixture_product_page(&["attention"], false),
+        &[],
         "fractal now --as person/alex",
     );
     assert!(attention_only.starts_with("1 alert\n"), "{attention_only}");
@@ -3854,6 +4284,7 @@ fn now_page_without_work_does_not_claim_zero_working() {
 
     let with_work = render_now_page(
         &fixture_product_page(&["attention", "work"], false),
+        &[],
         "fractal now --as person/alex --owner-run mission-run/release/1",
     );
     assert!(with_work.contains("\nWORKING  1\n"), "{with_work}");
@@ -3862,14 +4293,56 @@ fn now_page_without_work_does_not_claim_zero_working() {
 }
 
 #[test]
+fn now_page_names_availability_before_alerts() {
+    use fractal_client::{
+        AvailabilityDeadlineClock, AvailabilityInterruptions, AvailabilityPresence, AvailabilityStatus,
+        AvailabilityStatusSource,
+    };
+    let away = fractal_client::PersonAvailability {
+        person: "person/alex".into(),
+        status: AvailabilityStatus::Away,
+        status_source: AvailabilityStatusSource::Override,
+        status_until: Some("2026-11-12T18:00:00.000Z".into()),
+        presence: None,
+        presence_observed_at: None,
+        interruptions: AvailabilityInterruptions::None,
+        interruptions_until: None,
+        deadline_clock: AvailabilityDeadlineClock::Run,
+        deadline_clock_since: None,
+        deadline_clock_until: None,
+    };
+    let output = render_now_page(&fixture_product_page(&["attention"], false), std::slice::from_ref(&away), "fractal now");
+    assert!(
+        output.starts_with(
+            "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\n1 alert\n"
+        ),
+        "{output}"
+    );
+    assert_eq!(
+        render_now_page(&fixture_product_page(&[], false), std::slice::from_ref(&away), "fractal now"),
+        "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\nWork: fractal work ls · Health: fractal doctor\n"
+    );
+    let unreported = fractal_client::PersonAvailability {
+        status: AvailabilityStatus::Available,
+        status_source: AvailabilityStatusSource::Unreported,
+        status_until: None,
+        presence: Some(AvailabilityPresence::Unreported),
+        interruptions: AvailabilityInterruptions::All,
+        ..away
+    };
+    let quiet = render_now_page(&fixture_product_page(&["attention"], false), &[unreported], "fractal now");
+    assert!(quiet.starts_with("1 alert\n"), "no device reporting alone prints nothing: {quiet}");
+}
+
+#[test]
 fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let page = fixture_product_page(&["attention"], false);
     let mut alerts = page.clone();
     alerts.items = [page.items.clone(), page.items.clone()].concat();
     assert!(
-        render_now_page(&alerts, "fractal now").starts_with("2 alerts\n"),
+        render_now_page(&alerts, &[], "fractal now").starts_with("2 alerts\n"),
         "{}",
-        render_now_page(&alerts, "fractal now")
+        render_now_page(&alerts, &[], "fractal now")
     );
     // An update asks nothing: it is listed apart and never counted as an alert.
     let mut updates = page.clone();
@@ -3882,14 +4355,15 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
         about: "message/abc".into(),
         subjects: Vec::new(),
         summary: None,
+        speech: None,
     });
     update.alert = Some(false);
-    let now = render_now_page(&updates, "fractal now");
+    let now = render_now_page(&updates, &[], "fractal now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
     assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), "fractal now"),
+        render_now_page(&fixture_product_page(&[], false), &[], "fractal now"),
         "Work: fractal work ls · Health: fractal doctor\n"
     );
     // `st alerts ls` counts the alerts under its heading, then lists updates apart.
@@ -4560,14 +5034,14 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
         // Agent-only continuations deliberately keep the executable available in agent seats.
         wait_interruption_reason(actor, true, &[], &["message/new".into()]),
         Some(
-            "the wait stopped because agent/worker has a new message: message/new. Run `st conversations ls`"
+            "the wait stopped because agent/worker has a new message: message/new. Run `fractal conversations ls`"
                 .into()
         )
     );
     assert_eq!(
         wait_interruption_reason(actor, true, &["step-run/new".into()], &[]),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );
@@ -4579,7 +5053,7 @@ fn an_agent_wait_stops_for_messages_work_and_an_empty_lease() {
             &["message/new".into()]
         ),
         Some(
-            "the wait stopped because agent/worker has ready work: step-run/new. Run `st work ls`"
+            "the wait stopped because agent/worker has ready work: step-run/new. Run `fractal work ls`"
                 .into()
         )
     );
@@ -4616,7 +5090,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
             text.starts_with("people do not have inboxes: print your answer in the chat"),
             "{to}: {text}"
         );
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     // Even a preview of the message is refused.
     let mut preview = args("person/ada");
@@ -4764,6 +5239,93 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
 }
 
 #[test]
+fn mission_workspace_uses_actual_step_hosts_and_refuses_unknown_placement() {
+    let source = "version 2\nmission \"placement\" state=\"ready\" {\n goal \"Resolve actual placement\"\n step \"executor\" {\n agentless\n host \"${ST_STEP}\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\" }\n }\n }\n}\n";
+    let intent = fractal_daemon::parse_intent(source, "publisher").unwrap();
+    let mut mission = intent.missions.values().next().unwrap().clone();
+    let inputs = BTreeMap::new();
+    let cwd = Path::new(".").canonicalize().unwrap();
+    for workspace in [None, Some(Path::new("."))] {
+        assert_eq!(resolve_mission_workspace(&mission, workspace, "executor", &inputs).unwrap(), cwd);
+        let error = resolve_mission_workspace(&mission, workspace, "migration-step", &inputs).unwrap_err();
+        assert!(error.to_string().contains(if workspace.is_none() { "pass --workspace" } else { "absolute path" }), "{error:#}");
+    }
+    let remote = Path::new("/srv/only-on-executor/../workspace");
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "migration-step", &inputs).unwrap(), remote);
+    mission.steps.get_mut("executor").unwrap().declarations_kdl = Some(
+        "version 2\nhost \"${ST_REQUESTER}\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\" }\n}\n".into()
+    );
+    assert!(resolve_mission_workspace(&mission, None, "migration-reviewer", &inputs).unwrap_err().to_string().contains("pass --workspace"));
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "migration-reviewer", &inputs).unwrap(), remote);
+}
+
+#[test]
+fn mission_workspace_respects_execution_members() {
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nmission \"workspace\" state=\"ready\" {\n goal \"Check workspace placement\"\n step \"wait\" { agentless }\n}\n",
+        "publisher",
+    ).unwrap();
+    let mut mission = intent.missions.values().next().unwrap().clone();
+    let inputs = BTreeMap::new();
+    assert_eq!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs).unwrap(),
+        Path::new(".").canonicalize().unwrap(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(root.path()), "publisher", &inputs).unwrap(),
+        root.path().canonicalize().unwrap(),
+    );
+    let missing = root.path().join("missing");
+    assert!(resolve_mission_workspace(&mission, Some(&missing), "publisher", &inputs).is_err());
+    mission
+        .gates
+        .push(fractal_daemon::model::GateSpec::Mechanical {
+            name: "remote-proof".into(),
+            command: "true".into(),
+            host: "executor".into(),
+            workspace: "${ST_WORKSPACE}".into(),
+            environment: BTreeMap::new(),
+            time_limit_ms: 1000,
+        });
+    let remote = Path::new("/srv/workspace-only-on-executor/../project");
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(),
+        remote,
+    );
+    assert!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("pass --workspace")
+    );
+    assert!(
+        resolve_mission_workspace(&mission, Some(Path::new(".")), "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute path")
+    );
+    mission.gates.clear();
+    mission.declarations_kdl = Some("version 2\nhost \"executor\" {\n agent \"workspace/worker\" {\n workspace \"${ST_WORKSPACE}\"\n harness \"claude\" {}\n }\n}\n".into());
+    assert_eq!(
+        resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(),
+        remote,
+    );
+    assert!(
+        resolve_mission_workspace(&mission, None, "publisher", &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("pass --workspace")
+    );
+    mission.declarations_kdl = None;
+    mission.steps.get_mut("wait").unwrap().uses_mission = Some(
+        fractal_daemon::model::UsedMissionSpec::StepOutput { step: "prepare".into() },
+    );
+    assert!(resolve_mission_workspace(&mission, None, "publisher", &inputs).unwrap_err().to_string().contains("pass --workspace"));
+    assert_eq!(resolve_mission_workspace(&mission, Some(remote), "publisher", &inputs).unwrap(), remote);
+}
+
+#[test]
 fn mission_start_bare_ids_are_scoped_to_each_mission() {
     for mission in ["fleet/fractal/daemon-github-sekrets", "release/demo"] {
         for requested in ["2026-10-07", "mission-run/2026-10-07"] {
@@ -4803,6 +5365,36 @@ fn mission_start_explicit_paths_and_default_ids_are_preserved() {
     let generated = mission_start_run_id("release/demo", None);
     let suffix = generated.strip_prefix("release/demo/").unwrap();
     assert!(uuid::Uuid::parse_str(suffix).is_ok());
+}
+
+#[test]
+fn mission_retry_defaults_to_latest_and_requires_an_actor() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "retry", "demo/failed", "--as", "person/operator",
+    ]).unwrap();
+    let Command::Missions { command: MissionViewCommand::Retry(args) } = cli.command else {
+        panic!("the mission retry command did not parse");
+    };
+    assert_eq!(args.run, "demo/failed");
+    assert_eq!(args.actor, "person/operator");
+    assert!(!args.same_revision);
+    assert!(args.reason.is_none());
+    assert!(Cli::try_parse_from(["fractal", "missions", "retry", "demo/failed"]).is_err());
+}
+
+#[test]
+fn mission_retry_accepts_same_revision_reason_and_agent_actor() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "retry", "mission-run/demo/failed",
+        "--same-revision", "--reason", "the worker is available", "--as", "agent/operator",
+    ]).unwrap();
+    let Command::Missions { command: MissionViewCommand::Retry(args) } = cli.command else {
+        panic!("the mission retry command did not parse");
+    };
+    assert_eq!(args.run, "mission-run/demo/failed");
+    assert_eq!(args.actor, "agent/operator");
+    assert!(args.same_revision);
+    assert_eq!(args.reason.as_deref(), Some("the worker is available"));
 }
 
 #[test]
@@ -6004,12 +6596,14 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "message-read-state".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -6104,9 +6698,11 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
         client_relay: None, native_session_home: None, owning_person: None,
@@ -6225,13 +6821,27 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     else {
         panic!("agents start did not parse");
     };
-    let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let kdl = agent_start_document(
+        &args,
+        None,
+        &Default::default(),
+        &StartWorkspace::Set(cwd.display().to_string(), false),
+    )
+    .unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
         intent.subjects["agent/example/cos/standing/cos"]
             .owner_run
             .is_none()
+    );
+    assert_eq!(
+        intent.subjects["agent/example/cos/standing/cos"]
+            .member
+            .as_ref()
+            .map(|member| member.workspace.as_str()),
+        Some(cwd.to_str().unwrap()),
     );
 
     let cli = Cli::try_parse_from([
@@ -6250,6 +6860,87 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
             command: AgentsCommand::Stop(_)
         }
     ));
+}
+
+#[test]
+fn agents_start_keeps_a_declared_remote_workspace_and_passes_overrides_through() {
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
+    let source = format!(
+        "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"claude\" {{}}\n  restart always\n }}\n}}\n"
+    );
+    let intent = fractal_daemon::parse_intent(&source, "node").unwrap();
+    let subject = "agent/dotfiles/build-capacity";
+    let existing = &intent.subjects[subject];
+    assert_eq!(
+        existing.member.as_ref().map(|member| member.host.as_str()),
+        Some("distant")
+    );
+    let start_args = |extra: &[&str]| {
+        let cli = Cli::try_parse_from(
+            ["st3", "agents", "start", subject, "--as", "person/alex"]
+                .into_iter()
+                .chain(extra.iter().copied()),
+        )
+        .unwrap();
+        let Command::Agents {
+            command: AgentsCommand::Start(args),
+        } = cli.command
+        else {
+            panic!("agents start did not parse");
+        };
+        args
+    };
+    let workspace_of = |kdl: &str| {
+        let started = fractal_daemon::parse_intent(kdl, "node").unwrap();
+        started.subjects[subject]
+            .member
+            .as_ref()
+            .map(|member| member.workspace.clone())
+    };
+    // A declared agent started from another member keeps its declaration's workspace, which
+    // only exists on the agent's member: the document never consults this machine's files.
+    let args = start_args(&[]);
+    let kdl = agent_start_document(&args, Some(existing), &Default::default(), &StartWorkspace::Keep)
+        .unwrap();
+    assert_eq!(workspace_of(&kdl).as_deref(), Some(declared));
+    assert!(kdl.contains("host distant"), "{kdl}");
+    // An override for the agent's member is published as written, even when no such path
+    // exists on the caller's machine.
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("not-created-on-the-caller");
+    assert!(!missing.exists());
+    let args = start_args(&["--workspace", missing.to_str().unwrap()]);
+    let kdl = agent_start_document(
+        &args,
+        Some(existing),
+        &Default::default(),
+        &StartWorkspace::Set(missing.display().to_string(), false),
+    )
+    .unwrap();
+    assert_eq!(
+        workspace_of(&kdl).as_deref(),
+        Some(missing.to_str().unwrap())
+    );
+    // An override keeps the declaration's own create policy for the new path.
+    let source = source.replace(
+        &format!("workspace {declared:?}"),
+        &format!("workspace {declared:?} create=#true"),
+    );
+    let intent = fractal_daemon::parse_intent(&source, "node").unwrap();
+    let existing = &intent.subjects[subject];
+    assert!(existing.member.as_ref().is_some_and(|member| member.workspace_create));
+    let kdl = agent_start_document(
+        &args,
+        Some(existing),
+        &Default::default(),
+        &StartWorkspace::Set(missing.display().to_string(), false),
+    )
+    .unwrap();
+    assert!(kdl.contains("create=#true"), "{kdl}");
+    assert_eq!(
+        workspace_of(&kdl).as_deref(),
+        Some(missing.to_str().unwrap())
+    );
 }
 
 #[test]
@@ -6609,6 +7300,130 @@ fn human_mutations_reject_missing_or_shorthand_identity() {
             Cli::try_parse_from(&argv).is_err(),
             "accepted shorthand human identity: {argv:?}"
         );
+    }
+}
+
+#[test]
+fn device_renewal_staging_requires_audited_terms_without_key_or_scope_overrides() {
+    let base = [
+        "fractal", "devices", "renew-stage", "device/phone",
+        "--migration-epoch", "phone-renewal", "--allow", "audited-digest",
+    ];
+    let cli = Cli::try_parse_from(base).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::RenewStage {
+            device_id, migration_epoch, allow_digest, expires_in_hours,
+        }), ..
+    }) = cli.command else { panic!("expected renewal staging") };
+    assert_eq!(device_id, "device/phone");
+    assert_eq!(migration_epoch, "phone-renewal");
+    assert_eq!(allow_digest, "audited-digest");
+    assert_eq!(expires_in_hours, 72);
+    for missing in [
+        vec!["fractal", "devices", "renew-stage", "device/phone"],
+        vec!["fractal", "devices", "renew-stage", "device/phone", "--migration-epoch", "epoch"],
+        vec!["fractal", "devices", "renew-stage", "device/phone", "--allow", "digest"],
+    ] {
+        assert!(Cli::try_parse_from(missing).is_err());
+    }
+    for extra in [
+        ["--scope", "control.messages"],
+        ["--candidate-public-key", "key"],
+        ["--expires-in-hours", "0"],
+        ["--expires-in-hours", "169"],
+    ] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--expires-in-hours", "168"])).is_ok());
+}
+
+#[tokio::test]
+async fn device_renewal_staging_refuses_remote_endpoints_without_connecting() {
+    for endpoint in [
+        Endpoint::Http("http://127.0.0.1:1".into()),
+        Endpoint::parse("fabric://devbox/st3-client-v0").unwrap(),
+    ] {
+        let error = stage_device_renewal(&endpoint, "person/alex", DeviceRenewalStageRequest {
+            api_version: CLIENT_V0_API_VERSION,
+            device_id: "device/phone".into(),
+            migration_epoch: "phone-renewal".into(),
+            allow_digest: "audited-digest".into(),
+            expires_in_hours: 72,
+        }).await.err().expect("remote staging must fail");
+        assert!(error.to_string().contains("trusted local Unix socket"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn device_renewal_staging_posts_sealed_terms_and_returns_only_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("renewal.sock");
+    let server_socket = socket.clone();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings/renewals/stage",
+        axum::routing::post(move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send((headers, body)).unwrap();
+                let mut envelope = json!({
+                    "api_version": CLIENT_V0_API_VERSION,
+                    "request_id": "request/renew-stage",
+                    "snapshot": {
+                        "id": "snapshot/host-a/1844/44cd", "host_id": "host/host-a", "store_index": 1844,
+                        "projection_version": "client-projection.v0", "created_at": "2026-09-20T12:00:02Z"
+                    },
+                });
+                envelope["value"] = json!({
+                    "kind": "device-renewal-staged",
+                    "renewal_id": "renewal/phone",
+                    "expires_at": "2026-11-11T12:00:00Z",
+                    "allow_digest": "audited-digest",
+                    "credential": "not-a-receipt-field",
+                });
+                axum::Json(envelope)
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { serve_unix(&server_socket, app).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !socket.exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let receipt = stage_device_renewal(&Endpoint::Unix(socket), "agent/deployer", DeviceRenewalStageRequest {
+        api_version: CLIENT_V0_API_VERSION,
+        device_id: "device/phone".into(),
+        migration_epoch: "phone-renewal".into(),
+        allow_digest: "audited-digest".into(),
+        expires_in_hours: 72,
+    }).await.unwrap();
+    let (headers, body) = received.await.unwrap();
+    assert_eq!(headers["x-st3-person"], "agent/deployer");
+    assert_eq!(body, json!({
+        "api_version": CLIENT_V0_API_VERSION,
+        "device_id": "device/phone",
+        "migration_epoch": "phone-renewal",
+        "allow_digest": "audited-digest",
+        "expires_in_hours": 72,
+    }));
+    assert_eq!(serde_json::to_value(receipt).unwrap(), json!({
+        "kind": "device-renewal-staged",
+        "renewal_id": "renewal/phone",
+        "expires_at": "2026-11-11T12:00:00Z",
+        "allow_digest": "audited-digest",
+    }));
+    server.abort();
+}
+
+#[test]
+fn device_renewal_staging_requires_the_callers_literal_agent_actor() {
+    let command = |actor: &str| Cli::try_parse_from([
+        "fractal","devices","renew-stage","--as",actor,"device/phone",
+        "--migration-epoch","phone-renewal","--allow","audited-digest",
+    ]).unwrap().command;
+    assert!(guard_mutating_cli_actor(&command("agent/deployer"),Some("agent/deployer"),None).is_ok());
+    for actor in ["person/alex","agent/other"] {
+        assert!(guard_mutating_cli_actor(&command(actor),Some("agent/deployer"),None).is_err());
     }
 }
 
@@ -7413,6 +8228,7 @@ async fn graph_delivery_gate_closes_on_hold_outage_and_mismatched_subject() {
         reason: "adopted hold".into(),
         idempotency_key: "adopt-test".into(),
         legacy_adoption: true,
+        force: false,
     };
     let deadline = request.until_unix_ms;
     let mut paths = NativePaths {
@@ -7578,6 +8394,52 @@ async fn a_closed_message_missing_from_the_active_page_archives_its_projected_fi
     .await
     .unwrap();
     assert!(!inbox.join(&filename).exists());
+    assert!(archive.join(filename).is_file());
+    server.abort();
+}
+
+#[tokio::test]
+async fn expired_staged_native_mail_is_archived_without_receipts_and_delivery_supersedes_expiry() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("expiry").unwrap());
+    let seat = "agent/eval.worker";
+    let append = |status: &str, fields: BTreeMap<String, Value>| {
+        store.append_claim(&ClaimInput {
+            subject: "message/expiry".into(), kind: format!("message.{status}"),
+            actor: Some(if status == "expired" { "daemon/runtime" } else { seat }.into()), fields, evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append("sent", BTreeMap::from([
+        ("from".into(), json!("person/eval")), ("to".into(), json!(seat)),
+        ("content".into(), json!("Brief")), ("status".into(), json!("sent")),
+    ]));
+    let (client, server) = serve_test_store(store.clone(), root.path(), "expiry").await;
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    let reconcile = || forward_projected_messages(
+        &client, seat, &inbox, &archive, "app-server",
+        NativeDeliveryReceipts::Codex {
+            state_dir: root.path(), identity: "eval.worker", runtime_id: "worker",
+        },
+    );
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.message("message/expiry").unwrap().unwrap().status, "staged");
+    let filename = fractal_drivers::message::list_dir(&inbox).unwrap()[0].filename.clone();
+    append("expired", BTreeMap::from([
+        ("status".into(), json!("expired")), ("reason".into(), json!("cutoff-uncertain-attempt")),
+    ]));
+    assert!(reconcile().await.unwrap().is_empty());
+    assert!(!inbox.join(&filename).exists());
+    assert!(archive.join(&filename).is_file());
+    for kind in ["message.delivered", "message.read"] {
+        assert!(store.claims_for_subject_kind_at("message/expiry", kind, None, false, 1).unwrap().claims.is_empty());
+    }
+    append("delivered", BTreeMap::from([("status".into(), json!("delivered"))]));
+    assert_eq!(message_page(&client, Some(seat), false, None).await.unwrap().items[0].status, "delivered");
+    let index = store.index().unwrap();
+    assert!(reconcile().await.unwrap().is_empty());
+    assert_eq!(store.index().unwrap(), index, "delivered-unread replay writes no receipt");
     assert!(archive.join(filename).is_file());
     server.abort();
 }
@@ -8080,12 +8942,14 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: node.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -8137,9 +9001,17 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
             adopt: vec![],
             allow_empty: false,
             confirm_retire: None,
+            source_policy: None,
+            enforce: None,
+            publisher: vec![],
+            namespace: vec![],
+            unmanaged_allow: vec![],
+            force: false,
+            reason: None,
+            source_map: None,
             dry_run: false,
             at_index: None,
-            actor: "person/test".into(),
+            actor: Some("person/test".into()),
             workspace: root.to_owned(),
             no_gate_check: false,
             check: false,
@@ -8149,6 +9021,54 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn mission_retry_command_creates_distinct_runs_through_the_api() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("single").unwrap());
+    let (client, server) = serve_test_store(store.clone(), root.path(), "single").await;
+    publish_text(
+        &client,
+        "version 2\nmission \"arrival\" state=\"ready\" {\n goal \"Retry the failed run.\"\n concurrent-runs max=2\n step \"work\" { }\n}\n".into(),
+        "retry command fixture".into(),
+        "person/test".into(),
+    ).await.unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "arrival".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/test".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "cli-retry-source".into(),
+    }).unwrap();
+    store.set_mission_run_state(&source.id, "failed", "terminal", Some("a gate failed")).unwrap();
+    for same_revision in [false, true] {
+        run_mission_view(
+            &client,
+            &Endpoint::Unix(root.path().join("st3.sock")),
+            MissionViewCommand::Retry(MissionRunRetryArgs {
+                run: source.id.clone(),
+                actor: "person/test".into(),
+                same_revision,
+                reason: Some("the worker is available".into()),
+            }),
+            true,
+        ).await.unwrap();
+    }
+    let source_after = store.mission_run(&source.subject).unwrap().unwrap();
+    assert_eq!(source_after.status, "failed");
+    assert_eq!(source_after.generation, source.generation);
+    assert_eq!(source_after.retried_by.len(), 2, "each invocation has a unique idempotency key");
+    assert_ne!(source_after.retried_by[0], source_after.retried_by[1]);
+    for subject in &source_after.retried_by {
+        let retried = store.mission_run(subject).unwrap().unwrap();
+        assert_eq!(retried.retry_of.as_deref(), Some(source.subject.as_str()));
+        assert_eq!(retried.revision, source.revision);
+        assert_eq!(retried.workspace, source.workspace);
+    }
+    server.abort();
 }
 
 #[tokio::test]
@@ -8173,7 +9093,7 @@ async fn mission_start_same_bare_id_creates_distinct_runs() {
                 mission: format!("mission/{mission}"),
                 revision: None,
                 id: Some("2026-10-07".into()),
-                workspace: root.path().to_path_buf(),
+                workspace: Some(root.path().to_path_buf()),
                 inputs: Vec::new(),
                 after: None,
                 report_to: None,
@@ -8198,6 +9118,118 @@ async fn mission_start_same_bare_id_creates_distinct_runs() {
             .unwrap()
             .is_none()
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn launch_runs_publish_workspaces_for_the_candidate_execution_member() {
+    for combined in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("publisher").unwrap());
+        let (client, server) = serve_test_store(store, root.path(), "publisher").await;
+        let session: PlanningSessionView = client.post("/v1/launches", &json!({
+            "mission": "remote-launch", "request": b"Run the remote task.",
+            "workspace": root.path().display().to_string(), "requester": "person/test",
+            "idempotency_key": "remote-launch-plan"
+        })).await.unwrap();
+        let path = format!("/v1/launches/{}", urlencoding::encode(&session.id));
+        let candidate = b"version 2\nmission \"remote-launch\" state=\"ready\" {\n goal \"Run remotely\"\n loop \"improve\" {\n max-rounds 2\n round { completion { when \"all-steps-exhausted\" } }\n }\n step \"work\" {\n agentless\n host \"executor\" {\n exec \"task\" { command \"true\"; workspace \"${ST_WORKSPACE}\"; restart \"never\" }\n }\n }\n}\n";
+        let parsed = fractal_daemon::parse_intent(std::str::from_utf8(candidate).unwrap(), "publisher").unwrap();
+        assert_eq!(parsed.missions.len(), 2, "the valid candidate includes an implicit loop graph");
+        assert_eq!(fractal_daemon::mission::top_level_mission_ids(&parsed.missions).len(), 1);
+        let _: PlanningSessionView = client.post(&format!("{path}/submit"), &PlanningCandidateSubmitRequest {
+            actor: session.planner, markdown: b"# Remote task".to_vec(),
+            kdl: candidate.to_vec(), idempotency_key: "remote-launch-submit".into(),
+        }).await.unwrap();
+        let preview: PlanningSessionView = client.post(&format!("{path}/preview"), &json!({})).await.unwrap();
+        let hash = preview.preview.unwrap().hash;
+        if !combined {
+            let _: PlanningSessionView = client.post(&format!("{path}/approve"), &PlanningApprovalRequest {
+                actor: "person/test".into(), preview_hash: hash.clone(), idempotency_key: "remote-launch-approve".into(),
+            }).await.unwrap();
+            let _: Value = client.post("/v1/missions/rename-id", &json!({
+                "from": "mission/remote-launch", "to": "mission/renamed-launch",
+                "actor": "person/test", "reason": "Clarify mission name",
+                "idempotency_key": "remote-launch-rename"
+            })).await.unwrap();
+            let renamed: PlanningSessionView = client.get(&path).await.unwrap();
+            assert_eq!(renamed.mission, "renamed-launch");
+        }
+        let command = |workspace| if combined {
+            LaunchCommand::ApproveAndLaunch(LaunchApproveAndStartArgs {
+                session: session.id.clone(), preview_hash: hash.clone(), workspace,
+                inputs: Vec::new(), actor: "person/test".into(),
+            })
+        } else {
+            LaunchCommand::Run(LaunchRunArgs {
+                session: session.id.clone(), workspace, inputs: Vec::new(), actor: "person/test".into(),
+            })
+        };
+        let endpoint = Endpoint::Unix(root.path().join("st3.sock"));
+        let error = launch_cli::run_launch(&client, &endpoint, command(None), &PlannerSpec::default(), true).await.unwrap_err();
+        assert!(error.to_string().contains("pass --workspace"), "{error:#}");
+        let remote = "/srv/only-on-executor/../launch";
+        launch_cli::run_launch(&client, &endpoint, command(Some(PathBuf::from(remote))), &PlannerSpec::default(), true).await.unwrap();
+        let runs: Vec<MissionRunView> = client.get("/v1/mission-runs?mission=remote-launch").await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].workspace, remote);
+        assert_eq!(runs[0].mission, if combined { "mission/remote-launch" } else { "mission/renamed-launch" });
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn missions_start_publishes_remote_workspace_without_resolving_it_locally() {
+    const FLEET: &str = "5d0c1c52-3f7a-4b0e-9b61-1f2d3c4b5a69";
+    let root = tempfile::tempdir().unwrap();
+    let publisher = Arc::new(Store::open_memory("publisher").unwrap());
+    let executor = Arc::new(Store::open_memory("executor").unwrap());
+    publisher.bind_fleet(FLEET).unwrap();
+    executor.bind_fleet(FLEET).unwrap();
+    let (client, server) = serve_test_store(publisher.clone(), root.path(), "publisher").await;
+    publish_text(
+        &client,
+        r#"version 2
+mission "remote-workspace" state="ready" {
+ goal "Execute on the declared member."
+ step "work" {
+  agentless
+  host "executor" {
+   exec "workspace-check" { command "true"; workspace "${ST_WORKSPACE}"; restart "never" }
+  }
+ }
+}
+        "#.into(),
+        "remote workspace regression".into(),
+        "person/test".into(),
+    ).await.unwrap();
+    let args = |workspace| MissionRunStartArgs {
+        mission: "remote-workspace".into(),
+        revision: None,
+        id: Some("remote-workspace/check".into()),
+        workspace,
+        inputs: Vec::new(),
+        after: None,
+        report_to: None,
+        report_completed: false,
+        follow: false,
+        actor: "person/test".into(),
+        print_kdl: false,
+    };
+    let error = start_mission_run(&client, args(None), true).await.unwrap_err();
+    assert!(error.to_string().contains("pass --workspace"), "{error:#}");
+    let remote = "/srv/only-on-executor/../workspace";
+    start_mission_run(&client, args(Some(PathBuf::from(remote))), true).await.unwrap();
+    let exchange = publisher.export_replication_exchange(FLEET, &fractal_daemon::model::ReplicationInventory::default()).unwrap();
+    executor.receive_replication_exchange("publisher", FLEET, &exchange).unwrap();
+    executor.validate_replication_backlog().unwrap();
+    executor.apply_replication_repairs().unwrap();
+    executor.project_replication_backlog().unwrap();
+    let executor_root = tempfile::tempdir().unwrap();
+    let (executor_client, executor_server) = serve_test_store(executor, executor_root.path(), "executor").await;
+    let run: MissionRunView = executor_client.get("/v1/mission-runs/mission-run%2Fremote-workspace%2Fcheck").await.unwrap();
+    assert_eq!(run.workspace, remote);
+    executor_server.abort();
     server.abort();
 }
 
@@ -8252,7 +9284,7 @@ async fn missions_start_waits_for_a_revision_published_on_another_host() {
             mission: "arrival".into(),
             revision: Some(revision.clone()),
             id: Some("arrival/after-replication".into()),
-            workspace: starter_root.path().to_path_buf(),
+            workspace: Some(starter_root.path().to_path_buf()),
             inputs: Vec::new(),
             after: None,
             report_to: None,
@@ -9165,7 +10197,7 @@ async fn harness_answer_cli_uses_supplied_fences_without_fetching_detail() {
 
 #[test]
 fn github_watch_continuation_keeps_the_agent_executable() {
-    assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
+    assert_eq!(GH_UNWATCH_HINT, "To stop: fractal gh unwatch");
 }
 
     #[test]
@@ -9290,11 +10322,12 @@ impl MovedSeat {
             cedar.apply_internal(&fractal_daemon::parse_intent(source, "cedar").unwrap(), "moved-seat").unwrap();
         }
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: cedar.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0).0,
-            node: "cedar".into(), state_dir: root.path().into(),
+            node: "cedar".into(), api_socket: root.path().join("api.sock"),state_dir: root.path().into(),
             pty_root: root.path().join("pty"), pty_binary: "pty".into(),
             fleet_id: Some(MOVED_FLEET.into()), configured_peers: vec![], client_relay: None,
             native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
@@ -9412,4 +10445,16 @@ async fn the_work_fence_still_refuses_an_incarnation_that_is_not_live() {
     let seat = MovedSeat::new().await;
     seat.cedar_observes("running", Some("on-cedar-next"));
     assert!(!seat.refused("renew", MOVED_SEAT, "on-cedar-next", "other-lease").await.is_empty());
+}
+
+#[test]
+fn the_lane_bursts_line_shows_the_room_kept_from_starts_for_a_burst() {
+    const G: u64 = 1 << 30;
+    let line = |reserve: serde_json::Value| render_performance(&serde_json::json!({"lane_bursts": {"held": 0, "waiting": 1, "dropped_by_lease": 0, "reserve": reserve}}))
+        .lines().find(|line| line.starts_with("LANE BURSTS")).unwrap().to_owned();
+    assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 16 * G})),
+        "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (last judged for agent/elm)");
+    assert_eq!(line(serde_json::json!({"subject": "agent/elm", "full": 16 * G, "kept": 0})),
+        "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start · 16.0G kept from starts for a burst (0.0G while one is held; last judged for agent/elm)");
+    assert_eq!(line(serde_json::Value::Null), "LANE BURSTS  0 held · 1 waiting · 0 dropped by lease since start");
 }

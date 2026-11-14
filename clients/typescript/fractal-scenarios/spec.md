@@ -210,6 +210,7 @@ after it (see [Store versions](#store-versions)).
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
 | `sync` | `capabilities` envelope, the [sync script](#sync-matrix) and the `expected` sync status per surface | see [Replay dispatch](#replay-dispatch) |
+| `objectives` | `list: SloList` (`GET slo`), `histories: SloHistory[]` (one 24-hour, 48-step read per row), `usage: UsagePeriod` (declared accounts). A world that authors none serves an empty read. The epoch-ms fields carry no `x-st-codec`, so readers do not rebase them; synthetic factories likewise retain the fixture anchor values at every requested world clock | none; the replay does not serve these routes |
 
 Synthetic details missions include `run_details`, derived from the same work inventory at
 the baseline and after every details change. Each run's progress, step states and claimants
@@ -317,6 +318,7 @@ so an override never introduces strangers. Variants per slice:
 | `conversation` | `default`, `empty`, `loading`, `streaming`, `long`, `huge`, `tool-heavy`, `failed-tools`, `remote-only-mail` |
 | `terminal` | `default`, `none`, `running`, `unavailable`, `exited`, `restarted` |
 | `sync` | one variant per row of the [sync matrix](#sync-matrix) |
+| `objectives` | `default`, `none`, `loading`, `unsafe-link` |
 
 `world.with({ conversation: 'long' })` returns a new world with that variant. A world may also
 pass a slice value built by its own factories: `world.with({ sync: customSync })`.
@@ -1232,7 +1234,7 @@ Other slices retain their full marker contract. World-switch contrast selection 
 same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
 The story must state the consumer's real mount rule, with a comment naming that rule; this
 is not permission to choose arbitrary convenient data or split the transcript.
-Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
+Fractal-ui exports `transcriptMountedWindow` from its transcript-window module, derived from
 Transcript's initial source-row count. Stories can use this shared value instead of copying
 the count; a consumer-side test guards it.
 
@@ -1328,16 +1330,18 @@ breaks a scenario fails in the same pull request.
 
 ## Consumer contracts (D2, D8)
 
+Fractal Web 2 maintains the kit, its committed fixtures and its CI gates (freshness, decode, privacy, tests); consumer adapters stay with their consumer owners.
+
 | Consumer | Owner | Contract |
 | --- | --- | --- |
 | fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. The inventory is every CSF loaded by the kit Storybook, including app CSFs, from the shared Storybook configuration. Configured files are discovered without extension filtering; unsupported files fail explicitly instead of escaping the check. The inventory expands nested brace alternatives before deriving static story roots, rejects patterns whose roots cannot be determined or that mention `node_modules` until the check is extended, walks supported roots with `lstat` without following symlinks, and reports any directory or file symlink outside excluded dependencies (including literal file entries). Traversal skips directories named `node_modules`; discovery filters exact `node_modules` path segments independently of glob matching, including patterns with leading `../` prefixes and brace alternatives. Similarly named directories remain included. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries and the separate app-mode deferral list owned by fractal-web-app, a reviewed shrink-only pin. The app list pins exactly the undeclared app export ids with its own count; missing or already-declared entries fail. Exemptions list their reasons; each CSF exports its reviewed `scenarioExemptions` (sorted `export:mode` ids, excluded from stories), and the collected exemptions must equal their union, with no stale or duplicate id. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
 | `@fractal/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a live source built with the app-local `adoptEarlyCollections: false` option that passes `replay.socket` and `replay.fetch` to `FractalOptions`. Browser transport, early socket adoption, and visibility/LRU admission are supplied by the app's `src/data/sdk-browser` platform Layer, not the portable SDK. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
-| Fractal TUI (`crates/fractal-tui`) | Fractal Product Lead | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through Fractal TUI's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
+| Fractal TUI (`crates/fractal-tui`) | Fractal Product Lead | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through Fractal TUI's own adapter (`ui/adapt.rs`); `FRACTAL_TUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
 | iOS app | native-client maintainers | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
 | Rust `fractal-client` | native-client maintainers | Provides the rebase reader and passes the shared vectors. |
 | Swift `FractalClient` | native-client maintainers | Provides the rebase reader, passes the shared vectors, and decodes every committed scenario file with the Swift models. |
-| fractalite (dotfiles flakes/fractal) | none | No adoption planned; revisit when it needs scenario data. |
+| fractalite (dotfiles flakes/fractal) | Fractal Product Lead | Excluded from the shared scenario data by Johannes's decision `step-run/ask-ab9b5934aae4d45ab96e13da847ef4c1/ask`. Revisit when fractalite gains a client-v0 data path or converges onto Fractal TUI through sidebar-v2. In the latter case, it inherits Fractal TUI adoption. |
 
 ## Non-goals
 

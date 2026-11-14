@@ -1098,7 +1098,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.4",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1499,6 +1499,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-socket-discovery",
  "fractal-store",
  "fractal-terminal-direct",
  "fractal-tui",
@@ -1527,6 +1528,7 @@ dependencies = [
  "pty-client",
  "pty-core",
  "pty-terminal",
+ "qrcode",
  "reqwest",
  "resvg",
  "ring",
@@ -1563,6 +1565,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-store",
  "fractal-ui-model",
  "futures-util",
  "getrandom 0.3.4",
@@ -1610,6 +1613,7 @@ dependencies = [
  "fractal-reconcile",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-store",
  "fractal-ui-model",
  "futures-util",
  "getrandom 0.3.4",
@@ -1661,6 +1665,7 @@ dependencies = [
  "fractal-api-mailbox",
  "fractal-drivers",
  "fractal-runtime",
+ "fractal-schema",
  "futures-util",
  "hex",
  "http-body-util",
@@ -1749,6 +1754,7 @@ dependencies = [
  "ciborium",
  "crossterm",
  "fractal-schema",
+ "fractal-socket-discovery",
  "futures-util",
  "hex",
  "http-body-util",
@@ -1759,6 +1765,7 @@ dependencies = [
  "libc",
  "opentelemetry",
  "opentelemetry_sdk",
+ "regex",
  "reqwest",
  "ring",
  "serde",
@@ -1782,6 +1789,7 @@ name = "fractal-client-codegen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fractal-store",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -1954,15 +1962,12 @@ dependencies = [
  "fractal-resource-protocol",
  "fractal-resource-providers",
  "fractal-resource-wasip2",
+ "fractal-runtime",
  "fractal-schema",
  "fractal-wire",
  "kdl",
  "libc",
  "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -1972,7 +1977,6 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "tungstenite 0.30.0",
  "wat",
@@ -2011,6 +2015,7 @@ dependencies = [
  "fractal-attention",
  "fractal-evidence",
  "fractal-kernel",
+ "fractal-schema",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2029,6 +2034,7 @@ dependencies = [
  "blake3",
  "clap",
  "hex",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
@@ -2125,6 +2131,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-jobs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fractal-kernel"
 version = "0.1.0"
 dependencies = [
@@ -2136,9 +2150,11 @@ dependencies = [
  "fractal-drivers",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-socket-discovery",
  "fractal-terminal-direct",
  "getrandom 0.3.4",
  "hex",
+ "kdl",
  "libc",
  "reqwest",
  "rusqlite",
@@ -2188,12 +2204,14 @@ name = "fractal-missions"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "flate2",
  "fractal-delivery",
  "fractal-kernel",
  "fractal-missions",
  "fractal-schema",
+ "fractal-secrets",
  "fractal-store",
  "hex",
  "kdl",
@@ -2204,6 +2222,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallclaims",
  "tempfile",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -2279,6 +2298,7 @@ dependencies = [
  "chrono-tz",
  "fractal-client",
  "fractal-drivers",
+ "fractal-kernel",
  "fractal-peer",
  "fractal-reconcile",
  "fractal-runtime",
@@ -2288,6 +2308,7 @@ dependencies = [
  "libc",
  "notify",
  "opentelemetry",
+ "opentelemetry_sdk",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2471,6 +2492,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-sidebar"
+version = "0.1.0"
+dependencies = [
+ "fractal-client",
+ "fractal-schema",
+ "fractal-sidebar",
+ "jsonschema",
+ "ratatui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fractal-socket-discovery"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "fractal-storage-version"
 version = "0.1.0"
 
@@ -2556,7 +2597,6 @@ dependencies = [
  "smallclaims",
  "tempfile",
  "tokio",
- "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -2603,6 +2643,7 @@ dependencies = [
  "fractal-feed",
  "fractal-mission-ui",
  "fractal-schema",
+ "fractal-sidebar",
  "fractal-terminal-direct",
  "fractal-ui-model",
  "image",
@@ -2622,6 +2663,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
  "unicode-width 0.2.0",
  "uuid",
 ]
@@ -3422,7 +3465,7 @@ version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82cb6a9f675da968c63b6208c641b9dca58fc0133ae53375736b1767b0cab8bd"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3993,7 +4036,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4690,7 +4733,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=79d526d1be4f77bb3764dc1d880492806f8a07fc#79d526d1be4f77bb3764dc1d880492806f8a07fc"
+source = "git+https://github.com/compoundingtech/pty?rev=d0e816ac4129c97f39473855bb4fe527701ea07c#d0e816ac4129c97f39473855bb4fe527701ea07c"
 dependencies = [
  "libc",
  "pty-core",
@@ -4701,7 +4744,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=79d526d1be4f77bb3764dc1d880492806f8a07fc#79d526d1be4f77bb3764dc1d880492806f8a07fc"
+source = "git+https://github.com/compoundingtech/pty?rev=d0e816ac4129c97f39473855bb4fe527701ea07c#d0e816ac4129c97f39473855bb4fe527701ea07c"
 dependencies = [
  "indexmap",
  "libc",
@@ -4716,7 +4759,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=79d526d1be4f77bb3764dc1d880492806f8a07fc#79d526d1be4f77bb3764dc1d880492806f8a07fc"
+source = "git+https://github.com/compoundingtech/pty?rev=d0e816ac4129c97f39473855bb4fe527701ea07c#d0e816ac4129c97f39473855bb4fe527701ea07c"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",
@@ -4752,6 +4795,12 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quantette"
@@ -5380,7 +5429,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5859,6 +5908,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
 ]
 

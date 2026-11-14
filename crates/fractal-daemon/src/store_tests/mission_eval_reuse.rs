@@ -29,6 +29,8 @@ fn at(at: u128) -> Self {
 }
 }
 
+// Keep the legacy step/timing reduction independent while including the canonical
+// lineage now required by every full execution view, not only presentation.
 fn legacy_run(connection: &Connection, id: &str, snapshot: u128) -> rusqlite::Result<MissionRunView> {
 let mut view = mission_run_header_tx(connection, id)?;
 let mut statement = connection.prepare(
@@ -52,6 +54,7 @@ view.provenance = crate::provenance::read(connection, &view.mission, &view.revis
     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
 view.loops = loop_run_views_tx(connection, &view)?;
 view.outcome = mission_run_outcome_tx(connection, &view)?;
+enrich_mission_run_lineage_tx(connection, &mut view)?;
 Ok(view)
 }
 

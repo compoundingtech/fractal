@@ -194,6 +194,7 @@ pub(super) async fn run_agents(
                                 .context("setting or releasing a hold needs --reason")?,
                             idempotency_key: format!("delivery-hold:{}", uuid::Uuid::now_v7()),
                             legacy_adoption: false,
+                            force: args.force,
                         },
                     )
                     .await?;
@@ -331,6 +332,7 @@ pub(super) async fn run_agents(
                     no_gate_check: true,
                     check: false,
                     inputs: vec![],
+                    force_reason: None,
                 },
                 json_output,
             )
@@ -380,6 +382,15 @@ pub(super) async fn run_agents(
                     )
                     .await?
             } else {
+                let workspace = resolve_start_workspace(
+                    &client,
+                    endpoint,
+                    &args,
+                    existing.as_ref(),
+                    configured_person,
+                    &subject,
+                )
+                .await?;
                 let mut uris = BTreeMap::new();
                 if let Some(existing) = &existing {
                     for reference in fractal_daemon::graph::declared_resources(&existing.desired) {
@@ -395,7 +406,7 @@ pub(super) async fn run_agents(
                         }
                     }
                 }
-                let kdl = agent_start_document(&args, existing.as_ref(), &uris)?;
+                let kdl = agent_start_document(&args, existing.as_ref(), &uris, &workspace)?;
                 if args.print_kdl {
                     print!("{kdl}");
                     return Ok(());
@@ -406,6 +417,7 @@ pub(super) async fn run_agents(
                     format!("st agents start {}", args.identity),
                     args.actor.clone(),
                     Some((&subject, &tokens)),
+                    args.force.then(|| args.reason.clone()).flatten(),
                 )
                 .await?
             };
@@ -495,9 +507,12 @@ pub(super) async fn run_agents(
                 endpoint,
                 "/v1/agents/suspend",
                 &subject,
-                &args.actor,
-                args.reason.as_deref(),
-                None,
+                SuspensionRequest {
+                    actor: &args.actor,
+                    reason: args.reason.as_deref(),
+                    host: None,
+                    force: args.force,
+                },
                 &args.timeout,
             )
             .await?;
@@ -523,9 +538,12 @@ pub(super) async fn run_agents(
                 endpoint,
                 "/v1/agents/resume",
                 &subject,
-                &args.actor,
-                None,
-                args.host.as_deref(),
+                SuspensionRequest {
+                    actor: &args.actor,
+                    reason: args.reason.as_deref(),
+                    host: args.host.as_deref(),
+                    force: args.force,
+                },
                 &args.timeout,
             )
             .await?;
@@ -579,11 +597,22 @@ pub(super) async fn run_agents(
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                         "now": args.now,
                         "fresh_session": args.fresh_session,
+                        "from_stale_handoff": args.from_stale_handoff,
                         "ignore_fit": args.ignore_fit,
                         "reason": args.reason,
                     }),
                 )
                 .await?;
+            if request.body["fields"]["fresh_session"] == true
+                && request.body["fields"]["operation"] != fractal_daemon::handoff::RESTART_NOW_OPERATION
+            {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Fresh-session restart pending for {subject}: waiting for the agent to write or mark its handoff ready; no deadline forces the restart");
+                    Ok(())
+                };
+            }
             if request.body["fields"]["action"] == "restart-when-idle" {
                 return if json_output {
                     print_value(&request, true)
@@ -720,14 +749,29 @@ pub(super) async fn run_agents(
                 print!("{kdl}");
                 return Ok(());
             }
-            let response = publish_text(
+            let response = publish_text_with_expected(
                 &cli_client(endpoint),
                 kdl,
                 format!("st agents stop {subject}"),
                 args.actor,
+                None,
+                args.force.then(|| args.reason.clone()).flatten(),
             )
             .await?;
-            print_value(&response, json_output)
+            print_value(&response, json_output)?;
+            // The same stop was already declared: say why the seat still runs, if it does.
+            if !json_output && !response.changed
+                && let Ok(gateway) = generated_client(endpoint, None)
+                && let Ok(found) = gateway.agents_get(&subject).await
+                && let ClientResource::Agent(agent) = found.value
+                && let Some(stopping) = agent.stopping
+            {
+                match stopping.held {
+                    Some(held) => println!("{subject} is already stopping; it is held: {held}"),
+                    None => println!("{subject} is already stopping"),
+                }
+            }
+            Ok(())
         }
         command => run_agent_inspection(endpoint, command, json_output).await,
     }
@@ -754,14 +798,18 @@ pub(super) fn admission_start_message(subject: &str, admission: &Value) -> Strin
 }
 
 /// Holds an agent's lane burst while standard input stays open (docs/st3/seat-lanes.md, "Bursts"):
-/// one line per answer on standard output for the command that started it, then a renewal of its
-/// lease every half minute. Standard input closing, or a stop signal, gives it back. A daemon
-/// without bursts answers with an empty 404, which is `none`.
+/// one line per answer on standard output for the command that started it, then a renewal every
+/// third of the lease the daemon names. Standard input closing, or a stop signal, gives it back. A daemon
+/// without bursts answers with an empty 404, which is `none`. A renewal says the burst is held, so
+/// a daemon that restarted restores it; once granted, any other answer means the lane no longer
+/// holds it: the holder says `lost` and why, gives it back and fails, and never goes on as if it held.
+/// A held renewal that fails is tried again after `WAITING_POLL`, not a whole renewal later, so a
+/// daemon that restarted hears it well inside the lease it keeps a raise found at start for.
 async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
     const WAITING_POLL: std::time::Duration = std::time::Duration::from_secs(5);
-    const RENEW: std::time::Duration = std::time::Duration::from_secs(30);
     let subject = normalize_agent_subject(&args.subject);
-    let body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason});
+    let mut body = json!({"agent": subject, "actor": args.actor, "cores": args.cores, "memory": args.memory, "reason": args.reason,
+        "held": false});
     let (closed_tx, mut closed) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
@@ -776,16 +824,29 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
         Ok(())
     };
     let (mut told, mut granted) = (None::<String>, false);
+    // Renewed at a third of the lease the daemon names, so a renewal or two may fail and it still holds.
+    let mut renew = std::time::Duration::from_secs(30);
     loop {
+        let mut failed = false;
         match client.post::<_, Value>("/v1/agents/lane/burst", &body).await {
             Ok(answer) => {
                 let why = answer["why"].as_str().unwrap_or_default().to_owned();
+                if let Some(lease) = answer["lease_secs"].as_u64() {
+                    renew = std::time::Duration::from_secs((lease / 3).max(1));
+                }
                 match answer["state"].as_str() {
                     Some("granted") if !granted => {
                         say(format!("granted {} {}", args.cores, args.memory))?;
                         granted = true;
+                        body["held"] = json!(true);
                     }
                     Some("granted") => {}
+                    Some(state) if granted => {
+                        let why = if why.is_empty() { format!("this host's daemon answered {state}") } else { why };
+                        say(format!("lost {why}"))?;
+                        let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
+                        anyhow::bail!("lane burst lost: {why}");
+                    }
                     Some("waiting") if told.as_deref() != Some(why.as_str()) => {
                         say(format!("waiting {why}"))?;
                         told = Some(why);
@@ -813,14 +874,21 @@ async fn hold_lane_burst(client: &Client, args: AgentBurstArgs) -> Result<()> {
             }
             // Held, a renewal that fails (a daemon restarting) is tried again: the lease outlasts a
             // few, and the raised slice still counts meanwhile.
-            Err(error) if granted => eprintln!("fractal: WARN renewing the lane burst: {error:#}"),
+            Err(error) if granted => {
+                eprintln!("fractal: WARN renewing the lane burst: {error:#}");
+                failed = true;
+            }
             Err(error) => return Err(error),
         }
         tokio::select! {
             _ = &mut closed => break,
             _ = terminate.recv() => break,
             _ = tokio::signal::ctrl_c() => break,
-            () = tokio::time::sleep(if granted { RENEW } else { WAITING_POLL }) => {}
+            () = tokio::time::sleep(match (granted, failed) {
+                (false, _) => WAITING_POLL,
+                (true, false) => renew,
+                (true, true) => renew.min(WAITING_POLL),
+            }) => {}
         }
     }
     let _: Value = client.request("DELETE", "/v1/agents/lane/burst", Some(&json!({"agent": subject, "actor": args.actor}))).await?;
@@ -909,7 +977,7 @@ async fn agent_start_declaration(
                 && matches!(suspension.phase.as_str(),
                     "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
             {
-                return Err(fractal_daemon::St3Error::new(
+                return Err(fractal_daemon::FractalError::new(
                     "start-suspended",
                     format!("`{subject}` is {}; use `st agents resume {subject}` to resume its recorded native session",
                         suspension.phase),
@@ -933,6 +1001,86 @@ async fn agent_start_declaration(
             .get(&format!("/v1/claims/by-id/{}", claim.predecessors[0]))
             .await?;
     }
+}
+
+/// The workspace `agents start` publishes: the declaration's own when a declared agent starts
+/// without `--workspace`, otherwise a path resolved for the placement host. The caller only
+/// canonicalizes paths on its own host; a path for another member is taken as written, and a
+/// new agent on another member without `--workspace` gets the directory that host names.
+async fn resolve_start_workspace(
+    client: &Client,
+    endpoint: &Endpoint,
+    args: &AgentStartArgs,
+    existing: Option<&fractal_daemon::model::DesiredSubject>,
+    configured_person: Option<&str>,
+    subject: &str,
+) -> Result<StartWorkspace> {
+    if existing.is_some() && args.workspace.is_none() {
+        return Ok(StartWorkspace::Keep);
+    }
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let placement = args
+        .host
+        .as_deref()
+        .or_else(|| {
+            existing.and_then(|seat| seat.member.as_ref().map(|member| member.host.as_str()))
+        })
+        .unwrap_or(local);
+    let placement = placement.strip_prefix("host/").unwrap_or(placement);
+    let placement = if placement == "local" { local } else { placement };
+    if let Some(workspace) = &args.workspace {
+        if placement == local {
+            let workspace = fs::canonicalize(workspace)
+                .with_context(|| format!("resolve workspace {}", workspace.display()))?;
+            return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+        }
+        anyhow::ensure!(
+            workspace.is_absolute(),
+            "a workspace on {placement} must be an absolute path on that host"
+        );
+        return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+    }
+    if placement == local {
+        let workspace = fs::canonicalize(Path::new(".")).context("resolve workspace .")?;
+        return Ok(StartWorkspace::Set(workspace.display().to_string(), false));
+    }
+    // Another host's home is only known there, so it names the new agent's directory itself,
+    // like `agents new`: the placement host creates it when the agent starts. A placement no
+    // member can reach names nothing, and the caller's own default is no path on that host.
+    let Some(socket) = endpoint.unix_socket() else {
+        anyhow::bail!(
+            "asking {placement} for a workspace needs the local Unix endpoint; pass --workspace"
+        );
+    };
+    let person = Some(args.actor.as_str())
+        .filter(|actor| actor.starts_with("person/"))
+        .or(configured_person)
+        .with_context(|| {
+            format!(
+                "asking {placement} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
+            )
+        })?;
+    let path = format!(
+        "/v1/hosts/{}/agent-workspace?identity={}",
+        urlencoding::encode(placement),
+        urlencoding::encode(subject)
+    );
+    let answer: Value = Client::unix_as(socket.as_ref(), person)?
+        .with_endpoint(endpoint.clone())
+        .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+        .get(&path)
+        .await
+        .with_context(|| {
+            format!("{placement} did not name a workspace for `{subject}`; pass --workspace")
+        })?;
+    let workspace = answer
+        .get("workspace")
+        .and_then(Value::as_str)
+        .with_context(|| format!("{placement} returned no workspace"))?;
+    Ok(StartWorkspace::Set(workspace.to_owned(), true))
 }
 
 async fn run_agent_new(
@@ -1081,42 +1229,53 @@ async fn run_agent_new(
         eprintln!("Created {subject} in {workspace}; waiting for the agent to start.");
     }
     let mut latest = None;
-    let waiting = tokio::time::timeout(
-        timeout,
+    let deadline = tokio::time::Instant::now() + timeout;
+    let waiting = tokio::time::timeout_at(
+        deadline + AGENT_READY_READ_GRACE,
         wait_for_agent_harness(
             &client,
             &gateway,
             &subject,
             args.attach,
             json_output,
+            deadline,
             &mut latest,
         ),
     )
     .await;
     let agent = match waiting {
-        Ok(Ok(agent)) => agent,
+        Ok(Ok(Some(agent))) => agent,
         other => {
             if !json_output {
-                let state = latest.as_ref().map_or_else(
-                    || cli_help::agent_state("starting", None, None, "unknown"),
-                    |agent: &fractal_client::Agent| {
-                        cli_help::agent_state(
-                            &agent.state,
-                            agent.harness_state.as_deref(),
-                            agent.fault.as_deref(),
-                            &agent.reachability,
-                        )
-                    },
-                );
+                let state = if other.is_err() {
+                    "Unknown — the current agent state read exceeded its grace period.".to_owned()
+                } else {
+                    latest.as_ref().map_or_else(
+                        || cli_help::agent_state("starting", None, None, "unknown"),
+                        |agent: &fractal_client::Agent| {
+                            cli_help::agent_state(
+                                &agent.state,
+                                agent.harness_state.as_deref(),
+                                agent.fault.as_deref(),
+                                &agent.reachability,
+                            )
+                        },
+                    )
+                };
                 println!("{}", cli_help::agent_next_steps(&subject, &actor, &state));
             }
             return match other {
                 Ok(Err(error)) => Err(error),
-                Err(_) => anyhow::bail!(
+                Ok(Ok(None)) => anyhow::bail!(
                     "`{subject}` was created, but was not ready after {}; see `fractal agents show {subject}`",
                     args.timeout
                 ),
-                Ok(Ok(_)) => unreachable!(),
+                Err(_) => anyhow::bail!(
+                    "`{subject}` was created, but its current state is unknown after {} plus a {:?} state-read grace; see `fractal agents show {subject}`",
+                    args.timeout,
+                    AGENT_READY_READ_GRACE,
+                ),
+                Ok(Ok(Some(_))) => unreachable!(),
             };
         }
     };
@@ -1191,7 +1350,7 @@ async fn agent_new_workspace(
     let answer: Result<Value> = if host == local {
         client.get(&path).await
     } else {
-        let Endpoint::Unix(socket) = endpoint else {
+        let Some(socket) = endpoint.unix_socket() else {
             anyhow::bail!(
                 "asking {host} for a workspace needs the local Unix endpoint; pass --workspace"
             );
@@ -1201,7 +1360,7 @@ async fn agent_new_workspace(
                 "asking {host} for a new workspace needs `--as person/NAME` or `person = \"person/NAME\"` in the st config; or pass --workspace"
             )
         })?;
-        Client::unix_as(socket.clone(), person)?
+        Client::unix_as(socket.as_ref(), person)?.with_endpoint(endpoint.clone())
             .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
             .get(&path)
             .await
@@ -1218,6 +1377,8 @@ async fn agent_new_workspace(
     Ok((workspace.to_owned(), true))
 }
 
+const AGENT_READY_READ_GRACE: Duration = Duration::from_secs(2);
+
 /// Wait until the agent's current harness is ready. A harness that waits on a person, such as at
 /// a login prompt, is ready enough to attach to, so `attach` accepts it.
 async fn wait_for_agent_harness(
@@ -1226,8 +1387,9 @@ async fn wait_for_agent_harness(
     subject: &str,
     attach: bool,
     json_output: bool,
+    deadline: tokio::time::Instant,
     latest: &mut Option<fractal_client::Agent>,
-) -> Result<fractal_client::Agent> {
+) -> Result<Option<fractal_client::Agent>> {
     let health: Value = client.get("/v1/health").await?;
     let mut cursor = health["store_index"]
         .as_u64()
@@ -1235,6 +1397,9 @@ async fn wait_for_agent_harness(
     let mut reported = String::new();
     let mut event_feed = LocalEventFeed::default();
     loop {
+        // Read the condition even when its wait budget has elapsed. Cancelling this read
+        // would turn an already-ready agent into an unknown state. The outer read grace
+        // bounds any overrun; cancel event waiting at the original readiness deadline.
         let agent = match gateway.agents_get(subject).await {
             Ok(response) => match response.value {
                 ClientResource::Agent(agent) => Some(agent),
@@ -1247,8 +1412,8 @@ async fn wait_for_agent_harness(
             *latest = Some(agent.clone());
             let harness = agent.harness_state.as_deref().unwrap_or("not ready");
             match agent.state.as_str() {
-                "running" => return Ok(agent),
-                "waiting" if attach && agent.reachability == "reachable" => return Ok(agent),
+                "running" => return Ok(Some(agent)),
+                "waiting" if attach && agent.reachability == "reachable" => return Ok(Some(agent)),
                 "waiting" if agent.reachability == "reachable" => anyhow::bail!(
                     "`{subject}` started and is waiting for your input; attach with `fractal terminals attach {subject}`"
                 ),
@@ -1269,15 +1434,26 @@ async fn wait_for_agent_harness(
                 reported = progress;
             }
         }
-        let page = event_feed
-            .read(
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        let page = match tokio::time::timeout_at(
+            deadline,
+            event_feed.read(
                 client,
                 &format!(
                     "after={cursor}&subject={}&wait=true&timeout_ms=30000",
                     urlencoding::encode(subject),
                 ),
-            )
-            .await?;
+            ),
+        )
+        .await
+        {
+            Ok(page) => page?,
+            // Check the condition once after the wait expires. If it still is not ready,
+            // the deadline check above returns without starting another event wait.
+            Err(_) => continue,
+        };
         if let Some(scanned) = page.next_after {
             cursor = cursor.max(scanned);
         }
@@ -1323,10 +1499,25 @@ async fn run_agent_inspection(
                     current.push(step);
                 }
             }
+            // The charter is the description of the declaration the seat runs now; a stopped or
+            // retired seat's current declaration is not an agent and has none.
+            let charter = status_for(&client, &agent.header.id)
+                .await?
+                .subjects
+                .into_iter()
+                .find(|status| status.subject == agent.header.id)
+                .and_then(|status| status.desired)
+                .filter(|desired| desired.get("name").and_then(Value::as_str) == Some("agent"))
+                .and_then(|desired| {
+                    fractal_daemon::model::canonical_child_string(&desired, "description")
+                });
             print!(
                 "{}",
                 render_client_agent(&agent, &current, current_unix_ms()?)
             );
+            if let Some(charter) = charter {
+                print!("{}", render_agent_charter(&charter));
+            }
             return Ok(());
         }
         AgentsCommand::New(_)
@@ -1508,27 +1699,34 @@ async fn run_agent_queue(
     Ok(())
 }
 
+/// What a suspend or resume request asks for, apart from its subject.
+struct SuspensionRequest<'a> {
+    actor: &'a str,
+    reason: Option<&'a str>,
+    host: Option<&'a str>,
+    force: bool,
+}
+
 /// Ask the daemon to suspend or resume `subject`, then wait for the request to finish: the seat
 /// suspended, or resumed with its harness bound to the suspended native session.
 async fn request_suspension(
     endpoint: &Endpoint,
     route: &str,
     subject: &str,
-    actor: &str,
-    reason: Option<&str>,
-    host: Option<&str>,
+    request: SuspensionRequest<'_>,
     timeout_text: &str,
 ) -> Result<fractal_client::Agent> {
     let timeout = fractal_daemon::graph::parse_duration(timeout_text, false)?;
     let client = cli_client(endpoint);
-    let request: ClaimRecord = client
+    let claim: ClaimRecord = client
         .post(
             route,
             &json!({
                 "subject": subject,
-                "actor": actor,
-                "reason": reason,
-                "host": host,
+                "actor": request.actor,
+                "reason": request.reason,
+                "host": request.host,
+                "force": request.force,
                 "idempotency_key": uuid::Uuid::now_v7().to_string(),
             }),
         )
@@ -1539,7 +1737,7 @@ async fn request_suspension(
         loop {
             if let ClientResource::Agent(agent) = gateway.agents_get(subject).await?.value
                 && let Some(suspension) = agent.suspension.clone()
-                && suspension.operation_id == request.id
+                && suspension.operation_id == claim.id
             {
                 let failure = || {
                     let blocking = if suspension.blocking.is_empty() {

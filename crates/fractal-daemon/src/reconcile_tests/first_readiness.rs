@@ -111,12 +111,14 @@ let fresh = start(&store, "fresh", "new-first-readiness", root.path());
 creation_order.push(fresh.id.clone());
 let notify = Arc::new(Notify::new());
 let state = AppState {
+    browser_pairing_login: None,
     seat_admission: Default::default(),
     owning_person: None,
     store: store.clone(),
     notify: notify.clone(),
     event_notify: tokio::sync::watch::channel(0).0,
     node: "node".into(),
+    api_socket: root.path().join("api.sock"),
     state_dir: root.path().into(),
     pty_root: root.path().join("pty"),
     pty_binary: "unused-pty".into(),
@@ -278,12 +280,14 @@ assert!(
 
 let notify = Arc::new(Notify::new());
 let state = AppState {
+    browser_pairing_login: None,
     seat_admission: Default::default(),
     owning_person: None,
     store: store.clone(),
     notify: notify.clone(),
     event_notify: tokio::sync::watch::channel(0).0,
     node: "node".into(),
+    api_socket: root.path().join("api.sock"),
     state_dir: root.path().into(),
     pty_root: root.path().join("pty"),
     pty_binary: "unused-pty".into(),

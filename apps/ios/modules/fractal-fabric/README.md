@@ -8,13 +8,17 @@ It is opt-in at build time and at run time. Normal pod installation compiles `Fr
 
 ## Build
 
-Install Rust targets `aarch64-apple-ios` and `aarch64-apple-ios-sim`, then from `apps/ios`:
+Install Nix and Xcode, then from `apps/ios`:
 
 ```sh
 sh modules/fractal-fabric/build.sh
 pnpm exec expo prebuild --platform ios --no-install
 FRACTAL_FABRIC=1 pnpm run pods
 ```
+
+`build.sh` resolves the repository's `ios-rust-toolchain` Nix package once per run. The existing `fenix` input in `flake.lock` pins Cargo, Rustc, the host standard library, and both `aarch64-apple-ios` and `aarch64-apple-ios-sim` standard libraries. No `rustup target add` or login-shell Cargo PATH is needed. The script uses Apple clang for both target linkers and cc-rs compilers, and resolves each target's SDK through `/usr/bin/xcrun`; Xcode's selected developer directory (or an explicitly supplied `DEVELOPER_DIR`) remains host configuration.
+
+The package is exposed only on Darwin. Its source is the Git checkout (including linked worktrees), so ignored build outputs, `rust/target`, and `node_modules` are not imported into the Nix store when resolving the toolchain.
 
 Build Debug for an arm64 simulator of your own (`ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`); the proof framework has no x86_64 simulator slice. The script targets iOS 16.4, including its C/assembly dependencies, and writes the XCFramework under `ios/build` inside the pod root. On a shared build host, wait until `pgrep -x xcodebuild` finds no process before starting Xcode. Generated static libraries and the device/simulator XCFramework are ignored; do not commit them. To restore the default build, reinstall pods without `FRACTAL_FABRIC` (`FRACTAL_FABRIC_PROOF`, or either legacy `ST3_` counterpart).
 

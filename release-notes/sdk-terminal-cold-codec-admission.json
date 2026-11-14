@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep terminal admission and subscription independent of lazy screen codec loading",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Public SDK signatures remain unchanged. Terminal transport starts before its optional codec finishes loading. Complete screen replacements use a bounded latest-wins slot during loading; reset and stop discard obsolete screens. Codec failures retain the existing status-before-event failure channel."},
+  "downtime": {"status": "none", "detail": "No service interruption or startup migration required."},
+  "manual": {"status": "none", "detail": "No operator action or configuration change required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new swap-back restrictions."}
+}

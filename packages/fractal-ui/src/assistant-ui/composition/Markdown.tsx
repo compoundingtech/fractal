@@ -1,27 +1,19 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Link, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Link, VisuallyHidden } from 'react-aria-components'
+import { HoverCard } from '../entity/HoverCard'
+import { ResourceEntityCard } from '../entity/ResourceCard'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
-import type { Root, RootContent as SyntaxNode } from 'hast'
-import { refractor } from 'refractor/core'
-import typescript from 'refractor/typescript'
-import tsx from 'refractor/tsx'
-import javascript from 'refractor/javascript'
-import json from 'refractor/json'
-import bash from 'refractor/bash'
-import diff from 'refractor/diff'
-import rust from 'refractor/rust'
-import nix from 'refractor/nix'
-import python from 'refractor/python'
-import yaml from 'refractor/yaml'
-import markdown from 'refractor/markdown'
-import css from 'refractor/css'
+import type { Root } from 'hast'
+import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
+import { createLazyChunk } from '../../lazy-chunk'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
+import { isSupportedFenceLanguage } from './pierre-languages.generated'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -92,7 +84,7 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
-  const link = <Link href={href} target="_blank" rel="noopener noreferrer" render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const link = <Link href={href} target="_blank" rel="noopener noreferrer" data-search-exclude={imageLink || undefined} render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
   return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{imageLink ? <span>{children}{' '}{link}</span> : link}</ReferenceContext.Provider>
 }
 
@@ -127,40 +119,90 @@ function InlineCode({ children }: React.ComponentProps<'code'>) {
   return rendered === undefined ? <code {...stylex.props(styles.inlineCode)}>{children}</code> : rendered
 }
 
-// Eager, fixed package grammars: authored fences never trigger a module request.
-const grammars = { typescript, tsx, javascript, json, bash, diff, rust, nix, python, yaml, markdown, css }
-for (const grammar of Object.values(grammars)) refractor.register(grammar)
-const languageAliases: Readonly<Record<string, keyof typeof grammars>> = {
+const pathLanguages: Readonly<Record<string, true>> = { typescript: true, tsx: true, javascript: true, json: true, bash: true, diff: true, rust: true, nix: true, python: true, yaml: true, markdown: true, css: true }
+const languageAliases: Readonly<Record<string, string>> = {
   ts: 'typescript', js: 'javascript', sh: 'bash', shell: 'bash', shellscript: 'bash',
   rs: 'rust', py: 'python', yml: 'yaml', md: 'markdown',
 }
 
-/** File-path language lookup uses the same eager grammar allowlist as fenced code. */
+/** Keep file-path detection limited to the existing twelve language extensions. */
 export function languageFromPath(path: string): string {
   const extension = /\.([^.]+)$/.exec(path)?.[1]?.toLowerCase() ?? ''
   const canonical = Object.hasOwn(languageAliases, extension) ? languageAliases[extension]! : extension
-  return Object.hasOwn(grammars, canonical) ? canonical : ''
+  return Object.hasOwn(pathLanguages, canonical) ? canonical : ''
 }
 
-function SyntaxToken({ node }: { node: SyntaxNode }): React.ReactNode {
-  if (node.type === 'text') return node.value
-  if (node.type !== 'element') return null
-  const classes = Array.isArray(node.properties.className) ? node.properties.className.map(String) : []
-  return <span data-syntax-token={classes.filter(value => value !== 'token').join(' ')} {...stylex.props(
-    classes.some(value => ['comment', 'prolog', 'doctype', 'cdata'].includes(value)) && styles.syntaxComment,
-    classes.some(value => ['keyword', 'atrule', 'tag', 'selector'].includes(value)) && styles.syntaxKeyword,
-    classes.some(value => ['string', 'char', 'attr-value', 'inserted'].includes(value)) && styles.syntaxString,
-    classes.some(value => ['number', 'boolean', 'constant', 'symbol'].includes(value)) && styles.syntaxLiteral,
-    classes.some(value => ['function', 'class-name', 'builtin'].includes(value)) && styles.syntaxFunction,
-    classes.includes('deleted') && styles.syntaxDeleted,
-  )}>{node.children.map((child, index) => <SyntaxToken key={index} node={child} />)}</span>
+// These marker colours select semantic StyleX styles; they are never rendered as colours.
+const syntaxTheme: Highlights.Theme = {
+  name: 'Fractal semantic tokens', appearance: 'dark',
+  style: { syntax: {
+    comment: '#000001', keyword: '#000002', tag: '#000002', selector: '#000002',
+    string: '#000003', 'diff.plus': '#000009',
+    number: '#000004', boolean: '#000007', constant: '#000008',
+    function: '#000005', type: '#000005', constructor: '#000005',
+    'diff.minus': '#000006',
+    title: '#000002', emphasis: '#000005', link_text: '#000003', link_uri: '#000003',
+  } },
+}
+const syntaxKinds: Readonly<Record<string, string>> = {
+  '#000001': 'comment', '#000002': 'keyword', '#000003': 'string', '#000004': 'number',
+  '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant', '#000009': 'inserted',
+}
+let highlightsModule: typeof Highlights | undefined
+const highlightsChunk = createLazyChunk({
+  // fractal-ui targets ES2022, before Promise.withResolvers.
+  load: () => new Promise<typeof Highlights>((resolve, reject) => {
+    // The published entry compiles embedded WASM at import. Defer that work
+    // until after the pane's plain-text first paint, never during render.
+    requestAnimationFrame(() => setTimeout(() => {
+      import('@pierre/highlights').then(resolve, reject)
+    }, 0))
+  }),
+})
+let highlightsRequest: Promise<void> | undefined
+const highlightsListeners = new Set<() => void>()
+const highlightsSnapshot = () => highlightsModule
+const plainSourceSnapshot = () => undefined
+const unsubscribePlainSource = () => {}
+const subscribePlainSource = () => unsubscribePlainSource
+const subscribeHighlights = (notify: () => void) => {
+  highlightsListeners.add(notify)
+  highlightsRequest ??= highlightsChunk.load().then(module => {
+    highlightsModule = module
+    for (const listener of highlightsListeners) listener()
+  }, () => {
+    // Sticky plain source for this session: highlighting never retries or reloads.
+  })
+  return () => { highlightsListeners.delete(notify) }
 }
 
 export function HighlightedSource({ code, language }: { code: string; language: string }) {
-  const normalized = language.toLowerCase()
+  const normalized = language.trim().toLowerCase()
   const canonical = Object.hasOwn(languageAliases, normalized) ? languageAliases[normalized]! : normalized
-  const nodes = React.useMemo(() => Object.hasOwn(grammars, canonical) ? refractor.highlight(code, canonical).children : undefined, [code, canonical])
-  return nodes === undefined ? code : <>{nodes.map((node, index) => <SyntaxToken key={index} node={node} />)}</>
+  const highlights = React.useSyncExternalStore(
+    isSupportedFenceLanguage(canonical) ? subscribeHighlights : subscribePlainSource, highlightsSnapshot, plainSourceSnapshot,
+  )
+  const lines = React.useMemo(() => highlights?.isSupportedLanguage(canonical)
+    ? highlights.codeToTokens(code, { lang: canonical, theme: syntaxTheme }).tokens
+    : undefined, [code, canonical, highlights])
+  if (lines === undefined) return code
+  let sourceOffset = 0
+  return <>{lines.map((line, lineIndex) => <React.Fragment key={lineIndex}>{line.map((token, index) => {
+    // Reinsert the exact source gaps, including CRLF and trailing empty lines.
+    const gap = code.slice(sourceOffset, token.offset)
+    sourceOffset = token.offset + token.content.length
+    if (token.color === undefined || token.content.trim() === '') return <React.Fragment key={index}>{gap}{token.content}</React.Fragment>
+    // AccName trims each inline element: keep token-edge whitespace outside spans.
+    const [, leading, content, trailing] = /^(\s*)([\s\S]*?)(\s*)$/.exec(token.content)!
+    return <React.Fragment key={index}>{gap}{leading}<span data-syntax-token={syntaxKinds[token.color]} {...stylex.props(
+      token.color === '#000001' && styles.syntaxComment,
+      token.color === '#000002' && styles.syntaxKeyword,
+      (token.color === '#000003' || token.color === '#000009') && styles.syntaxString,
+      (token.color === '#000004' || token.color === '#000007' || token.color === '#000008') && styles.syntaxLiteral,
+      token.color === '#000005' && styles.syntaxFunction,
+      token.color === '#000006' && styles.syntaxDeleted,
+    )}>{content}</span>{trailing}</React.Fragment>
+  })}</React.Fragment>)}{code.slice(sourceOffset)}</>
 }
 
 const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: string; language: string }) {
@@ -221,8 +263,11 @@ const MARKDOWN_COMPONENTS: Components = {
   th: ({ children, style }) => <th {...stylex.props(styles.cell, styles.tableHeading, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
   td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
 }
+/** A file the agent touched, mentioned in prose: its hover is the resource's canonical card. */
 export function ResourceChip({ resource, onOpen }: { resource: InlineResource; onOpen?: (path?: string) => void }) {
-  return <TooltipTrigger delay={300}><Button onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button><Tooltip {...stylex.props(styles.hoverCard)}><div {...stylex.props(styles.resourceTitle)}>{resource.path}<span {...stylex.props(styles.added)}>+{resource.added}</span><span {...stylex.props(styles.removed)}>−{resource.removed}</span></div>{resource.preview ? <pre {...stylex.props(styles.preview)}>{resource.preview}</pre> : null}</Tooltip></TooltipTrigger>
+  return <HoverCard placement="bottom start" content={() => <ResourceEntityCard id={resource.path} title={resource.path} kind="File" icon="attach" summary={[`+${resource.added} \u2212${resource.removed}`]} {...(resource.preview ? { preview: resource.preview.split('\n'), previewKind: 'diff' as const } : {})} />}>
+    <Button data-search-content onPress={() => onOpen?.(resource.path)} {...stylex.props(styles.resource)}>{resource.path}</Button>
+  </HoverCard>
 }
 /** Complete only the unfinished prose tail; fenced code and settled literal punctuation are untouched. */
 export function completeStreamingTail(source: string): string {
@@ -337,9 +382,11 @@ const styles = stylex.create({
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
-  syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
+  // Hosts that tint rows under highlighted source (inspector frames, diff washes) raise
+  // `--fractal-syntax-muted` so muted tokens keep AA contrast on the tint.
+  syntaxComment: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})`, fontStyle: 'italic' },
   syntaxKeyword: { color: status.runningFg },
-  syntaxString: { color: textColor.fgMuted },
+  syntaxString: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})` },
   syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
   syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
   syntaxDeleted: { color: status.dangerFg },
@@ -362,5 +409,5 @@ const styles = stylex.create({
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
   link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
-  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } },
 })

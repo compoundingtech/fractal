@@ -1,14 +1,15 @@
 import type { AgentTodo, HarnessPhase } from '@fractal/client/schema'
-import type { DecodedAgent, Open } from '@fractal/sdk/effect'
+import type { DecodedAgent, Open } from '@fractal/sdk/read'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 
-import type { DataSource, Feed } from '../../data/source.ts'
+import { credentialNotice, type DataSource, type Feed } from '../../data/source.ts'
 import type { FeedSyncObservation } from '../../data/feedSync.ts'
 
 /** Todo observation availability or accepted progress with phase, source totals and freshness. */
 export type TodoState =
   | { readonly _tag: 'Waiting' }
+  | { readonly _tag: 'Unauthorized' }
   | { readonly _tag: 'Unavailable'; readonly detail: string }
   | { readonly _tag: 'Missing' }
   | {
@@ -30,6 +31,7 @@ export const projectTodos = ({
   agentRef: string
   sync?: FeedSyncObservation['status']
 }): TodoState => {
+  if (credentialNotice(feed)) return { _tag: 'Unauthorized' }
   if (feed._tag !== 'Observed') return feed
   const agent = feed.value.find((row) => row.id === agentRef)
   const todo = agent === undefined ? undefined : Option.getOrUndefined(agent.todo)
@@ -44,19 +46,44 @@ export const projectTodos = ({
       candidate.tasks.some((task) => task.status === 'blocked'),
     ) ??
     snapshot.phases.find((candidate) => candidate.tasks.some((task) => task.status === 'pending'))
-  const { completed, pending, in_progress, blocked, abandoned = 0 } = snapshot.totals
+  const { completed, pending, in_progress, blocked } = snapshot.totals
   return {
     _tag: 'Observed',
     todo,
     phase,
     completed,
-    total: completed + pending + in_progress + blocked + abandoned,
+    // Abandoned work is neither done nor outstanding: progress leaves it out and the plan counts it apart.
+    total: completed + pending + in_progress + blocked,
     binding: sync?._tag === 'Connecting' || sync?._tag === 'Requested' || sync?._tag === 'Progress'
       ? 'pending'
       : todo.stale || feed.freshness === 'stale' || (incarnation !== undefined && incarnation !== snapshot.incarnation_id)
         ? 'stale'
         : 'current',
   }
+}
+
+/** A task's text cut at the references worth a chip. Parsed here because the schema carries only plain text. */
+export type TodoTextPart =
+  | { readonly _tag: 'Text'; readonly text: string }
+  | { readonly _tag: 'PullRequest' | 'Commit' | 'Agent'; readonly text: string }
+
+const referencePattern = /(#\d{3,6})\b|\b([0-9a-f]{7,40})\b|\b(agent\/[a-z0-9-]+\/[a-z0-9-]+)\b/g
+// A word like "defaced" is all hex letters; a commit id has both digits and letters.
+const looksLikeCommit = (word: string): boolean => /\d/.test(word) && /[a-f]/.test(word)
+
+export const todoTextParts = (text: string): readonly TodoTextPart[] => {
+  const parts: TodoTextPart[] = []
+  // "(#5707)" reads as a bare chip, so a wrapping pair of parentheses goes with the reference.
+  const bare = text.replace(/\((#\d{3,6}|[0-9a-f]{7,40})\)/g, '$1')
+  let at = 0
+  for (const match of bare.matchAll(referencePattern)) {
+    if (match[2] !== undefined && !looksLikeCommit(match[2])) continue
+    if (match.index > at) parts.push({ _tag: 'Text', text: bare.slice(at, match.index) })
+    parts.push({ _tag: match[1] !== undefined ? 'PullRequest' : match[2] !== undefined ? 'Commit' : 'Agent', text: match[0] })
+    at = match.index + match[0].length
+  }
+  if (at < bare.length) parts.push({ _tag: 'Text', text: bare.slice(at) })
+  return parts
 }
 
 type TodoFamily = (agentRef: string) => Atom.Atom<TodoState>

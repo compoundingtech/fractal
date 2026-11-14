@@ -9,11 +9,13 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 fn state(root: &std::path::Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: Arc::new(Store::open(&root.join("graph.db"), "push-test").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0u64).0,
         node: "push-test".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused"),
@@ -32,7 +34,7 @@ fn state(root: &std::path::Path) -> AppState {
 fn grant(state: &AppState, expiry: u64) {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
@@ -82,7 +84,7 @@ async fn send(
 }
 
 fn assert_local_envelope(response: &Value, status: Value) {
-    assert_eq!(response["api_version"], "st3.client.v0");
+    assert_eq!(response["api_version"], "fractal.client.v0");
     assert!(response["request_id"].is_string());
     assert_eq!(response["value"], status);
     for field in ["snapshot", "claims", "receipt", "token"] {
@@ -188,7 +190,7 @@ async fn push_terminal_cleanup_preserves_normal_authentication_and_local_authori
     assert_eq!(status, StatusCode::OK, "{response}");
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-revoked".into(),
             actor: Some(PERSON.into()),
@@ -364,7 +366,7 @@ async fn push_cleanup_rejects_malformed_proof_and_redacts_database_failures() {
 }
 
 #[derive(Clone, Default)]
-struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct LogBuffer(pub(crate) Arc<Mutex<Vec<u8>>>);
 impl std::io::Write for LogBuffer {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0

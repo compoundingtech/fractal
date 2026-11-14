@@ -7,7 +7,7 @@ provider session, and how Fractal reports a seat whose message path did not.
 
 ## Self-restarts at a turn boundary
 
-`st agents restart agent/example/worker --as agent/example/worker` returns
+`fractal agents restart agent/example/worker --as agent/example/worker` returns
 `Restart pending` immediately when that seat's fresh harness report shows a turn in flight.
 The daemon preserves the request across its own restarts and waits for a fresh report from the
 same incarnation saying both idle and quiescent. It then uses the ordinary restart path, keeping
@@ -39,7 +39,7 @@ Before starting an unseen installed omp or OpenCode build, Fractal measures its 
 contract in a disposable session. Existing running providers and driver adoption across deploys
 are unaffected. On a new launch (including restart or residency resume), a failed omp measurement
 refuses to start the provider; OpenCode starts with native delivery disabled and mail stays queued.
-There is no rollback to a last-admitted executable. `st doctor` and the affected agent's state
+There is no rollback to a last-admitted executable. `fractal doctor` and the affected agent's state
 name the failed boundary and the remedy.
 
 The isolated `--version` child has a 20-second deadline, including cold runtime startup under
@@ -81,7 +81,7 @@ its normal installation works. A person can explicitly allow the exact installed
 host and as the operating-system user owning the seats, outside an agent seat:
 
 ```sh
-st admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
+fractal admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
 ```
 
 Use `opencode` for OpenCode; `--binary` must name the executable used by the affected seat.
@@ -92,7 +92,7 @@ measurements and expires when executable, interpreter, package manifest, lockfil
 identity changes. Build identity hashes executable and runtime contents plus package metadata; it
 does not traverse package assets or refuse installations for their size. A dependency upgrade
 recorded in a manifest or lockfile changes identity; an arbitrary asset edit does not.
-The driver logs the active exception. `st admission revoke omp --binary /path/to/omp` (with the
+The driver logs the active exception. `fractal admission revoke omp --binary /path/to/omp` (with the
 same state directory, if customized) restores normal admission on the next launch. An override
 cannot supply a runtime missing from the real harness installation or repair incompatible APIs.
 
@@ -114,24 +114,30 @@ as `vanished` from PTY liveness, without an exit code. If only the driver was si
 
 ## What runs in a seat
 
-Each seat runs in its own PTY. The daemon starts `st3 driver HARNESS` there, and the driver starts
+Each seat runs in its own PTY. The daemon starts `fractal driver HARNESS` there, and the driver starts
 the provider. Several Fractal processes carry the seat's messages for the whole provider session:
 
 | Harness | Driver | Channel |
 | --- | --- | --- |
-| Claude | publishes harness state and subscribes to the seat record for PTY titles | `st driver claude-mcp`, started by the owned `st-channel@st` plugin, subscribes to the durable mailbox and proves native consumption from the bound user transcript |
+| Claude | publishes harness state and subscribes to the seat record for PTY titles | `fractal driver claude-mcp`, started by the owned `st-channel@st` plugin, subscribes to the durable mailbox and proves native consumption from the bound user transcript |
 | Codex | subscribes to the mailbox and submits messages over its control connection to the app-server that the TUI also uses | none |
 | OpenCode | subscribes to the mailbox and posts messages to the loopback server in the OpenCode TUI | none |
-| pi, omp | keeps presence, the terminal record, and live PTY titles | `st driver pi-channel` or `omp-channel` subscribes to the mailbox; the managed extension preserves first-idle gating and reports native acceptance separately from turn-context consumption |
+| pi, omp | keeps presence, the terminal record, and live PTY titles | `fractal driver pi-channel` or `omp-channel` subscribes to the mailbox; the managed extension preserves first-idle gating and reports native acceptance separately from turn-context consumption |
 
 New seats receive `ST3_MAILBOX_TRANSPORT=push`. Each delivery component connects to `/v1/mailbox`
 over the local daemon Unix socket. The stream sends the full seat record and pushes new mail.
-Every connection starts a new automatic-delivery boundary. Pre-connection mail older than one
-hour stays held in the graph mailbox. Recent mail with no staging or delivery claim is admitted
-once so an in-flight send survives a daemon restart. Previously staged or delivered-but-unread
-mail stays held regardless of age; a missing receipt never authorizes another offer. The one-hour
-window uses the original send time and the same threshold as the unread backlog. SQLite
-fences both subscriptions and receipts to the live runtime
+Every connection starts a new automatic-delivery boundary. Never-offered pre-connection mail
+sent within the preceding seven days is eligible for recovery; older mail stays held in the graph
+mailbox. Of that recovery backlog, mail older than one hour is admitted oldest first, in batches of
+at most five. Only one batch is outstanding per connection: the next batch opens when every
+member is delivered or withdrawn. A terminally closed message is withdrawn, not delivered;
+withdrawal creates no delivery receipt. Staging or offering a message does not release a slot;
+one stuck, non-closed member holds the whole next batch. Mail at most one hour old and new live
+mail do not consume that budget. Delivery or withdrawal wakes the stream to admit the next
+batch without a reconnect.
+Both age boundaries use the original send time relative to connection start, including late imports.
+Previously staged or delivered-but-unread mail stays held regardless of age; a missing receipt
+never authorizes another offer. SQLite fences both subscriptions and receipts to the live runtime
 incarnation and replacement owner; reconnecting an older channel cannot retake ownership, including
 after a daemon restart. A stream item's receipt is the exception: its fence is read on the graph
 just before the record goes to the messages shard, so a token revoked between them can still
@@ -146,12 +152,44 @@ uncertain handoffs, and successful handoffs retry lost receipt acknowledgements 
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 
 `delivered` records native transport acceptance, not model consumption. A boot or channel reconnect
-never authorizes another offer of old mail. Older polling drivers also recover recent unoffered
-pre-boot mail and retain the current boot's staging attempt until its receipts finish;
-their local archive projection removes old native inbox files without closing the graph messages.
-An agent can explicitly inspect that retained mail with `st conversations ls --as "$ST_AGENT"`
-and read it with `st conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
+never authorizes another offer of previously offered mail. Polling drivers use the same seven-day
+recovery window and settlement-gated batches of at most five oldest backlog messages. Their
+connection boundary is the consumer's boot/session floor; the daemon's store keeps one bounded
+outstanding batch per recipient and replaces it when that floor changes. Pagination and filtered
+reads share that batch; a stale boot cannot refill it. Admitted mail remains visible through the
+current boot's staging attempt until its receipts finish; their local
+archive projection removes old native inbox files without closing the graph messages.
+An agent can explicitly inspect that retained mail with `fractal conversations ls --as "$ST_AGENT"`
+and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
 continues to arrive normally, with the channel's usual handoff deduplication and receipt handling.
+
+The registry also accepts a durable graph `message.expired` outcome, written only by
+`daemon/runtime`, with reason `cutoff-never-offered`, `cutoff-uncertain-attempt`, or
+`no-live-recipient`. No automatic expiration is enabled. Non-superseded expiry removes mail
+from open inboxes, unread counts and recovery offers, and settles an outstanding batch member.
+It wakes stream re-evaluation without inventing a delivered/read receipt. Actual delivery or read
+evidence supersedes expiry and restores the normal receipt-based path; delivered-but-unread
+mail remains unread. The expiry claim stays in history. Harness receipts cannot
+write expiry, and the messages shard still replicates only `message.sent`. Outcome readers,
+projections and sender surfaces must be deployed to every pinned host before any expiry writer
+is enabled; older registries retain the new kind as unknown rather than interpreting its outcome.
+Writer activation also requires upgraded TypeScript clients, including fractal-web and generated
+consumers, whose message-state decoder accepts `expired`. This is a prerequisite for the
+expiry-writer rollout, not a negotiated response format.
+The writer must also enforce original-accepting-member authority before activation; replicated
+expiry admission here checks the daemon actor, not that future writer prerequisite.
+
+`GET /v1/messages/delivery/:id` reports active expiry as terminal `state: expired`,
+`phase: expired`, with the durable reason above, before human-hold or delivery-path
+diagnostics. An unavailable remote receipt host cannot replace that outcome with
+`unknown`. Actual delivered/read evidence supersedes expiry and reports normal receipt
+progress; this endpoint does not add expiry history. `fractal conversations status`
+prints the outcome and reason; `fractal conversations ls` shows the raw message status.
+Rust's generated string field can receive the raw `expired` status without regeneration.
+Older TypeScript `ReadSchema.Message.state` decoders use a closed literal union and reject
+`expired`, even in tolerant mode; upgrade those clients before enabling any expiry writer.
+Upgrading the generated union may require consumers to add an exhaustive `expired` arm.
+No harness receipt or automatic expiry writer is changed.
 
 Claude distinguishes native queue acceptance (`queue-operation/enqueue`, which records
 `delivered`) from consumption (a user transcript entry, including `isMeta`, or an explicit
@@ -168,9 +206,9 @@ lookup, and receipt publication failures have separate diagnostics and retry wit
 at 30 seconds. Retained handoffs are inspected only to recover missing receipts from exact native
 proof. Boot and reconnect never authorize a fresh offer of delivered-but-unread mail.
 
-`st doctor` and the terminal UI count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
+`fractal doctor` and the terminal UI count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
 retained mail for retired seats. Boot never clears that backlog. To deliberately archive it across
-all mailboxes, run `st conversations cleanup --all --older-than 1h`. Add `--dry-run` to list matching
+all mailboxes, run `fractal conversations cleanup --all --older-than 1h`. Add `--dry-run` to list matching
 message IDs first, or replace `--all` with `--as AGENT` to clean one mailbox. Cleanup archives as each
 recipient, records manual archival through stable keys and linked claims, and can be repeated,
 including after an interrupted archival. Delivered mail without a read claim is included. Fresh
@@ -196,9 +234,9 @@ daemon's first eight seconds. It added about seven seconds of writer time to tho
 and write-acks queued behind it. A launched driver does not wait.
 
 Only a binary replacement starts this wait, and a replacement only arrives with a deploy, when
-every seat's driver re-executes at once. `st agents resume`, a restart and Claude channel recovery
+every seat's driver re-executes at once. `fractal agents resume`, a restart and Claude channel recovery
 launch a fresh driver, which does not wait. A re-executed driver keeps its seat's incarnation, and
-`st agents suspend` reads the newest quiet report for that incarnation with no age limit, so a seat
+`fractal agents suspend` reads the newest quiet report for that incarnation with no age limit, so a seat
 that was quiet before the deploy can be suspended at once. A seat whose harness changed state
 during the deploy, such as a turn that finished while the daemon was down, reports its new state
 only when its wait ends. A suspend sent before then is refused for up to 30 seconds.
@@ -260,8 +298,8 @@ Older OMP releases without `getSessionName` still apply the declared label witho
 Claude's status line reads the same graph authority on each render and chains the existing renderer.
 Native `/rename` is temporary: the next authority update restores the declared name.
 
-Live harness evidence is refreshed every twenty seconds, inside the client's ninety-second
-observation freshness horizon. The driver retries its durable observation outbox across daemon
+Live harness evidence is refreshed every five minutes, inside the shared
+`HARNESS_OBSERVATION_FRESHNESS` window (refresh interval plus thirty seconds). The driver retries its durable observation outbox across daemon
 outages; mailbox subscriptions reconnect under the existing incarnation and fence. Once the daemon
 returns, quiet seats recover their current observation without a provider restart or a new turn.
 Heartbeats remain evidence-gated: missing, ended, superseded, or disconnected provider observations
@@ -279,7 +317,7 @@ behind that link therefore changes both when a deploy replaces the daemon's exec
 when the daemon restarts from a new path. Once a second the process compares that file's device,
 inode, size, and modification time with its own running image. A different file is a replacement.
 The process acts on it only after the file stays unchanged for a second and answers
-`st3 resume-probe` with the resume format the process writes. A replacement that cannot read that
+`fractal resume-probe` with the resume format the process writes. A replacement that cannot read that
 format, such as a rollback to a build from before reexec, is refused, and the process keeps its
 current code and tries again 30 seconds later.
 
@@ -326,7 +364,7 @@ channel's PID, image, and the age of its last presence write. The daemon keeps t
 each recipient in memory. It is not graph state; a restarted daemon learns every live path again
 within a second.
 
-`st agents ls` and `st agents show` add a `delivery` object to each local native seat that is running
+`fractal agents ls` and `fractal agents show` add a `delivery` object to each local native seat that is running
 or waiting. Waiting on a human, login, or trust prompt does not hide its transport assessment;
 delivery presence is independent of whether the harness can start another turn:
 
@@ -345,8 +383,23 @@ delivery presence is independent of whether the harness can start another turn:
 - `stale`, with the reason: no report since then, a report from an unidentified binary, a pi-family
   channel without idle proof or with a rejected handoff, or a silent Claude channel.
 
-A stale seat shows as `waiting` instead of `running`, and `st agents show` prints the reason on its
+A stale seat shows as `waiting` instead of `running`, and `fractal agents show` prints the reason on its
 `DELIVERY` line. Remote seats carry no `delivery` object; only their own daemon can see their reports.
+
+## Launch-contract identity
+
+On the owning daemon, `fractal agents show SUBJECT --json` includes `value.launch_contract`.
+Its `declared` contract describes the current harness launch (model and tool arguments),
+planned renders and effective project/user context and tool files, and launcher/provider identity.
+Runtime/account environment and working directory select inputs exactly as for launch. Binary
+hashing reuses harness admission; git excludes, process IDs and bookkeeping are not prompt inputs.
+
+`running` reads installed render destinations immediately before launch and is retained on the
+successful receipt for that exact incarnation. Publication or source edits never rewrite it.
+`drift.prompt` and `drift.binary` flags distinguish the changes; a successful replacement records
+the new contract and clears drift. Missing historical launch evidence or unreadable current inputs
+produce unknown drift, not a false claim of convergence. This is a live host-local diagnostic:
+it is omitted from cached roster rows and reads on non-owning daemons.
 
 ## Deploys
 
@@ -367,10 +420,10 @@ and diagnostics. They are not durable `message.attempt` claims and reset on a ne
 Recording failure history and per-attempt tokens in the shared graph is a follow-up to the fenced
 receipt transport; the current lifecycle idempotency keys identify acknowledgements, not attempts.
 
-`st conversations status MESSAGE` shows delivery/read progress without changing its lifecycle.
+`fractal conversations status MESSAGE` shows delivery/read progress without changing its lifecycle.
 The client message view carries the same `delivery` assessment, including the local recipient
 path when one is known. A remote path stays unverified. A message waiting more than ten seconds
-for read is visible as `waiting`; it stays durable. `st doctor` warns about stale local paths and
+for read is visible as `waiting`; it stays durable. `fractal doctor` warns about stale local paths and
 overdue graph read receipts for current agents. It excludes obsolete seat recipients and people,
 and distinguishes accepted native handoffs. A missing graph read receipt on a legacy channel
 does not prove that its provider failed to consume the envelope. Reading the message clears its

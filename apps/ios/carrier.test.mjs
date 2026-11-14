@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { DIAL_BUDGET_MS, FabricCarrier, FabricRefusal, REDIAL_WAITS_MS, RETRY_WAITS_MS, REMEMBER_FAILURE_MS, WALK_BUDGET_MS, refusalText, routeLabel, selectRoute } from './carrier.ts';
+import { test } from 'node:test';
+import { DIAL_BUDGET_MS, FabricCarrier, FabricRefusal, REDIAL_WAITS_MS, RETRY_WAITS_MS, REMEMBER_FAILURE_MS, WALK_BUDGET_MS, refusalText, routeLabel, selectRoute, shouldRetryFabric } from './carrier.ts';
 
 const node = 'ab'.repeat(32);
 const target = { node, service: 'st3-client/demo', name: 'member 1' };
@@ -406,4 +407,35 @@ const dialed = state => state.dials.map(dial => dial.t.name);
   carrier.configure(true, [home, office]); await flush();
   assert.equal(carrier.picked, null);
   assert.equal(dialed(state).at(-1), 'home');
+}
+
+test('offline reconnect retries only failed or refused Fabric', () => {
+  for (const choice of ['tailscale', 'fabric']) {
+    for (const phase of ['off', 'idle', 'dialing', 'ready', 'failed', 'refused']) {
+      assert.equal(shouldRetryFabric(choice, phase), choice === 'fabric' && ['failed', 'refused'].includes(phase), `${choice}: ${phase}`);
+    }
+  }
+});
+
+for (const failure of ['failed', 'refused']) {
+  test(`offline reconnect recovers ${failure} Fabric without a foreground event or feed`, async () => {
+    const { carrier, state, flush } = harness();
+    carrier.foreground(true);
+    carrier.configure(true, one);
+    await flush();
+    state.dials[0].reject(failure === 'refused' ? new FabricRefusal('peer_not_in_allow_list') : new Error('peer unreachable'));
+    await flush();
+    assert.equal(carrier.snapshot.phase, failure);
+    const waits = state.waits.length;
+
+    // The offline action uses the carrier's current phase; the foreground gate stays active.
+    if (shouldRetryFabric('fabric', carrier.snapshot.phase)) carrier.retry();
+    await flush();
+    assert.equal(state.dials.length, 2, 'reconnect starts a new dial immediately');
+    state.dials[1].resolve({ url: 'http://127.0.0.1:50901' });
+    await flush();
+    assert.equal(carrier.snapshot.phase, 'ready');
+    assert.equal(carrier.snapshot.bridgeUrl, 'http://127.0.0.1:50901');
+    assert.equal(state.waits.length, waits + 1, 'only the new dial budget is scheduled');
+  });
 }

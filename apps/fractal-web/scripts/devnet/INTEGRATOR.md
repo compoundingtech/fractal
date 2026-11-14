@@ -79,6 +79,20 @@ when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
 
+Failure attribution builds each probe in a fresh temporary
+`live-r3-probe-*` namespace under `FRACTAL_BUILD_ROOT`. Probe outputs are removed
+after the helper returns; empty snapshot namespaces are also removed, without
+deleting leftover snapshots that might still hold leases. Relative build and
+snapshot roots are resolved against the helper's working directory (`SCRIPT_DIR`),
+not the integrator process's starting directory. Existing outputs are
+never reused: ignored private/vendor overlays can change without changing the
+commit, and a raw build receipt can exist before host validation finishes.
+A probe passes only when the full build-and-validation helper exits successfully.
+Once a failing prefix is found, the integrator ejects that PR and reintegrates
+later accepted heads before rebuilding.
+Tree-cache identities include the integrator version, so upgrading the attribution
+logic does not replay an older unattributed failure.
+
 Deployment overlays can import `edgeOrTailnetAdmission` from `server/host.mts` and
 pass their existing edge admission as `edge`. With `origin: undefined`, it returns
 that exact policy. With a published HTTPS origin and a nonempty login allowlist,
@@ -92,6 +106,32 @@ and [forwarded/identity headers](https://github.com/tailscale/tailscale/blob/v1.
 Keep the listener loopback-only and preserve these headers between Serve and
 the app. Local processes can forge proxy headers, the same trust assumption as
 the Hub. The old edge URL retains its existing access policy.
+
+Browser sending uses a separate 30-day revocable device grant per browser, never
+the publisher's read-only bearer. `startHost` enables the cookie-only pairing
+endpoints automatically. Custom deployment overlays must pass
+`pairing: { admit: tailnetAdmission({ origin, logins, listener }) }` to the web
+server or middleware in addition to their general admission policy. The pairing
+admission must require the personal login allowlist, even if the read-only app
+also has an edge URL. Keep `WF_TAILNET_LOGINS` restricted to personal account
+logins; tagged infrastructure is not an approved browser device.
+The compose control requests approval in Fractal and shows the matching display
+code. Request secrets and device credentials are held exclusively in HttpOnly,
+Secure, SameSite=Strict cookies. Forgetting revokes the current device before
+clearing its cookie. HTTP and WebSocket gateway requests use that device's
+bearer when present and otherwise retain the read-only publisher bearer.
+The daemon seals the browser grant to `read.projections`, `read.declarations`,
+`read.glasses`, `read.arrangements`, `terminal.read`, and `control.messages`.
+Raw daemon `pairing` and `pairings` routes are never forwarded from HTTP or
+WebSocket browsers; only the publisher wrapper may call them. Encoded routes
+are decoded once, namespace exclusions are case-insensitive, and ambiguous paths
+are refused before routing.
+Status validates an existing browser credential with the daemon; revoked or
+expired credentials are cleared and must pair again. A send authorization
+refusal rechecks status and restores the pairing prompt without dropping drafts.
+Approve only after
+comparing the code in Fractal with the browser being used: labels and login
+names are display metadata, not proof of who initiated the request.
 
 ## Trust boundary
 
@@ -163,14 +203,20 @@ until its replacement is Ready and the edge cuts over. A previous registration
 is stopped first only when Devnet status positively reports it is not running
 or its lifecycle is starting/terminal. Missing or failed observations never
 authorize stopping a server; Devnet decides whether replacement can proceed.
-If replacement fails, Devnet owns server recovery. The integrator restores the
-previous build pointer only if the edge confirms that previous revision serves;
-if the candidate serves or the observation is inconclusive, the pointer stays
-unchanged. Neither generation is stopped or relaunched, and the original error
-is propagated. In particular, `ReplacementRecoveryRequired` needs operator
-recovery: the integrator never runs `--abandon-replace`. If replacement succeeds
-but subsequent publication verification fails, the integrator stops the new
-server and relaunches the previous build as before.
+After a nonzero replacement exit, the integrator verifies the published candidate
+build identity; neither the exit code nor stderr text establishes whether the
+switch committed. If the candidate serves, activation succeeds and the tick
+records the last 4000 stderr characters in `replaceWarning` (or the command error
+if stderr is empty). The current pointer is preserved and normal retention runs.
+Otherwise Devnet owns server recovery. The integrator restores the previous build
+pointer only if the edge confirms that previous revision serves; an inconclusive
+observation leaves the pointer unchanged. Neither generation is stopped or
+relaunched, and the original error is propagated with the last 4000 diagnostic
+characters in the tick's `detail`. `ReplacementRecoveryRequired` remains a Devnet
+recovery diagnostic, not a success/failure discriminator; the integrator never runs
+`--abandon-replace`. If replacement exits successfully but subsequent publication
+verification fails, the integrator stops the new server and relaunches the previous
+build as before.
 
 After confirmed activation, the integrator keeps the current build and one previous
 rollback build and deletes older build directories. `integrator-activation.json`
@@ -342,11 +388,29 @@ not an automatic fallback that hides a failed immutable-cache build.
 
 Every tick reads `servedSha` from `/build-identity.json` (`rev`) at the published `devnet url <purpose> --remote` edge.
 `current` requires no `error`, a non-null `sha`, and equality with `servedSha`, not a disk build.
-A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false.
+A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false. Precheck capacity refusals instead leave freshness unknown (`current=null`).
 The `--local` probe records `localServedSha`/`localServedError` for diagnostics only; it never determines `current`.
-`build` is `built`, `skipped`, `failed`, or `dry-run`; it is not a freshness signal.
-Skipped `reason` is `unchanged`, `lock-held`, or `known-built-tree`/`known-failed-tree`.
-Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; errors retain `build=failed`.
+`build` is `built`, `skipped`, `failed`, `capacity-refused`, or `dry-run`; it is not a freshness signal. Older capacity-refusal rows used `error`.
+Skipped `reason` is `unchanged`, `lock-held`, `selection-deadline`, or `known-built-tree`/`known-failed-tree`.
+Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; ordinary errors retain `build=failed`.
+Agent-nix capacity refusal (exit 75, `EX_TEMPFAIL`) records
+`build: "capacity-refused"`, `reason: "capacity-refused"`, `retryable: true` and an
+`error` explaining that the previous build is retained. This is host pressure,
+not a candidate build failure. A refused precheck still observes `servedSha`
+and `localServedSha`, but leaves `sha`, `main` and `current` null because no
+candidate was selected. In-build refusals retain the factual `current` computed
+by served observation. Consumers must not count either form as a failed build
+or a freshness transition; legacy `build: "error"` rows with
+`reason: "capacity-refused"` have the same capacity meaning.
+The sandbox CLI preserves 75 through the build helper; integrator-side nix
+exceptions and refused attribution probes take the same retryable capacity path.
+A refused candidate never enters the failed-tree cache or starts attribution;
+a refused probe aborts attribution without caching the tree or ejecting a PR.
+Failure-cache writes and tentative PR ejections are also withheld if the reduced
+candidate rebuild is refused after attribution.
+The next tick retries the same tree after capacity becomes available. No build
+pointer or served process is changed by these refusals. Observers must distinguish
+this retryable tick error from a reproducible candidate build failure.
 Observability alerts when the last `current=true` timestamp is over 24 hours old, or no tick arrives for 30 minutes.
 
 ## Follower inputs
@@ -450,6 +514,31 @@ inputs above on every tick. Global Git configuration is never consulted for
 commit identity; the reserved-domain default identifies local integration commits.
 Identity keys in `config.worktree` are refused even when worktree config is
 enabled: their higher precedence must not override the launcher's common identity.
+
+Preparation disables automatic GC and maintenance in the disposable clone
+(`gc.auto=0`, `maintenance.auto=false`). Once per day, under the tick lock,
+the integrator first prunes loose unreachable objects older than two weeks,
+then runs `git repack -d --geometric=2` and `git rerere gc` with 60-day resolved
+and 7-day unresolved retention. Pruning first prevents packing expired loose
+garbage. Geometric repacking consolidates loose objects
+and small packs without routinely rewriting the large base pack; a sufficiently
+large accumulated increment can eventually include it. The attempt timestamp
+is stored in `live/<clone-name>-git-maintenance.json`. Failures are recorded in
+the tick's `maintenanceErrors` and do not fail integration or retry until the
+next daily attempt. Expiry settings are command-local, not additional accepted
+repository config keys.
+Every 30 days (including the first maintenance attempt), after pruning and
+before geometric repacking, `git gc --cruft --prune=2.weeks.ago` collects packed
+unreachable objects. This deliberately permits a monthly full base-pack rewrite;
+recent unreachable objects survive in cruft packs until old enough to expire.
+Its separate `live/<clone-name>-git-full-gc.json` attempt stamp also bounds
+failed full collections to monthly, with the same nonfatal tick diagnostics.
+
+Before aborting an abandoned merge, `git rerere clear` removes its unresolved
+preimages while retaining recorded resolutions. Otherwise repeated conflicts
+allocate new numbered preimages on each tick even when their contents match.
+This bounds abandoned-cache growth, not the writes needed to record a conflict
+the next time it is attempted.
 
 The clone's entire `.git` directory is read-only inside bubblewrap. Linked
 snapshots additionally bind their `.git` pointer read-only; the clone mount covers

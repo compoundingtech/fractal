@@ -2,292 +2,118 @@ import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 
-import {
-  alertConversations,
-  alertsIn,
-  answerLabel,
-  offeredAnswers,
-  pendingCalls,
-  pendingQuestions,
-  promptAnswers,
-  promptAlertKey,
-  promptCalls,
-  questionAnswer,
-  type PendingCall,
-} from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { useAttention, useDataSource } from '../../data/react.tsx'
+import { DecisionCard } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import type { UxTelemetry } from '../../telemetry/ux.ts'
-import { tokens } from '../../ui-compat/tokens.stylex.ts'
-import { AlertButton } from './AlertButton.tsx'
-import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
+import { useAlertAnswersStore } from './alertAnswers.ts'
+import { conversationAlerts } from './alertChoices.ts'
 import { AnswerAlert } from './AnswerAlert.tsx'
+import { PromptAlert } from './PromptAlert.tsx'
+import { useAlertAnswers, type Act, type Answer } from './useAlertAnswers.ts'
 
-/** What the strip reads of a conversation's items: its tool calls, joined with their results. */
-export type ConversationCall = { readonly _tag: string; readonly id: string } & Partial<{
-  readonly callId: string
-  readonly name: string
-  readonly input: unknown
-  readonly result: unknown
-  readonly callSeen: boolean
-}>
-import type { PromptAnswerResult } from './prompt-answer-port.ts'
+/** About 300px on an 800px window: the transcript keeps its room; the card's body scrolls, its controls do not. */
+const DOCK_SHARE = 0.42
+/** A phone stacks the field under the options, which needs more of a shorter column. */
+const DOCK_SHARE_NARROW = 0.65
+/** Below this the card starts folded to one line, unless the person unfolded it. */
+const FOLD_BELOW = 480
+const DOCK_MIN = 220
 
-const styles = stylex.create({
-  pinned: { width: '100%', minWidth: 0, boxSizing: 'border-box', paddingInline: s.section, flexShrink: 0 },
-  strip: {
-    maxWidth: g.lane,
-    marginInline: 'auto',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '8px',
-    paddingBlock: s.md,
-    borderTopWidth: 1,
-    borderTopStyle: 'solid',
-    borderTopColor: tokens['--ds-gray-alpha-400'],
-    // Many alerts keep the conversation readable: the strip scrolls, the transcript keeps its room.
-    maxHeight: '40vh',
-    overflowY: 'auto',
-  },
-  count: { fontWeight: 600, fontSize: '0.75rem', color: tokens['--ds-gray-900'] },
-  folded: { display: 'flex', flexDirection: 'column', gap: '8px' },
-  summary: { cursor: 'pointer', fontWeight: 600, fontSize: '0.8125rem', color: tokens['--ds-gray-1000'] },
-  alert: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '0.8125rem' },
-  title: { fontWeight: 600, color: tokens['--ds-gray-1000'] },
-  detail: { color: tokens['--ds-gray-900'], whiteSpace: 'pre-wrap' },
-  call: {
-    margin: 0,
-    padding: '8px',
-    borderRadius: 4,
-    backgroundColor: tokens['--ds-gray-alpha-100'],
-    whiteSpace: 'pre-wrap',
-    overflowWrap: 'anywhere',
-    fontSize: '0.75rem',
-  },
-  answers: { display: 'flex', flexWrap: 'wrap', gap: '8px' },
-  note: { color: tokens['--ds-gray-900'], fontSize: '0.75rem' },
-})
+const isDocumentRef = (ref: string): boolean => ref.startsWith('doc/')
 
-/** The native prompt alerts of one agent's conversation, open ones only. */
-export const promptAlerts = (items: readonly Native.Attention[], agentRef: string): readonly Native.Attention[] =>
-  items.filter(
-    (item) =>
-      item.attention_kind === 'harness-prompt' &&
-      item.state === 'open' &&
-      alertConversations(item).includes(agentRef),
-  )
+/** The height of the host this card docks in. */
+const useRoom = (): readonly [React.RefCallback<HTMLElement>, number | undefined] => {
+  const [room, setRoom] = React.useState<number>()
+  const observer = React.useRef<ResizeObserver>(undefined)
+  const ref = React.useCallback<React.RefCallback<HTMLElement>>((node) => {
+    observer.current?.disconnect()
+    // The nearest ancestor with a box of its own: a `display: contents` wrapper measures zero.
+    let host = node?.parentElement
+    while (host != null && getComputedStyle(host).display === 'contents') host = host.parentElement
+    if (host == null || typeof ResizeObserver === 'undefined') return
+    observer.current = new ResizeObserver(() => setRoom(host.clientHeight))
+    observer.current.observe(host)
+    setRoom(host.clientHeight)
+  }, [])
+  return [ref, room]
+}
 
 /**
- * Every alert this agent's conversation shows, as the Fractal terminal UI and the phone choose them (`alertsIn`):
- * open, an alert, of a kind Home shows, and naming this conversation.
+ * The alerts of an agent's conversation, above its composer: one focused card, with a pager when there are several.
+ * Answering advances to the next at once; a refused answer comes back without moving the person off what they are on.
  */
-export const conversationAlerts = (items: readonly Native.Attention[], agentRef: string): readonly Native.Attention[] =>
-  alertsIn(items, agentRef, undefined)
-
-/** The tool calls a conversation shows with no result yet, in full, as st3-views reads them. */
-export const waitingCalls = (items: readonly ConversationCall[]): PendingCall[] =>
-  pendingCalls(
-    items.flatMap((item) =>
-      item._tag === 'ToolCall' && item.callSeen === true && item.result === undefined && item.callId !== undefined
-        ? [{ id: item.id, type: 'tool_call' as const, body: { call_id: item.callId, name: item.name ?? 'tool', arguments: item.input } }]
-        : [],
-    ),
-  )
-
-type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise<PromptAnswerResult>
-type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
-
-/**
- * The alerts of an agent's conversation, above its composer. A prompt its harness waits on shows
- * with the answers Fractal can deliver: the one waiting call in full beside `allow` (or a plan beside
- * `approve`), a question's options to choose and send together, a screen prompt's own answers.
- * Anything else is answered in the seat's terminal, and an answer there still wins. An ask or a
- * review gate shows with its own answers (`AnswerAlert`).
- */
-export const AgentAlerts = ({
-  alerts,
-  calls,
-  onAnswer,
-  onAct,
-}: {
+export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, onOpenDocument }: {
   readonly alerts: readonly Native.Attention[]
-  readonly calls: readonly PendingCall[]
+  /** Keeps the record of an answer in view after the feed has dropped its alert. */
+  readonly agentRef?: string
   readonly onAnswer?: Answer
   readonly onAct?: Act
+  readonly onOpenDocument?: (ref: string) => void
 }): React.ReactNode => {
-  if (alerts.length === 0) return null
-  const one = (alert: Native.Attention) =>
-    alert.attention_kind === 'harness-prompt'
-      // A new prompt or revision behind the same alert starts with nothing chosen.
-      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} calls={calls} onAnswer={onAnswer} />
-      : <AnswerAlert key={alert.id} alert={alert} onAct={onAct} />
-  const [first, ...rest] = alerts
+  const store = useAlertAnswersStore()
+  const narrow = React.useContext(NarrowLayoutContext)
+  const [roomRef, room] = useRoom()
+  const [foldChoice, setFoldChoice] = React.useState<boolean>()
+  const [currentId, setCurrentId] = React.useState<string>()
+  const lastIndex = React.useRef(0)
+  const open = alerts.filter((alert) => !store.hidden(alert))
+  const records = [...store.getSnapshot().pending.values()].filter(({ item }) =>
+    alerts.some((alert) => alert.id === item.id) || (agentRef !== undefined && conversationAlerts([item], agentRef).length > 0))
+  const found = open.findIndex((alert) => alert.id === currentId)
+  // The alert being read stays read, wherever others come and go; a closed one gives way to the one that took its place.
+  const index = found >= 0 ? found : Math.min(lastIndex.current, Math.max(open.length - 1, 0))
+  const current = open[index]
+  // Held by id from the moment it shows, so a refused answer returning ahead of it cannot take its place.
+  if (current !== undefined && current.id !== currentId) setCurrentId(current.id)
+  React.useLayoutEffect(() => { lastIndex.current = index })
+  const card = React.useRef<HTMLElement>(null)
+  const resolved = React.useRef<HTMLElement>(null)
+  const focusFollows = React.useRef(false)
+  const onBegin = () => {
+    focusFollows.current = card.current?.contains(document.activeElement) === true
+    if (current !== undefined) lastIndex.current = index
+  }
+  // The answered card unmounted with focus in it. Anywhere else, focus is the person's and stays.
+  React.useLayoutEffect(() => {
+    if (!focusFollows.current) return
+    focusFollows.current = false
+    if (document.activeElement !== null && document.activeElement !== document.body) return
+    ;(card.current ?? resolved.current)?.focus()
+  })
+  if (open.length === 0 && records.length === 0) return null
+  const folded = foldChoice ?? (room !== undefined && room < FOLD_BELOW)
+  const maxBlockSize = room === undefined ? undefined : Math.max(DOCK_MIN, Math.round(room * (narrow ? DOCK_SHARE_NARROW : DOCK_SHARE)))
+  const pager = open.length > 1 ? {
+    index, count: open.length,
+    onPrevious: () => setCurrentId(open[index - 1]?.id),
+    onNext: () => setCurrentId(open[index + 1]?.id),
+  } : undefined
+  const shared = { density: folded ? 'row' as const : 'docked' as const, onFold: () => setFoldChoice(!folded), onBegin, focusRef: card, ...(pager === undefined ? {} : { pager }), ...(maxBlockSize === undefined ? {} : { maxBlockSize }) }
   return (
-    <div {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
+    <div ref={roomRef} {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
       <div {...stylex.props(styles.strip)}>
-        {alerts.length > 1 ? <div {...stylex.props(styles.count)}>◆ {alerts.length} alerts</div> : null}
-        {one(first!)}
-        {/* The first alert is open; the others open on a click, as on the phone. */}
-        {rest.map((alert) => (
-          <details key={alert.id} {...stylex.props(styles.folded)}>
-            <summary {...stylex.props(styles.summary)}>◆ {alert.title}</summary>
-            {one(alert)}
-          </details>
+        {records.map(({ item, label, phase }, at) => (
+          <DecisionCard key={item.id} density="row" data={{ 'data-answer-phase': phase }} label={`Answered: ${item.title}`} meta={[]} heading={item.title} resolved={`You answered ${label}`}
+            {...(at === 0 ? { focusRef: resolved } : {})}
+            {...(phase === 'confirmed' ? {} : { status: { tone: 'progress' as const, text: phase === 'sending' ? 'Sending…' : 'Waiting for Fractal to clear it…' } })} />
         ))}
+        {current === undefined ? null : current.attention_kind === 'harness-prompt'
+          ? <PromptAlert key={current.id} alert={current} {...(onAnswer === undefined ? {} : { onAnswer })} {...shared} />
+          : <AnswerAlert key={current.id} alert={current} {...(onAct === undefined ? {} : { onAct })} {...(onOpenDocument === undefined ? {} : { onOpenRef: onOpenDocument, opensRef: isDocumentRef })} {...shared} />}
       </div>
     </div>
   )
 }
 
-const PromptAlert = ({
-  alert,
-  calls,
-  onAnswer,
-}: {
-  readonly alert: Native.Attention
-  readonly calls: readonly PendingCall[]
-  readonly onAnswer?: Answer
-}): React.ReactNode => {
-  const prompt = promptAnswers(alert)
-  // Only the exact call the prompt asks about, when the daemon names it.
-  const shown = prompt === null ? calls : promptCalls(prompt, calls)
-  const [chosen, setChosen] = React.useState<number[][]>([])
-  const [status, setStatus] = React.useState<string>()
-  const [sending, setSending] = React.useState(false)
-  const offered = prompt === null || onAnswer === undefined ? [] : offeredAnswers(prompt, calls)
-  const questions = pendingQuestions(shown)
-  const gated = prompt?.answers.find((answer) => answer === 'allow' || answer === 'approve' || answer === 'answer')
-  const sendable = questions === null ? null : questionAnswer(questions, chosen)
-  const choose = (question: number, option: number, multi: boolean) =>
-    setChosen((previous) => {
-      const next = [...previous]
-      const picked = next[question] ?? []
-      next[question] = multi
-        ? picked.includes(option) ? picked.filter((each) => each !== option) : [...picked, option].sort()
-        : [option]
-      return next
-    })
-  const send = (answer: string) => {
-    const sent = answer === 'answer' ? sendable : answer
-    if (sent === null || onAnswer === undefined) return
-    setSending(true)
-    setStatus(`Answering ${answerLabel(answer).toLowerCase()}…`)
-    void onAnswer(alert, answer, sent).then((result) => {
-      setSending(false)
-      setStatus(result._tag === 'Sent' ? 'Answered. The alert clears once the harness moves on.' : result.detail)
-    })
-  }
-  return (
-    <section {...stylex.props(styles.alert)} aria-label={alert.title}>
-      <div {...stylex.props(styles.title)}>◆ {alert.title}</div>
-      {alert.detail ? <div {...stylex.props(styles.detail)}>{alert.detail}</div> : null}
-      {prompt === null ? (
-        <div {...stylex.props(styles.note)}>Answer it in the seat's terminal.</div>
-      ) : questions !== null && gated === 'answer' ? (
-        questions.map((question, index) => (
-          <div key={index} {...stylex.props(styles.alert)}>
-            <div {...stylex.props(styles.title)}>
-              {question.header ? `${question.header} · ` : ''}
-              {question.question}
-              {question.multiSelect ? ' (choose any)' : ''}
-            </div>
-            <div {...stylex.props(styles.answers)}>
-              {question.options.map((option, choice) => {
-                const on = (chosen[index] ?? []).includes(choice)
-                return (
-                  <AlertButton key={choice} tone={on ? 'primary' : 'secondary'} aria-pressed={on} isDisabled={sending}
-                    onPress={() => choose(index, choice, question.multiSelect)}>
-                    {on ? `✓ ${option.label}` : option.label}
-                  </AlertButton>
-                )
-              })}
-            </div>
-          </div>
-        ))
-      ) : (
-        shown.map((call) => (
-          <pre key={call.id} {...stylex.props(styles.call)}>{[call.tool, ...call.lines].join('\n')}</pre>
-        ))
-      )}
-      {prompt !== null && gated !== undefined && !offered.includes(gated) ? (
-        <div {...stylex.props(styles.note)}>
-          {prompt.call_id == null
-            ? 'Fractal does not say which call this asks about: answer it in the seat\'s terminal.'
-            : 'What it would let through is not in the conversation yet: answer it in the seat\'s terminal.'}
-        </div>
-      ) : null}
-      {offered.length > 0 ? (
-        <div {...stylex.props(styles.answers)}>
-          {offered.map((answer) => (
-            <AlertButton key={answer} tone={answer === 'deny' ? 'danger' : answer === gated ? 'primary' : 'secondary'}
-              isDisabled={sending || (answer === 'answer' && sendable === null)} onPress={() => send(answer)}>
-              {answer === 'deny' && gated === 'answer' ? 'Decline' : answerLabel(answer)}
-            </AlertButton>
-          ))}
-        </div>
-      ) : null}
-      {status ? <div role="status" {...stylex.props(styles.note)}>{status}</div> : null}
-    </section>
-  )
+/** The agent's alerts from the active data source, answered through its ports. */
+export const LiveAgentAlerts = ({ agentRef, ux, onOpenDocument }: { readonly agentRef: string; readonly ux?: UxTelemetry; readonly onOpenDocument?: (ref: string) => void }): React.ReactNode => {
+  const { feed, onAct, onAnswer } = useAlertAnswers(ux)
+  const alerts = React.useMemo(() => (feed._tag === 'Observed' ? conversationAlerts(feed.value, agentRef) : []), [feed, agentRef])
+  return <AgentAlerts alerts={alerts} agentRef={agentRef} {...(onAct === undefined ? {} : { onAct })} {...(onAnswer === undefined ? {} : { onAnswer })} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />
 }
 
-/** The agent's prompt alerts from the active data source, answered through its prompt port. */
-export const LiveAgentAlerts = ({
-  agentRef,
-  items,
-  ux,
-}: {
-  readonly agentRef: string
-  readonly items: readonly ConversationCall[]
-  readonly ux?: UxTelemetry
-}): React.ReactNode => {
-  const source = useDataSource()
-  const attention = useAttention()
-  const calls = React.useMemo(() => waitingCalls(items), [items])
-  const alerts = React.useMemo(
-    () => (attention._tag === 'Observed' ? conversationAlerts(attention.value, agentRef) : []),
-    [attention, agentRef],
-  )
-  // From Fractal taking an answer to the paint that no longer shows its alert (Fractal's `alert_landed`).
-  const answered = React.useRef(new Map<string, ReturnType<UxTelemetry['beginAlertAnswer']>>())
-  const landing = React.useRef<Array<() => void>>([])
-  React.useLayoutEffect(() => {
-    const shown = new Set<string>(alerts.map((alert) => alert.id))
-    for (const [id, operation] of answered.current) {
-      if (shown.has(id)) continue
-      answered.current.delete(id)
-      landing.current.push(operation.landed())
-    }
-  }, [alerts])
-  React.useEffect(() => () => {
-    for (const operation of answered.current.values()) operation.cancel()
-    for (const cancel of landing.current) cancel()
-  }, [])
-  const actions = source.alertActions
-  const onAct: Act | undefined =
-    actions === undefined
-      ? undefined
-      : (alert, action) => {
-          const operation = ux?.beginAlertAnswer()
-          return actions.act({ alert, action }).then((result) => {
-            if (operation === undefined) return result
-            if (result._tag === 'Sent') answered.current.set(alert.id, operation)
-            else operation.cancel()
-            return result
-          })
-        }
-  const prompts = source.prompts
-  const onAnswer: Answer | undefined =
-    prompts === undefined
-      ? undefined
-      : (alert, _answer, sent) => {
-          const prompt = promptAnswers(alert)
-          return prompt === null
-            ? Promise.resolve({ _tag: 'Refused', detail: 'This prompt is answered in the seat\'s terminal.' })
-            : prompts.respond({
-                alert: { id: alert.id, revision: alert.revision, source_id: alert.source_id, target_id: prompt.target_id, episode: prompt.episode },
-                answer: sent,
-              })
-        }
-  return <AgentAlerts alerts={alerts} calls={calls} onAnswer={onAnswer} onAct={onAct} />
-}
+const styles = stylex.create({
+  pinned: { width: '100%', minWidth: 0, boxSizing: 'border-box', paddingInline: s.section, flexShrink: 0 },
+  strip: { maxWidth: g.lane, marginInline: 'auto', display: 'flex', flexDirection: 'column', gap: s.sm, paddingBlock: s.md },
+})

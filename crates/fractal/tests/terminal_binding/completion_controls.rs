@@ -131,13 +131,16 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
+    let events = watch::channel(0).0;
     let state = fractal_daemon::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
+        event_notify: events.clone(),
         node: "orchid".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: "pty".into(),
@@ -188,7 +191,11 @@ try:
     for line in channel.stdout:
         event = json.loads(line)
         if event.get('method') == 'notifications/claude/channel':
-            Path(os.environ['FIXTURE_RECEIVED']).write_text(json.dumps(event))
+            # Existence is the reader's completion barrier, so publish only closed JSON.
+            received = Path(os.environ['FIXTURE_RECEIVED'])
+            pending = received.with_suffix('.tmp')
+            pending.write_text(json.dumps(event))
+            pending.replace(received)
             while not Path(os.environ['FIXTURE_NATIVE_IDLE']).exists():
                 time.sleep(0.005)
             break
@@ -490,6 +497,13 @@ fi
     }
     if let Some(owner) = rejection_fence {
         assert!(shell.try_wait().unwrap().is_none());
+        // The ended record says the driver stopped the provider exactly when it did (#4743): a
+        // provider that ended before the fence ended on its own.
+        assert_eq!(
+            !driver_stopped_records(root.path()).is_empty(),
+            order.is_none(),
+            "the provider's ended record says the driver stopped it only when the driver did"
+        );
         if rejection == Some("token") {
             if cfg!(target_os = "linux") {
             assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(&store, &owner).unwrap_err().code, "stale-mailbox-session");
@@ -506,7 +520,7 @@ fi
         }
         assert!(runtime.actions.lock().unwrap().is_empty());
         if rejection == Some("successor") {
-            successor_keeps_the_mailbox(&store, &runtime, &client, root.path(), &barrier, &received,
+            successor_keeps_the_mailbox(&store, &runtime, &client, &events, root.path(), &barrier, &received,
                 &physical, &mut shell, &mut stdout).await;
         }
         server.abort();
@@ -535,6 +549,28 @@ fi
     let _ = diagnostics.await.unwrap();
 }
 
+/// Every agent directory under `root` whose harness record ended because its driver stopped the
+/// provider. The record is read where its writer keeps it, which need not be a plain file.
+fn driver_stopped_records(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let record = fractal_drivers::harness_state::harness_state_path(&directory);
+        if fractal_drivers::harness_state::read(&record, None).is_some_and(|record| {
+            record.state == fractal_drivers::harness_state::Activity::Ended
+                && record.reason.as_deref() == Some(fractal_drivers::provider_session::DRIVER_STOPPED)
+        }) {
+            found.push(directory.clone());
+        }
+        for entry in std::fs::read_dir(&directory).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                directories.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
 /// The seat's next invocation starts its own driver in the same shell once the fenced one has
 /// stopped. It binds the mailbox and receives mail, and the stopped driver's exit, recorded under
 /// its own incarnation, takes nothing back from it.
@@ -543,6 +579,7 @@ async fn successor_keeps_the_mailbox(
     store: &Arc<Store>,
     runtime: &Arc<Runtime>,
     client: &fractal_daemon::client::Client,
+    events: &watch::Sender<u64>,
     root: &std::path::Path,
     barrier: &std::path::Path,
     received: &std::path::Path,
@@ -552,6 +589,13 @@ async fn successor_keeps_the_mailbox(
 ) {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
     let successor = format!("{physical}:bound:{NEXT}");
+    // Channel delivery and the driver's title stream bind independently. Subscribe before
+    // launching the successor so its title ownership change cannot be missed.
+    let mut title_changes = fractal_daemon::MailboxWakesStore::subscribe_mailbox(
+        store,
+        &fractal_daemon::mailbox::Fence::new(SEAT, &successor, "title"),
+        events,
+    );
     std::fs::remove_file(received).unwrap();
     shell.stdin.as_mut().unwrap().write_all(b"successor\n").await.unwrap();
     let sent: MessageView = client
@@ -570,29 +614,35 @@ async fn successor_keeps_the_mailbox(
         )
         .await
         .unwrap();
-    if tokio::time::timeout(Duration::from_secs(15), async {
+    let ready = tokio::time::timeout(Duration::from_secs(15), async {
         while !received.exists() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        let notification: Value = serde_json::from_slice(&std::fs::read(received).unwrap()).unwrap();
+        assert_eq!(notification["params"]["meta"]["messageId"], sent.subject);
+        loop {
+            title_changes.changed.borrow_and_update();
+            let owner = title_owner(root);
+            if owner.incarnation == successor {
+                break owner;
+            }
+            title_changes.changed.changed().await.unwrap();
+        }
     })
-    .await
-    .is_err()
-    {
+    .await;
+    let owner = ready.unwrap_or_else(|_| {
         let owners = rusqlite::Connection::open(root.join("graph.db")).unwrap()
             .prepare("SELECT incarnation, epoch FROM local_mailbox_owners WHERE subject=?1").unwrap()
             .query_map([SEAT], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).unwrap()
             .collect::<Result<Vec<_>, _>>().unwrap();
         panic!(
-            "the successor received no mail; owners={owners:?} harness={:?} status={} driver log={:?} hook={:?}",
+            "the successor's mail and title binding were not ready; owners={owners:?} harness={:?} status={} driver log={:?} hook={:?}",
             store.current_harness(SEAT).unwrap(),
             status(store),
             std::fs::read_to_string(root.join(".local/state/st3/driver-api-warnings.log")),
             std::fs::read_to_string(root.join("native-idle.hook-result")),
         );
-    }
-    let notification: Value = serde_json::from_slice(&std::fs::read(received).unwrap()).unwrap();
-    assert_eq!(notification["params"]["meta"]["messageId"], sent.subject);
-    let owner = title_owner(root);
+    });
     assert_eq!(owner.incarnation, successor);
     // Nothing contends for the mailbox afterwards: the same binding holds across reconcile passes.
     for _ in 0..10 {

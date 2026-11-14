@@ -1,0 +1,15 @@
+version 2
+mission "factory/land-program" report-to="agent/factory" state="ready" timeout="2h" {
+  concurrent-runs max=8
+  input "change" kind="text"
+  input "reviewer" kind="text"
+  goal "Land one change on main and prove it live, or leave main as it was."
+  authority {
+    publish "scratch/*"
+    start "factory/step/review"
+    write "resource/factory/*"
+  }
+  step "program" timeout="2h" {
+    program "/bundles/16261dc977137b4410cd172e6a053126702d36ab6154e38a338f414e182db729.mjs" sha256="16261dc977137b4410cd172e6a053126702d36ab6154e38a338f414e182db729" stalled-after="10m"
+  }
+}

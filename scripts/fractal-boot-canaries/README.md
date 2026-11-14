@@ -11,7 +11,7 @@ message.
 `access-auto`, `access-bypass`, `idle-hold` (Codex/OpenCode), `utf8` and `import` (Codex),
 or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
 `run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
-back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
+back on the session it suspended on, holds mail older than seven days, and consumes recent never-offered
 mail exactly once. The Rust wrapper
 `crates/fractal/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
 
@@ -29,6 +29,10 @@ inherited `PATH` entries that neither contain an `st2` executable nor name an `s
 Provide Bash, Python, `env`, Git, curl and `pty` on the inherited path, plus Node for pi/omp.
 Login shells and stand-in interpreters use discovered absolute executables; conventional
 system bin directories are not required, so these fixtures also run in Nix sandboxes.
+Each private daemon also gets `AGENT_RUNTIME_PROFILE` (a `runtime-profile.json` in its root whose
+`generalist` persona names that private bin directory as `harnessBin`) and `AGENT_PERSONA=generalist`,
+so managed launch starts the `omp`, `claude` or `codex` in that directory: the stand-in, or the
+raw OMP the `when-idle` runner links there.
 
 The OMP `when-idle` regression uses a separate runner:
 
@@ -54,16 +58,21 @@ Claude's `channel-missing` and `channel-uninitialized` scenarios restart with he
 but no usable channel. They require `claude-channel-unattached` with a blocked seat within
 45 seconds (awaited in the daemon's event log from a cursor taken before the restart, so the
 roughly ten-second blocked window cannot be missed; see `scripts/fractal_events.py`), a visible hold for early mail, and recovery with exactly one native offer and one
-staged/delivered/read receipt. Two further restarts must deliver fresh startup mail once without
+staged/delivered/read receipt. A receipt is a lifecycle claim or this member's local mark of it
+(`local_message_marks`, `local_message_staged`), counted together. Two further restarts must deliver fresh startup mail once without
 replaying recovered mail. The missing-channel seat must restart automatically, continuing its
 native session. The uninitialized channel attaches during the recheck window and must keep its
 incarnation; a recovery request that its attachment overtook must settle as retained, with no
 restart. Automatic recovery waits 10, 20 and 40 seconds after detection before each of three
-restarts; a channel still missing after the third replacement parks the seat with a visible
-failure and holds mail until an operator restart or a new declaration. The fault controls live
-only in each isolated workspace.
-The `channel-parked` scenario keeps the channel missing through all three replacements and
-restarts the daemon after parking; neither a fourth attempt nor a mail offer may appear.
+charged restarts. Only a new channel failure is charged: a seat blocked again for the cause the
+last charged attempt named is restarted on a backoff of minutes without charging. A seat that
+spends all three parks with a visible failure and holds mail until an operator restart or a new
+declaration. The fault controls live only in each isolated workspace.
+The `channel-parked` scenario first keeps the channel missing for one cause. The first failure
+is charged, and its replacement is neither charged nor restarted inside the short schedule. After
+an operator restart, the stand-in changes the cause for each launch: whether the project declares
+its own `st` server. That spends all three attempts, and the scenario restarts the daemon after
+parking; neither a fourth attempt nor a mail offer may appear.
 
 Every fresh scenario also checks that the native driver creates no `catalog.kdl`, `agent.kdl`,
 or polled `harness-state`, `harness-context`, and `harness-timeline` records, and that each seat

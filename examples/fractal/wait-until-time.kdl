@@ -3,7 +3,7 @@ version 2
 // Hold work until a wall-clock time, without an agent waiting in a turn.
 //
 // The `window` step is agentless. Its gate passes once the time has come. Before then `test`
-// exits 1, which an exec gate reads as not yet, and st checks the clock again: a minute later,
+// exits 1, which an exec gate reads as not yet, and st checks the clock again: five seconds later,
 // then twice as long after each further not yet, up to every fifteen minutes. The dependent step
 // becomes ready only after the gate passes, and st then wakes the seat for it.
 //

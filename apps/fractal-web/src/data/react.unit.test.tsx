@@ -5,7 +5,7 @@ import {
   type ResourceObservationEncoded,
   type TerminalScreen,
 } from '@fractal/client/schema'
-import type { DecodedAgent } from '@fractal/sdk/effect'
+import type { DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { renderToStaticMarkup } from 'react-dom/server'

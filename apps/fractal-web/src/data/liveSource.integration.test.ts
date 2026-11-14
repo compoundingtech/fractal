@@ -112,7 +112,7 @@ class Gateway {
             message: 'Device credential revoked',
             retryable: false,
             request_id: 'request/revoked',
-            details: {},
+            details: { reason: 'credential-rejected' },
           }),
           { status: 403, headers: { 'content-type': 'application/json' } },
         )
@@ -350,7 +350,9 @@ class Gateway {
   }
 
   /** `terminalId` defaults to the subject-shaped id; the daemon itself publishes `terminal/<agent id>`. */
-  screen(id: string, name: string, text: string, terminalId = `terminal/${name}`) {
+  async screen(id: string, name: string, text: string, terminalId = `terminal/${name}`) {
+    // Admission is already asserted by the caller; decoding may legitimately await a cold chunk.
+    await import('@fractal/client/schema')
     const value: TerminalScreen = {
       kind: 'terminal-screen',
       terminal_id: terminalId,
@@ -406,8 +408,8 @@ const settle = Effect.promise(async () => {
   }
 })
 
-const withGateway = (
-  test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void>,
+const withGateway = <E,>(
+  test: (live: LiveSource, gateway: Gateway) => Effect.Effect<void, E>,
   { maxFollows = 2, sessionTraceLayer }: {
     readonly maxFollows?: number
     readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider>
@@ -474,6 +476,87 @@ describe('session inventory independence', () => {
       releaseNext()
       releaseNextInterest()
       releaseRoster()
+    })),
+  )
+})
+
+describe('mission decode evidence', () => {
+  it.live('publishes rejected missions, retains last-good rows on all-bad frames and recovers', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.missions)
+      yield* settle
+      const mission = {
+        id: 'mission/example', kind: 'mission', title: 'Example', state: 'ready',
+        revision: '1', mission_revision: '1', updated_at: snapshot.created_at,
+        runs: [], run_generations: {},
+      }
+      const broken = { ...mission, id: 'mission/broken', runs: 'not-a-list' }
+      const frame = (items: readonly Record<string, unknown>[]) => gateway.sendUnchecked({
+        kind: 'snapshot', id: gateway.subscription('missions').id, collection: 'missions',
+        has_more: false, items, order: items.map((row) => row.id), snapshot,
+      })
+      frame([mission, broken])
+      yield* settle
+      expect(live.registry.get(live.source.missions)).toMatchObject({
+        _tag: 'Observed', freshness: 'live', value: [{ id: mission.id }],
+      })
+      expect(live.registry.get(live.source.missionsDecode!)).toMatchObject({
+        decodeStale: false,
+        undecodable: expect.arrayContaining([
+          expect.objectContaining({ _tag: 'Rejected', id: broken.id, path: 'runs' }),
+        ]),
+      })
+      frame([broken])
+      yield* settle
+      expect(live.registry.get(live.source.missions)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: mission.id }],
+      })
+      expect(live.registry.get(live.source.missionsDecode!).decodeStale).toBe(true)
+      frame([mission])
+      yield* settle
+      expect(live.registry.get(live.source.missionsDecode!)).toEqual({ undecodable: [], decodeStale: false })
+      expect(live.registry.get(live.source.missions)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
+    })),
+  )
+})
+
+describe('attention decode evidence', () => {
+  it.live('publishes rejected alerts, retains last-good rows on all-bad frames and recovers', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.attention)
+      yield* settle
+      const alert = {
+        id: 'attention/example', kind: 'attention', title: 'Example', detail: '',
+        revision: '1', updated_at: snapshot.created_at, requested_at: snapshot.created_at,
+        person_id: 'person/operator', source_id: 'agent/example', attention_kind: 'agent-request',
+        priority: 'normal', state: 'open', actions: ['work.done'],
+      }
+      const broken = { ...alert, id: 'attention/broken', actions: 'not-a-list' }
+      const frame = (items: readonly Record<string, unknown>[]) => gateway.sendUnchecked({
+        kind: 'snapshot', id: gateway.subscription('attention').id, collection: 'attention',
+        has_more: false, items, order: items.map((row) => row.id), snapshot,
+      })
+      frame([alert, broken])
+      yield* settle
+      expect(live.registry.get(live.source.attention)).toMatchObject({
+        _tag: 'Observed', freshness: 'live', value: [{ id: alert.id }],
+      })
+      expect(live.registry.get(live.source.attentionDecode!)).toMatchObject({
+        decodeStale: false,
+        undecodable: expect.arrayContaining([
+          expect.objectContaining({ _tag: 'Rejected', id: broken.id, path: 'actions' }),
+        ]),
+      })
+      frame([broken])
+      yield* settle
+      expect(live.registry.get(live.source.attention)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: alert.id }],
+      })
+      expect(live.registry.get(live.source.attentionDecode!).decodeStale).toBe(true)
+      frame([alert])
+      yield* settle
+      expect(live.registry.get(live.source.attentionDecode!)).toEqual({ undecodable: [], decodeStale: false })
+      expect(live.registry.get(live.source.attention)).toMatchObject({ _tag: 'Observed', freshness: 'live' })
     })),
   )
 })
@@ -825,11 +908,11 @@ describe('live feed sync sidecars', () => {
         live.registry.mount(live.source.agents)
         live.registry.mount(sync.agents)
         yield* settle
-        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.agents).sync.status).toEqual(failed)
         expect(Option.isNone(live.registry.get(sync.agents).last)).toBe(true)
         const later = 'agent/opened-after-rejection'
-        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'ungranted' })
+        expect(live.registry.get(live.source.conversation(later))).toMatchObject({ _tag: 'Unavailable', reason: 'unauthorized' })
         expect(live.registry.get(sync.conversation(later)).sync.status).toEqual(failed)
       }),
     ),
@@ -921,7 +1004,7 @@ describe('terminal dependent-read authority', () => {
       const leave = live.registry.mount(live.source.terminalInterest!(ref))
       const stopReading = live.registry.mount(live.source.terminal(ref))
       yield* settle
-      gateway.screen(gateway.subscription('terminal').id, 'old', 'Retained output')
+      yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Retained output'))
       yield* settle
       expect(live.registry.get(live.source.terminal(ref))).toMatchObject({ _tag: 'Observed' })
       stopReading()
@@ -1023,7 +1106,7 @@ describe('terminal dependent-read authority', () => {
         expect(gateway.runtimeReads).toHaveLength(refusal.expectedRetryable ? 2 : 1)
         expect(gateway.terminalActions).toHaveLength(refusal.expectedRetryable ? 1 : 0)
         if (refusal.expectedRetryable) {
-          gateway.screen(gateway.subscription('terminal').id, 'old', 'Recovered screen')
+          yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Recovered screen'))
           yield* settle
           expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
           live.source.retryTerminal?.(ref)
@@ -1142,7 +1225,7 @@ describe('terminal dependent-read authority', () => {
       const ref = 'terminal/example'
       live.registry.mount(live.source.terminalInterest!(ref))
       yield* settle
-      gateway.screen(gateway.subscription('terminal').id, 'old', 'Previous screen')
+      yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Previous screen'))
       yield* settle
       expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
       gateway.fleet([{ ...agent, revision: '2', runtime_ids: [] }])
@@ -1247,7 +1330,7 @@ describe('terminal dependent-read authority', () => {
           const ref = 'terminal/example'
           live.registry.mount(live.source.terminalInterest!(ref))
           yield* settle
-          gateway.screen(gateway.subscription('terminal').id, 'old', 'Trusted previous screen')
+          yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Trusted previous screen'))
           yield* settle
           expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
           gateway.runtimeRefusalStatus = status
@@ -1276,7 +1359,7 @@ describe('terminal dependent-read authority', () => {
         const ref = 'terminal/example'
         live.registry.mount(live.source.terminalInterest!(ref))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'old', 'Previously authorized screen')
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'old', 'Previously authorized screen'))
         yield* settle
         expect(live.registry.get(live.source.terminal(ref))._tag).toBe('Observed')
         gateway.send({ kind: 'error', id: gateway.subscription('agents').id, collection: 'agents', code: 'forbidden', message: 'Roster read revoked', retryable: false })
@@ -1442,7 +1525,7 @@ describe('terminal input', () => {
         yield* settle
         live.registry.mount(live.source.terminalInterest!('terminal/example'))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$')
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$'))
         yield* settle
         const port = yield* Effect.promise(() => live.source.terminalInput!({ subject: 'terminal/example', terminalRef: 'terminal/example', incarnation: 'incarnation-example', registry: live.registry }))
         port.open()
@@ -1477,7 +1560,7 @@ describe('terminal input', () => {
         const subject = 'terminal/example/input-subject'
         live.registry.mount(live.source.terminalInterest!(subject))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$', `terminal/${seat.id}`)
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$', `terminal/${seat.id}`))
         yield* settle
         const shown = live.registry.get(live.source.terminal(subject))
         if (shown._tag !== 'Observed') return yield* Effect.die(`terminal ${subject} was not observed`)
@@ -1512,7 +1595,7 @@ describe('terminal input', () => {
         yield* settle
         live.registry.mount(live.source.terminalInterest!('terminal/example'))
         yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$')
+        yield* Effect.promise(() => gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$'))
         yield* settle
         expect(live.registry.get(live.source.grants).terminalInput).toBe('ungranted')
         const port = yield* Effect.promise(() => live.source.terminalInput!({ subject: 'terminal/example', terminalRef: 'terminal/example', incarnation: 'incarnation-example', registry: live.registry }))
@@ -2044,14 +2127,14 @@ describe('optimistic conversation sends', () => {
         const feed = live.registry.get(conversation)
         expect(feed).toMatchObject({ _tag: 'Observed' })
         if (feed._tag !== 'Observed') return
-        expect(feed.value.items.map((item) => item._tag)).toEqual(['Message', 'Text'])
+        // A person's mail reads as the person's one row; its header joins its body.
+        expect(feed.value.items.map((item) => item._tag)).toEqual(['Text'])
         resolvePost()
         expect((yield* Effect.promise(() => sending))._tag).toBe('Success')
         yield* settle
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [
-            { _tag: 'Message', messageId: resent },
-            { _tag: 'Text', id: 'timeline-entry/resent/content' },
+            { _tag: 'Text', id: 'timeline-entry/resent/content', text: 'hello' },
           ] },
         })
       }),

@@ -261,6 +261,9 @@ export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 /** Dev/test builds without debug information or incremental state, as on the fleet runners. */
 export const buildEnv = { CARGO_PROFILE_DEV_DEBUG: '0', CARGO_PROFILE_TEST_DEBUG: '0', CARGO_INCREMENTAL: '0' }
 
+// This archive is dependency-only evidence, even on an exact key hit: its key
+// omits Rust sources. buildSnapshotPrepare discards local package fingerprints
+// and outputs after restoration; only exact-source snapshots retain them.
 export const cargoCacheStep = {
   name: 'Restore the Cargo target and registry',
   id: 'cargo-cache',
@@ -355,6 +358,7 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    env: { GH_TOKEN: '${{ github.token }}' },
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
 printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
@@ -809,7 +813,10 @@ export const linuxStageJob = ({
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
     ...before,
-    nixDevelopStep({ name: description ?? 'Run nextest', command }),
+    {
+      ...nixDevelopStep({ name: description ?? 'Run nextest', command }),
+      ...(stage === 'fleet-compat' ? { env: { GH_TOKEN: '${{ github.token }}' } } : {}),
+    },
     ...after,
     {
       name: 'Save Nix outputs to the local Nix cache',
@@ -863,7 +870,8 @@ printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
-  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-',
 } as const
 
 /**
@@ -933,7 +941,8 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
   'fractal-web-changes': {
     name: 'fractal-web-changes',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the detection steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     outputs: {
       relevant: '${{ steps.detect.outputs.relevant }}',
@@ -1042,7 +1051,8 @@ export const buildFractalWebJobs = (context: FleetBuildContext) => ({
     // require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the gate steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     steps: [
       fractalWebRunnerStep,

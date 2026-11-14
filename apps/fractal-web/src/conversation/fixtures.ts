@@ -6,7 +6,7 @@
 // Rendering both through their adapters is the parity check: whatever differs on screen is a real
 // difference between the sources.
 
-import { decodeUnknownSync, TimelineEntry, TimelineEntryId } from '@fractal/client/schema'
+import { decodeUnknownSync, TimelineEntry, TimelineEntryId } from '@fractal/client/schema/read'
 
 import type { ConversationPage } from '../data/source.ts'
 import {

@@ -32,23 +32,10 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    store
-        .connection
-        .batched(|_| {
-            smallclaims::store::set_thread_clock(Some(now - 8 * 86_400_000));
-            Ok::<_, anyhow::Error>(())
-        })
-        .unwrap()
-        .unwrap();
+    // Batched appends inherit the caller's clock; callback-local changes do not survive a job.
+    smallclaims::store::set_thread_clock(Some(now - 8 * 86_400_000));
     let old = store.append_as_older_build_for_test(&input(0)).unwrap();
-    store
-        .connection
-        .batched(|_| {
-            smallclaims::store::set_thread_clock(None);
-            Ok::<_, anyhow::Error>(())
-        })
-        .unwrap()
-        .unwrap();
+    smallclaims::store::set_thread_clock(None);
     assert!(old.accepted_at_unix_ms <= now - 8 * 86_400_000);
     let recent = store.append_as_older_build_for_test(&input(1)).unwrap();
     let events = serde_json::to_value(store.events_after(0, None).unwrap()).unwrap();

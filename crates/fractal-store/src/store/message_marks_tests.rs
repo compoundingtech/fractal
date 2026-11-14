@@ -119,11 +119,20 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
     assert_eq!(projections(&claims), projections(&marks), "the twins start equal");
     let digest = |store: &Store| crate::store::projection_digest::tables(&store.readers.get()).unwrap();
     let unmarked = digest(&marks);
+    // A commit folds its selectors only within a time budget, so on a loaded host either twin can
+    // stop partway, claims having more rows to fold than marks. Stop both after one row of each
+    // pass, then let maintenance finish them as the daemon's worker does.
+    for store in [&claims, &marks] {
+        store.set_client_message_fold_budget(std::time::Duration::ZERO).unwrap();
+    }
     for (subject, to, ends) in messages() {
         for kind in ends {
             claims.append_claim(&lifecycle(&subject, kind, &to)).unwrap();
             message_marks::record(&marks, &subject, kind, &to).unwrap();
         }
+    }
+    for store in [&claims, &marks] {
+        while store.maintain_client_message_selectors().unwrap() {}
     }
     assert!(claims.readers.get().query_row("SELECT COUNT(*) FROM local_message_marks", [], |row| row.get::<_, i64>(0)).unwrap() == 0);
     assert!(marks.claims_for("message/marks-0-4", Some("message.closed")).unwrap().is_empty(), "marks wrote a claim");
@@ -131,6 +140,7 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
     // Marks are outside the projection digest every member computes alike.
     assert_eq!(digest(&marks), unmarked, "a mark changed the shared projection digest");
     let (by_claims, by_marks) = (projections(&claims), projections(&marks));
+    assert_eq!(by_claims["local_client_message_selectors_v1 unfolded"], Vec::<String>::new());
     for (table, rows) in &by_claims {
         assert_eq!(rows, &by_marks[table], "{table}");
     }
@@ -154,7 +164,7 @@ fn marks_make_the_projections_views_and_pages_lifecycle_claims_make() {
         assert_eq!(page(&claims), page(&marks), "closed {include_closed}");
     }
     for quiet in [false, true] {
-        assert_eq!(format!("{:?}", claims.mailbox_unread_summary(RECIPIENT, quiet).unwrap()), format!("{:?}", marks.mailbox_unread_summary(RECIPIENT, quiet).unwrap()));
+        assert_eq!(format!("{:?}", claims.mailbox_unread_summary(RECIPIENT, quiet, 0).unwrap()), format!("{:?}", marks.mailbox_unread_summary(RECIPIENT, quiet, 0).unwrap()));
     }
 }
 
@@ -174,13 +184,14 @@ fn a_repeated_mark_answers_its_first_receipt_and_an_unknown_message_is_refused()
 }
 
 /// Once marks are on, the claim append path records a seat placed on this member delivering,
-/// reading and closing graph mail as marks, and its staging still as a claim (RECORDS_STAGED: a
-/// release that reads marks but no stagings must not offer the mail again after a rollback). A
-/// seat placed on another host, a person, a delivery probe's mail, and anything before the switch
-/// write claims. Each mark
-/// moves the mark-event position mailbox wakes and changes read.
+/// reading and closing graph mail as marks, and its staging too once the staging switch is on
+/// (marks_switch::staged_switched_tx, which a member alone turns on with marks). While the staging
+/// switch is off, beside a member whose reads do not count a host's staging, a staging stays a
+/// claim and the later steps are still marks. A seat placed on another host, a person, a delivery
+/// probe's mail, and anything before the switch write claims. Each mark moves the mark-event
+/// position mailbox wakes and changes read.
 #[test]
-fn a_hosted_seat_marks_delivery_read_and_close_once_marks_are_on_and_stages_as_a_claim() {
+fn a_hosted_seat_marks_staging_delivery_read_and_close_once_both_switches_are_on() {
     let store = Store::open_memory("node").unwrap();
     let intent = crate::graph::parse_intent(
         "version 2\nagent \"birch\" { host \"node\"; command \"true\"; }\nagent \"cedar\" { host \"other\"; command \"true\"; }",
@@ -203,19 +214,39 @@ fn a_hosted_seat_marks_delivery_read_and_close_once_marks_are_on_and_stages_as_a
     assert_eq!(kinds("message/before"), every, "marks were on before the switch");
 
     assert_eq!(store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+    assert!(store.staged_switched().unwrap(), "a member alone records stagings as marks with the rest");
     let position = message_marks::event_position(&store.readers.get()).unwrap();
     let [staged, delivered, read, closed] = lifecycle_of("message/hosted", RECIPIENT);
+    for receipt in [&staged, &delivered, &read, &closed] {
+        assert!(receipt.starts_with("offset-receipt/"), "{receipt}");
+    }
+    assert_eq!(kinds("message/hosted"), ["message.sent"]);
+    assert!(message_marks::staged(&store.readers.get(), "message/hosted").unwrap().is_some());
+    assert_eq!(message_marks::status(&store.readers.get(), "message/hosted").unwrap(), Some("closed"));
+    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 4);
+    // A repeat answers its mark's receipt and records nothing again; a repeat of the staging the
+    // close superseded records nothing either.
+    assert_eq!(store.append_claim(&lifecycle("message/hosted", "message.closed", RECIPIENT)).unwrap().id, closed);
+    store.append_claim(&lifecycle("message/hosted", "message.staged", RECIPIENT)).unwrap();
+    assert_eq!(kinds("message/hosted"), ["message.sent"]);
+    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 4);
+
+    // The staging switch off with marks on, as the barrier decides beside a member that does not
+    // count a host's staging (marks_switch's tests): the staging is a claim, the rest are marks.
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hd5502dd7ccde owner=fractal_store::store::message_marks_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value='0' WHERE key='staged_switched'", []).unwrap();
+    assert!(store.marks_switched().unwrap() && !store.staged_switched().unwrap());
+    let [staged, delivered, read, closed] = lifecycle_of("message/held", RECIPIENT);
     assert!(!staged.starts_with("offset-receipt/"), "a staging was recorded as a mark: {staged}");
     for receipt in [&delivered, &read, &closed] {
         assert!(receipt.starts_with("offset-receipt/"), "{receipt}");
     }
-    assert_eq!(kinds("message/hosted"), ["message.sent", "message.staged"]);
-    assert!(message_marks::staged(&store.readers.get(), "message/hosted").unwrap().is_none());
-    assert_eq!(message_marks::status(&store.readers.get(), "message/hosted").unwrap(), Some("closed"));
-    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 3);
-    // A repeat answers its mark's receipt and records nothing again.
-    assert_eq!(store.append_claim(&lifecycle("message/hosted", "message.closed", RECIPIENT)).unwrap().id, closed);
-    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 3);
+    assert_eq!(kinds("message/held"), ["message.sent", "message.staged"]);
+    assert!(message_marks::staged(&store.readers.get(), "message/held").unwrap().is_none());
+    assert_eq!(message_marks::status(&store.readers.get(), "message/held").unwrap(), Some("closed"));
+    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 7);
+    assert_eq!(store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
+    assert!(store.staged_switched().unwrap(), "the next check turns it on again");
+    let position = message_marks::event_position(&store.readers.get()).unwrap();
 
     // A delivery probe proves its read by the replicated claim, so its mail keeps claims.
     store.append_claim(&sent("message/probe", RECIPIENT, &["delivery-probe"])).unwrap();
@@ -230,7 +261,7 @@ fn a_hosted_seat_marks_delivery_read_and_close_once_marks_are_on_and_stages_as_a
         }
         assert_eq!(kinds(subject), every, "{subject}");
     }
-    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 3);
+    assert_eq!(message_marks::event_position(&store.readers.get()).unwrap() - position, 0, "claims move no mark event");
 }
 
 #[test]
@@ -327,4 +358,222 @@ fn a_mark_holds_the_writer_no_longer_than_the_claim_it_replaces() {
         }));
     }
     println!("{}", json!({"messages": messages, "per_kind": report}));
+}
+
+#[test]
+fn a_closed_mark_leaves_the_open_page_before_its_header_folds() {
+    let (_root, claims, marks) = twins();
+    let subject = "message/marks-0-0";
+    for kind in ["message.staged", "message.delivered", "message.read"] {
+        claims.append_claim(&lifecycle(subject, kind, RECIPIENT)).unwrap();
+        message_marks::record(&marks, subject, kind, RECIPIENT).unwrap();
+    }
+    // Each pass then folds one row and stops, and a send that sorts first takes more than one, so
+    // the close's header waits behind it for maintenance as it can on a loaded host.
+    for store in [&claims, &marks] {
+        while store.maintain_client_message_selectors().unwrap() {}
+        store.set_client_message_fold_budget(std::time::Duration::ZERO).unwrap();
+        store.append_claim(&sent("message/backlog", RECIPIENT, &[])).unwrap();
+    }
+    claims.append_claim(&lifecycle(subject, "message.closed", RECIPIENT)).unwrap();
+    message_marks::record(&marks, subject, "message.closed", RECIPIENT).unwrap();
+    // (status, closed, current) of the message's row at the page's own cut.
+    let page = |store: &Store, history: bool| -> Vec<(String, bool, bool)> {
+        let cut = store.client_messages_page_cut(store.index().unwrap()).unwrap();
+        store.client_messages_page(Some(RECIPIENT), None, history, cut, None, 100).unwrap().into_iter()
+            .filter(|(message, ..)| message.subject == subject)
+            .map(|(message, metadata, current)| (message.status, metadata["closed"].as_bool().unwrap(), current))
+            .collect()
+    };
+    let closed = vec![("closed".to_string(), true, false)];
+    for store in [&claims, &marks] {
+        let unfolded = &projections(store)["local_client_message_selectors_v1 unfolded"];
+        assert_eq!(unfolded, &[format!("{:?}", rusqlite::types::ValueRef::from(subject))], "only the close's header is unfolded");
+    }
+    // A claim's close is above the pinned cut, so the page shows the message as it was at the cut.
+    assert_eq!(page(&claims, false), vec![("read".to_string(), false, true)]);
+    // A mark's close has no index to pin, so the page reads it live, as the message's status does.
+    assert_eq!(page(&marks, false), Vec::new(), "a closed mark is on the open page");
+    assert_eq!(page(&marks, true), closed);
+    for store in [&claims, &marks] {
+        while store.maintain_client_message_selectors().unwrap() {}
+        assert_eq!(page(store, false), Vec::new());
+        assert_eq!(page(store, true), closed);
+    }
+}
+
+/// Each pass folds one row and stops, and a send that sorts before every message here takes more
+/// than one, so a header dirtied next waits behind it, as it can on a loaded host.
+fn hold_the_fold_behind_a_backlog(store: &Store) {
+    while store.maintain_client_message_selectors().unwrap() {}
+    store.set_client_message_fold_budget(std::time::Duration::ZERO).unwrap();
+    store.append_claim(&sent("message/backlog", RECIPIENT, &[])).unwrap();
+}
+
+/// The fold's saved work, if a pass stopped partway through a subject.
+fn saved_fold(store: &Store) -> Option<String> {
+    store.readers.get().query_row("SELECT value FROM meta WHERE key=?1", [super::client_messages::FOLD_MARKER], |row| row.get(0)).optional().unwrap()
+}
+
+#[test]
+fn a_closed_mark_moves_its_reminders_winner_before_its_header_folds() {
+    let (_root, _claims, marks) = twins();
+    marks.append_claim(&sent("message/r1", RECIPIENT, &["reminder:standup", "version:1"])).unwrap();
+    marks.append_claim(&sent("message/r2", RECIPIENT, &["reminder:standup", "version:2"])).unwrap();
+    for kind in ["message.staged", "message.delivered", "message.read"] {
+        message_marks::record(&marks, "message/r2", kind, RECIPIENT).unwrap();
+    }
+    // (subject, status, current) of the group's rows at the page's own cut.
+    let page = |history: bool| -> Vec<(String, String, bool)> {
+        let cut = marks.client_messages_page_cut(marks.index().unwrap()).unwrap();
+        marks.client_messages_page(Some(RECIPIENT), None, history, cut, None, 100).unwrap().into_iter()
+            .filter(|(message, ..)| message.subject.starts_with("message/r"))
+            .map(|(message, _, current)| (message.subject, message.status, current)).collect()
+    };
+    let row = |subject: &str, status: &str, current: bool| (subject.to_string(), status.to_string(), current);
+    hold_the_fold_behind_a_backlog(&marks);
+    assert_eq!(page(false), [row("message/r2", "read", true)], "the newer reminder wins");
+    message_marks::record(&marks, "message/r2", "message.closed", RECIPIENT).unwrap();
+    assert!(projections(&marks)["local_client_message_selectors_v1 unfolded"].contains(&format!("{:?}", rusqlite::types::ValueRef::from("message/r2"))), "the close folded");
+    let moved = [row("message/r2", "closed", false), row("message/r1", "sent", true)];
+    assert_eq!(page(false), [row("message/r1", "sent", true)], "the older reminder wins at once");
+    assert_eq!(page(true), moved);
+    while marks.maintain_client_message_selectors().unwrap() {}
+    assert_eq!(page(false), [row("message/r1", "sent", true)]);
+    assert_eq!(page(true), moved);
+}
+
+#[test]
+fn a_closed_mark_leaves_the_folds_saved_work_and_drains_to_the_state_its_claim_does() {
+    let (_root, claims, marks) = twins();
+    for store in [&claims, &marks] {
+        hold_the_fold_behind_a_backlog(store);
+    }
+    let saved = saved_fold(&marks).expect("the backlog's fold stopped partway");
+    assert!(saved.contains("message/backlog"), "{saved}");
+    // Closing another subject's header leaves the fold's cursor, saved work and queue as they were.
+    {
+        let unfolded = projections(&marks)["local_client_message_selectors_v1 unfolded"].clone();
+        let mut connection = marks.connection.write();
+        let transaction = connection.transaction().unwrap();
+        super::client_messages::close_marked(&transaction, "message/marks-0-3").unwrap();
+        let after: String = transaction.query_row("SELECT value FROM meta WHERE key=?1", [super::client_messages::FOLD_MARKER], |row| row.get(0)).unwrap();
+        assert_eq!(after, saved);
+        let still: Vec<String> = transaction.prepare("SELECT subject FROM local_client_message_selectors_v1 WHERE born_index<0 ORDER BY subject").unwrap()
+            .query_map([], |row| row.get_ref(0).map(|value| format!("{value:?}"))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(still, unfolded);
+    }
+    for kind in PATTERNS[4] {
+        claims.append_claim(&lifecycle("message/marks-0-3", kind, RECIPIENT)).unwrap();
+        message_marks::record(&marks, "message/marks-0-3", kind, RECIPIENT).unwrap();
+    }
+    for store in [&claims, &marks] {
+        while store.maintain_client_message_selectors().unwrap() {}
+    }
+    // Each twin sent its own backlog, at its own time.
+    let backlog = format!("{:?}", rusqlite::types::ValueRef::from("message/backlog"));
+    let shared = |store: &Store| projections(store).into_iter()
+        .map(|(table, rows)| (table, rows.into_iter().filter(|row| !row.starts_with(&backlog)).collect::<Vec<_>>()))
+        .collect::<BTreeMap<_, _>>();
+    let (by_claims, by_marks) = (shared(&claims), shared(&marks));
+    for (table, rows) in &by_claims {
+        assert_eq!(rows, &by_marks[table], "{table}");
+    }
+}
+
+#[test]
+fn a_closed_mark_leaves_a_header_its_fold_has_saved_work_on_to_the_fold() {
+    let (_root, _claims, marks) = twins();
+    hold_the_fold_behind_a_backlog(&marks);
+    while marks.maintain_client_message_selectors().unwrap() {}
+    // The backlog now has a header, and a new claim starts its fold over, partway again.
+    marks.append_claim(&lifecycle("message/backlog", "message.staged", RECIPIENT)).unwrap();
+    let saved = saved_fold(&marks).expect("the refold stopped partway");
+    assert!(saved.contains("message/backlog"), "{saved}");
+    let header = |connection: &rusqlite::Connection| -> String {
+        connection.query_row("SELECT closed||','||global_current||','||recipient_current FROM local_client_message_selectors_v1 WHERE subject='message/backlog' AND born_index>=0 AND retired_index IS NULL", [], |row| row.get(0)).unwrap()
+    };
+    let before = header(&marks.readers.get());
+    let mut connection = marks.connection.write();
+    let transaction = connection.transaction().unwrap();
+    super::client_messages::close_marked(&transaction, "message/backlog").unwrap();
+    assert_eq!(header(&transaction), before, "closed a header mid-fold");
+    assert_eq!(before, "0,1,1");
+}
+
+
+/// A later version that folds past the published cut while another subject is still pending leaves
+/// readers pinned before it, where the closed winner's currency stays on a header the fold retired.
+/// The group's next version at that cut stands in for it until the cut publishes.
+#[test]
+fn a_closed_mark_at_a_cut_a_later_version_folded_past_hands_the_cuts_winner_on() {
+    let (_root, _claims, marks) = twins();
+    marks.append_claim(&sent("message/r1", RECIPIENT, &["reminder:standup", "version:1"])).unwrap();
+    marks.append_claim(&sent("message/r2", RECIPIENT, &["reminder:standup", "version:2"])).unwrap();
+    // (subject, status, current) of the group's rows at the page's own cut, for everyone and for the recipient.
+    let page = |person: Option<&str>| -> Vec<(String, String, bool)> {
+        let cut = marks.client_messages_page_cut(marks.index().unwrap()).unwrap();
+        marks.client_messages_page(person, None, false, cut, None, 100).unwrap().into_iter()
+            .filter(|(message, ..)| message.subject.starts_with("message/r"))
+            .map(|(message, _, current)| (message.subject, message.status, current)).collect()
+    };
+    let row = |subject: &str, status: &str, current: bool| (subject.to_string(), status.to_string(), current);
+    let unfolded = |subject: &str| projections(&marks)["local_client_message_selectors_v1 unfolded"].contains(&format!("{:?}", rusqlite::types::ValueRef::from(subject)));
+    hold_the_fold_behind_a_backlog(&marks);
+    marks.append_claim(&sent("message/r3", RECIPIENT, &["reminder:standup", "version:3"])).unwrap();
+    marks.append_claim(&sent("message/zz", RECIPIENT, &[])).unwrap();
+    while unfolded("message/r3") { assert!(marks.maintain_client_message_selectors().unwrap()); }
+    assert!(unfolded("message/zz"), "the cut stays pinned before r3");
+    for person in [None, Some(RECIPIENT)] {
+        assert_eq!(page(person), [row("message/r2", "sent", true)], "{person:?}");
+    }
+    message_marks::record(&marks, "message/r2", "message.closed", RECIPIENT).unwrap();
+    for person in [None, Some(RECIPIENT)] {
+        assert_eq!(page(person), [row("message/r1", "sent", true)], "the cut's next version stands in, {person:?}");
+    }
+    while marks.maintain_client_message_selectors().unwrap() {}
+    for person in [None, Some(RECIPIENT)] {
+        assert_eq!(page(person), [row("message/r3", "sent", true)], "{person:?}");
+    }
+}
+
+/// What the open page costs a reader pinned to a cut that `ST_PAGE_GROUPS` (default 2000)
+/// reminder groups have each had a later version fold past: with no closed marks, and with every
+/// one of the cut's winners closed by a mark, so each group's version 0 stands in for it.
+#[test]
+#[ignore = "pinned open page cost against the retirements since its cut: run alone"]
+fn a_pinned_open_page_costs_little_beside_the_retirements_since_its_cut() {
+    let groups: usize = std::env::var("ST_PAGE_GROUPS").ok().and_then(|value| value.parse().ok()).unwrap_or(2000);
+    let (_root, _claims, marks) = twins();
+    for group in 0..groups {
+        for version in [0, 1] {
+            marks.append_claim(&sent(&format!("message/g{group:05}-{version}"), RECIPIENT, &[&format!("reminder:g{group:05}"), &format!("version:{version}")])).unwrap();
+        }
+    }
+    hold_the_fold_behind_a_backlog(&marks);
+    for group in 0..groups {
+        marks.append_claim(&sent(&format!("message/g{group:05}-2"), RECIPIENT, &[&format!("reminder:g{group:05}"), "version:2"])).unwrap();
+    }
+    marks.append_claim(&sent("message/zz", RECIPIENT, &[])).unwrap();
+    let unfolded = || projections(&marks)["local_client_message_selectors_v1 unfolded"].clone();
+    let last = format!("{:?}", rusqlite::types::ValueRef::from("message/zz"));
+    while unfolded() != [last.clone()] { assert!(marks.maintain_client_message_selectors().unwrap()); }
+    let cut = marks.client_messages_page_cut(marks.index().unwrap()).unwrap();
+    let time = |person: Option<&str>| {
+        let mut rows = 0;
+        let mut samples = (0..200).map(|_| {
+            let start = std::time::Instant::now();
+            rows = marks.client_messages_page(person, None, false, cut, None, 50).unwrap().len();
+            start.elapsed().as_secs_f64() * 1000.0
+        }).collect::<Vec<_>>();
+        samples.sort_by(f64::total_cmp);
+        json!({"p50_ms": samples[samples.len() / 2], "p99_ms": samples[samples.len() * 99 / 100], "rows": rows})
+    };
+    let unmarked = json!({"global": time(None), "recipient": time(Some(RECIPIENT))});
+    for group in 0..groups {
+        message_marks::record(&marks, &format!("message/g{group:05}-1"), "message.closed", RECIPIENT).unwrap();
+    }
+    assert_eq!(unfolded(), [last], "the cut stays pinned");
+    let marked = json!({"global": time(None), "recipient": time(Some(RECIPIENT))});
+    println!("{}", json!({"groups": groups, "unmarked": unmarked, "every_winner_marked": marked}));
 }

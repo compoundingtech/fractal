@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Measure an explicitly selected owner's live first pages before/after a build.
+
+On the owner host, run this once with the old daemon and once after deploying
+an approved new daemon (this command never changes or restarts a daemon):
+  python3 scripts/measure-timeline-first-page --socket /path/to/daemon.sock \
+    --session session/external-EXAMPLE --label before
+Repeat with --label after. Compare median_ms for limits 1 and 20. Each sample
+is a fresh connection; the first sample is reported separately as cold_ms.
+"""
+import argparse
+import hashlib
+import http.client
+import json
+import socket
+import statistics
+import time
+import urllib.parse
+
+
+class UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("localhost", timeout=60)
+        self.path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--socket", required=True)
+    parser.add_argument("--session", required=True)
+    parser.add_argument("--label", required=True)
+    parser.add_argument("--samples", type=int, default=6)
+    args = parser.parse_args()
+    if args.samples < 2:
+        parser.error("--samples must be at least 2 (one cold and one warm)")
+    session = urllib.parse.quote(args.session.removeprefix("session/"), safe="")
+    for limit in (1, 20):
+        timings = []
+        digests = []
+        for _ in range(args.samples):
+            connection = UnixConnection(args.socket)
+            start = time.perf_counter()
+            try:
+                connection.request("GET", f"/v1/client/sessions/{session}/timeline?limit={limit}",
+                                   headers={"x-st3-features": "conversation-blocks.v1"})
+                response = connection.getresponse()
+                body = response.read()
+                elapsed = (time.perf_counter() - start) * 1000
+                if response.status != 200:
+                    raise RuntimeError(f"timeline returned HTTP {response.status}: {body[:1000]!r}")
+                value = json.loads(body)["value"]
+                if len(value["items"]) > limit:
+                    raise RuntimeError("owner exceeded the requested page limit")
+                digests.append(hashlib.sha256(json.dumps(
+                    {"header": value.get("header"), "items": value["items"]},
+                    sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+                timings.append(elapsed)
+            finally:
+                connection.close()
+        print(json.dumps({"label": args.label, "session": args.session, "limit": limit,
+                          "cold_ms": timings[0], "median_ms": statistics.median(timings[1:]),
+                          "samples_ms": timings, "header_items_sha256": digests}))
+
+
+if __name__ == "__main__":
+    main()

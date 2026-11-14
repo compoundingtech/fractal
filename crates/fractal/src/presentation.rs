@@ -11,6 +11,7 @@ use fractal_daemon::model::{
     AttentionItemView, MissionInputKind, MissionRunView, RevisionCutover, RevisionProposalView,
     RunGenerationView, StepRunView,
 };
+use fractal_daemon::program_journal::ProgramRunView;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OutputStyle {
@@ -113,6 +114,21 @@ pub(crate) fn render_mission_run(
         short_subject(&selected.mission, "mission/")
     );
     let _ = writeln!(output, "RUN       {}", selected.subject);
+    if let Some(source) = &selected.retry_of {
+        let _ = writeln!(output, "RETRY OF  {source}");
+    }
+    for retry in &selected.retried_by {
+        let _ = writeln!(output, "RETRIED BY {retry}");
+    }
+    if let Some(source) = &selected.supersedes {
+        let _ = writeln!(output, "SUPERSEDES {source}");
+    }
+    if let Some(replacement) = &selected.superseded_by {
+        let _ = writeln!(output, "SUPERSEDED BY {replacement}");
+    }
+    if let Some(reason) = &selected.supersession_fault {
+        let _ = writeln!(output, "{} {reason}", style.status_value("blocked", "SUPERSESSION FAULT"));
+    }
     let _ = writeln!(
         output,
         "STATE     {} · {}",
@@ -170,6 +186,11 @@ pub(crate) fn render_mission_run(
         if let Some(fault) = &run.scheduler_fault {
             let _ = writeln!(output, "SCHEDULER FAULT  {fault}");
         }
+        for program in &run.programs {
+            if let Some(fault) = &program.fault {
+                let _ = writeln!(output, "PROGRAM FAULT  {} ({}): {}", program.path, fault.scope, fault.reason);
+            }
+        }
     }
     if !selected.inputs.is_empty() {
         let _ = writeln!(output);
@@ -187,7 +208,7 @@ pub(crate) fn render_mission_run(
     if selected.steps.is_empty() {
         let _ = writeln!(output, "  {}", style.muted("No steps."));
     } else {
-        render_run_steps(&mut output, selected, &children, "  ", style);
+        render_run_steps(&mut output, selected, &children, "  ", style, now_unix_ms);
     }
     output
 }
@@ -439,6 +460,15 @@ fn render_object_fields(
         if displayed_identity.is_some_and(|identity| scalar_text(value) == identity)
             && matches!(key.as_str(), "subject" | "id" | "name" | "reference")
         {
+            continue;
+        }
+        if key == "declared_admission" && let Value::Object(nested) = value {
+            if !nested.is_empty() {
+                let padding = " ".repeat(indent);
+                let _ = writeln!(output, "{padding}{}", style.heading("Declared admission — declared, not enforced."));
+                let _ = writeln!(output, "{padding}st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+                render_object_fields(output, nested, indent + 2, style, None);
+            }
             continue;
         }
         let padding = " ".repeat(indent);
@@ -851,11 +881,14 @@ pub(crate) fn render_claim_lease(
     output
 }
 
+/// `source` is the step's SOURCE row (`source_cli::render_step_source`), printed under its
+/// definition when its run's revision has a source map.
 pub(crate) fn render_step_run(
     step: &StepRunView,
     style: OutputStyle,
     now_unix_ms: u128,
     driver_held: Option<bool>,
+    source: Option<&str>,
 ) -> String {
     let mut output = String::new();
     let title = step.title.as_deref().unwrap_or(&step.step);
@@ -870,6 +903,9 @@ pub(crate) fn render_step_run(
     let _ = writeln!(output, "MISSION RUN {}", step.run);
     let _ = writeln!(output, "GENERATION {}", step.generation);
     let _ = writeln!(output, "DEFINITION {}", step.definition_hash);
+    if let Some(source) = source {
+        output.push_str(source);
+    }
     let _ = writeln!(
         output,
         "UPDATED    {}",
@@ -1263,6 +1299,7 @@ fn render_run_steps(
     children: &BTreeMap<&str, Vec<&MissionRunView>>,
     indent: &str,
     style: OutputStyle,
+    now_unix_ms: u128,
 ) {
     let base_depth = run
         .steps
@@ -1318,6 +1355,9 @@ fn render_run_steps(
                 let _ = writeln!(output, "{indent}    {reason}");
             }
         }
+        if let Some(program) = run.programs.iter().find(|program| program.step_run == step.subject) {
+            render_program(output, program, indent, style, now_unix_ms);
+        }
         let prefix = format!("{}/", step.step);
         let nested = run
             .steps
@@ -1362,9 +1402,70 @@ fn render_run_steps(
                 child.steps.len()
             );
             if !matches!(child.status.as_str(), "completed" | "cancelled") {
-                render_run_steps(output, child, children, &format!("{indent}    "), style);
+                render_run_steps(output, child, children, &format!("{indent}    "), style, now_unix_ms);
             }
         }
+    }
+}
+
+/// How many of a program's newest keys `missions show` lists; `--json` carries every key read.
+const PROGRAM_KEYS_SHOWN: usize = 12;
+
+/// A program step's journal: the innermost open key, then each key's latest status, newest last.
+fn render_program(
+    output: &mut String,
+    program: &ProgramRunView,
+    indent: &str,
+    style: OutputStyle,
+    now_unix_ms: u128,
+) {
+    let journal = &program.journal;
+    let current = match journal.innermost() {
+        Some(entry) => format!("running {}", entry.key),
+        None => "idle".to_owned(),
+    };
+    let _ = write!(output, "{indent}  ↳ program · {current} · {} keys", journal.entries.len());
+    if journal.truncated {
+        let _ = write!(output, "+");
+    }
+    if let Some(at) = journal.last_entry_at_unix_ms {
+        let _ = write!(output, " · last entry {}", relative_time(at, now_unix_ms));
+    }
+    let _ = writeln!(output);
+    let hidden = journal.entries.len().saturating_sub(PROGRAM_KEYS_SHOWN);
+    if hidden > 0 {
+        let _ = writeln!(output, "{indent}    … {hidden} earlier keys");
+    }
+    for entry in &journal.entries[hidden..] {
+        let mut line = format!(
+            "{indent}    {} {}",
+            style.status_value(&entry.status, format!("{:<9}", entry.status)),
+            entry.key
+        );
+        match (entry.ms, entry.started_at_unix_ms) {
+            (Some(ms), _) => {
+                let _ = write!(line, " · {}", program_duration(u128::from(ms)));
+            }
+            (None, Some(started)) if entry.status == "started" => {
+                let _ = write!(line, " · running {}", program_duration(now_unix_ms.saturating_sub(started)));
+            }
+            _ => {}
+        }
+        if let Some(child) = &entry.child {
+            let _ = write!(line, " · waits on {child}");
+        }
+        if let Some(error) = &entry.error {
+            let _ = write!(line, " · {}", glance(error));
+        }
+        let _ = writeln!(output, "{line}");
+    }
+}
+
+fn program_duration(ms: u128) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else {
+        fractal_daemon::waiting_on::describe_age(ms)
     }
 }
 
@@ -1575,50 +1676,48 @@ mod tests {
     use fractal_daemon::model::{LoopRunView, MissionRunInput, UnderSpec};
 
     fn step(subject: &str, path: &str, status: &str) -> StepRunView {
-        StepRunView {
-            subject: subject.into(),
-            run: "mission-run/demo/run".into(),
-            generation: "run-generation/demo-generation".into(),
-            step: path.into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition-hash".into(),
-            status: status.into(),
-            attempt: 1,
-            assigned_to: Some("agent/demo/worker".into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: Some(path.replace('/', " ")),
-            goals: vec!["Complete the work.".into()],
-            constraints: vec!["Keep the proof.".into()],
-            under: Vec::<UnderSpec>::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: None,
-            wake: None,
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 1_000,
-            updated_at_unix_ms: 2_000,
-            person_answers: Vec::new(),
-        }
+        StepRunView { executions: None, subject: subject.into(),
+        run: "mission-run/demo/run".into(),
+        generation: "run-generation/demo-generation".into(),
+        step: path.into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition-hash".into(),
+        status: status.into(),
+        attempt: 1,
+        assigned_to: Some("agent/demo/worker".into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: Some(path.replace('/', " ")),
+        goals: vec!["Complete the work.".into()],
+        constraints: vec!["Keep the proof.".into()],
+        under: Vec::<UnderSpec>::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: None,
+        wake: None,
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 1_000,
+        updated_at_unix_ms: 2_000,
+        person_answers: Vec::new(), }
     }
 
     #[test]
@@ -1632,19 +1731,23 @@ mod tests {
             assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
             ask: "step-run/demo/ask".into(),
             status: "completed".into(),
-            summary: "Proceed".into(),
+            summary: "Proceed\nNote on hold (not selected): Revisit after launch.".into(),
             respondent: "assistant/chatgpt".into(),
             answered_at_unix_ms: 2_000,
-            answer: None,
+            answer: Some(serde_json::json!({
+                "type": "decision", "outcome": "accept", "id": "proceed", "label": "Proceed",
+                "option_notes": [{"id": "hold", "text": "Revisit after launch."}]
+            })),
             resolved_by: None,
             evidence: vec![],
         });
-        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("Sender class: external-assistant"));
         assert!(rendered.contains("Assistant grant: assistant-grant/test"));
         assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
         assert!(rendered.contains("Assistant owner: person/avery"));
         assert!(rendered.contains("Assistant session actor: assistant/chatgpt/session/test"));
+        assert!(rendered.contains("Note on hold (not selected): Revisit after launch."));
     }
 
     fn run(subject: &str, parent: Option<&str>, steps: Vec<StepRunView>) -> MissionRunView {
@@ -1662,6 +1765,11 @@ mod tests {
             root_revision: "root-revision".into(),
             root_mission_run: "mission-run/demo/run".into(),
             parent_step_run: parent.map(str::to_owned),
+            retry_of: None,
+            retried_by: Vec::new(),
+            supersedes: None,
+            superseded_by: None,
+            supersession_fault: None,
             workspace: "/workspace".into(),
             requester: "person/tester".into(),
             inputs: BTreeMap::from([(
@@ -1684,9 +1792,46 @@ mod tests {
             updated_at_unix_ms: 2_000,
             steps,
             loops: Vec::new(),
+            programs: Vec::new(),
             stuck_gates: Vec::new(),
             scheduler_fault: None,
         }
+    }
+
+    #[test]
+    fn mission_show_displays_exact_retry_links() {
+        let mut selected = run("mission-run/demo/retry", None, Vec::new());
+        selected.retry_of = Some("mission-run/demo/original".into());
+        selected.retried_by = vec![
+            "mission-run/demo/retry-again".into(),
+            "mission-run/demo/another-retry".into(),
+        ];
+        let rendered = render_mission_run_page(
+            &selected, std::slice::from_ref(&selected), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains("RETRY OF  mission-run/demo/original"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/retry-again"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/another-retry"));
+        let plain = run("mission-run/demo/original", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("RETRY OF"));
+        assert!(!rendered.contains("RETRIED BY"));
+    }
+
+    #[test]
+    fn mission_show_displays_supersession_links_and_admission_fault() {
+        let mut selected = run("mission-run/demo/current", None, Vec::new());
+        selected.supersedes = Some("mission-run/demo/previous".into());
+        selected.superseded_by = Some("mission-run/demo/replacement".into());
+        selected.supersession_fault = Some("revision old -> new: input branch changed kind from Text to Resource".into());
+        let rendered = render_mission_run_page(&selected, &[], OutputStyle::plain(), 3_000);
+        assert!(rendered.contains("SUPERSEDES mission-run/demo/previous"));
+        assert!(rendered.contains("SUPERSEDED BY mission-run/demo/replacement"));
+        assert!(rendered.contains("SUPERSESSION FAULT revision old -> new: input branch changed kind from Text to Resource"));
+        let plain = run("mission-run/demo/ordinary", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("SUPERSED"));
+        assert!(!rendered.contains("SUPERSESSION FAULT"));
     }
 
     fn terminal(subject: &str, status: &str) -> SubjectStatus {
@@ -1739,6 +1884,19 @@ mod tests {
             render_pty_list(&[], OutputStyle::plain()),
             "TERMINALS\nNo terminal sessions are declared.\n"
         );
+    }
+
+    #[test]
+    fn declared_admission_group_uses_the_non_enforcement_contract() {
+        let rendered = render_human_value(&serde_json::json!({
+            "mission": {"declared_admission": {"lane": "check"}}
+        }), OutputStyle::plain());
+        assert!(rendered.contains("Declared admission — declared, not enforced."));
+        assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits."));
+        assert!(rendered.contains("check"));
+        assert!(!render_human_value(&serde_json::json!({
+            "declared_admission": {}
+        }), OutputStyle::plain()).contains("Declared admission"));
     }
 
     #[test]
@@ -1979,6 +2137,40 @@ mod tests {
     }
 
     #[test]
+    fn mission_view_shows_each_program_key_and_the_program_fault() {
+        use fractal_daemon::program_journal::{ProgramFault, ProgramJournal};
+        let program_step = step("step-run/demo-generation/land", "land", "working");
+        let mut root = run("mission-run/demo/run", None, vec![program_step]);
+        let rows = [
+            (serde_json::json!({"key": "review", "status": "started", "child": "mission-run/demo/review"}), 2_000),
+            (serde_json::json!({"key": "merge", "status": "failed", "ms": 900, "error": {"_tag": "Conflict"}}), 1_500),
+            (serde_json::json!({"key": "merge", "status": "started"}), 1_400),
+            (serde_json::json!({"key": "render", "status": "completed", "ms": 2_500}), 1_200),
+        ];
+        root.programs.push(ProgramRunView {
+            step_run: "step-run/demo-generation/land".into(),
+            path: "land".into(),
+            attempt: 1,
+            bundle_hash: "a".repeat(64),
+            stalled_after_ms: 600_000,
+            journal: ProgramJournal::fold(rows.iter().map(|(fields, at)| (fields, *at)), false),
+            fault: Some(ProgramFault {
+                scope: "program/stalled".into(),
+                reason: "no journal entry for 10m; open key `review`".into(),
+            }),
+        });
+
+        let rendered = render_mission_run(&root, &[root.clone()], OutputStyle::plain(), 62_000);
+
+        assert!(rendered.contains("PROGRAM FAULT  land (program/stalled): no journal entry for 10m; open key `review`\n"), "{rendered}");
+        assert!(rendered.contains("  ↳ program · running review · 3 keys · last entry 1m ago\n"), "{rendered}");
+        assert!(rendered.contains("    completed render · 2s\n"), "{rendered}");
+        assert!(rendered.contains("    failed    merge · 900ms · {\"_tag\":\"Conflict\"}\n"), "{rendered}");
+        assert!(rendered.contains("    started   review · running 1m · waits on mission-run/demo/review\n"), "{rendered}");
+        assert!(!rendered.contains("watching"), "{rendered}");
+    }
+
+    #[test]
     fn mission_view_shows_one_summary_line_per_reporting_step() {
         let mut working = step("step-run/demo-generation/build", "build", "working");
         working.progress_summary = Some("Tests pass; opening the pull request".into());
@@ -2116,7 +2308,7 @@ mod tests {
         claimed.execution_elapsed_ms = 1_000;
         claimed.timeout_ms = Some(60_000);
 
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), None);
 
         assert!(rendered.contains("SUBJECT    step-run/demo-generation/build"));
         assert!(rendered.contains("GENERATION run-generation/demo-generation"));
@@ -2124,6 +2316,11 @@ mod tests {
         assert!(!rendered.contains("fractal work renew"));
         assert!(rendered.contains("Execution    1000ms / 60000ms · active 1s ago"));
         assert!(rendered.contains("• Complete the work."));
+        assert!(!rendered.contains("SOURCE"));
+
+        let source = "SOURCE     schickling/factory@2e047be graph/demo/mission.ts:7-11\n  via      graph/demo/steps.ts:6-10\n";
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), Some(source));
+        assert!(rendered.contains(&format!("DEFINITION {}\n{source}UPDATED", claimed.definition_hash)), "{rendered}");
     }
 
     #[test]
@@ -2131,12 +2328,12 @@ mod tests {
         let mut claimed = step("step-run/demo-generation/build", "build", "claimed");
         claimed.claimant = Some("person/operator".into());
         claimed.claim_expires_at_unix_ms = Some(62_001);
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("Lease        The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew step-run/demo-generation/build --as person/operator\n"));
         assert!(!rendered.contains("st driver renews"));
 
         claimed.claim_incarnation = Some("incarnation/manual".into());
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false));
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("--as person/operator --incarnation incarnation/manual\n"));
     }
 

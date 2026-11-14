@@ -13,7 +13,7 @@ export interface TestGateway {
   readonly client: FoldersClient
   readonly sdk: FractalClient
   readonly calls: { url: string; body?: unknown }[]
-  readonly state: { current: Arrangement; accepted: boolean; loseNextReply: boolean; capability: boolean; capabilityVersion: number; afterAccept?: () => void }
+  readonly state: { current: Arrangement; accepted: boolean; loseNextReply: boolean; capability: boolean; capabilityVersion: number; credentialRejected?: 'discover' | 'arrangements'; afterAccept?: () => void }
   close(): Promise<void>
 }
 /** Local HTTP implementation of the exercised wire fixture, not a live daemon proof. */
@@ -29,6 +29,11 @@ export const createTestGateway = async (): Promise<TestGateway> => {
       body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     }
     calls.push({ url, ...(body === undefined ? {} : { body }) })
+    if (state.credentialRejected === 'discover' || (state.credentialRejected === 'arrangements' && url.startsWith('/v1/client/arrangements'))) {
+      response.writeHead(403, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/refused', code: 'forbidden', message: 'private credential diagnostic', retryable: false, details: { reason: 'credential-rejected' } }))
+      return
+    }
     const send = (value: unknown): void => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ api_version: 'st3.client.v0', request_id: 'request/test', snapshot: testSnapshot, value })) }
     if (url === '/v1/client/capabilities') { send({ ...testCapabilities, capabilities: state.capability ? [{ id: 'arrangements', state: 'granted', version: state.capabilityVersion }] : [] }); return }
     if (url === '/v1/client/actions') {

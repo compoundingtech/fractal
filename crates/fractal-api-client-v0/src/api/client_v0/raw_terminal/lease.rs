@@ -16,12 +16,14 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(Store::open_memory("lease-owner").unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0).0,
             node: "lease-owner".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: root.path().join("unused-pty"),
@@ -48,12 +50,11 @@ mod tests {
     }
 
     fn claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
-        state
-            .store
-            .append_claim(&ClaimInput {
+        let input = ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
-                actor: None,
+                actor: fields.get("person_id").and_then(Value::as_str)
+                    .or((kind == "custom.client.pairing-revoked").then_some("person/alex")).map(str::to_owned),
                 fields: fields
                     .as_object()
                     .unwrap()
@@ -63,8 +64,12 @@ mod tests {
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: None,
-            })
-            .unwrap();
+            };
+        if kind.starts_with("custom.client.pairing") {
+            state.store.append_client_operation_claim(&input)
+        } else {
+            state.store.append_claim(&input)
+        }.unwrap();
     }
 
     fn pairing(state: &AppState, subject: &str, credential: &str, scopes: Value) {
@@ -119,9 +124,7 @@ mod tests {
         let (_other_root, mut gateway, _) = fixture();
         gateway.store = Arc::new(Store::open_memory("other-member").unwrap());
         gateway.node = "other-member".into();
-        gateway.store.import_replication(
-            "lease-owner", &issuer.store.export_replication(0).unwrap(),
-        ).unwrap();
+        super::super::super::pairing_order_tests::replicate(&issuer, &gateway);
         pairing(&gateway, "custom/client/gateway-second", "second", json!(["terminal.read"]));
         let first = authenticated(&gateway, "first");
         assert_eq!(authorization_epoch(&gateway, &first).unwrap_err().code, "forbidden");
@@ -224,6 +227,20 @@ mod tests {
             lease.selected_use(1).is_err(),
             "expired streams cannot be resurrected"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn held_stream_stops_at_the_effective_pairing_deadline() {
+        let (_root, state, _) = fixture();
+        pairing(&state, "custom/client/deadline-phone", "deadline-phone", json!(["terminal.read"]));
+        let mut session = authenticated(&state, "deadline-phone");
+        session.grant_expires_at = Some(client_now_ms() + 2_000);
+        let lease = acquire(&state, &session);
+        assert!(lease.binding.absolute_deadline_unix_ms <= session.grant_expires_at.unwrap());
+        assert!(lease.check().is_ok());
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(lease.check().is_err());
+        assert!(lease.selected_use(1).is_err());
     }
 
     #[tokio::test(start_paused = true)]

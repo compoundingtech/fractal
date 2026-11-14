@@ -5,6 +5,27 @@
 //! mirror is new, wakes nobody.
 
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
+
+/// The operation names this observation, not the global event subject. Keep every payload
+/// field in the fingerprint: even the same observer on two pollers can see different facts.
+pub(super) fn observation_key(subject: &str, fields: &BTreeMap<String, Value>) -> anyhow::Result<String> {
+    let digest = fingerprint("github-event-observation.v1", subject, fields)?;
+    Ok(format!("github-event-observation:v1:{digest}"))
+}
+
+/// The operation names one poller's write of one completed CI run, like [`observation_key`].
+pub(super) fn workflow_run_observation_key(subject: &str, fields: &BTreeMap<String, Value>) -> anyhow::Result<String> {
+    let digest = fingerprint("github-workflow-run-observation.v1", subject, fields)?;
+    Ok(format!("github-workflow-run-observation:v1:{digest}"))
+}
+
+fn fingerprint(domain: &str, subject: &str, fields: &BTreeMap<String, Value>) -> anyhow::Result<String> {
+    let fields = fields.iter()
+        .map(|(name, value)| (name, smallclaims::hash::canonical_json_value(value)))
+        .collect::<BTreeMap<_, _>>();
+    smallclaims::hash::canonical_hash(&(domain, subject, fields))
+}
 
 /// One thing that happened to one item.
 #[derive(Clone, Debug, PartialEq)]
@@ -170,6 +191,98 @@ pub fn view(event: &Event, item: &str, subject: &str, at: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn event_claim(observer: &str, at: &str) -> crate::model::ClaimInput {
+        let subject = "github-event/github/acme/garden/issue/7/closed";
+        let fields = BTreeMap::from([
+            ("version".into(), json!(1)),
+            ("item".into(), json!("resource/github/acme/garden/issue/7")),
+            ("event".into(), json!("closed")),
+            ("observer".into(), json!(observer)),
+            ("at".into(), json!(at)),
+            ("detail".into(), json!({"state": "closed"})),
+        ]);
+        let key = observation_key(subject, &fields).unwrap();
+        crate::model::ClaimInput {
+            subject: subject.into(), kind: fractal_schema::github_plugin::EVENT.into(),
+            actor: None, fields, evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(key),
+        }
+    }
+
+    #[test]
+    fn observation_keys_cover_every_field_and_canonicalize_nested_objects() {
+        let input = event_claim("observer/a", "2026-11-11T10:00:00Z");
+        let original = observation_key(&input.subject, &input.fields).unwrap();
+        for (name, value) in [
+            ("observer", json!("observer/b")),
+            ("at", json!("2026-11-11T10:00:01Z")),
+            ("head_sha", json!("abc")),
+            ("detail", json!({"state": "open"})),
+            ("event", json!("reopened")),
+            ("version", json!(2)),
+            ("item", json!("resource/github/acme/garden/issue/8")),
+        ] {
+            let mut fields = input.fields.clone();
+            fields.insert(name.into(), value);
+            assert_ne!(observation_key(&input.subject, &fields).unwrap(), original, "{name}");
+        }
+        assert_ne!(observation_key("github-event/github/acme/garden/issue/8/closed", &input.fields).unwrap(), original);
+        let mut fields = input.fields;
+        fields.insert("detail".into(), serde_json::from_str(r#"{"b":{"y":2,"x":1},"a":0}"#).unwrap());
+        let first = observation_key(&input.subject, &fields).unwrap();
+        fields.insert("detail".into(), serde_json::from_str(r#"{"a":0,"b":{"x":1,"y":2}}"#).unwrap());
+        assert_eq!(observation_key(&input.subject, &fields).unwrap(), first);
+    }
+
+    /// Independent writers race before either sees the other's event. Old global keys and
+    /// new observation keys must fold by subject, regardless of replication arrival order.
+    #[test]
+    fn concurrent_event_observations_and_legacy_claims_fold_once_without_conflicts() {
+        use crate::store::Store;
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        for (other_observer, legacy) in [("observer/b", false), ("observer/a", false), ("observer/b", true)] {
+            let a = Store::open_memory("alder").unwrap();
+            let b = Store::open_memory("birch").unwrap();
+            let forward = Store::open_memory("cedar").unwrap();
+            let reverse = Store::open_memory("dogwood").unwrap();
+            for store in [&a, &b, &forward, &reverse] {
+                store.bind_fleet(FLEET).unwrap();
+            }
+            let input = event_claim("observer/a", "2026-11-11T10:00:00Z");
+            let first = a.append_claim(&input).unwrap();
+            assert_eq!(a.append_claim(&input).unwrap().id, first.id, "exact retry");
+            let mut other = event_claim(other_observer, "2026-11-11T10:00:01Z");
+            if legacy {
+                other.idempotency_key = Some(format!("github-event:{}", other.subject));
+            }
+            let second = b.append_claim(&other).unwrap();
+            assert_ne!(first.body["_operation"]["id"], second.body["_operation"]["id"]);
+            for (target, sources) in [(&forward, [&a, &b]), (&reverse, [&b, &a])] {
+                for source in sources {
+                    let exchange = source.export_replication_exchange_answering(
+                        FLEET, &target.replication_inventory().unwrap(),
+                        &target.replication_signature_requests().unwrap(),
+                    ).unwrap();
+                    target.receive_replication_exchange(&source.origin, FLEET, &exchange).unwrap();
+                    target.validate_replication_backlog().unwrap();
+                    target.project_replication_backlog().unwrap();
+                }
+                assert_eq!(target.idempotency_conflicts(10).unwrap().0, 0);
+                assert_eq!(target.claims_for(&input.subject, None).unwrap().len(), 2, "provenance survives");
+                let events = target.github_events("resource/github/acme/garden", Some(7), 10).unwrap();
+                assert_eq!(events.len(), 1, "one event, not one row per observation");
+                assert_eq!(events, target.github_events("resource/github/acme/garden", None, 1).unwrap());
+                target.replay_replication_graph().unwrap();
+                assert_eq!(events, target.github_events("resource/github/acme/garden", Some(7), 10).unwrap());
+            }
+            assert_eq!(
+                forward.github_events("resource/github/acme/garden", None, 10).unwrap(),
+                reverse.github_events("resource/github/acme/garden", None, 10).unwrap(),
+                "canonical fold is independent of arrival",
+            );
+        }
+    }
 
     fn facts(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()

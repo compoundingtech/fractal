@@ -2,8 +2,13 @@ import { Effect } from 'effect'
 import * as FetchHttpClient from 'effect/http/FetchHttpClient'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
-// Isolate the page's transport ownership; use the real telemetry and OTLP exporter.
-const source = vi.hoisted(() => vi.fn(() => ({ dispose: vi.fn(async () => {}) })))
+// Isolate the page's transport ownership; use the real telemetry and OTLP exporter. The source has no
+// availability port, as against a daemon without it, so the page starts no presence reports.
+const source = vi.hoisted(() => vi.fn(() => ({ source: {}, dispose: vi.fn(async () => {}) })))
+const pairingStatus = vi.hoisted(() => vi.fn(async (): Promise<{ status: 'paired' | 'unpaired'; credentialChanged: boolean } | undefined> => undefined))
+const closeEarly = vi.hoisted(() => vi.fn())
+vi.mock('../data/browserPairing.ts', () => ({ browserPairingPort: () => ({ status: pairingStatus }) }))
+vi.mock('../data/sdk-browser/early.ts', () => ({ takeEarlyCollections: () => ({ close: closeEarly }), peekEarlyBootstrap: () => undefined }))
 vi.mock('../data/liveSource.ts', () => ({ liveSource: source }))
 vi.mock('virtual:build-identity', () => ({
   buildIdentity: { machineVersion: 'test' }, deploymentId: undefined,
@@ -12,6 +17,9 @@ vi.mock('virtual:build-identity', () => ({
 const frames: FrameRequestCallback[] = []
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  pairingStatus.mockReset()
+  closeEarly.mockClear()
+  source.mockClear()
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length })
   vi.stubGlobal('cancelAnimationFrame', () => {})
 })
@@ -87,9 +95,13 @@ it('exports to the explicitly configured traces endpoint', async () => {
   expect(errors).not.toHaveBeenCalled()
 })
 
-it('uses replay transports without early adoption and closes replay with the page source', async () => {
+it('uses replay transports without early adoption, drops the availability port, and closes replay with the page source', async () => {
   vi.stubGlobal('window', { location: { origin: 'https://example.test', search: '' } })
   const { createPageRuntime } = await import('./liveRuntime.ts')
+  // The live source always carries an availability port; a replay has no person to show it for. (Importing the
+  // module built the page's own runtime, so only the replay runtime below gets this source.)
+  const withAvailability = { source: { availability: { read: vi.fn() } }, dispose: vi.fn(async () => {}) }
+  source.mockReturnValueOnce(withAvailability)
   const replay = {
     socket: vi.fn(),
     fetch: vi.fn(),
@@ -102,12 +114,28 @@ it('uses replay transports without early adoption and closes replay with the pag
     adoptEarlyCollections: false,
     options: expect.objectContaining({
       baseUrl: 'https://example.test', maxFollows: 8, conversationSlots: 'advertised',
+      client: 'fractal-web test',
       socket: replay.socket, fetch: replay.fetch,
     }),
   }))
+  expect(live.source.availability).toBeUndefined()
   const underlying = source.mock.results.at(-1)!.value!
   await live.dispose()
   expect(underlying.dispose).toHaveBeenCalledOnce()
   expect(replay.close).toHaveBeenCalledOnce()
   telemetry.ux.dispose()
+})
+
+it.each(['paired', 'unpaired'] as const)('settles a %s credential change and discards the old early socket before live initialization', async status => {
+  vi.stubGlobal('window', { location: { origin: 'https://example.test' } })
+  const pending = Promise.withResolvers<{ status: 'paired' | 'unpaired'; credentialChanged: boolean }>()
+  pairingStatus.mockImplementationOnce(() => pending.promise)
+  const loading = import('./liveRuntime.ts')
+  await vi.waitFor(() => expect(pairingStatus).toHaveBeenCalledOnce())
+  expect(source).not.toHaveBeenCalled()
+  pending.resolve({ status, credentialChanged: true })
+  await loading
+  expect(closeEarly).toHaveBeenCalledOnce()
+  expect(source).toHaveBeenCalledOnce()
+  expect(closeEarly.mock.invocationCallOrder[0]).toBeLessThan(source.mock.invocationCallOrder[0]!)
 })

@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -32,7 +31,7 @@ pub(super) fn ensure_supported_protocol(codex: &str) -> Result<String> {
         .prefix("st-codex-protocol-")
         .tempdir()
         .context("creating a temporary Codex protocol schema directory")?;
-    let output = Command::new(codex)
+    let output = crate::managed_launch::provider_command(codex)?
         .args([
             "app-server",
             "generate-json-schema",
@@ -70,7 +69,7 @@ pub(super) fn ensure_supported_protocol(codex: &str) -> Result<String> {
 fn codex_version(codex: &str) -> Result<String> {
     let mut attempt_index = 0;
     let output = loop {
-        let attempt = Command::new(codex).arg("--version").output();
+        let attempt = crate::managed_launch::provider_command(codex)?.arg("--version").output();
         match attempt {
             Ok(output) => break output,
             Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempt_index + 1 < 5 => {

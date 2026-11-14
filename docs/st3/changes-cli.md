@@ -6,7 +6,7 @@
 > Change-Id convention is approved. Do not enable the `[changes]` configuration. The read-only code stays
 > in place unused until the work is explicitly resumed.
 
-`st changes list`, `show` and explicit `sync` use configured Git transport and the
+`fractal changes list`, `show` and explicit `sync` use configured Git transport and the
 node-local graph index. They use no GitHub API. The existing PR workflow remains
 available when Git or its designated reader is unavailable.
 
@@ -40,10 +40,10 @@ successful inventory. A configuration owned by a different node reports the name
 owner and the PR fallback instead of starting a second Git reader.
 
 ```text
-st changes list --repository fixture/garden
-st changes show I0123456789abcdef0123456789abcdef01234567 --repository fixture/garden
-st changes sync --repository fixture/garden
-st changes list --repository fixture/garden --offline
+fractal changes list --repository fixture/garden
+fractal changes show I0123456789abcdef0123456789abcdef01234567 --repository fixture/garden
+fractal changes sync --repository fixture/garden
+fractal changes list --repository fixture/garden --offline
 ```
 
 A new shared observation performs one patterned `ls-remote`. Concurrent requests
@@ -65,10 +65,12 @@ Evidence freshness is unknown until separately indexed and verified.
 
 List/show use the existing `read.projections` scope and client envelope. Explicit
 sync requires `control.work` because it exercises configured Git credentials and
-writes the local derived index. The CLI carries the configured person or the
-current `ST_AGENT` over the trusted local Unix socket for sync; list/show keep
-their read-only client. Sync accepts no actor selector and refuses an HTTP
-endpoint instead of forwarding local identity. An unavailable or non-owner sync is a typed
+writes the local derived index. `fractal changes sync --as agent/example/caller
+--repository fixture/garden` carries the explicit actor over the trusted local
+Unix socket. Without `--as`, sync retains the current `ST_AGENT`, then configured
+person fallback. An explicit actor must match an agent caller's own identity.
+List/show keep their read-only client. Sync refuses an HTTP endpoint instead of
+forwarding local identity. An unavailable or non-owner sync is a typed
 `unavailable` result naming its reader node and the PR fallback. Imports bind each
 current ref's canonical ID to the ID of every loaded or already indexed record;
 a mismatch is skipped and reported in a bounded issue list, and cannot set another

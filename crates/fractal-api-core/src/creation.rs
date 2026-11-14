@@ -154,8 +154,12 @@ pub fn terminal_document(
     creation_key: &str,
 ) -> String {
     let identity = format!("{person}/{id}");
-    // With no directory named, the shell starts in the host user's home: a service's own working
-    // directory is `/` (Nathan, 2026-10-05). A home that is unset or missing leaves it where it is.
+    // The launching runtime resolves this intent, not a potentially remote API client.
+    let mut tags = creation_tags(creation_key);
+    if cwd == "." {
+        tags.entries_mut().push(KdlEntry::new_prop("st3.cwd", "home"));
+    }
+    // Older launching hosts ignore the home intent, so keep the shell-side cd during rollout.
     let command = if cwd == "." {
         "cd \"${HOME:-.}\" 2>/dev/null; exec \"${SHELL:-/bin/sh}\" -i"
     } else {
@@ -169,7 +173,7 @@ pub fn terminal_document(
         kdl_node("workspace", [cwd]),
         kdl_node("command", [command]),
         kdl_node("restart", ["never"]),
-        creation_tags(creation_key),
+        tags,
     ]);
     terminal.set_children(body);
     publication_document(terminal)
@@ -275,16 +279,25 @@ mod tests {
             ..Default::default()
         };
         let plain = terminal_document("person/example", "one", &args, "host", ".", "key");
-        // The command is quoted for KDL, so its own quotes are escaped.
         assert!(
             plain.contains("cd \\\"${HOME:-.}\\\" 2>/dev/null; exec"),
             "{plain}"
         );
         assert!(plain.contains("${SHELL:-/bin/sh}"), "{plain}");
+        let document = plain.parse::<KdlDocument>().unwrap();
+        let body = document.nodes()[1].children().unwrap();
+        let tags = body.get("tags").unwrap();
+        assert_eq!(tags.get("st3.cwd").unwrap().as_string(), Some("home"));
         let placed = terminal_document("person/example", "two", &args, "host", "/srv/work", "key");
         assert!(!placed.contains("HOME"), "{placed}");
-        assert!(placed.contains("workspace \"/srv/work\""), "{placed}");
-        // The command really lands in HOME, and falls back when HOME is unset or missing.
+        let document = placed.parse::<KdlDocument>().unwrap();
+        let body = document.nodes()[1].children().unwrap();
+        assert!(body.get("tags").unwrap().get("st3.cwd").is_none());
+        assert_eq!(
+            body.get("workspace").unwrap().get(0).unwrap().as_string(),
+            Some("/srv/work")
+        );
+        // The command also lands in HOME when an older runtime launches it.
         for (home, expected) in [(Some("/tmp"), "/tmp"), (Some("/no/such/dir"), "/")] {
             let mut shell = std::process::Command::new("sh");
             shell.current_dir("/");

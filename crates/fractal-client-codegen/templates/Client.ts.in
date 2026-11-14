@@ -3,12 +3,17 @@
 // Clients that omit that token retain the legacy message-list shape and paging contract.
 import { API_VERSION } from './Models.generated.ts';
 import type {
+    AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
-    Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
+    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
+    Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
-    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    AttentionBudgetReport,
+    MissionDeclaration, SubjectSourceMap, SourceBlob,
+    GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
@@ -23,6 +28,17 @@ const acceptsApiVersion = (value: unknown): boolean => value === API_VERSION || 
 export type PageOptions = { cursor?: string; limit?: number };
 /** Transport options, never serialized into a query or action body. */
 export type RequestOptions = { signal?: AbortSignal };
+
+// React Native's AbortSignal polyfill has aborted, but no throwIfAborted or reason.
+const checkAborted = (signal?: Pick<AbortSignal, 'aborted' | 'reason'>): void => {
+    if (!signal?.aborted) return;
+    if (signal.reason != null) throw signal.reason;
+    if (typeof DOMException !== 'undefined') throw new DOMException('This operation was aborted', 'AbortError');
+    const error = new Error('This operation was aborted');
+    error.name = 'AbortError';
+    throw error;
+};
+
 /** Validate framing only, leaving resource rows and timeline entries raw for tolerant consumers.
  * Unknown kinds and additive fields retain the existing forward-compatible behavior. */
 function validateCollectionFrame(frame: unknown): void {
@@ -131,7 +147,9 @@ export type CollectionStream = {
     subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
-    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships'>, limit?: number, filters?: CollectionFilters): void;
+    /** Follow the person's read positions; frames are invalidations, so re-list `readPositionsList`. */
+    subscribeReadPositions(id: string, person: string, limit?: number): void;
+    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'read-positions'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
     subscribeAgent(id: string, agent: string, status?: string | null): Promise<void>;
@@ -265,7 +283,7 @@ export class FractalClient {
     }
 
     async discover(options: RequestOptions = {}): Promise<EnvelopeOf<Capabilities>> {
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         return this.discoveryCache.value ?? this.capabilities(options);
     }
 
@@ -288,8 +306,8 @@ export class FractalClient {
     }
     private features(): string {
         return this.messagesPaging
-            ? 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2'
-            : 'custom-subjects.v1, conversation-blocks.v1';
+            ? 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1, messages-paging.v2'
+            : 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1';
     }
 
 
@@ -318,9 +336,9 @@ export class FractalClient {
     }
 
     private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, idempotencyKey?: string, raw?: { contentType: string }, options: RequestOptions = {}, readAuthorization?: { header: string; budget: number }): Promise<EnvelopeOf<T>> {
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         const credential = await this.credential?.();
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
         const headers: Record<string, string> = { Accept: 'application/json', 'x-st3-features': this.features() };
         if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
@@ -333,26 +351,26 @@ export class FractalClient {
             method, headers, ...(body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-        // Old routers can return an empty 404 for this collection; do not parse it as JSON
-        // or try a history endpoint. This route has no missing-item 404 meaning.
-        if (response.status === 404 && path.split('?')[0] === '/v1/client/schedules') {
+        // These projections have no missing-item 404, including an old router's empty response.
+        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
+        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: 'This server does not support schedules.list; upgrade the server',
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
         try {
             if (readAuthorization) {
                 const bytes = new Uint8Array(await response.arrayBuffer());
-                options.signal?.throwIfAborted();
+                checkAborted(options.signal);
                 if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
                 payload = JSON.parse(new TextDecoder().decode(bytes));
             } else {
                 payload = await response.json();
-                options.signal?.throwIfAborted();
+                checkAborted(options.signal);
             }
         } catch (error) {
-            options.signal?.throwIfAborted();
+            checkAborted(options.signal);
             // HTTP middleware can reject a request before the client API writes a JSON envelope.
             if (response.ok || !(error instanceof SyntaxError)) throw error;
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
@@ -381,7 +399,7 @@ export class FractalClient {
             if (typeof value === 'number' && !(Number.isSafeInteger(value) && value >= 0)) throw new AssistantReadRejected('assistant parameters must be scalar strings or unsigned integers');
             parameters[name] = String(value);
         }
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         if (proof.payload.projection !== projection) throw new AssistantReadRejected('assistant proof names a different projection');
         const signed = Object.entries(proof.payload.parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
         const sent = Object.entries(parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -396,7 +414,7 @@ export class FractalClient {
 
     private async get<T>(path: string, kind?: 'events', options: RequestOptions = {}): Promise<EnvelopeOf<T>> {
         const capabilities = await this.discover(options);
-        options.signal?.throwIfAborted();
+        checkAborted(options.signal);
         const url = new URL(path, this.baseUrl + '/');
         const limit = url.searchParams.get('limit');
         if (limit !== null) bounded(Number(limit), kind === 'events' ? capabilities.value.limits.max_event_items : capabilities.value.limits.max_page_items, 'limit');
@@ -454,6 +472,21 @@ export class FractalClient {
         return this.request('POST', '/v1/client/observations', report, undefined, undefined, requestOptions);
     }
 
+    /** Set or clear the session person's own availability. Requires write.availability; agent sessions are refused. */
+    async availabilitySet(request: AvailabilitySet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailability>> {
+        return this.request<PersonAvailability>('PUT', '/v1/client/availability', request, undefined, undefined, requestOptions);
+    }
+
+    /** Report one device's raw state for the session person, on every state change and again at report_again_at; the daemon derives presence and assigns the source. Requires write.presence. */
+    async presenceReport(report: PresenceReport, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PresenceReportResult>> {
+        return this.request<PresenceReportResult>('POST', '/v1/client/presence', report, undefined, undefined, requestOptions);
+    }
+
+    /** Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused. */
+    async notesSet(request: DirectiveNoteSet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNoteSetResult>> {
+        return this.request<DirectiveNoteSetResult>('PUT', '/v1/client/notes', request, undefined, undefined, requestOptions);
+    }
+
     /** Replace this paired device's local-only registration, without a graph receipt. */
     async pushRegister(registration: PushRegistration, requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
         return this.request('POST', '/v1/client/push-registration', registration, undefined, undefined, requestOptions);
@@ -461,6 +494,15 @@ export class FractalClient {
 
     async pushUnregister(requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
         return this.request('DELETE', '/v1/client/push-registration', undefined, undefined, undefined, requestOptions);
+    }
+
+    /** Issue one expiring foreground command; never retried or replayed by the client. */
+    async deviceCommand(command: DeviceCommandRequest, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DeviceCommand>> {
+        return this.request('POST', '/v1/client/device-commands', command, undefined, undefined, requestOptions);
+    }
+
+    async deviceResult(result: DeviceResult, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DeviceCommand>> {
+        return this.request('POST', '/v1/client/device-results', result, undefined, undefined, requestOptions);
     }
 
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {
@@ -620,12 +662,21 @@ export class FractalClient {
             } catch (error) { end(error instanceof Error ? error : new Error(String(error))); socket.close(1000); }
         };
         socket.onclose = event => end(event.code === 1000 ? undefined : new Error(`The collections socket closed (${event.code}${event.reason ? ` ${event.reason}` : ''})`));
-        socket.onerror = () => end(new Error('The collections socket failed'));
+        socket.onerror = event => {
+            // Native carriers expose only NSError identity. Browser events remain generic;
+            // never copy message, localizedDescription, userInfo, or arbitrary event text.
+            const identity = typeof event === 'object' && event !== null
+                && 'domain' in event && typeof event.domain === 'string'
+                && 'code' in event && typeof event.code === 'number' && Number.isSafeInteger(event.code)
+                ? ` (${event.domain} ${event.code})` : '';
+            end(new Error(`The collections socket failed${identity}`));
+        };
         return {
             subscribeGlasses: id => send({kind: 'subscribe', id, collection: 'glasses', limit: 100}),
             subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
+            subscribeReadPositions: (id, person, limit = 100) => send({kind: 'subscribe', id, collection: 'read-positions', person, limit}),
             subscribe: (id, collection, limit, filters = {}) => {
                 // Only subscribeAgent may send an exact selector: it first checks the daemon.
                 if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');

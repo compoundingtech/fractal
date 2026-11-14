@@ -1,17 +1,19 @@
 // Project decoded Fractal conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema'
-import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/effect'
+import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema/read'
+import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/read'
 import { DateTime, Option, Schema } from 'effect'
 
-import type { ConversationItem, ToolCallItem, ToolResult, UnsupportedReason } from './model.ts'
+import type { ConversationItem, MessageItem, TextItem, ToolCallItem, ToolResult, UnsupportedReason } from './model.ts'
 import { contentEvent, proseItem, withoutShownDeliveries } from './semantics.ts'
 import { ompNoticeExcerpt, q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 import { blockFacts, recordValue } from './blocks.ts'
 import { blockRole, isKnownView, viewMeaning } from './vocabulary.ts'
 import { inspectPreview } from './inspect.ts'
 import { recordTranscriptTelemetry } from './telemetry.ts'
+import { bodyRepeatsRecord, systemRecordItem } from './systemRecords.ts'
+import { mailAuthor, mailOrigin, wakeExcerpt, wakeTitle } from './mail.ts'
 
 /**
  * Fixture-only D08 proposal, not part of the Fractal wire contract.
@@ -100,6 +102,8 @@ const joinResult = ({
  */
 const isTurnHeader = (entry: Entry) =>
   entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined
+  // Fractal names no participants on a native turn; an author alone makes a header mail only on a graph message.
+  && (entry.body.author === undefined || !entry.body.message_id.startsWith('message/'))
 
 /**
  * Ids Fractal mints for a mailbox message's own content (`client_v0.rs`): the native projection
@@ -168,6 +172,11 @@ const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): Conve
 
 const isHiddenBlock = (block: { readonly visibility?: string | undefined }) =>
   block.visibility === 'internal' || block.visibility === 'hidden-by-harness'
+
+/** Harness text with nothing beside it that a delivery copy could take with it: images, views, hidden or dropped blocks. */
+const isPlainText = (entry: Extract<Entry, { type: 'content' }>) =>
+  (entry.degraded?.length ?? 0) === 0 && (entry.body.blocks ?? []).every(block =>
+    block.kind === 'source_record' || (block.kind === 'text' && block.view === undefined && !isHiddenBlock(block)))
 
 /**
  * Native bodies with internal or hidden-by-harness blocks stay out of prose but keep their inspectable data as one
@@ -240,17 +249,21 @@ const baseItemOf = ({
         at: entryTimestamp(entry),
       })
     }
-    case 'message':
+    case 'message': {
+      // A header alone: its body is outside the window. A wake still reads as one quiet row.
+      if (mailOrigin(entry.body) === 'machine') return wakeItem(entry, undefined)
       return {
         _tag: 'Message',
         id: entry.id,
         messageId: entry.body.message_id,
+        ...(entry.body.author !== undefined ? { author: entry.body.author } : {}),
         ...(entry.body.from !== undefined ? { from: entry.body.from } : {}),
         ...(entry.body.to !== undefined ? { to: entry.body.to } : {}),
         ...(entry.body.title !== undefined ? { title: entry.body.title } : {}),
         ...(Option.isSome(entry.body.reply_to) ? { replyTo: entry.body.reply_to.value } : {}),
         at: entryTimestamp(entry),
       }
+    }
     case 'reasoning':
       return {
         _tag: 'Reasoning',
@@ -327,14 +340,90 @@ const baseItemOf = ({
   return unsupported(entry.id, 'st', entry.type.raw, 'unknown-entry-type', entry.body, entryTimestamp(entry))
 }
 
+/**
+ * Machine mail (a daemon wake, a restart handoff) as one quiet row: who woke the agent and why, a
+ * bounded one-line excerpt, and the whole body only behind Read message. `body` is undefined when
+ * only the header is loaded.
+ */
+const wakeItem = (header: MessageEntry, body: { readonly id: string; readonly text: string } | undefined): ConversationItem => {
+  const title = header.body.title
+  const facts = { message_id: header.body.message_id, author: mailAuthor(header.body) ?? null, to: header.body.to ?? null, title: title ?? null }
+  return {
+    _tag: 'Event',
+    id: body?.id ?? header.id,
+    kind: 'delivery',
+    title: wakeTitle(title),
+    text: body === undefined ? 'Message body not loaded' : wakeExcerpt(body.text),
+    sender: { kind: 'system', label: 'Fractal', via: 'daemon' },
+    data: facts,
+    notice: {
+      _tag: 'Delivery',
+      from: 'Fractal',
+      to: header.body.to ?? 'this agent',
+      ...(title === undefined ? {} : { subject: title }),
+      payload: body?.text ?? '',
+      raw: JSON.stringify(facts),
+    },
+    at: entryTimestamp(header),
+  }
+}
+
+/** A mail header and its body as one object; the body's id keeps a send's identity across frames. */
+const mailItem = (header: MessageEntry, body: TextItem): MessageItem | ConversationItem => {
+  if (mailOrigin(header.body) === 'machine') return wakeItem(header, { id: body.id, text: body.text })
+  const { _tag, role, streaming, sendState, model, sender, text, attachments, ...facts } = body
+  return {
+    ...facts,
+    _tag: 'Message',
+    messageId: header.body.message_id,
+    ...(header.body.author !== undefined ? { author: header.body.author } : {}),
+    ...(header.body.from !== undefined ? { from: header.body.from } : {}),
+    ...(header.body.to !== undefined ? { to: header.body.to } : {}),
+    ...(header.body.title !== undefined ? { title: header.body.title } : {}),
+    ...(Option.isSome(header.body.reply_to) ? { replyTo: header.body.reply_to.value } : {}),
+    text,
+    attachments,
+    at: entryTimestamp(header),
+  }
+}
+
 const itemOf = (args: Parameters<typeof baseItemOf>[0]): ConversationItem => {
-  const item = baseItemOf(args)
-  if (args.entry.type === 'unrecognized' || item._tag === 'Unsupported') return item
-  return { ...item, ...blockFacts(args.entry.body) }
+  const entry = systemRecordParts(args.entry)?.rest ?? args.entry
+  const item = baseItemOf({ ...args, entry })
+  if (entry.type === 'unrecognized' || item._tag === 'Unsupported') return item
+  return { ...item, ...blockFacts(entry.body) }
 }
 
 const unsupported = (id: string, harness: string, recordKind: string, reason: UnsupportedReason, raw: unknown, at?: string): ConversationItem =>
   ({ _tag: 'Unsupported', id, harness, recordKind, reason, inspect: inspectPreview(raw), ...(at === undefined ? {} : { at }) })
+
+/**
+ * An entry's system records apart from whatever else it carries. `rest` holds no native record, so
+ * neither a session prompt nor a tool list can follow visible content onto its item or disclosure.
+ * `sharedBodyIsRecord` drops the record's copy from the shared text; other blocks keep their meaning.
+ */
+const systemRecordParts = <E extends Exclude<Entry, { type: 'truncation' }>>(entry: E) => {
+  if (entry.type === 'unrecognized' || entry.type === 'reasoning') return undefined
+  const blocks = blockFacts(entry.body).blocks
+  if (blocks === undefined) return undefined
+  const harness = blocks.find(block => block.kind === 'source_record')?.source_type ?? 'st'
+  const at = entryTimestamp(entry)
+  const records = blocks.flatMap((block, index) => {
+    if (isHiddenBlock(block) || blockRole(block.kind) === 'bookkeeping') return []
+    const item = systemRecordItem(block, { id: entry.id, at, harness })
+    return item === undefined ? [] : [{ block, index, item }]
+  })
+  if (records.length === 0) return undefined
+  const kept = blocks.filter(block => !records.some(record => record.block === block))
+  const text = entry.type === 'content' ? entry.body.text ?? '' : ''
+  const sharedBodyIsRecord = records.some(({ block }) => bodyRepeatsRecord(block, text))
+  return {
+    records,
+    alone: kept.every(block => block.kind === 'source_record'),
+    sharedBodyIsRecord,
+    rest: { ...entry, body: { ...entry.body, ...(sharedBodyIsRecord ? { text: '' } : {}), blocks: kept.map(block => block.kind === 'source_record' ? { ...block, payload: {} } : block) } } as E,
+  }
+}
 
 interface BlockClassification {
   readonly markers: readonly ConversationItem[]
@@ -342,8 +431,28 @@ interface BlockClassification {
   readonly native: boolean
   readonly fallback?: boolean
 }
-/** Block visibility and vocabulary are authoritative whenever native blocks exist. */
+/** With the record's copy gone from a shared body, a text block has nothing left to say and takes no row. */
+const isEmptyProse = (item: ConversationItem | undefined) =>
+  item === undefined || (item._tag === 'Reasoning' && item.text.trim() === '')
+    || (item._tag === 'Text' && item.text.trim() === '' && item.attachments.length === 0)
+
+/** A record takes the entry's one row only when nothing else is there to read; beside content it gets its own hidden row. */
 const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassification => {
+  const parts = systemRecordParts(entry)
+  if (parts === undefined) return classifyBlocks(entry)
+  const rows = parts.records.map(({ block, index, item }) => ({ ...item, id: `${entry.id}#${block.id ?? index}` }))
+  const rest = classifyBlocks(parts.rest)
+  if (!parts.alone && !parts.sharedBodyIsRecord) return { ...rest, markers: [...rows, ...rest.markers] }
+  // Only content shares a body with its blocks, so only content reaches the fallback.
+  const own = parts.alone ? undefined : rest.native && !rest.fallback ? rest.primary
+    : parts.rest.type === 'content' ? itemOf({ entry: parts.rest, sessionActive: true }) : undefined
+  if (own !== undefined && !isEmptyProse(own)) return { markers: [...rows, ...rest.markers], primary: own, native: true, fallback: false }
+  // Its native facts stay off the row, as an F2 marker's do.
+  return { markers: [...rows.slice(1), ...rest.markers], primary: parts.records[0]!.item, native: true, fallback: false }
+}
+
+/** Block visibility and vocabulary are authoritative whenever native blocks exist. */
+const classifyBlocks = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassification => {
   if (entry.type === 'unrecognized' || entry.type === 'reasoning') return { markers: [], native: false }
   const facts = blockFacts(entry.body)
   const blocks = facts.blocks
@@ -361,7 +470,7 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     const role = blockRole(block.kind)
     const payload = recordValue(block.payload)
     const customType = recordValue(payload?.raw)?.customType
-    const recordKind = block.kind === 'unknown'
+    const recordKind = block.view?.type === 'omp_event' ? block.view.kind : block.kind === 'unknown'
       ? block.source_type === 'custom' && typeof customType === 'string' ? customType : block.source_type
       : block.kind
     const marker = (reason: UnsupportedReason) => markers.push(unsupported(`${entry.id}#${block.id ?? index}`, harness, recordKind, reason, block, at))
@@ -419,6 +528,25 @@ export const timelineItems = (
   return timeline.project().items
 }
 
+/** An item a mail body projects to when it carries its header: the person's prose, a message or a wake. */
+const isMailBody = (item: ConversationItem): boolean =>
+  item._tag === 'Text' || item._tag === 'Message' || (item._tag === 'Event' && item.kind === 'delivery')
+
+/** The body text a projected mail item shows a reader: prose, the joined message, or a wake's payload. */
+const shownMailText = (item: ConversationItem): readonly string[] =>
+  item._tag === 'Text' || item._tag === 'Message' ? (item.text === undefined ? [] : [item.text])
+    : item._tag === 'Event' && item.kind === 'delivery' && item.notice?._tag === 'Delivery' ? [item.notice.payload]
+      : []
+
+interface MailPairs {
+  /** Each shown message's body, by message id (delivery-echo removal compares against it). */
+  readonly bodies: ReadonlyMap<string, string>
+  /** The header a content entry is the body of, by content entry id. */
+  readonly headerOf: ReadonlyMap<string, MessageEntry>
+  /** Header entry ids whose body is in the window. */
+  readonly paired: ReadonlySet<string>
+}
+
 interface CachedItem {
   readonly entry: Entry
   readonly result: ToolResultEntry | undefined
@@ -473,6 +601,7 @@ export class LiveTimeline {
   private reindex = false
   /** Only a replace page describes the older-history edge. */
   hasOlder = false
+  olderCursor: string | undefined
   /** Native replace-page evidence, never an empty filtered projection. */
   observation: { readonly empty: boolean } | undefined
   header: FixtureConversationChunk['header']
@@ -513,6 +642,7 @@ export class LiveTimeline {
     }
     if (frame.replace) {
       this.hasOlder = frame.hasMore || frame.entries.some(entry => entry.type === 'truncation')
+      this.olderCursor = frame.olderCursor
       this.observation = frame.observation
     } else if (
       (frame.entries.length > 0 || frame.observation?.empty === false) &&
@@ -542,6 +672,8 @@ export class LiveTimeline {
         }
       }
       this.dirtyFrom = Math.min(this.dirtyFrom, at)
+      // Content right after a header may be that header's body: the header's row moves into it.
+      if (entry.type === 'content' && this.ordered[at - 1]?.type === 'message') this.dirtyFrom = Math.min(this.dirtyFrom, at - 1)
       // Re-pointed identities or sequence changes invalidate invocation/result segmentation.
       if (
         previous !== undefined &&
@@ -585,6 +717,22 @@ export class LiveTimeline {
         for (const [id, results] of newResults) this.indexResults(id, Array.from(results.values()))
     }
     return changed
+  }
+
+  /** Merge an older served page without replacing revisions received by the live follow. */
+  prepend(frame: FixtureConversationChunk): void {
+    const pageIds = new Set(frame.entries.map(entry => entry.id))
+    this.apply({ ...frame, replace: false })
+    if (pageIds.size > 0) {
+      this.ordered = [
+        ...Array.from(pageIds, id => this.entries.get(id)!),
+        ...this.ordered.filter(entry => !pageIds.has(entry.id)),
+      ]
+      this.reindex = true
+      this.dirtyFrom = 0
+    }
+    this.olderCursor = frame.olderCursor
+    this.hasOlder = frame.olderCursor !== undefined
   }
 
   /** Merge a frame's invocations once, avoiding quadratic shifts for reverse-arriving calls. */
@@ -738,6 +886,28 @@ export class LiveTimeline {
     return shown
   }
 
+  /**
+   * Each mail message's body as this window shows it. A header owns the content its mailbox id pairs
+   * with, or, for ids that pair with nothing, the content right after it. A header alone shows no body.
+   */
+  private mailPairs(mailboxHeaders: ReadonlyMap<string, MessageEntry>): MailPairs {
+    const bodies = new Map<string, string>()
+    const headerOf = new Map<string, MessageEntry>()
+    const paired = new Set<string>()
+    this.ordered.forEach((entry, at) => {
+      if (entry.type !== 'content') return
+      const key = mailboxPairKey(entry)
+      const previous = this.ordered[at - 1]
+      const header = key !== undefined ? mailboxHeaders.get(key)
+        : previous?.type === 'message' && !isTurnHeader(previous) && mailboxPairKeys(previous).length === 0 ? previous : undefined
+      if (header === undefined || bodies.has(header.body.message_id)) return
+      bodies.set(header.body.message_id, entry.body.text ?? '')
+      headerOf.set(entry.id, header)
+      paired.add(header.id)
+    })
+    return { bodies, headerOf, paired }
+  }
+
   /** Register only a send that painted an outbox row; an already-shown Resend keeps its server id. */
   keepOwnSendId(messageIds: readonly string[], itemId: string): void {
     for (const messageId of messageIds) {
@@ -763,7 +933,6 @@ export class LiveTimeline {
     const changedFrom = this.itemsBefore[from] ?? this.items.length
     const items = this.items.slice(0, changedFrom)
     this.itemsBefore.length = from
-    const shown = this.shownMessageIds()
     const userMailContent = new Set<string>()
     const mailboxHeaders = new Map<string, MessageEntry>()
     for (const entry of this.ordered) {
@@ -778,6 +947,18 @@ export class LiveTimeline {
       const key = mailboxPairKey(entry)
       if (key !== undefined) userMailContent.add(key)
     }
+    const pairs = this.mailPairs(mailboxHeaders)
+    // A delivery may be dropped only for the text a reader can actually see: the body as its projection
+    // shows it, not the raw entry. A hidden body (its header keeps its row) or a body whose projection
+    // shows only part of it leaves the delivery as the readable copy.
+    const shownBodies = new Map<string, string>()
+    for (const entry of this.ordered) {
+      if (entry.type !== 'content') continue
+      const mailbox = pairs.headerOf.get(entry.id)
+      if (mailbox === undefined) continue
+      const shown = this.cached({ entry, result: undefined, active: true, mailbox }).flatMap(shownMailText)
+      if (shown.length === 1) shownBodies.set(mailbox.body.message_id, shown[0]!)
+    }
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
       this.itemsBefore.push(items.length)
@@ -788,17 +969,22 @@ export class LiveTimeline {
         // Keep header-only mail and separate agent mail; one person send needs only its user row.
         if (mailboxPairKeys(entry).some(key => userMailContent.has(key))) continue
       }
+      // A header whose body is loaded is drawn once, as one object, at its body.
+      if (entry.type === 'message' && pairs.paired.has(entry.id)) continue
       // Only native harness turns repeat shown mail as delivery copies; a mailbox
       // message's own content is person-authored text that may quote anything.
       if (
-        entry.type === 'content' && entry.body.blocks === undefined && (entry.degraded?.length ?? 0) === 0 &&
-        !MAILBOX_CONTENT_ID.test(entry.id) &&
+        entry.type === 'content' && isPlainText(entry) &&
+        !MAILBOX_CONTENT_ID.test(entry.id) && !pairs.headerOf.has(entry.id) &&
         (entry.role === 'user' || entry.role === 'system')
       ) {
-        const text = withoutShownDeliveries(entry.body.text ?? '', shown)
+        const text = withoutShownDeliveries(entry.body.text ?? '', shownBodies)
         if (text !== (entry.body.text ?? '')) {
-          if (text.length > 0)
-            items.push(itemOf({ entry: { ...entry, body: { ...entry.body, text } }, sessionActive: true }))
+          if (text.length > 0) {
+            const rest = { ...entry, body: { ...entry.body, text } }
+            const classified = blockItems(rest)
+            items.push(classified.native && !classified.fallback && classified.primary !== undefined ? classified.primary : itemOf({ entry: rest, sessionActive: true }))
+          }
           continue
         }
       }
@@ -817,11 +1003,12 @@ export class LiveTimeline {
       if (entry.type === 'tool_call')
         items.push(...this.cached({ entry, result: this.joined.get(at), active: this.active }))
       else {
-        const key = entry.type === 'content' ? mailboxPairKey(entry) : undefined
-        items.push(...this.cached({
-          entry, result: undefined, active: true,
-          mailbox: key === undefined ? undefined : mailboxHeaders.get(key),
-        }))
+        const mailbox = entry.type === 'content' ? pairs.headerOf.get(entry.id) : undefined
+        const projected = this.cached({ entry, result: undefined, active: true, mailbox })
+        // A header is drawn at its body only when the body became the message; otherwise it keeps its own row.
+        if (mailbox !== undefined && !projected.some(isMailBody))
+          items.push(...this.cached({ entry: mailbox, result: undefined, active: true }))
+        items.push(...projected)
       }
     }
     this.items = items
@@ -914,6 +1101,13 @@ export class LiveTimeline {
       }
     }
     if (item?._tag === 'Text' && item.id !== id) item = { ...item, id }
+    // Mail reads as one object; only a person's mail keeps the person's row (the blue bar).
+    if (item?._tag === 'Text' && mailbox !== undefined && mailOrigin(mailbox.body) !== 'person') item = mailItem(mailbox, item)
+    // Fractal-minted mail content whose header left the window: who wrote it is unknown, so not a person's row.
+    else if (item?._tag === 'Text' && mailbox === undefined && entry.type === 'content' && MAILBOX_CONTENT_ID.test(entry.id) && id === entry.id) {
+      const { _tag, role, streaming, sendState, model, sender, ...rest } = item
+      item = { ...rest, _tag: 'Message', messageId: entry.body.message_id ?? '' }
+    }
     const items = [...classified.markers, ...(item === undefined ? [] : [item])]
     if (this.telemetryRevisions.get(entry.id) !== entry.revision) {
       this.telemetryRevisions.set(entry.id, entry.revision)

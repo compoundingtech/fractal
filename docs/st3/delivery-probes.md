@@ -5,7 +5,7 @@ It sends a real message from its local daemon to every other configured node eve
 three minutes. The recipient consumes the envelope from the installed binary's
 actual `omp-channel` driver and records `delivered`, `read`, and `closed` claims.
 It launches no model provider and never polls a mailbox to manufacture a read.
-Python 3.9 or newer and the installed `st3` binary are the only dependencies.
+Python 3.9 or newer and the installed `fractal` binary are the only dependencies.
 
 Each direction measures one active message. An accepted unread message becomes
 overdue after 60 seconds and sends one alert to the configured operations agent,
@@ -20,7 +20,7 @@ Boots and channel reconnects hold earlier mail, including old probe messages.
 Those messages stay in the mailbox and contribute to the aged unread count
 in doctor and the terminal UI. Preview and close that backlog with the commands in
 [seat deploys](seat-deploys.md), including
-`st conversations cleanup --all --older-than 1h`. Cleanup does not count as a
+`fractal conversations cleanup --all --older-than 1h`. Cleanup does not count as a
 successful native probe; recovery still requires a fresh recipient read.
 
 Sender state, received envelopes awaiting acknowledgement, and send idempotency
@@ -38,6 +38,10 @@ after a restart the pending attempt uses its saved wall time. The result also
 records the recipient's accepted read timestamp, but does not subtract clocks
 from different machines. `delivered` without `read` never passes the probe.
 
+The probe's mail, its alerts and their clears (every tag beginning `delivery-probe`)
+stay graph `message.sent` claims with lifecycle claims, not stream items or marks,
+while other mail moves to the messages shard, so these proofs hold.
+
 The latest results and a heartbeat are replicated as immutable document versions
 under `doc/delivery-probes/NODE`. Every version is kept on every member, so the probe
 publishes one only when a route's outcome changes (overdue, a late read, an alert, a
@@ -48,7 +52,7 @@ in flight once its deadline passes or it raises an alert, even while it keeps re
 and that publishes at once. A heartbeat waits, for at most one deadline, until no send
 is in flight, and a report that showed a send in flight is replaced as soon as it
 resolves, so doctor never sees a stale wait as overdue.
-`st doctor`
+`fractal doctor`
 shows each direction's latest message, measured latency or pending age, overdue
 results, missing configured source nodes, and heartbeats older than 15 minutes.
 A reported success must match the actual sender, recipient and accepted read
@@ -117,8 +121,8 @@ agent "probe/delivery/amber" {
 ```
 
 ```sh
-st apply probe.kdl --as person/operator
-st doctor --json
+fractal apply probe.kdl --as person/operator
+fractal doctor --json
 ```
 
 `apply` previews the intent and refuses unresolved references before
@@ -127,7 +131,7 @@ two nodes as peers. Host and agent identities must agree across configurations.
 An offline node remains configured so its missing source heartbeat and unread
 inbound messages stay visible. No shared daemon or existing model seat needs to
 restart to install these separate probe seats. Remove a probe explicitly with
-`st agents stop AGENT --as person/operator`; deleting its declaration alone does
+`fractal agents stop AGENT --as person/operator`; deleting its declaration alone does
 not stop it. Retained probe documents keep that stopped node visible to doctor.
 
 The probe exercises graph sends, fleet replication, native-channel polling,
@@ -138,7 +142,7 @@ matrix exercises the actual omp extension without model calls.
 
 ## Proof
 
-`scripts/fractal-delivery-probe-test --binary /path/to/st3` tests a lost send response,
+`scripts/fractal-delivery-probe-test --binary /path/to/fractal` tests a lost send response,
 stable idempotency across retry, crash replay of pending receipts, a delivered
 claim without a read, a replay after a competing native acknowledgement, a closed
 message without a read, incorrect read actors, person asks and operations messages,

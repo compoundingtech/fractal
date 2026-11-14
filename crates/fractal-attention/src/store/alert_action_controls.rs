@@ -1014,10 +1014,7 @@ fn a_person_read_racing_sender_withdrawal_has_one_terminal_source_outcome() {
         std::thread::spawn(move || {
             request.actor = "person/avery".into();
             request.summary = "Read".into();
-            request.answer = Some(crate::person_request::AnswerInput {
-                id: Some("read".into()),
-                text: None,
-            });
+            request.answer = Some(crate::person_request::AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() });
             request.idempotency_key = "racing-read".into();
             barrier.wait();
             store.finish_person_step(&request, false)

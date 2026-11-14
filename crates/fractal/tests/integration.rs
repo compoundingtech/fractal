@@ -76,6 +76,7 @@ mod event_waits;
 mod driver_incarnation;
 mod delivery_probe;
 mod examples;
+mod exec_clock_wait;
 mod fault_isolation;
 mod first_sync;
 mod follow_retry;

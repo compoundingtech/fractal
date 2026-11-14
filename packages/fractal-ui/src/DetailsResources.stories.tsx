@@ -194,7 +194,15 @@ function assertCraft(pane: HTMLElement, item: Case) {
   }
   if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-not-reported="group"]`), 'Unknown source omits its single not-reported line')
   const history = pane.querySelector('section[aria-label$="History"]')
-  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:/^Session · /}).length>0, 'Known trace history is absent')
+  if (item.state === 'busy' || item.state === 'idle') {
+    requireContract(history, 'Known trace history is absent')
+    // Sessions have nothing to open: dense rows are static list items; card forms keep their card's open row.
+    const sessions = item.variants.resources === 'R2'
+      ? within(history as HTMLElement).queryAllByRole('listitem').filter(row => row.hasAttribute('data-details-resource-static') && row.querySelector('[data-details-resource-title]')?.textContent?.startsWith('Session · '))
+      : within(history as HTMLElement).queryAllByRole('button', { name: /^Session · / })
+    requireContract(sessions.length > 0, 'Known trace history is absent')
+    if (item.variants.resources === 'R2') requireContract(sessions.every(row => !row.matches('[tabindex]') && !row.querySelector('button,a[href],[tabindex],[role="button"]')), 'Unopenable session history row is interactive')
+  }
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
   // Compactions paint context occupancy: 897,170 → 132,952 of a 1M window, excluding the straddling bucket.
   if (changes) requireContract(/90% → 13%/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')

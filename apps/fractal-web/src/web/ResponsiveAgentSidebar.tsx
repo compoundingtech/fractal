@@ -1,10 +1,13 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import { ResizableSplit } from '@fractal/ui/assistant-ui/shell'
+import { ResizableSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { touchPointerQuery } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/useTouchLayout.ts'
+import { parseKeybinding } from '../workbench-kit/keys.tsx'
+import { shortcuts, shortcutList, shortcutsPausedSelector, shortcutText } from './shortcuts.ts'
+import { devBarAvailable } from '../telemetry/devBarPreference.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 export const sidebarMinimumWidth = 240
@@ -65,7 +68,7 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
   </div>
 }
 
-/** The dock's header, reused by the phone drawer: collapse at the leading edge, the wordmark, then the alerts. */
+/** The dock's header, reused by the phone drawer: collapse at the leading edge, the wordmark, then trailing actions. */
 export const SidebarHeader = ({ ref, label, onCollapse, actions }: {
   readonly ref?: React.Ref<HTMLButtonElement>
   readonly label: string
@@ -74,17 +77,22 @@ export const SidebarHeader = ({ ref, label, onCollapse, actions }: {
 }) => <header data-sidebar-header="" {...stylex.props(styles.brand)}>
   <ChromeControl {...(ref === undefined ? {} : { ref })} icon="chevrons-left" label={label} edge="lead" onPress={onCollapse} />
   <strong {...stylex.props(styles.wordmark)}>Fractal</strong>
-  {actions}
+  {actions === undefined ? null : <span {...stylex.props(styles.actions)}>{actions}</span>}
 </header>
+
+const sidebarToggleKey = parseKeybinding(shortcuts.toggleSidebar.chords[0][0]).key
+const [navigationPrefix, agentsKey] = shortcuts.showAgents.chords[0]
+const alertsKey = shortcuts.showAlerts.chords[0][1]
+const missionsKey = shortcuts.showMissions.chords[0][1]
 
 /** One sidebar chord for the dock and drawer, without stealing text or terminal input. */
 export const useSidebarShortcut = (toggle?: () => void): void => {
   React.useLayoutEffect(() => {
     if (toggle === undefined) return
     const keydown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.repeat || event.altKey || event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'b') return
+      if (event.defaultPrevented || event.repeat || event.altKey || event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== sidebarToggleKey) return
       const target = event.target
-      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]') !== null) return
+      if (target instanceof Element && target.closest(`input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], ${shortcutsPausedSelector}`) !== null) return
       event.preventDefault()
       toggle()
     }
@@ -94,7 +102,7 @@ export const useSidebarShortcut = (toggle?: () => void): void => {
 }
 
 /** Available navigation only: unavailable sidebar destinations never steal a chord. */
-export const useSidebarNavigation = (showAgents: () => void): React.ReactNode => {
+export const useSidebarNavigation = (showTab: (tab: 'agents' | 'alerts' | 'missions') => void): React.ReactNode => {
   const [help, setHelp] = React.useState(false)
   React.useEffect(() => {
     let prefixAt = 0
@@ -105,22 +113,22 @@ export const useSidebarNavigation = (showAgents: () => void): React.ReactNode =>
         prefixAt = 0
         return
       }
-      if (event.key === '?') { event.preventDefault(); prefixAt = 0; setHelp(true); return }
+      if (event.key === shortcuts.showShortcuts.chords[0][0]) { event.preventDefault(); prefixAt = 0; setHelp(true); return }
       const key = event.key.toLowerCase()
-      if (key === 'a' && prefixAt > 0 && performance.now() - prefixAt < 1000) {
+      if ((key === agentsKey || key === alertsKey || key === missionsKey) && prefixAt > 0 && performance.now() - prefixAt < 1000) {
         event.preventDefault()
         prefixAt = 0
-        showAgents()
-      } else prefixAt = key === 'g' ? performance.now() : 0
+        showTab(key === agentsKey ? 'agents' : key === alertsKey ? 'alerts' : 'missions')
+      } else prefixAt = key === navigationPrefix ? performance.now() : 0
     }
     document.addEventListener('keydown', keydown)
     return () => document.removeEventListener('keydown', keydown)
-  }, [showAgents])
+  }, [showTab])
   return <Aria.ModalOverlay isOpen={help} onOpenChange={setHelp} isDismissable {...stylex.props(styles.helpOverlay)}>
     <Aria.Modal {...stylex.props(styles.helpModal)}>
       <Aria.Dialog aria-label="Keyboard shortcuts" {...stylex.props(styles.helpDialog)}>
         <Aria.Heading slot="title">Keyboard shortcuts</Aria.Heading>
-        <dl><dt>g a</dt><dd>Show Agents</dd><dt>← / →</dt><dd>Switch focused sidebar tabs</dd><dt>⌘B / Ctrl+B</dt><dd>Toggle sidebar</dd><dt>?</dt><dd>Show shortcuts</dd></dl>
+        <dl>{shortcutList(devBarAvailable()).map(shortcut => <React.Fragment key={shortcut.action}><dt>{shortcutText(shortcut)}</dt><dd>{shortcut.action}</dd></React.Fragment>)}</dl>
         <Aria.Button onPress={() => setHelp(false)}>Close</Aria.Button>
       </Aria.Dialog>
     </Aria.Modal>
@@ -132,6 +140,7 @@ const styles = stylex.create({
   // A minimum, not a fixed height: a touch layout's 44px collapse target stays inside the band.
   brand: { minHeight: g.band, boxSizing: 'border-box', paddingInline: s.md, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
   wordmark: { fontWeight: 500 },
+  actions: { display: 'flex', alignItems: 'center', gap: s.xs, marginInlineStart: 'auto' },
   portal: { display: 'contents' },
   overlay: { position: 'fixed', insetInline: 0, insetBlockStart: 0, insetBlockEnd: 'var(--wf-devbar-space, 0px)', zIndex: 90, display: 'flex', backgroundColor: 'rgba(0, 0, 0, 0.4)' },
   modal: { height: '100%', minWidth: sidebarMinimumWidth, backgroundColor: c.sidebar, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },

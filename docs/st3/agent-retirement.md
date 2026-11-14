@@ -1,6 +1,6 @@
 # Terminal agent retirement
 
-`st agents retire agent/example/worker --as person/avery --reason "Work finished" --idempotency-key retirement-example-001` permanently retires an identity at its declaring host. The client-v0 `agent.retire` action takes `agent` and a nonempty `reason`, and requires the selected desired claim ID in `fence.runtime_desired_revision`. An optional `runtime_incarnation` fences a selected process. Exact retries retain the same key and parameters. Retirement is owner-authoritative; an unknown declaration or a request at another host is refused.
+`fractal agents retire agent/example/worker --as person/avery --reason "Work finished" --idempotency-key retirement-example-001` permanently retires an identity at its declaring host. The client-v0 `agent.retire` action takes `agent` and a nonempty `reason`, and requires the selected desired claim ID in `fence.runtime_desired_revision`. An optional `runtime_incarnation` fences a selected process. Exact retries retain the same key and parameters. Retirement is owner-authoritative; an unknown declaration or a request at another host is refused.
 
 Use `--expect-revision REVISION --expect-incarnation INCARNATION` to retire only the declaration and runtime that were inspected. Pass the desired content revision from `agents show --json` at `value.revision`, and the runtime identity at `value.incarnation_id`. The revision is not the selected declaration claim ID: the CLI continues to send that existing token separately in `fence.runtime_desired_revision`. The optional content revision travels in `parameters.expect_revision`; the incarnation uses `fence.runtime_incarnation`. Both comparisons run in the retirement append transaction. A mismatch returns `retire-revision-mismatch` or `retire-incarnation-mismatch`, with `expected` and `current` details and no retirement applied. Missing runtime observations report a null current incarnation.
 
@@ -11,6 +11,25 @@ The durable `agent.retired` claim lives on the agent subject. It records the rea
 Every first locally produced `message.sent` checks lifecycle inside the serialized writer transaction, after the operation's previous-result and changed-body checks. HTTP `/v1/messages`, client-v0 `message.send`, the CLI, adapters using those APIs and daemon producers using the common transaction primitive share admission. A send committed before retirement succeeds; one ordered after retirement is refused. The 409 error has `code: "recipient-retired"`, `applied: "none"` at the envelope and in `details`, and `details.refusal: { "variant": "Retired", "recipient": "agent/example/worker" }`. The CLI exits nonzero and names the recipient and variant. No message, operation receipt or retry item is created for a refusal.
 
 Exact retries of accepted sends return the original receipt after retirement. Changing an accepted request under its key retains the idempotency mismatch error. A lost transport reply remains unconfirmed: retirement cannot turn a potentially accepted send into a confirmed refusal. Replicated sends are accepted history, so import and replay do not perform first-send admission.
+
+## One-shot process completion
+
+One-shot completion selects a reversible stop, not terminal identity retirement. The exact
+incarnation's retained PTY exit evidence is written to `runtime.observed.fields.exit_evidence`
+(incarnation, exit code, signal, bounded redacted output tail), with `exit_code` and `exit_signal`
+also available as observed fields. Later stop observations preserve this evidence for the same
+incarnation; a replacement incarnation never inherits it. Existing observations without retained
+evidence remain readable.
+
+The one-shot retirement decision records the exit summary. If the stopped seat leaves a mission
+without an eligible agent, the waiting step, mission run reason and operational failure include
+the exit code/signal and safe output tail. Subject inspection retains the structured evidence
+after stop. Output that cannot be safely redacted is omitted by the runtime evidence boundary.
+Automatic one-shot stops retain run/generation/step ownership and do not suppress the missing-agent
+fault as a deliberate root stop would. A blocked run durably refreshes a changed failure reason
+even when its status and phase do not change; an identical reason remains deduplicated.
+The optional claim field changes the registry digest; peers must upgrade together to interpret it.
+
 
 ## Replication and rollout
 
@@ -24,8 +43,8 @@ A host refuses a fresh send once **its own graph** contains retirement. The owne
 
 ## Mail custody: first increment
 
-The retiring owner may name one existing eligible agent with `st agents retire OLD --successor NEW --as OWNER --reason TEXT --idempotency-key KEY`. The optional signed `agent.retired.fields.successor` grants NEW custody of OLD's mailbox only. NEW uses `st conversations ls OLD --as NEW`, `st conversations read MESSAGE --as NEW`, and `st conversations archive MESSAGE --as NEW`. Read and close claims are signed by NEW, carry `acting_for: OLD`, and cite the retirement claim. They do not move or forward a message and do not grant OLD's identity, keys, work, conversations or session. The writer transaction rejects a stale OLD incarnation and any wrong successor. A pre-retirement send that replicates after retirement remains in OLD's mailbox and becomes visible to NEW. Pages are bounded and cursor based.
+The retiring owner may name one existing eligible agent with `fractal agents retire OLD --successor NEW --as OWNER --reason TEXT --idempotency-key KEY`. The optional signed `agent.retired.fields.successor` grants NEW custody of OLD's mailbox only. NEW uses `fractal conversations ls OLD --as NEW`, `fractal conversations read MESSAGE --as NEW`, and `fractal conversations archive MESSAGE --as NEW`. Read and close claims are signed by NEW, carry `acting_for: OLD`, and cite the retirement claim. They do not move or forward a message and do not grant OLD's identity, keys, work, conversations or session. The writer transaction rejects a stale OLD incarnation and any wrong successor. A pre-retirement send that replicates after retirement remains in OLD's mailbox and becomes visible to NEW. Pages are bounded and cursor based.
 
-`st agents show OLD`, the client agent detail, roster rows and Fractal TUI show pending custody and its successor. A numeric unread count is deferred until a bounded per-recipient unread projection is available; `st conversations ls OLD --as NEW` remains bounded and cursor based. Custody stays pending in this increment: there is no completion command or automatic expiry. Until completion ships, a custodian cannot be retired or be named custodian again; the writer refuses either action with a typed error. A successor's own successor receives no custody of OLD's mail. The design note's explicit-hop chain is deferred.
+`fractal agents show OLD`, the client agent detail, roster rows and Fractal TUI show pending custody and its successor. A numeric unread count is deferred until a bounded per-recipient unread projection is available; `fractal conversations ls OLD --as NEW` remains bounded and cursor based. Custody stays pending in this increment: there is no completion command or automatic expiry. Until completion ships, a custodian cannot be retired or be named custodian again; the writer refuses either action with a typed error. A successor's own successor receives no custody of OLD's mail. The design note's explicit-hop chain is deferred.
 
 The new optional `acting_for` fields change the registry digest. A retirement naming a successor uses the existing `retirement-upgrade-required` gate, so every configured and active member must advertise the new registry before it can be written. Older reducers ignore the new optional fields as unknown and an older reader still sees mail addressed to OLD; do not enable custody while an old member remains. Detail counts derive from durable claims, including mail replicated after retirement.

@@ -52,9 +52,12 @@ describe('huge fleet', () => {
     expect(roster.machines.map(({ id }) => id)).toEqual(world.cast.hosts.map(({ machine }) => machine))
     expect(roster.runtimes).toHaveLength(1_000)
     expect(new Set(roster.runtimes.map(({ id }) => id)).size).toBe(1_000)
-    const runtimeIds = new Set(roster.runtimes.map(({ id }) => id))
+    // An agent lists its own runtime, after any terminal runtime it owns (as the gateway does).
+    const terminalRuntimes = world.slices.terminal.state.terminals.map(({ owner, runtime }) => ({ owner, id: runtime.id }))
+    const runtimeIds = new Set([...roster.runtimes.map(({ id }) => id), ...terminalRuntimes.map(({ id }) => id)])
     for (const agent of roster.agents) {
-      expect(agent.runtime_ids.length, agent.id).toBeLessThanOrEqual(1)
+      const owned = terminalRuntimes.filter(({ owner }) => owner === agent.id).length
+      expect(agent.runtime_ids.length, agent.id).toBeLessThanOrEqual(1 + owned)
       for (const id of agent.runtime_ids) expect(runtimeIds.has(id), `${agent.id} runtime ${id}`).toBe(true)
     }
     expect(roster.runtimes.every(({ owner_id, owner_host_id }) => hostIds.has(owner_host_id) && roster.agents.some(({ id }) => id === owner_id))).toBe(true)
@@ -377,6 +380,7 @@ describe('huge variant coherence', () => {
     conversation: ['huge', 'empty', 'streaming'],
     terminal: [],
     sync: [],
+    objectives: ['none', 'unsafe-link'],
   }
 
   it('offers all generic variants and keeps huge window overrides coherent', () => {

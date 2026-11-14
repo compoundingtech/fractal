@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { ActionSheetIOS, Alert, AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { FractalClient, TimelineEntry } from '../../../clients/typescript/fractal-client';
@@ -11,7 +11,8 @@ import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConv
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
-import { quality } from '../qualityNative';
+import { quality, readPositions } from '../qualityNative';
+import { seenTail } from '../readPosition';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
 import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
@@ -68,6 +69,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const [timeline, setTimeline] = useState<Conversation<TimelineEntry>>(() => conversationCache.current.get(target) ?? empty);
   const timelineNow = useRef(timeline);
   timelineNow.current = timeline;
+  // Only viewable prose establishes a read frontier, not the roster's newer timestamp.
+  const focused = useIsFocused();
+  const [active, setActive] = useState(AppState.currentState === 'active');
+  useEffect(() => { const listening = AppState.addEventListener('change', state => setActive(state === 'active')); return () => listening.remove(); }, []);
+  const [presented, setPresented] = useState<ReadonlySet<string>>(new Set());
   // Earlier pages load only when the person asks by scrolling (or tapping the line above the
   // oldest entry), never on their own when a short conversation fits the screen.
   const dragged = useRef(false);
@@ -191,6 +197,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     return () => quality.endConversation(qualityOpen.current);
   }, [target, unresolved, attempt]));
   const visibleEntries = useRef((info: { viewableItems: ViewToken<Row>[] }) => {
+    setPresented(new Set(info.viewableItems.flatMap(item => {
+      if (!item.isViewable || item.item.kind !== 'entry') return [];
+      const { entry } = item.item;
+      return (entry.body.kind === 'assistant' && entry.body.text) || entry.body.kind === 'mail' ? [entry.id] : [];
+    })));
     for (const item of info.viewableItems) {
       const kind = item.item.kind;
       if (item.isViewable && (kind === 'entry' || kind === 'call' || kind === 'bundle')) { quality.conversationVisible(qualityOpen.current); break; }
@@ -227,6 +238,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   }, [data.agents, caps?.session_actor]);
   // Half a conversation is worse than none: when Fractal could not read the transcript, say why.
   const unreadable = useMemo(() => unreadableTranscript(timeline.entries), [timeline.entries]);
+  useEffect(() => {
+    if (!focused || !active || unreadable) return;
+    const tail = seenTail(timeline.entries, presented);
+    if (tail !== undefined) readPositions.advance(target, tail);
+  }, [focused, active, target, unreadable, timeline.entries, presented]);
   useEffect(() => { if (unreadable) quality.conversationError(qualityOpen.current, 'transcript-not-bound'); }, [unreadable]);
   // An entry that did not change keeps its object, so its row is not drawn and measured again:
   // redrawing every row on each frame made the list jump.

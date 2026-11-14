@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise bounded release bodies, full-note assets and credential-safe command failures."""
+"""Exercise release selection, transient reconciliation, bounded bodies and safe failures."""
 import hashlib
 import io
 import json
@@ -11,6 +11,9 @@ import sys
 import tarfile
 import tempfile
 
+from unittest import mock
+import release_gh
+
 from release_notes import FIELDS
 
 repo = Path(__file__).resolve().parent.parent
@@ -19,31 +22,88 @@ TOKEN = 'ghs_' + 'A1b2C3d4' * 5
 
 # A stand-in gh: just enough of the release flow to reach `release create`, which fails on request.
 FAKE_GH = r'''#!/usr/bin/env python3
-import json, os, pathlib, shutil, sys
+import hashlib, io, json, os, pathlib, sys, zipfile
 args = sys.argv[1:]
+recovery = pathlib.Path(os.environ['FAKE_RECEIPT'] + '.recovery')
+if recovery.exists() and args[0] == 'api':
+    row = json.loads(recovery.read_text())
+    if '/git/ref/tags/' in args[-1]:
+        print('HTTP/2.0 404 Not Found\n\n{}'); sys.exit(1)
+    if args[-1].endswith('/releases?per_page=100'):
+        print(json.dumps([[row]])); sys.exit(0)
+    if '--method' in args and args[args.index('--method') + 1] == 'PATCH':
+        row.update(json.load(sys.stdin))
+        recovery.write_text(json.dumps(row))
+        print(json.dumps(row)); sys.exit(0)
+    if args[-1].endswith('/releases/42'):
+        print(json.dumps(row)); sys.exit(0)
 if args[:2] == ['run', 'list']:
     print(json.dumps([{'databaseId': 7, 'headSha': os.environ['FAKE_SHA']}]))
+elif args[:2] == ['run', 'view']:
+    row = {'databaseId': int(args[2]), 'headSha': os.environ['FAKE_SHA'], 'headBranch': 'main',
+           'event': 'push', 'status': 'completed', 'conclusion': 'success',
+           'workflowName': 'Fractal tag release'}
+    row.update(json.loads(os.environ['FAKE_RUN']))
+    print(json.dumps(row))
+elif args[0] == 'api' and args[1].endswith('/artifacts'):
+    assert args[1] == 'repos/example/project/actions/runs/' + os.environ['FAKE_EXPECTED_RUN'] + '/artifacts', args
+    artifact = {'id': int(os.environ['FAKE_ARTIFACT_ID']),
+                'name': os.environ['FAKE_ARTIFACT'], 'expired': False}
+    print(json.dumps([{'artifacts': [{'id': 700, 'name': 'fractal-release', 'expired': False}]},
+                      {'artifacts': [artifact]}]))
+elif args[0] == 'api' and '/actions/artifacts/' in args[1]:
+    assert args == ['api', 'repos/example/project/actions/artifacts/701/zip'], args
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as bundle:
+        for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
+            bundle.write(item, item.name)
+    sys.stdout.buffer.write(archive.getvalue())
 elif args[0] == 'api' and '/actions/runs/' in args[1]:
-    print(json.dumps([{'artifacts': [{'name': os.environ['FAKE_ARTIFACT'], 'expired': False}]}]))
+    attempt = int(os.environ['FAKE_ATTEMPT'])
+    if '/attempts/' in args[1]:
+        assert args[1].endswith('/attempts/' + str(attempt)), args
+    else:
+        state = pathlib.Path(os.environ['FAKE_ATTEMPT_READS'])
+        reads = int(state.read_text()) if state.exists() else 0
+        state.write_text(str(reads + 1))
+        if reads:
+            attempt = int(os.environ['FAKE_FINAL_ATTEMPT'])
+    fields = json.loads(os.environ['FAKE_RUN'])
+    print(json.dumps({'status': fields.get('status', 'completed'),
+                      'conclusion': fields.get('conclusion', 'success'), 'run_attempt': attempt,
+                      'id': int(args[1].split('/actions/runs/')[1].split('/')[0]),
+                      'workflow_id': 42, 'head_sha': fields.get('headSha', os.environ['FAKE_SHA']),
+                      'head_branch': fields.get('headBranch', 'main'),
+                      'event': fields.get('event', 'push'),
+                      'display_title': fields.get('displayTitle', 'Main build')}))
 elif args[0] == 'api' and args[-1] == 'repos/example/project/releases?per_page=100':
     print(json.dumps([[{'tag_name': 'v0.3.17', 'draft': False, 'prerelease': False,
                        'published_at': '2026-10-07T00:00:00Z', 'id': 17}]]))
-elif args[:2] == ['run', 'download']:
-    assert args[args.index('--name') + 1] == os.environ['FAKE_ARTIFACT'], args
-    destination = pathlib.Path(args[args.index('--dir') + 1])
-    for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
-        shutil.copy(item, destination / item.name)
 elif args[:2] == ['release', 'create']:
+    assert '--draft' in args and '--verify-tag' not in args, args
     body_path = pathlib.Path(args[args.index('--notes-file') + 1])
     assets = args[args.index('--notes-file') + 2:]
+    proof_path = next(pathlib.Path(asset) for asset in assets if pathlib.Path(asset).name == 'CANDIDATE.json')
+    proof = json.loads(proof_path.read_text())
+    assert proof['source'] == os.environ['FAKE_SHA'] and type(proof['build_run']) is int, proof
+    assert proof['build_attempt'] == int(os.environ['FAKE_ATTEMPT']), proof
+    assert type(proof['build_artifact']) is int and proof['build_artifact'] == 701, proof
+    assert pathlib.Path(os.environ['FAKE_ATTEMPT_READS']).read_text() == '2'
     pathlib.Path(os.environ['FAKE_RECEIPT']).write_text(json.dumps({
         'body': body_path.read_text(),
         'assets': {pathlib.Path(asset).name: pathlib.Path(asset).read_text()
                    for asset in assets if asset.endswith('.md')},
     }))
+    if os.environ['FAKE_FAILURE'] == 'HTTP 504: gateway timeout':
+        recovery.write_text(json.dumps(dict(
+            id=42, name=f'Fractal {args[2]}', tag_name=args[2], target_commitish=os.environ['FAKE_SHA'],
+            draft=True, prerelease=False, body=body_path.read_text(),
+            assets=[dict(name=pathlib.Path(asset).name, state='uploaded',
+                         digest='sha256:' + hashlib.sha256(pathlib.Path(asset).read_bytes()).hexdigest())
+                    for asset in assets])))
     lines = os.environ['FAKE_FAILURE'].split('|')
     print('\n'.join(lines), file=sys.stderr)
-    sys.exit(1)
+    sys.exit(1 if os.environ['FAKE_FAILURE'] else 0)
 else:
     print('unexpected gh call: %r' % args, file=sys.stderr); sys.exit(9)
 '''
@@ -106,6 +166,9 @@ with tempfile.TemporaryDirectory() as temporary:
     (checkout / 'scripts').mkdir(parents=True)
     shutil.copy(repo / 'scripts/release-fractal-daily', checkout / 'scripts/release-fractal-daily')
     shutil.copy(repo / 'scripts/release-fractal-manifest.py', checkout / 'scripts/release-fractal-manifest.py')
+    shutil.copy(repo / 'scripts/release_gh.py', checkout / 'scripts/release_gh.py')
+    shutil.copy(repo / 'scripts/release_artifact.py', checkout / 'scripts/release_artifact.py')
+    shutil.copy(repo / 'scripts/release_draft_recovery.py', checkout / 'scripts/release_draft_recovery.py')
     shutil.copy(repo / 'scripts/compat-baseline-release', checkout / 'scripts/compat-baseline-release')
     (checkout / '.github').mkdir()
     pin = {'commit': 'a' * 40, 'tag': 'v0.3.17', 'why': 'Previous stable release fixture',
@@ -116,11 +179,13 @@ with tempfile.TemporaryDirectory() as temporary:
         (checkout / f'.github/{kind}-compat-baseline.json').write_text(json.dumps(pin))
     (checkout / 'scripts/release_notes.py').write_text(STUB_NOTES)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
-    # Fixture history must not depend on the account's interactive signing agent.
+    # Fixture history must not depend on account signing or identity hooks.
     sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'core.hooksPath', '/dev/null', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
+    sh('git', 'remote', 'add', 'origin', str(checkout), cwd=checkout)
     shas = []
     for index in range(2):
         (checkout / 'file').write_text(str(index))
@@ -137,23 +202,72 @@ with tempfile.TemporaryDirectory() as temporary:
 
     receipt = root / 'receipt.json'
 
-    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None, artifact='fractal-release'):
+    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None,
+              artifact='fractal-release-attempt-1', run_id=None, run_fields=None, summary='',
+              attempt=1, final_attempt=None, sha=''):
         receipt.unlink(missing_ok=True)
+        (root / 'attempt-reads').unlink(missing_ok=True)
         (root / 'notes.md').write_text(notes)
         (root / 'impact.json').write_text(json.dumps(impact or {'fragments': [], 'change_links': {}}))
         env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', GH_TOKEN=token, GH_REPO='example/project',
                    FAKE_SHA=shas[1], FAKE_DIST=str(root / 'dist'), FAKE_FAILURE=failure,
                    FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt),
-                   FAKE_IMPACT=str(root / 'impact.json'), FAKE_ARTIFACT=artifact)
-        args = ['python3', 'scripts/release-fractal-daily']
+                   FAKE_IMPACT=str(root / 'impact.json'), FAKE_ARTIFACT=artifact,
+                   FAKE_RUN=json.dumps(run_fields or {}), RELEASE_GH_RETRY_DELAYS='0,0,0',
+                   FAKE_ARTIFACT_ID='701', FAKE_ATTEMPT=str(attempt),
+                   FAKE_FINAL_ATTEMPT=str(attempt if final_attempt is None else final_attempt),
+                   FAKE_ATTEMPT_READS=str(root / 'attempt-reads'))
+        env['FAKE_EXPECTED_RUN'] = str(7 if run_id is None else run_id)
+        args = ['python3', 'scripts/release-fractal-daily', '--summary', summary]
+        if run_id is not None:
+            args += ['--run', str(run_id)]
+        if sha:
+            args += ['--sha', sha]
         return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
                               text=True, capture_output=True, timeout=60)
 
-    # Both current and pre-rename successful runs reach full checksum/source validation.
-    for artifact in ('fractal-release', 'smalltalk-release'):
-        done = daily(dry_run=True, artifact=artifact)
+    # The real artifact binding downloads the immutable ID from the selected attempt.
+    for attempt in (1, 2):
+        done = daily(dry_run=True, artifact=f'fractal-release-attempt-{attempt}', attempt=attempt)
         assert done.returncode == 0 and 'Validated both release targets' in done.stdout, done
-        assert 'would publish v0.3.18' in done.stdout, done
+        assert 'would draft v0.3.18' in done.stdout, done
+    for artifact in ('fractal-release', 'smalltalk-release', 'fractal-release-attempt-2'):
+        done = daily(artifact=artifact)
+        assert done.returncode == 1 and 'exactly one unexpired release artifact' in done.stdout, done
+        assert not receipt.exists(), done
+    done = daily(final_attempt=2)
+    assert done.returncode == 1 and 'rerun' in done.stdout, done
+    assert 'Validated both release targets' in done.stdout, done
+    assert (root / 'attempt-reads').read_text() == '2'
+    assert not receipt.exists(), 'an attempt flip after validation must not create a release'
+
+    # An explicitly selected older run wins over the newer run returned by `run list`.
+    done = daily(dry_run=True, run_id=6)
+    assert done.returncode == 0 and '(run 6)' in done.stdout, done
+    print('PASS: explicit push run reuse remains unchanged')
+
+    # The workflow dispatch head may differ from its exact candidate source.
+    candidate = {'event': 'workflow_dispatch', 'headSha': shas[0],
+                 'displayTitle': f'Fractal candidate {shas[1]} unique-request'}
+    done = daily(run_id=6, sha=shas[1], run_fields=candidate)
+    assert done.returncode == 0 and '(run 6)' in done.stdout and receipt.exists(), done
+    print('PASS: matching exact candidate SHA reuses selected run artifacts without rebuilding')
+    done = daily(dry_run=True, run_id=6, sha=shas[1],
+                 run_fields=dict(candidate, displayTitle=f'Fractal candidate {shas[0]} unique-request'))
+    assert done.returncode == 1 and 'not a successful Fractal tag release' in done.stdout, done
+    assert not (root / 'attempt-reads').exists() and not receipt.exists(), done
+    print('PASS: mismatched exact candidate SHA is refused before artifact download')
+    done = daily(dry_run=True, run_id=6, sha=shas[1],
+                 run_fields=dict(candidate, conclusion='failure'))
+    assert done.returncode == 1 and 'not a successful Fractal tag release' in done.stdout, done
+    assert not (root / 'attempt-reads').exists() and not receipt.exists(), done
+    print('PASS: failed exact candidate run is refused before artifact download')
+    for field, value in (('headBranch', 'feature'), ('event', 'workflow_dispatch'),
+                         ('status', 'in_progress'), ('conclusion', 'failure'),
+                         ('workflowName', 'Another workflow'), ('databaseId', 8)):
+        done = daily(dry_run=True, run_id=6, run_fields={field: value})
+        assert done.returncode == 1 and 'not a successful Fractal tag release push run on main' in done.stdout, done
+        assert not receipt.exists(), done
 
     # The Oct 10-11 shape: every earlier step passes, then gh release create fails with a cause.
     cause = 'HTTP 403: Resource not accessible by integration (https://api.example.invalid/releases)'
@@ -180,8 +294,20 @@ with tempfile.TemporaryDirectory() as temporary:
 
     # The body and uploaded asset use separate files, even when no shortening is needed.
     done = daily(notes='notes\n')
+    assert done.returncode == 0 and 'drafted v0.3.18' in done.stdout, done
     published = json.loads(receipt.read_text())
-    assert published == {'body': 'notes\n', 'assets': {'RELEASE-NOTES.md': 'notes\n'}}, published
+    assert published == {'body': 'notes\n\n\n<!-- fractal-daily-candidate -->\n',
+                         'assets': {'RELEASE-NOTES.md': 'notes\n'}}, published
+    done = daily(summary='Operator impact: no fleet rollout before GO.')
+    summarized = json.loads(receipt.read_text())
+    assert summarized['body'].startswith('## Operator impact summary\n\nOperator impact: no fleet rollout before GO.\n\nnotes\n')
+    assert summarized['assets']['RELEASE-NOTES.md'].startswith('## Operator impact summary\n\nOperator impact: no fleet rollout before GO.\n\n')
+    done = daily('HTTP 504: gateway timeout')
+    assert done.returncode == 0 and 'drafted v0.3.18' in done.stdout, done
+    assert 'gh release create exited 1' in done.stdout, done
+    (root / 'receipt.json.recovery').unlink()
+    print('PASS: ambiguous ordinary create 504 adopts the surviving exact draft')
+    assert sh('git', 'tag', '--list', 'v0.3.18', cwd=checkout) == '', 'drafting must not create a tag'
     done = daily(dry_run=True)
     assert done.returncode == 0 and 'release body unchanged: 6 characters' in done.stdout, done
     assert 'including RELEASE-NOTES.md' in done.stdout, done
@@ -210,8 +336,8 @@ with tempfile.TemporaryDirectory() as temporary:
     assert len(large) > 125000
     done = daily(notes=large, impact=impact)
     published = json.loads(receipt.read_text())
-    body = published['body']
-    assert len(body) <= 120000, len(body)
+    body = published['body'].removesuffix('\n\n<!-- fractal-daily-candidate -->\n')
+    assert len(published['body'].encode()) <= 24 * 1024, len(published['body'].encode())
     assert body.startswith('Fractal v0.3.18 headline\n'), body
     assert body.index('ACTION REQUIRED') < body.index('BREAKING CHANGE') < body.index('Change 0')
     assert '2000 changed, 0 unknown, 0 none' in body, body
@@ -223,6 +349,13 @@ with tempfile.TemporaryDirectory() as temporary:
     assert done.returncode == 0 and 'release body shortened:' in done.stdout, done
     assert f'{len(body)} characters' in done.stdout, done
     assert f'full notes: {len(large)}' in done.stdout, done
+    multibyte = 'Fractal v0.3.18 headline\n\n## Upgrade impact\n\n' + 'ü' * 13000
+    assert len(multibyte) < 24 * 1024 < len(multibyte.encode())
+    done = daily(notes=multibyte)
+    assert done.returncode == 0 and 'draft create metadata:' in done.stdout, done
+    published = json.loads(receipt.read_text())
+    assert len(published['body'].encode()) <= 24 * 1024
+    assert published['assets']['RELEASE-NOTES.md'] == multibyte
     done = daily(notes='x' * 120001)
     assert done.returncode == 1 and 'cannot build bounded release body' in done.stdout, done
     assert not receipt.exists()
@@ -239,10 +372,108 @@ module = module_from_spec(spec)
 spec.loader.exec_module(module)
 assert module.run('printf', 'ok\n') == 'ok'
 
+# Explicit source eligibility is full-SHA first-parent membership, not merely ancestry.
+source = 'a' * 40
+with mock.patch.object(module, 'run', side_effect=['', source + '\n' + 'b' * 40]):
+    module.require_main_first_parent(source, repo)
+for invalid in ('abc', 'c' * 40):
+    with mock.patch.object(module, 'run', return_value=source):
+        try:
+            module.require_main_first_parent(invalid, repo)
+        except module.CommandFailed:
+            pass
+        else:
+            raise AssertionError('invalid or side-branch source must fail')
+
+# An isolated build is correlated by a unique request, waited to success, never borrowed.
+title = f'Fractal candidate {source} request'
+for conclusion in ('success', 'failure'):
+    calls = []
+    def build_run(*args, **kwargs):
+        calls.append(args)
+        if args[:3] == ('gh', 'run', 'list'):
+            return json.dumps([{'databaseId': 8, 'displayTitle': 'unrelated'},
+                               {'databaseId': 9, 'displayTitle': title}])
+        if args[:3] == ('gh', 'run', 'view'):
+            return json.dumps({'status': 'completed', 'conclusion': conclusion, 'displayTitle': title})
+        return ''
+    with mock.patch.object(module, 'run', side_effect=build_run), \
+            mock.patch.object(module.uuid, 'uuid4', return_value=mock.Mock(hex='request')):
+        if conclusion == 'success':
+            assert module.build_exact_candidate(source) == (9, source)
+        else:
+            try:
+                module.build_exact_candidate(source)
+            except module.CommandFailed:
+                pass
+            else:
+                raise AssertionError('failed exact build must never become a candidate')
+    assert calls[0] == ('gh', 'workflow', 'run', 'release-fractal.yml', '--ref', 'main',
+                        '-f', f'sha={source}', '-f', 'request_id=request')
+    assert ('gh', 'run', 'watch', '9', '--exit-status', '--interval', '15') in calls
+
+# An explicit run and SHA must reach exact validation without rebuilding the candidate.
+for filename in ('release-daily.yml', 'release-daily.yml.genie.ts'):
+    workflow = (repo / '.github/workflows' / filename).read_text()
+    assert "inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == ''" in workflow
+    assert 'needs.build.outputs.build_run || inputs.run' in workflow
+    assert "always() && !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped')" in workflow
+
+# The build phase emits its result and never enters release selection/mutation.
+with tempfile.TemporaryDirectory() as temporary:
+    output = Path(temporary) / 'output'
+    with mock.patch.object(sys, 'argv', ['release-fractal-daily', '--build-only', '--sha', source]), \
+            mock.patch.dict(os.environ, GITHUB_OUTPUT=str(output)), \
+            mock.patch.object(module, 'require_main_first_parent') as eligible, \
+            mock.patch.object(module, 'build_exact_candidate', return_value=(9, source)), \
+            mock.patch.object(module, 'latest_release_tag') as release_selection:
+        assert module.main() == 0
+        eligible.assert_called_once()
+        release_selection.assert_not_called()
+        assert output.read_text() == 'build_run=9\n'
+
+# The mutation phase revalidates successful dispatch identity before reusing its artifacts.
+row = dict(databaseId=9, headSha='b' * 40, headBranch='main', event='workflow_dispatch',
+           status='completed', conclusion='success', workflowName='Fractal tag release',
+           displayTitle=f'Fractal candidate {source} request')
+with mock.patch.object(module, 'run', return_value=json.dumps(row)):
+    assert module.verified_main_run(9, source) == (9, source)
+row['displayTitle'] = f'Fractal candidate {"c" * 40} request'
+with mock.patch.object(module, 'run', return_value=json.dumps(row)):
+    try:
+        module.verified_main_run(9, source)
+    except module.CommandFailed:
+        pass
+    else:
+        raise AssertionError('mutation must reject another dispatched source')
+
+# Draft tags participate in numbering without being created in Git.
+with mock.patch.object(module, 'run', return_value='v0.3.17'):
+    assert module.next_tag([{'tag_name': 'v0.3.20'}]) == 'v0.3.21'
+# Cleanup removes only older drafts owned by this daily workflow, never unmarked/newer/published.
+drafts = [{'id': index, 'tag_name': tag, 'body': body} for index, (tag, body) in enumerate((
+    ('v0.3.18', '<!-- fractal-daily-candidate -->'),
+    ('v0.3.19', '<!-- fractal-daily-candidate -->'),
+    ('v0.3.20', 'manually prepared candidate'),
+    ('v0.3.22', '<!-- fractal-daily-candidate -->')), start=18)]
+def cleanup_state(*args):
+    release_id = int(args[-1].rsplit('/', 1)[1])
+    return json.dumps(dict(draft=release_id != 19, tag_name=f'v0.3.{release_id}',
+                           body='<!-- fractal-daily-candidate -->'))
+with mock.patch.dict(os.environ, GH_REPO='example/project'), \
+        mock.patch.object(module, 'run', side_effect=cleanup_state) as reread, \
+        mock.patch.object(module, 'gh') as github:
+    module.cleanup_superseded_drafts('v0.3.21', drafts)
+    github.assert_called_once_with('api', '--method', 'DELETE', 'repos/example/project/releases/18')
+    assert reread.call_args_list == [
+        mock.call('gh', 'api', 'repos/example/project/releases/18'),
+        mock.call('gh', 'api', 'repos/example/project/releases/19')]
+
 # Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.
-assert module.release_body('x' * module.RELEASE_BODY_LIMIT, {}) == 'x' * module.RELEASE_BODY_LIMIT
+limit = module.RELEASE_BODY_BYTES - len(module.DRAFT_MARKER.encode())
+assert module.release_body('x' * limit, {}) == 'x' * limit
 shortened = module.release_body(large, impact)
-assert len(shortened) <= module.RELEASE_BODY_LIMIT
+assert len((shortened + module.DRAFT_MARKER).encode()) <= module.RELEASE_BODY_BYTES
 assert shortened.index('ACTION REQUIRED') < shortened.index('BREAKING CHANGE') < shortened.index('Change 0')
 assert shortened.endswith(module.FULL_NOTES_POINTER + '\n')
 assert module.release_body('notes\n', {}) == 'notes\n'
@@ -252,4 +483,208 @@ except module.CommandFailed as error:
     assert str(error) == 'sh exited 3: reason', str(error)
 else:
     raise AssertionError('a failing command must raise')
+
+# API diagnostics name the method and endpoint regardless of gh option ordering. Neither command
+# payloads nor responses echoing those payloads may appear in retry, failure, or reconciliation logs.
+endpoint = 'repos/example/project/git/refs/tags/edge'
+payload = 'private-payload-value'
+api_cases = (
+    (('api', '--method', 'PATCH', endpoint, '-f', f'sha={payload}'), 'PATCH'),
+    (('api', endpoint, '-X', 'PATCH', '-F', f'sha={payload}'), 'PATCH'),
+    (('api', '--method=PATCH', '--raw-field', f'sha={payload}', endpoint), 'PATCH'),
+    (('api', '-XPATCH', f'-fsha={payload}', endpoint), 'PATCH'),
+    (('api', '--input', payload, endpoint), 'POST'),
+    (('api', '-F', f'sha={payload}', endpoint), 'POST'),
+    (('api', '--header', f'Authorization: {payload}', '--paginate', endpoint), 'GET'),
+    (('api', endpoint), 'GET'),
+)
+for args, method in api_cases:
+    for response_stream in ('stderr', 'stdout'):
+        for retry_delays, reconciled in (('', False), ('0', False), ('0', True), ('', True)):
+            response = dict(stdout='', stderr='')
+            response[response_stream] = f'HTTP 504: rejected {payload}\n{TOKEN}'
+            result = subprocess.CompletedProcess(['gh', *args], 1, **response)
+            log = io.StringIO()
+            with mock.patch.dict(os.environ, RELEASE_GH_RETRY_DELAYS=retry_delays), \
+                    mock.patch.object(release_gh.subprocess, 'run', return_value=result) as github, \
+                    mock.patch.object(release_gh.sys, 'stderr', log):
+                try:
+                    completed = release_gh.gh(*args, step='diagnostic-test',
+                                              done=(lambda: True) if reconciled else None)
+                except SystemExit as error:
+                    assert not reconciled
+                    message = str(error)
+                    assert f'gh api {method} {endpoint} failed: HTTP 504' in message, message
+                else:
+                    assert reconciled and completed.returncode == 0
+                    message = ''
+            output = log.getvalue() + message
+            assert f'gh api {method} {endpoint}' in output, output
+            assert payload not in output and TOKEN not in output and 'sha=' not in output, output
+            assert github.call_count == (2 if retry_delays and not reconciled else 1)
+            if retry_delays:
+                assert 'retrying in 0s' in output, output
+            if reconciled:
+                assert 'took effect before it failed' in output, output
+
+# Permanent failures do not retry, and even non-HTTP response text is never printed.
+result = subprocess.CompletedProcess(['gh', 'api', endpoint], 1, '', f'permission denied: {payload}')
+with mock.patch.dict(os.environ, RELEASE_GH_RETRY_DELAYS='0'), \
+        mock.patch.object(release_gh.subprocess, 'run', return_value=result) as github:
+    try:
+        release_gh.gh('api', endpoint, step='diagnostic-test')
+    except SystemExit as error:
+        assert str(error) == f'diagnostic-test: gh api GET {endpoint} failed: exit status 1', str(error)
+    else:
+        raise AssertionError('a permanent API failure must raise')
+    github.assert_called_once()
+
+# Opt-in HTTP diagnostics distinguish GraphQL preflight from release POST/upload without exposing
+# credentials, notes, response bodies, repository names, tag names, asset names or query strings.
+for path, route in (
+        ('/graphql', '/graphql'),
+        ('/repos/private/project/releases?secret=value', '/repos/{owner}/{repo}/releases'),
+        ('/repos/private/project/releases/tags/private-tag', '/repos/{owner}/{repo}/releases/tags/{tag}'),
+        ('/repos/private/project/releases/123/assets?name=private-name',
+         '/repos/{owner}/{repo}/releases/{release}/assets'),
+        ('/repos/private/project/git/ref/tags/private-tag', '/repos/{owner}/{repo}/git/ref/{ref}'),
+        ('/unknown/private-value', '(other endpoint)')):
+    trace = (f'> POST {path} HTTP/1.1\n> Authorization: token {TOKEN}\n\n'
+             f'notes: {payload}\n< HTTP/2.0 504 Gateway Timeout\n'
+             '< X-Github-Request-Id: ABCD:1234\n< Set-Cookie: private-cookie\n\n'
+             f'{payload}\n< X-Github-Request-Id: DEAD:BEEF\nHTTP 504: rejected\n')
+    expected = f'POST {route} HTTP 504 request-id=ABCD:1234'
+    assert release_gh.request_failures(trace) == expected
+    result = subprocess.CompletedProcess(['gh', 'release', 'create'], 1, '', trace)
+    with mock.patch.dict(os.environ, RELEASE_GH_DIAGNOSTICS='1', RELEASE_GH_RETRY_DELAYS=''), \
+            mock.patch.object(release_gh.subprocess, 'run', return_value=result) as github:
+        try:
+            release_gh.gh('release', 'create', step='diagnostic-test')
+        except SystemExit as error:
+            assert str(error) == f'diagnostic-test: gh release create failed: HTTP 504 [{expected}]'
+        else:
+            raise AssertionError('diagnostic failure must raise')
+        assert github.call_args.kwargs['env']['GH_DEBUG'] == 'api'
+    with mock.patch.dict(os.environ, RELEASE_GH_DIAGNOSTICS='0'):
+        assert release_gh.failure_reason(result) == 'HTTP 504'
+
+assert release_gh.request_failures(
+    '> POST /graphql HTTP/1.1\n< HTTP/2.0 200 OK\n\nHTTP 504 in response body') == ''
+assert release_gh.request_failures(
+    '> POST /graphql HTTP/1.1\n< HTTP/2.0 504 Gateway Timeout\n'
+    '< X-Github-Request-Id: not-a-request-id\n\n') == 'POST /graphql HTTP 504'
+
+# Callers handling check=False cannot accidentally print raw traces, including on successful reads.
+for returncode in (0, 1):
+    result = subprocess.CompletedProcess(['gh', 'release', 'view'], returncode, '{}',
+        '> POST /graphql HTTP/1.1\n< HTTP/2.0 504 Gateway Timeout\n'
+        f'< Authorization: {TOKEN}\n\n{payload}\n')
+    with mock.patch.dict(os.environ, RELEASE_GH_DIAGNOSTICS='1', RELEASE_GH_RETRY_DELAYS=''), \
+            mock.patch.object(release_gh.subprocess, 'run', return_value=result):
+        completed = release_gh.gh('release', 'view', step='diagnostic-test', check=False)
+        assert TOKEN not in completed.stderr and payload not in completed.stderr
+        assert completed.stderr == ('HTTP 504 [POST /graphql HTTP 504]' if returncode else '')
+
+# Mock the single-POST recovery protocol without any release mutations.
+from release_draft_recovery import create_verified_draft
+
+
+def recovery_case(mode):
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        notes = root / 'notes.md'
+        notes.write_text('complete notes\n\n<!-- fractal-daily-candidate -->\n')
+        asset = root / 'archive.tar.gz'
+        asset.write_bytes(b'original verified archive')
+        digest = 'sha256:' + hashlib.sha256(asset.read_bytes()).hexdigest()
+        body = '<!-- fractal-daily-candidate-diagnostic:run-7-marker -->\n'
+        row = dict(id=42, name='Fractal v0.3.18', tag_name='v0.3.18', target_commitish='a' * 40,
+                   draft=True, prerelease=False, body=body, assets=[])
+        state = {'exists': mode in ('existing', 'mismatch', 'wrong-name', 'partial'),
+                 'posts': 0, 'writes': [], 'logs': []}
+        if mode == 'mismatch':
+            row['target_commitish'] = 'b' * 40
+        if mode == 'wrong-name':
+            row['name'] = 'Different release'
+        assets = [asset]
+        if mode == 'partial':
+            retained = root / 'retained.sha256'
+            retained.write_bytes(b'original retained checksum')
+            assets.append(retained)
+            row['assets'] = [dict(name=retained.name, state='uploaded',
+                                  digest='sha256:' + hashlib.sha256(retained.read_bytes()).hexdigest())]
+
+        def call(*args, **kwargs):
+            method = args[args.index('--method') + 1] if '--method' in args else 'GET'
+            out, code = '', 0
+            assert method != 'DELETE' and args[:2] != ('release', 'delete')
+            if '/git/ref/tags/' in args[-1]:
+                out = 'HTTP/2.0 200 OK\n\n{}' if mode == 'tag' else 'HTTP/2.0 404 Not Found\n\n{}'
+                code = 0 if mode == 'tag' else 1
+            elif '--paginate' in args:
+                out = json.dumps([[row] if state['exists'] else []])
+            elif method == 'POST':
+                state['posts'] += 1
+                payload = json.loads(kwargs['input'])
+                assert payload['body'] == body and payload['draft'] is True
+                assert payload['target_commitish'] == 'a' * 40
+                state['exists'] = mode not in ('absent', 'rejected')
+                status = 422 if mode == 'rejected' else 504 if mode in ('ambiguous', 'absent') else 201
+                out = f'HTTP/2.0 {status} Result\nX-GitHub-Request-Id: ABCD:1234\nDate: Sun, 08 Nov 2026 12:00:00 GMT\n\n' + json.dumps(row)
+                code = int(status != 201)
+                if mode == 'wrong-marker':
+                    row['body'] = 'unowned draft'
+            elif args[:2] == ('release', 'upload'):
+                state['writes'].append('upload')
+                assert args[5:] == (str(asset),), 'upload only the missing original asset'
+                row['assets'].append(dict(name=asset.name, state='uploaded',
+                                          digest='sha256:wrong' if mode == 'digest' else digest))
+            elif method == 'PATCH':
+                state['writes'].append('notes')
+                patch = json.loads(kwargs['input'])
+                assert patch['draft'] is True
+                row.update(patch)
+                if mode == 'published':
+                    row['draft'] = False
+                out = json.dumps(row)
+            else:
+                out = json.dumps(row)
+            return subprocess.CompletedProcess(args, code, out, '')
+
+        failed = False
+        try:
+            create_verified_draft('example/project', 'v0.3.18', 'a' * 40,
+                                  'run-7-marker', notes, assets, call=call,
+                                  say=state['logs'].append)
+        except ValueError:
+            failed = True
+        assert state['posts'] <= 1, state
+        success = mode in ('success', 'ambiguous', 'existing', 'repeated', 'partial')
+        assert failed != success, (mode, state)
+        if success:
+            assert row['draft'] is True and row['body'] == notes.read_text()
+            assert state['writes'] == ['upload', 'notes']
+        if mode == 'repeated':
+            posts = state['posts']
+            create_verified_draft('example/project', 'v0.3.18', 'a' * 40,
+                                  'run-7-marker', notes, assets, call=call,
+                                  say=state['logs'].append)
+            assert state['posts'] == posts == 1
+            assert state['writes'] == ['upload', 'notes', 'notes']
+            assert row['draft'] is True and row['body'] == notes.read_text()
+        if mode == 'partial':
+            assert state['posts'] == 0 and len(row['assets']) == 2
+        if state['posts']:
+            assert 'request-id=ABCD:1234' in state['logs'][0]
+        if mode in ('tag', 'mismatch', 'wrong-name'):
+            assert not state['posts'] and not state['writes']
+        if mode in ('absent', 'rejected', 'wrong-marker'):
+            assert not state['writes']
+        print(f'PASS: draft recovery {mode}')
+
+
+# Prototype outcomes and exact-match, repeated-run, and partial-upload regressions.
+for mode in ('success', 'tag', 'absent', 'rejected', 'wrong-marker', 'digest',
+             'published', 'existing', 'ambiguous', 'mismatch', 'wrong-name', 'repeated', 'partial'):
+    recovery_case(mode)
 print('Daily release bodies are bounded, full notes are attached, and failures are credential-safe')

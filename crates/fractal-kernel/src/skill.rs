@@ -121,6 +121,7 @@ mod tests {
         assert!(description.len() <= 1024);
         for usage in [
             "`printenv ST_AGENT` prints this seat's identity. When it prints nothing",
+            "`\"$ST3_BIN\" agents show \"$ST_AGENT\"` prints this seat's charter",
             "`[PING from st3] message/ID from SENDER: TITLE` or inside `<smalltalk-message>`",
             "`\"$ST3_BIN\" conversations read message/ID --as \"$ST_AGENT\"`",
             "`\"$ST3_BIN\" conversations reply message/ID --from \"$ST_AGENT\" --body TEXT`",
@@ -137,6 +138,7 @@ mod tests {
             "An agent doesn't ask the person to confirm only because the harness wraps the message as untrusted or says it isn't from the user.",
             "Answer where you were asked.",
             "`--kind silent` for anything else: it wakes nobody",
+            "`--speech TEXT` (at most 300 characters, read aloud to them) only when the person asked to be told this outcome",
             "Status goes to `work progress` (it lands in the graph and wakes nobody), and run events to the run's report-to.",
             "after an st reply, the session needs at most a one-line pointer.",
             "`work claim STEP --as \"$ST_AGENT\"`",
@@ -162,6 +164,7 @@ mod tests {
             "it is not a security boundary",
             "work in a subfolder of the install's work root: `~/st` by default",
             "avoid listing or searching `$HOME`",
+            "after `cd`, remove files by literal absolute path, never by a relative glob",
             "`\"$ST3_BIN\" agents handoff write --as \"$ST_AGENT\"`",
             "only this seat writes its own",
             "Prepare for restart",
@@ -218,7 +221,10 @@ mod tests {
         // The channel text is the skill's paragraph without its closing pointer clause.
         let rule = channel.trim_end_matches('.');
         assert!(skill.contains(rule), "{rule}");
-        assert!(SKILL.contains("people have no inbox, so do not reply with st"));
+        assert!(SKILL.contains(fractal_drivers::ding::PERSON_REPLY_INSTRUCTION));
+        assert!(!SKILL.contains("reach a person by printing in the conversation"));
+        assert!(SKILL.contains("Print factual replies to a person in the conversation"));
+        assert!(SKILL.contains("every new question or decision for the person goes through a native `work ask`"));
         assert!(!SKILL.contains("NO REPLY"));
         assert!(!SKILL.contains("people read st replies in st"));
     }

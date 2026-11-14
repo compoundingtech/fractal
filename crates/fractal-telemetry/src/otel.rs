@@ -8,6 +8,11 @@
 //! respect per-signal opt-outs and retain correlation attributes, but always use
 //! the st unit's service name and explicit resource identity.
 
+#[path = "resource_lane.rs"]
+mod resource_lane;
+pub use resource_lane::{LaneIdentity, LaneOutcome, LanePhase, LanePhaseKind, LaneTelemetry};
+pub use crate::attempt_trace::{AttemptTrace, AttemptTraceContext};
+
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -225,6 +230,71 @@ pub fn roster_attribute(key: &'static str, value: impl Into<opentelemetry::Value
             attributes.values.insert(key, value);
         }
     });
+}
+
+/// Conversation work is synchronous on the request worker. Reuse the sampled request
+/// attribute accumulator and SQLite admission hook; never create per-item spans.
+pub fn conversation_scope<T>(work: impl FnOnce() -> T) -> T {
+    if !export_enabled() || !roster_destination_recording() {
+        return work();
+    }
+    let _restore = ensure_roster_scope();
+    roster_attribute("st.conversation.reader_admission_ms", 0.0);
+    smallclaims::sqlite::with_reader_timing(
+        |elapsed| roster_accumulate("st.conversation.reader_admission_ms", elapsed.as_secs_f64() * 1000.0),
+        work,
+    )
+}
+
+pub fn conversation_count(key: &'static str, count: usize) {
+    if !roster_recording() { return; }
+    let previous = ROSTER_SCOPE.with(|slot| slot.borrow().as_ref().and_then(|attributes| {
+        match attributes.values.get(key) { Some(opentelemetry::Value::I64(value)) => Some(*value), _ => None }
+    })).unwrap_or_default();
+    roster_attribute(key, previous.saturating_add(i64::try_from(count).unwrap_or(i64::MAX)));
+}
+
+pub fn conversation_phase<T>(key: &'static str, work: impl FnOnce() -> T) -> T {
+    if !roster_recording() { return work(); }
+    let started = Instant::now();
+    let value = work();
+    roster_accumulate(key, started.elapsed().as_secs_f64() * 1000.0);
+    value
+}
+
+/// Config.peers is the label allowlist (plus the local node); discovered membership
+/// alone never adds series. Unconfigured or malformed owner ids collapse to unknown.
+pub fn conversation_owner<'a>(owner: &'a str, local: &str, mut peers: impl Iterator<Item = &'a str>) -> &'a str {
+    let Some(name) = owner.strip_prefix("host/") else { return "unknown"; };
+    if name == local { "local" } else if peers.any(|peer| peer == name) { owner } else { "unknown" }
+}
+
+pub fn record_conversation_relay_read(owner: &str, operation: &'static str, elapsed: Duration) {
+    if !metrics_enabled() { return; }
+    static DURATION: std::sync::LazyLock<opentelemetry::metrics::Histogram<f64>> = std::sync::LazyLock::new(||
+        opentelemetry::global::meter("st3.conversation")
+        .f64_histogram("st.conversation.relay_read.duration")
+        .with_unit("s")
+        .with_description("Conversation owner relay round-trip duration, including failed reads")
+        .build());
+    DURATION.record(elapsed.as_secs_f64(), &[
+            KeyValue::new("st.conversation.owner", owner.to_owned()),
+            KeyValue::new("st.conversation.operation", operation),
+        ]);
+}
+
+#[cfg(test)]
+mod conversation_metrics_tests {
+    #[test]
+    fn owner_labels_are_bounded_to_the_configured_fleet() {
+        let label = |owner| super::conversation_owner(owner, "local-node", ["alpha", "beta"].into_iter());
+        assert_eq!(label("host/local-node"), "local");
+        assert_eq!(label("host/alpha"), "host/alpha");
+        assert_eq!(label("host/beta"), "host/beta");
+        for owner in ["alpha", "host/new-peer", "session/secret", "host/", "host/alpha/session/id"] {
+            assert_eq!(label(owner), "unknown", "{owner}");
+        }
+    }
 }
 
 pub fn record_roster_read(path: &'static str, requested: u64, publication: Option<u64>, fresh: bool) {
@@ -558,6 +628,24 @@ fn duration_view(instrument: &Instrument) -> Option<Stream> {
     Some(stream.build().expect("seconds histogram view is valid"))
 }
 
+/// AP-2026-11-07-r2 safety margin; the population allocation remains 256 buckets.
+const AGENT_POPULATION_CARDINALITY_LIMIT: usize = 512;
+
+fn agent_population_view(instrument: &Instrument) -> Option<Stream> {
+    if !matches!(
+        instrument.name(),
+        "st.agents" | "st.attention.open" | "st.agents.refresh.last_success"
+    ) {
+        return None;
+    }
+    Some(
+        Stream::builder()
+            .with_cardinality_limit(AGENT_POPULATION_CARDINALITY_LIMIT)
+            .build()
+            .expect("agent population view is valid"),
+    )
+}
+
 /// The request-duration histogram shares the st2 view (30 s and 60 s buckets
 /// included for long-polls and replay); startup owns its longer bucket range.
 const HTTP_SERVER_DURATION_INSTRUMENT: &str = "http.server.request.duration";
@@ -756,6 +844,26 @@ pub fn record_http_request_duration(
         ],
     );
 }
+/// Count only bounded mutation refusals caused by pending run projections. Labels use the
+/// router's bounded route template and HTTP method, never a run, step, person or raw URL.
+pub fn record_run_projection_drain_refusal(method: &str, route: &str) {
+    if !metrics_enabled() {
+        return;
+    }
+    static REFUSALS: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::LazyLock::new(|| {
+            opentelemetry::global::meter("st3.http")
+                .u64_counter("st.run_projection.drain.refusals")
+                .with_unit("{refusal}")
+                .with_description("Mutation refusals after the bounded run projection drain wait")
+                .build()
+        });
+    REFUSALS.add(1, &[
+        KeyValue::new("http.request.method", method.to_owned()),
+        KeyValue::new("http.route", route.to_owned()),
+    ]);
+}
+
 
 /// Bounded reasons a mailbox stream checks its authority; never label metrics with a seat.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -835,6 +943,27 @@ fn record_github_response_metric(
         KeyValue::new("github.repository", repository.to_owned()),
         KeyValue::new("github.resource", resource),
         KeyValue::new("github.response.kind", if not_modified { "not_modified" } else { "charged" }),
+    ]);
+}
+
+static GITHUB_WEBHOOK_DELIVERIES: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.github")
+            .u64_counter("st.github.webhook.deliveries")
+            .with_description("GitHub webhook deliveries this daemon received, by event and outcome")
+            .with_unit("{delivery}")
+            .build()
+    });
+
+/// One webhook delivery. `event` is a bounded label (`other` for events the receiver does not
+/// know); `outcome` is `refreshed`, `ignored`, `unauthorized`, `unavailable` or `invalid`.
+pub fn github_webhook_delivery(event: &'static str, outcome: &'static str) {
+    if !metrics_enabled() {
+        return;
+    }
+    GITHUB_WEBHOOK_DELIVERIES.add(1, &[
+        KeyValue::new("github.event", event),
+        KeyValue::new("outcome", outcome),
     ]);
 }
 
@@ -1178,6 +1307,7 @@ impl Telemetry {
                             opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build(),
                         )
                         .with_view(duration_view)
+                        .with_view(agent_population_view)
                         .with_resource(resource.clone())
                         .build();
                     if matches!(unit, Unit::Daemon) {
@@ -1797,6 +1927,52 @@ mod tests {
             }),
             "series beyond the cap fold into otel.metric.overflow"
         );
+    }
+
+    #[test]
+    fn agent_population_view_caps_each_observable_gauge() {
+        use super::{AGENT_POPULATION_CARDINALITY_LIMIT, agent_population_view, duration_view};
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .with_view(duration_view)
+            .with_view(agent_population_view)
+            .build();
+        let names = ["st.agents", "st.attention.open", "st.agents.refresh.last_success"];
+        for name in names {
+            provider.meter("st3").u64_observable_gauge(name)
+                .with_unit(if name == "st.agents.refresh.last_success" { "s" } else { "{item}" })
+                .with_callback(|observer| {
+                    for series in 0..AGENT_POPULATION_CARDINALITY_LIMIT + 25 {
+                        observer.observe(1, &[KeyValue::new("series", series.to_string())]);
+                    }
+                })
+                .build();
+        }
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        for name in names {
+            let metric = finished.iter()
+                .flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics())
+                .find(|metric| metric.name() == name)
+                .expect("each population instrument is exported");
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data() else {
+                panic!("population instruments must export as u64 gauges");
+            };
+            assert_eq!(gauge.data_points().count(), AGENT_POPULATION_CARDINALITY_LIMIT + 1);
+            assert_eq!(gauge.data_points().filter(|point| {
+                point.attributes().any(|attribute| {
+                    attribute.key.as_str() == "otel.metric.overflow"
+                        && attribute.value == opentelemetry::Value::Bool(true)
+                })
+            }).count(), 1, "excess series produce exactly one explicit overflow point");
+        }
+        provider.shutdown().unwrap();
     }
 
     /// Opt-in cost proof: ~1 GiB in small, touched allocations, with alternate

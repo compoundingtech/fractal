@@ -1,13 +1,13 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import * as stylex from '@stylexjs/stylex'
-import { decodeResourceRows, type DecodedAgent } from '@fractal/sdk/effect'
+import { decodeResourceRows, type DecodedAgent, type Undecodable } from '@fractal/sdk/read'
 import oldLiteral from '../../../../packages/fractal-sdk/src/effect/agentSnapshot.oldLiteral.json' with { type: 'json' }
 import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { lightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { fleetFromAgents } from '../data/projections.ts'
 import { observed, type Feed, type Fleet, type RosterDecode } from '../data/source.ts'
-import { RosterDecodeNotice, rosterDecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
+import { DecodeNotice, decodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 import { RosterStaleNotice } from './SidebarEmptyState.tsx'
 
 /** Synthetic old-literal snapshot; every other row is a single-field variant of it. */
@@ -29,11 +29,20 @@ const decodeAgents = (rows: readonly unknown[]) => {
 const partial = decodeAgents([wire, futureUsage, brokenRuntime, brokenIdentity])
 const lastGood = decodeAgents([wire, futureUsage])
 const allBad = decodeAgents([{ ...wire, runtime_ids: 'runtime/not-a-list' }, brokenRuntime, brokenIdentity])
+const [shownMissionRef, brokenMissionRef] = ['mission/example/build', 'mission/example/broken-steps']
+/** Two rejected missions (one id-less) and a degraded leaf on a shown mission. */
+const missionFailures: readonly Undecodable[] = [
+  { _tag: 'Rejected', id: brokenMissionRef, path: 'run_details', reason: 'Expected array' },
+  { _tag: 'Rejected', path: 'id', reason: 'Expected string' },
+  { _tag: 'Degraded', id: shownMissionRef, path: 'run_details.eta', reason: 'Unrecognized leaf value' },
+]
 
 interface Scenario {
   readonly fleet: Feed<Fleet>
   readonly decode: RosterDecode
   readonly stale: boolean
+  /** Observed mission ids; present only when the notice heads the missions feed. */
+  readonly missions?: ReadonlySet<string>
 }
 const scenarios = {
   decoded: (() => {
@@ -51,15 +60,16 @@ const scenarios = {
     decode: { undecodable: allBad.undecodable, decodeStale: true },
     stale: true,
   },
+  missions: { fleet: observed({ value: fleetFromAgents([]) }), decode: { undecodable: missionFailures, decodeStale: false }, stale: false, missions: new Set([shownMissionRef]) },
 } satisfies Record<string, Scenario>
 
 const Roster = ({ scenario, scheme }: { readonly scenario: keyof typeof scenarios; readonly scheme: 'light' | 'dark' }) => {
-  const { fleet, decode, stale } = scenarios[scenario]
+  const { fleet, decode, stale, missions }: Scenario = scenarios[scenario]
   return (
     <aside aria-label="Agents" data-scheme={scheme} {...stylex.props(styles.sidebar, ...(scheme === 'light' ? lightTheme : []))}>
       {fleet._tag === 'Observed' ? <>
         {stale ? <RosterStaleNotice decodeStale={decode.decodeStale} observedAt={undefined} partial={fleet.coverage?._tag === 'Partial'} refreshFailed={false} onRetry={undefined} /> : null}
-        <RosterDecodeNotice decode={decode} shown={shownRosterRefs(fleet)} />
+        {missions === undefined ? <DecodeNotice noun="agent" decode={decode} shown={shownRosterRefs(fleet)} /> : <DecodeNotice noun="mission" decode={decode} shown={missions} />}
       </> : null}
     </aside>
   )
@@ -82,6 +92,7 @@ export default meta
 export const scenarioExemptions: readonly string[] = [
   'AllBadStale:contract-fixture',
   'FullyDecoded:contract-fixture',
+  'UndecodableMission:contract-fixture',
   'UndecodableRow:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
@@ -123,10 +134,10 @@ export const UndecodableRow: Story = {
     expect(notices).toHaveLength(1)
     expect(notices[0]!.dataset.wfRosterDecode).toBe('partial')
     const status = canvas.getByRole('status')
-    expect(status.textContent).toBe(rosterDecodeNotice(2))
+    expect(status.textContent).toBe(decodeNotice(2, 'agent'))
     expect(status).toHaveAttribute('aria-live', 'polite')
     expect(status).toHaveAttribute('aria-atomic', 'true')
-    expect(status.textContent).toBe('2 agents could not be shown · this view is older than the daemon')
+    expect(status.textContent).toBe('2 agents could not be shown · their data does not match the expected format')
     expect(canvas.queryByRole('alert')).toBeNull()
     expect(canvasElement.querySelector('[data-wf-roster-stale]')).toBeNull()
 
@@ -160,7 +171,7 @@ export const AllBadStale: Story = {
     const notices = canvasElement.querySelectorAll<HTMLElement>('[data-wf-roster-decode]')
     expect(notices).toHaveLength(1)
     expect(notices[0]!.dataset.wfRosterDecode).toBe('stale')
-    expect(canvas.getByText('3 agents could not be shown · this view is older than the daemon')).toHaveAttribute('role', 'status')
+    expect(canvas.getByText('3 agents could not be shown · their data does not match the expected format')).toHaveAttribute('role', 'status')
     expect(canvas.queryByRole('alert')).toBeNull()
 
     await userEvent.click(canvas.getByRole('button', { name: 'Details' }))
@@ -169,5 +180,21 @@ export const AllBadStale: Story = {
     expect(list.textContent).toContain(wire.id)
     expect(list.textContent).toContain(brokenRuntimeRef)
     expect(list.querySelector('[data-wf-decode-path="id"]')).not.toBeNull()
+  },
+}
+
+export const UndecodableMission: Story = {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Rejected and degraded missions diagnostics pin the missions notice: rejected rows count once, degraded leaves of shown missions never count, and identifiers stay under Details.' } },
+  args: { scenario: 'missions' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    expect(canvasElement.querySelector<HTMLElement>('[data-wf-missions-decode]')?.dataset.wfMissionsDecode).toBe('partial')
+    const status = canvas.getByRole('status')
+    expect(status.textContent).toBe('2 missions could not be shown · their data does not match the expected format')
+    expect(status.textContent).not.toContain(brokenMissionRef)
+    await userEvent.click(canvas.getByRole('button', { name: 'Details' }))
+    const list = canvas.getByRole('list', { name: 'Missions that could not be shown' })
+    expect([...list.querySelectorAll('[data-wf-decode-path]')].map((row) => row.getAttribute('data-wf-decode-path'))).toEqual(['run_details', 'id'])
+    expect(list.textContent).not.toContain(shownMissionRef)
   },
 }

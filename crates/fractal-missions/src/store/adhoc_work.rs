@@ -9,9 +9,9 @@ pub fn validate_recipient(
     tx: &Transaction<'_>,
     input: &WorkHandoffRequest,
     current: &StepRunView,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if input.note.trim().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "handoff-needs-note",
             "a handoff needs a nonempty note",
         ));
@@ -20,7 +20,7 @@ pub fn validate_recipient(
         || !(input.to.starts_with("agent/") || input.to.starts_with("person/"))
         || input.to.split('/').skip(1).any(str::is_empty)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-handoff-recipient",
             "name another exact agent/ or person/ recipient",
         ));
@@ -28,13 +28,16 @@ pub fn validate_recipient(
     if input.to.starts_with("agent/")
         && !person_work::declaration_live(tx, &input.to).map_err(internal)?
     {
-        return Err(St3Error::new(
+        if super::stop_intake::stop_cut(tx, &input.to).map_err(internal)?.is_some() {
+            return Err(super::stop_intake::stopping(&input.to));
+        }
+        return Err(FractalError::new(
             "missing-handoff-recipient",
             "the recipient seat needs a live declaration",
         ));
     }
     if !matches!(current.status.as_str(), "claimed" | "working") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "work-not-claimed",
             "only a running claim can be handed off",
         ));
@@ -51,7 +54,7 @@ pub fn validate_recipient(
         )
         .map_err(internal)?;
     if children {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "handoff-has-children",
             "hand off a leaf step; a parent owns its child work",
         ));
@@ -65,7 +68,7 @@ pub fn transfer_tx(
     current: &StepRunView,
     input: &WorkHandoffRequest,
     body: &mut Value,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let key = serde_json::to_vec(&(
         &current.subject,
         current.attempt,
@@ -116,7 +119,7 @@ pub(super) fn clear_eta_tx(
     origin: &str,
     current: &StepRunView,
     input: &WorkHandoffRequest,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(summary) = current
         .progress_summary
         .as_deref()
@@ -148,7 +151,7 @@ pub fn validate_retry(
     connection: &Connection,
     subject: &str,
     input: &WorkHandoffRequest,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let stored: Option<String> = connection.query_row("SELECT body FROM claims WHERE subject=?1 AND kind='work.released' AND json_extract(body,'$.fields.handoff_key')=?2 AND actor=?3 LIMIT 1",
         params![normalize_step_run(subject), input.idempotency_key, input.actor], |row| row.get(0)).optional().map_err(internal)?;
     let expected = serde_json::to_value(input).map_err(internal)?;
@@ -156,7 +159,7 @@ pub fn validate_retry(
         .and_then(|body| serde_json::from_str::<Value>(&body).ok())
         .is_none_or(|body| body["fields"]["handoff_request"] != expected)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "idempotency-conflict",
             "this handoff key already names another transfer",
         ));
@@ -169,7 +172,7 @@ fn names_current_handoff(
     connection: &Connection,
     subject: &str,
     input: &WorkAcknowledgeRequest,
-) -> Result<bool, St3Error> {
+) -> Result<bool, FractalError> {
     let Some(view) = person_work::step(connection, subject).map_err(internal)? else {
         return Ok(false);
     };
@@ -184,7 +187,7 @@ fn names_current_handoff(
 /// The recipient's receipt for a handoff note that is a stream item: the read or close it
 /// already recorded, else the read [`stream_note_read`] records. It names the step, as a stream
 /// receipt does, and writes nothing.
-fn stream_note_receipt(store: &Store, note: &str, actor: &str) -> Result<String, St3Error> {
+fn stream_note_receipt(store: &Store, note: &str, actor: &str) -> Result<String, FractalError> {
     use crate::store::messages_shard::{lifecycle_receipt, mailbox_reads};
     let read = BTreeMap::from([("status".to_owned(), json!("read"))]);
     for kind in ["message.read", "message.closed"] {
@@ -199,7 +202,7 @@ fn stream_note_receipt(store: &Store, note: &str, actor: &str) -> Result<String,
 }
 
 /// Record the recipient's read of a stream handoff note, unless it already read or closed it.
-fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<(), St3Error> {
+fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<(), FractalError> {
     use crate::store::messages_shard::{mailbox_reads, record_admitted_lifecycle};
     for kind in ["message.read", "message.closed"] {
         if mailbox_reads::lifecycle_step(store, note, kind)
@@ -214,18 +217,36 @@ fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<(), St3Err
     record_admitted_lifecycle(store, note, "message.read", Some(actor), &read).map(drop)
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HandoffDisposition {
+    Withdrawn,
+    Declined,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HandoffReturnRequest {
+    pub actor: String,
+    pub message: String,
+    pub attempt: u32,
+    pub disposition: HandoffDisposition,
+    pub reason: String,
+    pub idempotency_key: String,
+}
+
 pub trait AdhocWorkStore {
     fn handoff_retry(
             &self,
             subject: &str,
             input: &WorkHandoffRequest,
-        ) -> Result<Option<StepRunView>, St3Error>;
-    fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, St3Error>;
+        ) -> Result<Option<StepRunView>, FractalError>;
+    fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, FractalError>;
+    fn return_handoff(&self, subject: &str, input: &HandoffReturnRequest) -> Result<ClaimRecord, FractalError>;
     fn acknowledge_work(
             &self,
             subject: &str,
             input: &WorkAcknowledgeRequest,
-        ) -> Result<StepRunView, St3Error>;
+        ) -> Result<StepRunView, FractalError>;
 }
 
 impl AdhocWorkStore for Store {
@@ -234,22 +255,65 @@ impl AdhocWorkStore for Store {
             &self,
             subject: &str,
             input: &WorkHandoffRequest,
-        ) -> Result<Option<StepRunView>, St3Error> {
+        ) -> Result<Option<StepRunView>, FractalError> {
         let response = self
             .cached_idempotency_response(&input.idempotency_key)
             .map_err(internal)?;
         if response.is_some() {
-            validate_retry(&self.readers.get(), subject, input)?;
+            self.with_run_fence(subject, |tx| validate_retry(tx, subject, input))?;
         }
         Ok(response)
     }
 
-    fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, St3Error> {
+    fn return_handoff(&self, subject: &str, input: &HandoffReturnRequest) -> Result<ClaimRecord, FractalError> {
+        let subject = normalize_step_run(subject);
+        if input.reason.trim().is_empty() || input.idempotency_key.trim().is_empty() {
+            return Err(FractalError::new("invalid-handoff-return", "a reason and idempotency key are required"));
+        }
+        self.with_run_fence(&subject, |tx| {
+            let existing = tx.query_row(
+                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='work.handoff-returned' AND json_extract(body,'$.fields.return_request.idempotency_key')=?1",
+                [&input.idempotency_key], claim_from_row).optional().map_err(internal)?;
+            if let Some(existing) = existing {
+                if existing.subject != subject || existing.body["fields"]["return_request"] != json!(input) {
+                    return Err(FractalError::new("idempotency-conflict", "this key names another return"));
+                }
+                return Ok(existing);
+            }
+            let view = person_work::step(tx, &subject).map_err(internal)?
+                .ok_or_else(|| FractalError::new("missing-step-run", "the handed-off step is missing"))?;
+            let handoff = latest_handoff(tx, &view, now_ms())?
+                .ok_or_else(|| FractalError::new("stale-handoff", "this attempt has no unresolved handoff"))?;
+            let from = handoff.actor.as_deref().unwrap_or_default();
+            let to = handoff.body["fields"]["handoff_to"].as_str().unwrap_or_default();
+            let authorized = match input.disposition {
+                HandoffDisposition::Withdrawn => input.actor == from,
+                HandoffDisposition::Declined => input.actor == to,
+            };
+            if step_owner_is_terminal_tx(tx, &subject)? || view.status != "ready"
+                || view.claimant.is_some() || view.attempt != input.attempt
+                || view.claim_incarnation.is_some() || view.claim_expires_at_unix_ms.is_some()
+                || handoff.body["fields"]["handoff_message"] != input.message
+                || !from.starts_with("agent/") || !to.starts_with("person/")
+                || view.assigned_to.as_deref() != Some(to) || !authorized {
+                return Err(FractalError::new("stale-handoff", "only the handing agent or assigned person can return the exact unclaimed live handoff"));
+            }
+            let claim = append_claim_tx(tx, &self.origin, &subject, "work.handoff-returned", Some(&input.actor),
+                &json!({"fields": {"attempt": view.attempt, "status": "ready", "handoff_claim": handoff.id,
+                    "handoff_message": input.message, "handoff_to": from, "disposition": input.disposition,
+                    "reason": input.reason, "readiness_epoch": view.readiness_epoch + 1, "return_request": input}}),
+                &[handoff.id], None).map_err(claim_append_error)?;
+            project_mission_run_update(tx, &claim)?;
+            Ok(claim)
+        })
+    }
+
+    fn start_work(&self, input: &WorkStartRequest) -> Result<StepRunView, FractalError> {
         if !input.actor.starts_with("agent/")
             || input.title.trim().is_empty()
             || input.idempotency_key.trim().is_empty()
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-work-start",
                 "start needs an exact agent actor, title and idempotency key",
             ));
@@ -269,34 +333,37 @@ impl AdhocWorkStore for Store {
         let mission = crate::graph::parse_internal_intent(&kdl, &self.origin)?
             .missions
             .remove(&mission_id)
-            .ok_or_else(|| St3Error::new("internal", "minimal work mission missing"))?;
-        self.connection.batched(|tx| {
+            .ok_or_else(|| FractalError::new("internal", "minimal work mission missing"))?;
+        self.with_run_fence(&run, |tx| {
             if let Some(existing) = tx.query_row(/* sqlite-large-value: allow-for-now lv-h1a7eefa5184a owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='mission-run.created' ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [&run], claim_from_row).optional().map_err(internal)? {
                 if existing.body["fields"]["ad_hoc_title"] != input.title || existing.actor.as_deref() != Some(&input.actor) {
-                    return Err(St3Error::new("idempotency-conflict", "this start key already names another task"));
+                    return Err(FractalError::new("idempotency-conflict", "this start key already names another task"));
                 }
-                return person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the work is no longer retained"));
+                return person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the work is no longer retained"));
             }
             if !person_work::declaration_live(tx, &input.actor).map_err(internal)? {
-                return Err(St3Error::new("missing-work-actor", "the calling seat needs a live declaration"));
+                if super::stop_intake::stop_cut(tx, &input.actor).map_err(internal)?.is_some() {
+                    return Err(super::stop_intake::stopping(&input.actor));
+                }
+                return Err(FractalError::new("missing-work-actor", "the calling seat needs a live declaration"));
             }
             let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM step_runs WHERE lease_owner=?1 AND status IN ('claimed','working','verifying','blocked') AND CAST(lease_expires_at_unix_ms AS INTEGER)>?2)", params![input.actor, now_ms() as i64], |row| row.get(0)).map_err(internal)?;
-            if active { return Err(St3Error::new("agent-capacity", "finish or release independent claimed work before starting another run")); }
+            if active { return Err(FractalError::new("agent-capacity", "finish or release independent claimed work before starting another run")); }
             let claim = append_claim_tx(tx, &self.origin, &run, "mission-run.created", Some(&input.actor), &json!({"fields": {
                 "status": "running", "mission": mission.subject, "revision": mission.revision, "initial_revision": mission.revision,
                 "current_generation": format!("run-generation/{generation}"), "root_revision": mission.revision, "root_mission_run": run,
                 "workspace": ".", "requester": input.actor, "inputs": {}, "mode": "run", "ad_hoc_title": input.title, "mission_spec": mission
             }}), &[], None).map_err(claim_append_error)?;
             project_start(tx, &claim)?;
-            person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the work could not be projected"))
-        }).map_err(internal)?
+            person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the work could not be projected"))
+        })
     }
 
     fn acknowledge_work(
             &self,
             subject: &str,
             input: &WorkAcknowledgeRequest,
-        ) -> Result<StepRunView, St3Error> {
+        ) -> Result<StepRunView, FractalError> {
         let subject = normalize_step_run(subject);
         // A note in the messages shard is a stream item: its read is this member's record there.
         // The progress below cites the read's receipt, whose id is known before it is recorded.
@@ -307,27 +374,29 @@ impl AdhocWorkStore for Store {
         // reader; the transaction below checks that again under the writer.
         let stream_receipt = match self.message(&input.message).map_err(internal)? {
             Some(note) if crate::store::messages_shard::mailbox_reads::is_stream_item(&note) => {
-                let current = names_current_handoff(&self.readers.get(), &subject, input)?;
+                let current = self.with_run_fence(&subject, |tx| {
+                    names_current_handoff(tx, &subject, input)
+                })?;
                 Some(current.then(|| stream_note_receipt(self, &input.message, &input.actor)).transpose()?)
             }
             _ => None,
         };
-        let view = self.connection.batched(|tx| {
-            let mut view = person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the handed-off step is missing"))?;
-            let handoff = latest_handoff(tx, &view, now_ms())?.ok_or_else(|| St3Error::new("missing-handoff", "this attempt has no handoff note"))?;
+        let view = self.with_run_fence(&subject, |tx| {
+            let mut view = person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the handed-off step is missing"))?;
+            let handoff = latest_handoff(tx, &view, now_ms())?.ok_or_else(|| FractalError::new("missing-handoff", "this attempt has no handoff note"))?;
             if handoff.body["fields"]["handoff_message"] != input.message || handoff.body["fields"]["handoff_to"] != input.actor || view.assigned_to.as_deref() != Some(&input.actor) {
-                return Err(St3Error::new("stale-handoff", "only the current recipient can acknowledge the exact current note"));
+                return Err(FractalError::new("stale-handoff", "only the current recipient can acknowledge the exact current note"));
             }
             if acknowledged(tx, &handoff, now_ms()).map_err(internal)? {
                 enrich_step_queue(tx, &mut view).map_err(internal)?;
                 return Ok(view);
             }
             if view.status != "ready" || step_owner_is_terminal_tx(tx, &subject)? {
-                return Err(St3Error::new("stale-handoff", "this handoff is no longer waiting for acknowledgment"));
+                return Err(FractalError::new("stale-handoff", "this handoff is no longer waiting for acknowledgment"));
             }
             let (receipt, predecessors) = if let Some(receipt) = &stream_receipt {
                 // The receipt is not a graph claim, so the progress cites it without following it.
-                let receipt = receipt.clone().ok_or_else(|| St3Error::new("stale-handoff", "the handoff changed while it was acknowledged; acknowledge it again"))?;
+                let receipt = receipt.clone().ok_or_else(|| FractalError::new("stale-handoff", "the handoff changed while it was acknowledged; acknowledge it again"))?;
                 (receipt, vec![handoff.id])
             } else {
                 let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h21741300df1e owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
@@ -359,7 +428,7 @@ impl AdhocWorkStore for Store {
             project_mission_run_update(tx, &claim)?;
             enrich_step_queue(tx, &mut view).map_err(internal)?;
             Ok(view)
-        }).map_err(internal)??;
+        })?;
         // Acknowledged, now or before: the note is read. A read that fails here is recorded by
         // the repeated acknowledgment its error asks for.
         if let Some(Some(_)) = &stream_receipt {

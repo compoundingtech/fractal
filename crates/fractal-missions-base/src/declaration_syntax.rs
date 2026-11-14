@@ -4,10 +4,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
-use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use crate::model::St3Error;
+use crate::model::FractalError;
 
 /// The context variables st sets for mission steps and gates (`mission`).
 pub const VARIABLES: &[&str] = &[
@@ -37,45 +36,115 @@ pub const VARIABLES: &[&str] = &[
     "PATH",
 ];
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-09-kdl-fractal-context-names — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Spell each `${FRACTAL_X}` context reference inside `mission` declarations as the registered
+/// `${ST_X}` before parsing, as `terminal` is lowered to `pty`. Either spelling publishes the same
+/// mission revision, so members that only know the `ST_` names run it unchanged. Escaped `$${…}`
+/// text and names that are not context variables stay as written.
+pub fn lower_context_references(document: &mut KdlDocument) {
+    fn lower(node: &mut KdlNode) {
+        for entry in node.entries_mut() {
+            let Some(lowered) = entry
+                .value()
+                .as_string()
+                .and_then(registered_references)
+            else {
+                continue;
+            };
+            let value = KdlValue::String(lowered);
+            if let Some(format) = entry.format_mut() {
+                format.value_repr = value.to_string();
+            }
+            entry.set_value(value);
+        }
+        if let Some(children) = node.children_mut() {
+            children.nodes_mut().iter_mut().for_each(lower);
+        }
+    }
+    for node in document.nodes_mut() {
+        if node.name().value() == "mission" {
+            lower(node);
+        }
+    }
+}
+
+/// `text` with its `${FRACTAL_X}` context references spelled `${ST_X}`, or `None` when it has none.
+fn registered_references(text: &str) -> Option<String> {
+    if !text.contains("${FRACTAL_") {
+        return None;
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut lowered = false;
+    while let Some(start) = rest.find("${") {
+        let (before, tail) = (&rest[..start], &rest[start + 2..]);
+        output.push_str(before);
+        output.push_str("${");
+        rest = tail;
+        if before.ends_with('$') {
+            continue;
+        }
+        let Some(end) = tail.find('}') else {
+            continue;
+        };
+        let name = &tail[..end];
+        let Some(suffix) = name.strip_prefix("FRACTAL_") else {
+            continue;
+        };
+        if let Some(registered) = VARIABLES
+            .iter()
+            .find(|variable| variable.strip_prefix("ST_") == Some(suffix))
+        {
+            output.push_str(registered);
+            output.push('}');
+            rest = &tail[end + 1..];
+            lowered = true;
+        }
+    }
+    output.push_str(rest);
+    lowered.then_some(output)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-09-kdl-fractal-context-names
+
 pub fn is_reserved_context_name(name: &str) -> bool {
     (VARIABLES.contains(&name) && name != "PATH") || name == "ST3_SUBJECT"
 }
 
-pub fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i128>, St3Error> {
+pub fn child_integer(document: &KdlDocument, name: &str) -> Result<Option<i128>, FractalError> {
     let Some(node) = unique_child(document, name)? else {
         return Ok(None);
     };
     ensure_no_properties(node)?;
     ensure_no_children(node)?;
     let [entry] = node.entries() else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-argument-count",
             format!("child `{name}` needs one integer"),
         ));
     };
     match entry.value() {
         KdlValue::Integer(value) => Ok(Some(*value)),
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "expected-integer",
             format!("child `{name}` needs one integer"),
         )),
     }
 }
 
-pub fn child_string(document: &KdlDocument, name: &str) -> Result<Option<String>, St3Error> {
+pub fn child_string(document: &KdlDocument, name: &str) -> Result<Option<String>, FractalError> {
     unique_child(document, name)?.map(one_string).transpose()
 }
 
-pub fn child_strings(document: &KdlDocument, name: &str) -> Result<Option<Vec<String>>, St3Error> {
+pub fn child_strings(document: &KdlDocument, name: &str) -> Result<Option<Vec<String>>, FractalError> {
     unique_child(document, name)?
         .map(positional_strings)
         .transpose()
 }
 
-pub fn ensure_bare(node: &KdlNode) -> Result<(), St3Error> {
+pub fn ensure_bare(node: &KdlNode) -> Result<(), FractalError> {
     reject_type(node)?;
     if !node.entries().is_empty() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unexpected-value",
             format!("node `{}` cannot have values", node.name().value()),
         ));
@@ -83,9 +152,9 @@ pub fn ensure_bare(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub fn ensure_no_children(node: &KdlNode) -> Result<(), St3Error> {
+pub fn ensure_no_children(node: &KdlNode) -> Result<(), FractalError> {
     if node.children().is_some() {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "unexpected-children",
             format!("node `{}` cannot have children", node.name().value()),
         ))
@@ -94,17 +163,17 @@ pub fn ensure_no_children(node: &KdlNode) -> Result<(), St3Error> {
     }
 }
 
-pub fn ensure_no_properties(node: &KdlNode) -> Result<(), St3Error> {
+pub fn ensure_no_properties(node: &KdlNode) -> Result<(), FractalError> {
     ensure_only_properties(node, &[])
 }
 
-pub fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), St3Error> {
+pub fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), FractalError> {
     reject_type(node)?;
     let mut seen = HashSet::new();
     for entry in node.entries().iter().filter(|entry| entry.name().is_some()) {
         let name = entry.name().expect("filtered").value();
         if !allowed.contains(&name) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unknown-property",
                 format!(
                     "node `{}` does not accept property `{name}`",
@@ -113,7 +182,7 @@ pub fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), St
             ));
         }
         if !seen.insert(name) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-property",
                 format!("node `{}` repeats property `{name}`", node.name().value()),
             ));
@@ -122,11 +191,11 @@ pub fn ensure_only_properties(node: &KdlNode, allowed: &[&str]) -> Result<(), St
     Ok(())
 }
 
-pub fn first_string(node: &KdlNode) -> Result<String, St3Error> {
+pub fn first_string(node: &KdlNode) -> Result<String, FractalError> {
     positional_values(node)
         .first()
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "missing-argument",
                 format!("node `{}` needs a name", node.name().value()),
             )
@@ -134,38 +203,19 @@ pub fn first_string(node: &KdlNode) -> Result<String, St3Error> {
         .and_then(|value| value_string(value))
 }
 
-pub fn json_value(value: &KdlValue) -> Result<Value, St3Error> {
-    Ok(match value {
-        KdlValue::String(value) => Value::String(value.clone()),
-        KdlValue::Integer(value) => {
-            let integer = i64::try_from(*value).map_err(|_| {
-                St3Error::new(
-                    "integer-range",
-                    "a KDL integer must fit a signed 64-bit value",
-                )
-            })?;
-            Value::Number(integer.into())
-        }
-        KdlValue::Float(value) => Value::Number(
-            serde_json::Number::from_f64(*value)
-                .ok_or_else(|| St3Error::new("invalid-number", "a float must be finite"))?,
-        ),
-        KdlValue::Bool(value) => Value::Bool(*value),
-        KdlValue::Null => Value::Null,
-    })
-}
+pub use crate::declaration_kdl::{json_value, parse_duration};
 
-pub fn one_string(node: &KdlNode) -> Result<String, St3Error> {
+pub fn one_string(node: &KdlNode) -> Result<String, FractalError> {
     ensure_no_children(node)?;
     one_string_with_children(node)
 }
 
-pub fn one_string_with_children(node: &KdlNode) -> Result<String, St3Error> {
+pub fn one_string_with_children(node: &KdlNode) -> Result<String, FractalError> {
     first_string(node).and_then(|first| {
         if positional_values(node).len() == 1 {
             Ok(first)
         } else {
-            Err(St3Error::new(
+            Err(FractalError::new(
                 "wrong-argument-count",
                 format!(
                     "node `{}` needs one string; received `{}`",
@@ -177,39 +227,10 @@ pub fn one_string_with_children(node: &KdlNode) -> Result<String, St3Error> {
     })
 }
 
-pub fn parse_duration(value: &str, positive: bool) -> Result<u64, St3Error> {
-    let (number, multiplier) = if let Some(value) = value.strip_suffix("ms") {
-        (value, 1)
-    } else if let Some(value) = value.strip_suffix('s') {
-        (value, 1_000)
-    } else if let Some(value) = value.strip_suffix('m') {
-        (value, 60_000)
-    } else if let Some(value) = value.strip_suffix('h') {
-        (value, 3_600_000)
-    } else if let Some(value) = value.strip_suffix('d') {
-        (value, 86_400_000)
-    } else {
-        (value, 1_000)
-    };
-    let number = number
-        .parse::<u64>()
-        .map_err(|_| St3Error::new("invalid-duration", format!("invalid duration `{value}`")))?;
-    let duration = number
-        .checked_mul(multiplier)
-        .ok_or_else(|| St3Error::new("duration-range", "duration is too large"))?;
-    if positive && duration == 0 {
-        return Err(St3Error::new(
-            "invalid-duration",
-            "a required duration must be positive",
-        ));
-    }
-    Ok(duration)
-}
-
 pub fn parse_map_child(
     document: &KdlDocument,
     name: &str,
-) -> Result<BTreeMap<String, String>, St3Error> {
+) -> Result<BTreeMap<String, String>, FractalError> {
     let Some(node) = unique_child(document, name)? else {
         return Ok(BTreeMap::new());
     };
@@ -222,7 +243,7 @@ pub fn parse_map_child(
         let value = one_string(child)?;
         let key = child.name().value().to_owned();
         if output.insert(key.clone(), value).is_some() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-map-key",
                 format!("map key `{key}` repeats"),
             ));
@@ -239,7 +260,7 @@ pub fn placement_host(host: String, default_host: &str) -> String {
     }
 }
 
-pub fn positional_strings(node: &KdlNode) -> Result<Vec<String>, St3Error> {
+pub fn positional_strings(node: &KdlNode) -> Result<Vec<String>, FractalError> {
     ensure_no_properties(node)?;
     ensure_no_children(node)?;
     positional_values(node)
@@ -256,7 +277,7 @@ pub fn positional_values(node: &KdlNode) -> Vec<&KdlValue> {
         .collect()
 }
 
-pub fn property_string(node: &KdlNode, property: &str) -> Result<Option<String>, St3Error> {
+pub fn property_string(node: &KdlNode, property: &str) -> Result<Option<String>, FractalError> {
     node.entries()
         .iter()
         .find(|entry| entry.name().is_some_and(|name| name.value() == property))
@@ -264,9 +285,9 @@ pub fn property_string(node: &KdlNode, property: &str) -> Result<Option<String>,
         .transpose()
 }
 
-pub fn reject_type(node: &KdlNode) -> Result<(), St3Error> {
+pub fn reject_type(node: &KdlNode) -> Result<(), FractalError> {
     if node.ty().is_some() {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "unexpected-type",
             format!(
                 "node `{}` cannot have a type annotation",
@@ -283,10 +304,10 @@ pub fn reject_unknown_children(
     allowed: &[&str],
     kind: &str,
     owner: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for child in document.nodes() {
         if !allowed.contains(&child.name().value()) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "unknown-child",
                 format!(
                     "{kind} `{owner}` does not accept child `{}`",
@@ -302,15 +323,15 @@ pub fn required_child_string(
     document: &KdlDocument,
     child: &str,
     owner: &str,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     child_string(document, child)?
-        .ok_or_else(|| St3Error::new("missing-child", format!("`{owner}` needs child `{child}`")))
+        .ok_or_else(|| FractalError::new("missing-child", format!("`{owner}` needs child `{child}`")))
 }
 
 pub fn unique_child<'a>(
     document: &'a KdlDocument,
     name: &str,
-) -> Result<Option<&'a KdlNode>, St3Error> {
+) -> Result<Option<&'a KdlNode>, FractalError> {
     let matches = document
         .nodes()
         .iter()
@@ -319,7 +340,7 @@ pub fn unique_child<'a>(
     match matches.as_slice() {
         [] => Ok(None),
         [node] => Ok(Some(*node)),
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "duplicate-child",
             format!("child `{name}` repeats"),
         )),
@@ -339,7 +360,7 @@ pub fn valid_field_path(path: &str) -> bool {
     })
 }
 
-pub fn validate_document_ref(value: &str) -> Result<(), St3Error> {
+pub fn validate_document_ref(value: &str) -> Result<(), FractalError> {
     let (name, hash) = value.rsplit_once('@').unwrap_or((value, ""));
     if name.len() <= 4
         || name.contains("..")
@@ -347,7 +368,7 @@ pub fn validate_document_ref(value: &str) -> Result<(), St3Error> {
         || (!hash.is_empty()
             && (hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-document-reference",
             format!("invalid document reference `{value}`"),
         ));
@@ -355,7 +376,7 @@ pub fn validate_document_ref(value: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub fn validate_environment_name(name: &str) -> Result<(), St3Error> {
+pub fn validate_environment_name(name: &str) -> Result<(), FractalError> {
     let valid = name
         .bytes()
         .next()
@@ -364,7 +385,7 @@ pub fn validate_environment_name(name: &str) -> Result<(), St3Error> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
     if !valid {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-environment-name",
             format!("invalid environment name `{name}`"),
         ));
@@ -372,7 +393,7 @@ pub fn validate_environment_name(name: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub fn validate_full_subject(value: &str) -> Result<(), St3Error> {
+pub fn validate_full_subject(value: &str) -> Result<(), FractalError> {
     if value.contains("${") {
         if value.starts_with("${")
             && value.ends_with('}')
@@ -388,7 +409,7 @@ pub fn validate_full_subject(value: &str) -> Result<(), St3Error> {
             concrete.push_str(&rest[..start]);
             let tail = &rest[start + 2..];
             let Some(end) = tail.find('}') else {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-variable",
                     "a variable reference has no closing brace",
                 ));
@@ -401,14 +422,14 @@ pub fn validate_full_subject(value: &str) -> Result<(), St3Error> {
     }
     if let Some(rest) = value.strip_prefix("file/") {
         let Some((host, path)) = rest.split_once(':') else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-file-subject",
                 "a file subject needs `file/HOST:/ABSOLUTE-PATH`",
             ));
         };
         validate_name(host, false)?;
         if !path.starts_with('/') || path.contains("/../") || path.ends_with("/..") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-file-subject",
                 "a file subject needs a safe absolute path",
             ));
@@ -420,7 +441,7 @@ pub fn validate_full_subject(value: &str) -> Result<(), St3Error> {
 
 /// A lane declares an optional entry prefix and an optional approver. Cleanup and revision
 /// retire it with `lane "NAME" { stop }`.
-pub fn validate_lane(node: &KdlNode) -> Result<(), St3Error> {
+pub fn validate_lane(node: &KdlNode) -> Result<(), FractalError> {
     ensure_no_properties(node)?;
     let Some(body) = node.children() else {
         one_string(node)?;
@@ -437,7 +458,7 @@ pub fn validate_lane(node: &KdlNode) -> Result<(), St3Error> {
     }
     if let Some(entries) = child_string(body, "entries")? {
         if !entries.ends_with('/') {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-lane-entries",
                 "a lane's `entries` prefix must end with `/`",
             ));
@@ -447,7 +468,7 @@ pub fn validate_lane(node: &KdlNode) -> Result<(), St3Error> {
     if let Some(approver) = child_string(body, "approver")? {
         validate_full_subject(&approver)?;
         if !approver.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-lane-approver",
                 "a lane's approver must be a `person/` subject",
             ));
@@ -456,9 +477,9 @@ pub fn validate_lane(node: &KdlNode) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
+pub fn validate_name(value: &str, full: bool) -> Result<(), FractalError> {
     if value.is_empty() || value.len() > 512 || !value.is_ascii() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-subject-name",
             format!("invalid subject name `{value}`"),
         ));
@@ -471,7 +492,7 @@ pub fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
         || value.split('/').any(|part| part.is_empty() || part == "..")
         || (full && !value.contains('/'))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-subject-name",
             format!("invalid subject name `{value}`"),
         ));
@@ -479,7 +500,7 @@ pub fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
     Ok(())
 }
 
-pub fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3Error> {
+pub fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), FractalError> {
     ensure_bare(node)?;
     let Some(body) = node.children() else {
         return Ok(());
@@ -488,7 +509,7 @@ pub fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3E
     for child in body.nodes() {
         let name = child.name().value();
         if !names.insert(name) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "duplicate-map-key",
                 format!("map key `{name}` repeats"),
             ));
@@ -496,7 +517,7 @@ pub fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3E
         if environment {
             validate_environment_name(name)?;
             if is_reserved_context_name(name) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "reserved-context-variable",
                     format!("environment cannot override `{name}`"),
                 ));
@@ -507,10 +528,10 @@ pub fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3E
     Ok(())
 }
 
-pub fn value_string(value: &KdlValue) -> Result<String, St3Error> {
+pub fn value_string(value: &KdlValue) -> Result<String, FractalError> {
     match value {
         KdlValue::String(value) if !value.is_empty() => Ok(value.clone()),
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "expected-string",
             "this value must be a non-empty string",
         )),
@@ -526,7 +547,7 @@ pub fn is_resource_reference(node: &KdlNode) -> bool {
 /// The typed edge a `resource` child of an agent or mission names, validated.
 pub fn parse_declared_resource_reference(
     node: &KdlNode,
-) -> Result<crate::model::DeclaredResourceReference, St3Error> {
+) -> Result<crate::model::DeclaredResourceReference, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &["uri", "subject", "reason"])?;
     ensure_no_children(node)?;
@@ -535,21 +556,21 @@ pub fn parse_declared_resource_reference(
     let uri = property_string(node, "uri")?;
     let subject = property_string(node, "subject")?;
     if uri.is_some() == subject.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-resource-reference",
             format!("resource `{name}` needs exactly one of uri=\"...\" or subject=\"resource/...\""),
         ));
     }
     let reason = property_string(node, "reason")?;
     if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-resource-reason",
             format!("resource `{name}` has an empty reason"),
         ));
     }
     if let Some(subject) = subject {
         let local = subject.strip_prefix("resource/").ok_or_else(|| {
-            St3Error::new("invalid-resource-subject", "a resource reference subject must start with resource/")
+            FractalError::new("invalid-resource-subject", "a resource reference subject must start with resource/")
         })?;
         validate_name(local, false)?;
         return Ok(crate::model::DeclaredResourceReference {
@@ -574,7 +595,7 @@ pub fn uri_reference_name(uri: &str) -> String {
 }
 
 /// An absolute URI (RFC 3986 `scheme ":" ...`) of any scheme, kept byte for byte.
-pub fn validate_resource_uri(uri: &str) -> Result<(), St3Error> {
+pub fn validate_resource_uri(uri: &str) -> Result<(), FractalError> {
     let valid = uri.len() <= 4096
         && uri.split_once(':').is_some_and(|(scheme, rest)| {
             !rest.is_empty()
@@ -595,7 +616,7 @@ pub fn validate_resource_uri(uri: &str) -> Result<(), St3Error> {
     if valid {
         Ok(())
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-resource-uri",
             format!("`{uri}` is not an absolute URI; any scheme is accepted"),
         ))
@@ -604,22 +625,22 @@ pub fn validate_resource_uri(uri: &str) -> Result<(), St3Error> {
 
 /// `capacity cores=N memory="SIZE"`: the seat's lane (docs/st3/seat-lanes.md). What it leaves
 /// out is the base lane's.
-pub fn parse_capacity(node: &KdlNode) -> Result<fractal_runtime::Capacity, St3Error> {
+pub fn parse_capacity(node: &KdlNode) -> Result<fractal_runtime::Capacity, FractalError> {
     let (cores, memory) = capacity_properties(node)?;
     fractal_runtime::Capacity::declared(cores, memory.as_deref())
-        .map_err(|error| St3Error::new("invalid-capacity", format!("{error:#}")))
+        .map_err(|error| FractalError::new("invalid-capacity", format!("{error:#}")))
 }
 
 /// A step's `capacity cores=N memory="SIZE"`: what it raises its seat's lane to while the seat holds
 /// the step. What it leaves out stays the seat's own.
-pub fn parse_step_capacity(node: &KdlNode) -> Result<fractal_runtime::Raise, St3Error> {
+pub fn parse_step_capacity(node: &KdlNode) -> Result<fractal_runtime::Raise, FractalError> {
     let (cores, memory) = capacity_properties(node)?;
     fractal_runtime::Raise::declared(cores, memory.as_deref())
-        .map_err(|error| St3Error::new("invalid-capacity", format!("{error:#}")))
+        .map_err(|error| FractalError::new("invalid-capacity", format!("{error:#}")))
 }
 
-fn capacity_properties(node: &KdlNode) -> Result<(Option<u32>, Option<String>), St3Error> {
-    let invalid = |message: String| St3Error::new("invalid-capacity", message);
+fn capacity_properties(node: &KdlNode) -> Result<(Option<u32>, Option<String>), FractalError> {
+    let invalid = |message: String| FractalError::new("invalid-capacity", message);
     ensure_only_properties(node, &["cores", "memory"])?;
     ensure_no_children(node)?;
     if node.entries().iter().any(|entry| entry.name().is_none()) {

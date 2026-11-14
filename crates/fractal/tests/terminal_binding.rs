@@ -77,7 +77,7 @@ impl RuntimeControl for Runtime {
         self.actions.lock().unwrap().push("leftovers".into());
     }
 }
-fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_daemon::St3Error> {
+fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_daemon::FractalError> {
     let intent = fractal_daemon::parse_intent(source, "orchid")?;
     let preview = store.mission(
         &intent,
@@ -328,12 +328,14 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     let runtime = runtime();
     let socket = root.path().join("api.sock");
     let state = fractal_daemon::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "orchid".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: "pty".into(),

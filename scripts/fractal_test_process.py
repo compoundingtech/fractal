@@ -42,15 +42,17 @@ def reap_exited_descendants(task_pid):
                 pass
 
 
-def reap_descendants():
+def reap_descendants(released=frozenset()):
     """Kill before reaping, keeping each PID reserved while signalling its group.
 
     Killing an adopted parent can adopt more children (even ones in new sessions).
-    Repeat until waitpid confirms we have no children at all.
+    Repeat until waitpid confirms we have no children at all, or only `released`
+    ones: those keep running and pass to the next subreaper when this guardian exits.
     """
     children = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
     while True:
-        for pid in map(int, children.read_text().split()):
+        owned = [pid for pid in map(int, children.read_text().split()) if pid not in released]
+        for pid in owned:
             kill_group(pid)
             try:
                 os.kill(pid, signal.SIGKILL)
@@ -61,7 +63,17 @@ def reap_descendants():
                 pass
         except ChildProcessError:
             return
+        if not owned:
+            return
         time.sleep(0.01)
+
+
+def read_released(control):
+    """The PIDs, four bytes each, that the owner sent before closing its end of the socket."""
+    message = b""
+    while chunk := os.read(control, 4096):
+        message += chunk
+    return frozenset(int.from_bytes(message[i:i + 4], "big") for i in range(0, len(message), 4))
 
 
 def set_child_subreaper():
@@ -82,6 +94,7 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, interrupt)
     task = None
+    released = frozenset()
     previous_sigchld = None
     roots = []
     evidence_manifest = (tempfile.NamedTemporaryFile(prefix="test-evidence-", mode="w+")
@@ -103,8 +116,8 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
         task = subprocess.Popen(command, env=env, start_new_session=True,
                                 **({"stdin": subprocess.DEVNULL} if control is not None else {}))
         if control is not None:
-            # A duplex inherited socket reports the real daemon PID. Its EOF also
-            # ends the scope if the Rust owner unwinds before requesting stop.
+            # A duplex inherited socket reports the real daemon PID. Its EOF ends the
+            # scope: after the PIDs the owner releases, or empty if the Rust owner unwinds.
             os.write(control, task.pid.to_bytes(4, "big"))
         # Reap adopted exits when SIGCHLD arrives, rather than leaving zombies
         # visible until the owner-watch timer. PTY lifecycle checks can launch
@@ -118,15 +131,18 @@ def guardian(command, watched, result, temporary_roots=(), keep=False, control=N
                 poller.register(fd, select.POLLIN)
             # pidfds avoid PID reuse and the check/launch race. An already dead
             # owner is immediately readable, including after the double fork.
-            while not interrupted and not poller.poll(100):
+            ready = []
+            while not interrupted and not (ready := poller.poll(100)):
                 pass
+            if any(fd == control for fd, _ in ready):
+                released = read_released(control)
     finally:
         if previous_sigchld is not None:
             signal.signal(signal.SIGCHLD, previous_sigchld)
         if task is not None:
             kill_group(task.pid)
             code = task.wait()
-        reap_descendants()
+        reap_descendants(released)
         if evidence_manifest is not None:
             from fractal_test_evidence import finish
             try:

@@ -130,7 +130,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       return {
         ...common, role,
         ...(role === 'assistant' ? { status: completed } : {}),
-        content: [{ type: 'text', text: item.title ?? `Message ${item.messageId}` }],
+        content: [{ type: 'text', text: item.text ?? item.title ?? `Message ${item.messageId}` }],
       }
     }
     case 'Status':
@@ -150,7 +150,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
         content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}${item.retryable === true ? '\nCan be retried' : ''}` }],
       } : {
         ...common, role: 'system',
-        content: [{ type: 'text', text: `${item.kind} · ${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
+        content: [{ type: 'text', text: `${item.kind === 'event' ? '' : `${item.kind} · `}${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
       }
     case 'Event': {
       diagnostics.push('semantic-row-as-text')

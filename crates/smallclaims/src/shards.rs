@@ -427,33 +427,67 @@ mod tests {
         shard
     }
 
-    /// After a writer's key rotates, a shard admits its envelopes only with a signature by the
-    /// new key: the old key's incarnation never ended, but a signature by it stays unsigned.
-    #[test]
-    fn a_shard_refuses_a_rotated_out_key() {
-        use crate::claim::ReplicaEnvelope;
-        use crate::fleet::{FleetClaim, Membership, membership::MEMBER_ADMITTED};
-        let admitted = |id: &str, name: &str, key: &str, sequence: u64, floor: u64| FleetClaim {
-            id: id.into(),
-            kind: MEMBER_ADMITTED.into(),
-            subject: format!("host/{name}"),
-            fields: serde_json::from_value(serde_json::json!({
-                "fleet_id": "fleet", "member_key": key, "via": if name == "a" { "anchor" } else { "invite" },
-                "mode": "listening", "writer_floor": floor
-            }))
-            .unwrap(),
-            writer: "a".into(),
-            sequence,
-            signers: BTreeSet::from(["ka".to_owned()]),
+    /// A `fleet.*` claim the anchor `a` wrote, or, for a leave or its shard bounds, the leaver.
+    fn fleet_claim(
+        id: &str,
+        kind: &str,
+        name: &str,
+        sequence: u64,
+        fields: serde_json::Value,
+    ) -> crate::fleet::FleetClaim {
+        use crate::fleet::membership::{MEMBER_LEFT, SHARD_BOUNDS};
+        let (writer, signer) = match fields["member_key"].as_str() {
+            Some(key) if [MEMBER_LEFT, SHARD_BOUNDS].contains(&kind) => (name, key.to_owned()),
+            _ => ("a", "ka".to_owned()),
         };
-        let membership = Membership::fold(
-            Some("ka"),
-            &[
-                admitted("1-a", "a", "ka", 1, 0),
-                admitted("2-b", "b", "kb-old", 2, 0),
-                admitted("3-b", "b", "kb-new", 3, 30),
-            ],
-        );
+        crate::fleet::FleetClaim {
+            id: id.into(),
+            kind: kind.into(),
+            subject: format!("host/{name}"),
+            fields: serde_json::from_value(fields).unwrap(),
+            writer: writer.into(),
+            sequence,
+            signers: BTreeSet::from([signer]),
+        }
+    }
+
+    fn member_admitted(
+        id: &str,
+        name: &str,
+        key: &str,
+        sequence: u64,
+        writer_floor: u64,
+    ) -> crate::fleet::FleetClaim {
+        let fields = serde_json::json!({
+            "fleet_id": "fleet", "member_key": key,
+            "via": if name == "a" { "anchor" } else { "invite" }, "mode": "listening",
+            "writer_floor": writer_floor,
+        });
+        fleet_claim(id, crate::fleet::membership::MEMBER_ADMITTED, name, sequence, fields)
+    }
+
+    /// `b`'s leave at graph sequence 5 under `key`, after its bounds at 4 when it wrote the shard.
+    fn leave(key: &str, shard_high_water: Option<u64>) -> Vec<crate::fleet::FleetClaim> {
+        use crate::fleet::membership::{MEMBER_LEFT, SHARD_BOUNDS};
+        let mut claims = Vec::new();
+        if let Some(high_water) = shard_high_water {
+            let fields = serde_json::json!({
+                "member_key": key, "shard_high_water": {"messages": high_water},
+            });
+            claims.push(fleet_claim(&format!("3-{key}-bounds"), SHARD_BOUNDS, "b", 4, fields));
+        }
+        let fields = serde_json::json!({"member_key": key, "high_water": 5});
+        claims.push(fleet_claim(&format!("4-{key}-left"), MEMBER_LEFT, "b", 5, fields));
+        claims
+    }
+
+    /// How a messages shard judges `b`'s envelopes, one per (sequence, signing key). Each key's
+    /// envelope at a sequence is its own, with its own hash.
+    fn messages_holds(
+        membership: &crate::fleet::Membership,
+        envelopes: &[(u64, &str)],
+    ) -> Vec<Option<&'static str>> {
+        use crate::claim::ReplicaEnvelope;
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -461,30 +495,86 @@ mod tests {
                     writer TEXT, sequence INTEGER, envelope_hash TEXT, member_key TEXT)",
             )
             .unwrap();
-        let envelope = |sequence: u64, signer: &str| {
-            let envelope = ReplicaEnvelope {
-                writer: "b".into(),
-                sequence,
-                previous_hash: None,
-                hash: format!("{sequence:064x}"),
-                accepted_at_unix_ms: 0,
-                payload: Vec::new().into(),
-                member_key: None,
-                signature: None,
-            };
-            connection
-                .execute(
-                    "INSERT INTO replica_envelope_signatures VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![envelope.writer, sequence, envelope.hash, signer],
-                )
-                .unwrap();
-            envelope
-        };
-        let hold = |envelope: &ReplicaEnvelope| {
-            crate::store::shard_admission_hold(&connection, &membership, envelope).unwrap()
-        };
-        assert_eq!(hold(&envelope(1, "kb-old")), Some("unsigned"));
-        assert_eq!(hold(&envelope(2, "kb-new")), None);
+        envelopes
+            .iter()
+            .map(|(sequence, signer)| {
+                let envelope = ReplicaEnvelope {
+                    writer: "b".into(),
+                    sequence: *sequence,
+                    previous_hash: None,
+                    hash: format!("{sequence:032x}{:0>32}", hex::encode(signer)),
+                    accepted_at_unix_ms: 0,
+                    payload: Vec::new().into(),
+                    member_key: None,
+                    signature: None,
+                };
+                connection
+                    .execute(
+                        "INSERT INTO replica_envelope_signatures VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![envelope.writer, sequence, envelope.hash, signer],
+                    )
+                    .unwrap();
+                crate::store::shard_admission_hold(&connection, membership, "messages", &envelope)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    /// After a writer's key is superseded without a leave, a shard admits its envelopes only
+    /// with a signature by the new key: the old key's incarnation never ended, but a signature
+    /// by it stays unsigned at every sequence.
+    #[test]
+    fn a_shard_refuses_a_rotated_out_key() {
+        let membership = crate::fleet::Membership::fold(
+            Some("ka"),
+            &[
+                member_admitted("1-a", "a", "ka", 1, 0),
+                member_admitted("2-b", "b", "kb-old", 2, 0),
+                member_admitted("3-b", "b", "kb-new", 3, 30),
+            ],
+        );
+        assert_eq!(
+            messages_holds(&membership, &[(1, "kb-old"), (1, "kb-new"), (2, "kb-new")]),
+            [Some("unsigned"), None, None]
+        );
+    }
+
+    /// A leaver's shard envelopes at or below the high water of its own bounds are admitted,
+    /// and one above it is fenced. After it rejoins with a new key, the new key's envelope at
+    /// the same sequence is admitted too: it is a distinct envelope.
+    #[test]
+    fn a_shard_admits_a_leavers_envelopes_at_or_below_its_high_water_and_fences_the_rest() {
+        use crate::fleet::Membership;
+        let mut claims = vec![
+            member_admitted("1-a", "a", "ka", 1, 0),
+            member_admitted("2-b", "b", "kb", 2, 0),
+        ];
+        claims.extend(leave("kb", Some(6)));
+        let left = Membership::fold(Some("ka"), &claims);
+        assert!(left.counts("3-kb-bounds"));
+        assert_eq!(
+            messages_holds(&left, &[(1, "kb"), (6, "kb"), (7, "kb")]),
+            [None, None, Some("fenced")]
+        );
+        claims.push(member_admitted("5-b-again", "b", "kb2", 3, 5));
+        let rejoined = Membership::fold(Some("ka"), &claims);
+        assert_eq!(
+            messages_holds(&rejoined, &[(6, "kb"), (6, "kb2"), (7, "kb"), (7, "kb2")]),
+            [None, None, Some("unsigned"), None]
+        );
+    }
+
+    /// A leave without bounds, as an older build writes it or one that never wrote the shard,
+    /// fences the leaver's key at every shard sequence.
+    #[test]
+    fn a_shard_fences_a_leaver_without_bounds_at_every_sequence() {
+        let mut claims = vec![
+            member_admitted("1-a", "a", "ka", 1, 0),
+            member_admitted("2-b", "b", "kb", 2, 0),
+        ];
+        claims.extend(leave("kb", None));
+        let membership = crate::fleet::Membership::fold(Some("ka"), &claims);
+        assert_eq!(messages_holds(&membership, &[(1, "kb")]), [Some("fenced")]);
     }
 
     /// A shard holds no fleet claims. It signs its envelopes for its authority's fleet in a

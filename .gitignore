@@ -30,6 +30,7 @@ clients/typescript/fractal-client/node_modules/
 clients/typescript/fractal-views/node_modules/
 clients/typescript/fractal-scenarios/node_modules/
 packages/fractal-sdk/node_modules/
+packages/fractal/node_modules/
 
 # Pinned megarepo members materialized by `mr apply`.
 /repos/

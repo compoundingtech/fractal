@@ -1,6 +1,6 @@
 //! Whether the Fractal TUI before this one ended cleanly.
 //!
-//! A stui that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
+//! A TUI that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
 //! window keeps its last picture and looks frozen (Nathan, 2026-10-05). Each running Fractal TUI keeps
 //! a small file under `$XDG_CACHE_HOME/st3/stui/runs/` (the cache, not the state: a device
 //! with no st state must stay free of it), removed when it exits by any route that
@@ -147,6 +147,19 @@ pub fn note_slow(what: &str, context: &str, build: &str) {
         .and_then(|runs| runs.parent().map(|dir| dir.join("slow.log")))
     {
         write_line(&file, &format!("{} {build} pid {} {what}; {context}", now_unix(), std::process::id()));
+    }
+}
+
+/// Retain non-successful attach outcomes even when no tracing subscriber is installed.
+#[cfg(not(test))]
+pub(crate) fn note_attach_outcome(attempt_id: uuid::Uuid, agent: &str, phase_reached: &str, outcome: &str, elapsed_ms: u128) {
+    if let Some(file) = directory().and_then(|runs| runs.parent().map(|dir| dir.join("attach.log"))) {
+        let event = serde_json::json!({
+            "service": "fractal-tui", "level": "INFO", "at_unix_ms": now_unix() * 1000,
+            "attempt_id": attempt_id.to_string(), "agent": agent,
+            "phase_reached": phase_reached, "outcome": outcome, "elapsed_ms": elapsed_ms,
+        });
+        write_line(&file, &event.to_string());
     }
 }
 
@@ -431,8 +444,8 @@ mod tests {
 
     #[test]
     fn a_panic_is_written_to_the_log_and_the_log_stays_small() {
-        let root = std::env::temp_dir().join(format!("stui-panic-{}", std::process::id()));
-        let file = root.join("stui").join("panics.log");
+        let root = std::env::temp_dir().join(format!("fractal-tui-panic-{}", std::process::id()));
+        let file = root.join("tui").join("panics.log");
         write_panic(&file, "build-1", "panicked at src/x.rs:1:1: boom");
         let first = std::fs::read_to_string(&file).unwrap();
         assert!(
@@ -450,8 +463,8 @@ mod tests {
 
     #[test]
     fn an_exit_is_logged_with_when_how_long_and_why_and_the_log_stays_small() {
-        let root = std::env::temp_dir().join(format!("stui-exit-{}", std::process::id()));
-        let file = root.join("stui").join("exits.log");
+        let root = std::env::temp_dir().join(format!("fractal-tui-exit-{}", std::process::id()));
+        let file = root.join("tui").join("exits.log");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         write_exit(&file, 3725, "terminal closed (stdin hung up)");
         write_exit(&file, 4, "error: the daemon\nwent away");
@@ -468,8 +481,8 @@ mod tests {
 
     #[test]
     fn a_log_line_is_one_line_and_the_log_stays_small() {
-        let root = std::env::temp_dir().join(format!("stui-slow-{}", std::process::id()));
-        let file = root.join("stui").join("slow.log");
+        let root = std::env::temp_dir().join(format!("fractal-tui-slow-{}", std::process::id()));
+        let file = root.join("tui").join("slow.log");
         write_line(&file, "draw 300 ms, turn 400 ms; pane agent\nsecond");
         assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1);
         std::fs::write(&file, "x".repeat(100_001)).unwrap();

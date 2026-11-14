@@ -1,11 +1,11 @@
 import { ClientError, FractalClient } from '@fractal/client'
-import { ResourcesPage, type ResourceObservation } from '@fractal/client/schema'
+import { ResourcesPage, type ResourceObservation } from '@fractal/client/schema/read'
 import { Effect, Option, Queue, Schedule, Schema, Stream } from 'effect'
 import * as AsyncResult from 'effect/reactivity/AsyncResult'
 import * as Atom from 'effect/reactivity/Atom'
 
 import type { Feed } from '../../data/source.ts'
-import { observed, unavailable, waiting } from '../../data/source.ts'
+import { clientReadAuthorization, observed, unavailable, waiting } from '../../data/source.ts'
 import { resourceTitle, sortResources, type ResourcePage } from './model.ts'
 
 /** Observed agent resources, paging controls and cached file-subject lookup. */
@@ -41,16 +41,18 @@ export const decodeResourcePage = (response: unknown): ResourcePage => {
 
 class ResourceReadError extends Schema.TaggedError<ResourceReadError>()('ResourceReadError', {
   message: Schema.String,
-  reason: Schema.Literals(['ungranted', 'failed']),
+  reason: Schema.Literals(['unauthorized', 'ungranted', 'failed']),
 }) {}
 
 /** Collection socket has no resource subscription yet. Each mounted reader owns its scoped poll. */
 export const gatewayResources = ({
   baseUrl,
   fetchImpl,
+  client: clientName,
 }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof fetch
+  readonly client?: string
 }): AgentResourceSource => {
   const controls = new Map<string, { more: () => void; refresh: () => void }>()
   const cache = new Map<string, ResourceObservation>()
@@ -71,6 +73,7 @@ export const gatewayResources = ({
           // through fetch and response.json without sharing mutable cancellation across readers.
           const client = new FractalClient({
             baseUrl,
+            ...(clientName === undefined ? {} : { client: clientName }),
             fetchImpl: (input, init) => fetchImpl(input, { ...init, signal }),
           })
           let cursor = startCursor
@@ -109,7 +112,7 @@ export const gatewayResources = ({
         catch: (error) =>
           new ResourceReadError({
             message: error instanceof Error ? error.message : 'Could not load resources.',
-            reason: error instanceof ClientError && error.status === 403 ? 'ungranted' : 'failed',
+            reason: clientReadAuthorization(error) ?? 'failed',
           }),
       }),
   )
@@ -194,7 +197,7 @@ export const gatewayResources = ({
                   ),
                   Effect.catch((error) =>
                     Effect.sync(() => {
-                      if (previous !== undefined)
+                      if (previous !== undefined && error.reason === 'failed')
                         publish({
                           _tag: 'Observed',
                           value: { ...previous, loadingMore: false, pagingError: error.message },
@@ -255,7 +258,7 @@ export const gatewayResources = ({
               Effect.catch((error) =>
                 Effect.sync(() =>
                   publish(
-                    latest._tag === 'Observed'
+                    latest._tag === 'Observed' && error.reason === 'failed'
                       ? {
                           _tag: 'Observed',
                           value: latest.value,

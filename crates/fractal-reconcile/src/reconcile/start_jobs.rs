@@ -75,6 +75,11 @@ pub enum StartCompletion {
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
+        if let Some(run) = &prepared.subject.owner_run
+            && self.store.run_projection_pending(run)?
+        {
+            return Ok(false);
+        }
         let failed_start = self.store.runtime_start_for(&prepared.subject.subject)?;
         let recovery_lock = if let Some(pending) = &failed_start {
             if prepared.request.is_none() {
@@ -100,6 +105,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             .launch_member
             .environment
             .insert(OPERATION_ENV.into(), id.clone());
+        let trace = if prepared.subject.kind == "agent" {
+            let links = prepared.subject.owner_run.as_deref()
+                .map(|run| self.store.claims_for(run, Some("mission.run.trace")))
+                .transpose()?.unwrap_or_default().into_iter().rev()
+                .find_map(|claim| serde_json::from_value(claim.body["fields"]["trace"].clone()).ok())
+                .into_iter().collect::<Vec<_>>();
+            let trace = self.store.start_invocation_trace(&format!("invocation/{id}"),
+                &prepared.subject.subject, &links);
+            trace.environment(&mut prepared.launch_member.environment);
+            Some(trace)
+        } else { None };
+        if prepared.subject.kind == "agent" {
+            prepared.launch_member.environment.insert(
+                fractal_schema::invocation::ENV.into(), format!("invocation/{id}"));
+        }
         let mut operation = RuntimeStartOperation {
             id: id.clone(),
             subject: prepared.subject.subject.clone(),
@@ -113,6 +133,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             dispatched: false,
             receipted: false,
         };
+        operation.body["trace_context"] = serde_json::to_value(trace)?;
         if let Some(pending) = &failed_start {
             // Operation metadata, retained across queueing and daemon restart. The admission
             // writer uses this exact ID, never whichever start happens to be pending later.
@@ -123,6 +144,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .admit_runtime_start(&mut operation, MAX_START_JOBS)?
         {
             RuntimeStartAdmission::SeatBusy | RuntimeStartAdmission::Superseded => {
+                self.store.finish_invocation_trace(&format!("invocation/{id}"), false);
                 return Ok(false);
             }
             RuntimeStartAdmission::Admitted | RuntimeStartAdmission::CapacityBusy => {}
@@ -213,8 +235,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(())
             };
             let mut backend_entered = false;
+            let mut contract = None;
             let result = caught(|| {
                 guard()?;
+                if prepared.subject.kind == "agent" {
+                    let measured = runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?;
+                    store.record_invocation_launch_inputs(&id, &measured)?;
+                    contract = Some(measured);
+                }
                 backend_entered = true;
                 runtime.start_guarded(&prepared.launch_member, &guard)?;
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
@@ -247,6 +275,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         "verification_error": verification_error})
                 },
             };
+            result["launch_contract"] = serde_json::json!(contract);
             result["operation_id"] = Value::from(id.clone());
             result["subject"] = Value::from(subject.clone());
             result["origin"] = Value::from(store.origin());
@@ -280,6 +309,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&operation.id);
             self.store.finish_runtime_start(&operation.id, &serde_json::json!({"error": format!("spawn launch worker: {error}"), "producer_closed": true}))?;
+            self.store.finish_invocation_trace(&format!("invocation/{}", operation.id), true);
             self.start_changed(&operation.subject);
         }
         Ok(())
@@ -314,9 +344,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         })?;
         self.store
             .revoke_runtime_start(&operation.id, &request.id)?;
-        if !operation.dispatched {
-            self.store
-                .cancel_undispatched_runtime_start(&operation.id)?;
+        if !operation.dispatched
+            && self.store.cancel_undispatched_runtime_start(&operation.id)?
+        {
+            self.store.finish_invocation_trace(&format!("invocation/{}", operation.id), false);
         }
         self.start_changed(subject);
         Ok(())
@@ -362,6 +393,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
+        if let Some(run) = &prepared.subject.owner_run
+            && self.store.run_projection_pending(run)?
+        {
+            return Ok(());
+        }
         let current =
             self.store.selected_desired_token(&operation.subject)? == prepared.selected_token;
         if !current || !prepared.requests_retained(&self.store)? {
@@ -471,7 +507,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     Some(error) => Err(anyhow::anyhow!(error.to_owned())),
                     None => Ok(result["incarnation"].as_str().map(str::to_owned)),
                 };
-                let completed = self.finish_start(&operation.id, &prepared, outcome)?;
+                let completed = self.finish_start(
+                    &operation.id, &prepared, outcome, result.get("launch_contract").filter(|value| !value.is_null()),
+                )?;
                 if let StartCompletion::Applied(Some(error)) = &completed {
                     if let Some(request) = &prepared.request
                         && self.store.runtime_start_request_retained(request)?

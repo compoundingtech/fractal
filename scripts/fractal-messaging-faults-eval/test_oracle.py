@@ -66,6 +66,47 @@ class OracleTests(unittest.TestCase):
                 proof.update(change)
                 self.assertIn(reason, "; ".join(runner.judge(proof)))
 
+    def test_a_read_mark_counts_only_as_the_readers_own_receipt(self):
+        # A seat's host records its read as a local mark (db break-up 4b-2): it is the graph read
+        # when it is the receipt the reader was given, by id, and never by time alone.
+        mark = {"kind": "message.read", "id": "offset-receipt/abc", "accepted_at_unix_ms": 1001, "mark": True}
+        given = [{"event": "read", "id": "offset-receipt/abc", "accepted_at_unix_ms": 1000}]
+        self.assertTrue(runner.receipt_matches(mark, given))
+        self.assertFalse(runner.receipt_matches(mark, [dict(given[0], id="offset-receipt/other")]))
+        self.assertFalse(runner.receipt_matches(mark, [dict(given[0], id=None)]))
+        self.assertFalse(runner.receipt_matches(mark, []))
+        # A read claim matches its receipt's time, and its id when the receipt names one.
+        claim = {"kind": "message.read", "id": "claim-1", "accepted_at_unix_ms": 1000}
+        self.assertTrue(runner.receipt_matches(claim, given[:0] + [dict(given[0], id="claim-1")]))
+        self.assertTrue(runner.receipt_matches(claim, [dict(given[0], id=None)]))
+        self.assertFalse(runner.receipt_matches(claim, [dict(given[0], id="claim-2")]))
+        self.assertFalse(runner.receipt_matches(claim, [dict(given[0], id="claim-1", accepted_at_unix_ms=999)]))
+
+    def test_graph_reads_count_claims_and_local_read_marks(self):
+        import sqlite3
+        import tempfile
+        import types
+        with tempfile.TemporaryDirectory() as root:
+            node = types.SimpleNamespace(root=Path(root))
+            claims = [{"kind": "message.sent"}, {"kind": "message.read", "id": "claim-1", "accepted_at_unix_ms": 5}]
+            self.assertEqual(runner.graph_reads_of(node, claims, "message/a"), claims[1:], "no store: claims only")
+            (node.root / "state").mkdir()
+            store = sqlite3.connect(node.root / "state/claims.sqlite3")
+            store.execute("CREATE TABLE other(x)")
+            store.commit()
+            self.assertEqual(runner.graph_reads_of(node, claims, "message/a"), claims[1:], "a release before marks")
+            store.execute("CREATE TABLE local_message_marks(message, kind, consumer, recorded_at_unix_ms, receipt)")
+            store.executemany("INSERT INTO local_message_marks VALUES (?, ?, 'agent/seat', ?, ?)", [
+                ("message/a", "message.read", 7, "offset-receipt/a"),
+                ("message/a", "message.delivered", 6, "offset-receipt/d"),
+                ("message/b", "message.read", 8, "offset-receipt/b"),
+            ])
+            store.commit()
+            store.close()
+            reads = runner.graph_reads_of(node, [], "message/a")
+            self.assertEqual(reads, [{"kind": "message.read", "id": "offset-receipt/a", "accepted_at_unix_ms": 7, "mark": True}])
+            self.assertEqual(len(runner.graph_reads_of(node, claims, "message/a")), 2, "a claim and a mark are two reads")
+
     def test_previous_release_channel_must_reexec_without_replacement(self):
         self.proof.update(case="old-channel", channel_pids_before=[789],
                           channel_pids_after=[789], previous_release_channel_observed=True)

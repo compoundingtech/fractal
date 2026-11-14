@@ -203,16 +203,16 @@ async fn revisioned_agents_cached_bytes_revalidate_grant_expiry_revocation_and_s
                 "scopes":scopes,
             })).unwrap(), evidence:Vec::new(), expected_subject:None, idempotency_key:None,
         };
-        let paired = state.store.append_claim(&pairing(u64::MAX, vec!["read.projections"])).unwrap();
+        let paired = state.store.append_client_operation_claim(&pairing(u64::MAX, vec!["read.projections"])).unwrap();
         let session = paired_client_session(&state, &paired, "fabric-loopback", false).unwrap();
         publish(&state, 1, vec![row(0, "initial")]);
         let (mut socket, _server) = connect(state.clone(), session.clone()).await;
         subscribe(&mut socket).await;
         assert_eq!(frame(&mut socket).await["kind"], "snapshot");
         match denied {
-            "expired" => { state.store.append_claim(&pairing(1, vec!["read.projections"])).unwrap(); }
-            "ungranted" => { state.store.append_claim(&pairing(u64::MAX, Vec::new())).unwrap(); }
-            _ => { state.store.append_claim(&ClaimInput {
+            "expired" => { state.store.append_client_operation_claim(&pairing(1, vec!["read.projections"])).unwrap(); }
+            "ungranted" => { state.store.append_client_operation_claim(&pairing(u64::MAX, Vec::new())).unwrap(); }
+            _ => { state.store.append_client_operation_claim(&ClaimInput {
                 subject:"custom/client/stream-test".into(),kind:"custom.client.pairing-revoked".into(),
                 actor:Some("person/ada".into()),fields:Default::default(),evidence:Vec::new(),
                 expected_subject:None,idempotency_key:None,

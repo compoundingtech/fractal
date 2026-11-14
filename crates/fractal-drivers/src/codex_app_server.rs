@@ -782,8 +782,7 @@ impl CodexInboxDelivery {
             }
         };
         let timeline =
-            crate::harness_timeline::Writer::new(&config.agent_dir, "codex", runtime.incarnation())
-                .with_model(config.model.clone());
+            crate::harness_timeline::Writer::new(&config.agent_dir, "codex", runtime.incarnation());
         // The record belongs to this incarnation: the protocol gate already admitted the version
         // it names, so `support` is a measured fact rather than a probe result.
         let mut diagnostics = driver_diagnostic::Publisher::new(
@@ -3262,7 +3261,7 @@ fn spawn_controlled_app_server(
     socket_path: &Path,
     log: &File,
 ) -> Result<OwnedProcessGroup> {
-    let mut command = Command::new(codex);
+    let mut command = crate::managed_launch::provider_command(codex)?;
     command
         .args(args)
         .stdin(Stdio::null())
@@ -3276,14 +3275,14 @@ fn spawn_controlled_app_server(
 /// startup screen would hold it before it creates a thread; the update notice is one.
 const CONTROLLED_TUI_OVERRIDES: [&str; 2] = ["-c", "check_for_update_on_startup=false"];
 
-fn controlled_tui_command(codex: &str, args: &[String]) -> Command {
-    let mut command = Command::new(codex);
+fn controlled_tui_command(codex: &str, args: &[String]) -> std::io::Result<Command> {
+    let mut command = crate::managed_launch::provider_command(codex)?;
     command.args(CONTROLLED_TUI_OVERRIDES).args(args);
-    command
+    Ok(command)
 }
 
 fn spawn_controlled_tui(codex: &str, args: &[String]) -> std::io::Result<ProviderProcess> {
-    controlled_tui_command(codex, args)
+    controlled_tui_command(codex, args)?
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -4416,7 +4415,7 @@ fn preflight_hook_trust(
     diagnostics: &mut WrapperDiagnostics,
 ) -> Result<Option<HookTrustProjection>> {
     diagnostics.record("hookTrustPreflightStarting", json!({}))?;
-    let mut server_command = Command::new(codex);
+    let mut server_command = crate::managed_launch::provider_command(codex)?;
     server_command
         .args(server_args)
         .stdin(Stdio::null())

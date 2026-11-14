@@ -1,5 +1,5 @@
 import { Effect, Metric } from 'effect'
-import type { BlockDegrade } from '@fractal/sdk/effect'
+import type { BlockDegrade } from '@fractal/sdk/read'
 import type { ConversationItem } from './model.ts'
 
 // OTLP metrics export is not wired yet: the dev relay forwards only /v1/traces.

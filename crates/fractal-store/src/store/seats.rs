@@ -42,51 +42,7 @@ impl Store {
     /// selected declaration is not a stop. A stop that replaced another stop is followed back
     /// to the declaration they ended; a merge of several is ambiguous and also gives `None`.
     pub fn declaration_ended_by_stop(&self, subject: &str) -> Result<Option<EndedDeclaration>> {
-        let connection = self.readers.get();
-        let Some((stop, writer)) = connection
-            .query_row(
-                "SELECT desired.subject, desired.kind, desired.body, desired.member,
-                        desired.owner_run, desired.owner_generation, desired.owner_step,
-                        desired.claim_id, claims.actor
-                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
-                 WHERE desired.subject = ?1 AND desired.kind = 'stop'",
-                [subject],
-                |row| {
-                    Ok((
-                        (desired_from_row(row)?, row.get::<_, String>(7)?),
-                        row.get::<_, Option<String>>(8)?,
-                    ))
-                },
-            )
-            .optional()?
-        else {
-            return Ok(None);
-        };
-        let (stop, token) = stop;
-        let mut claim = claim_by_id_tx(&connection, &token)?;
-        // A seat is stopped and started a few times at most; the bound only guards a cycle.
-        for _ in 0..64 {
-            let Some(current) = claim else {
-                return Ok(None);
-            };
-            let desired: DesiredSubject = serde_json::from_value(current.body)?;
-            if desired.kind == "agent" {
-                return Ok(Some(EndedDeclaration {
-                    stop,
-                    token,
-                    writer,
-                    declaration: desired,
-                }));
-            }
-            let [predecessor] = current.predecessors.as_slice() else {
-                return Ok(None);
-            };
-            if desired.kind != "stop" {
-                return Ok(None);
-            }
-            claim = claim_by_id_tx(&connection, predecessor)?;
-        }
-        Ok(None)
+        declaration_ended_by_stop_tx(&self.readers.get(), subject)
     }
 
     /// Suspension ancestry selected at a client snapshot; stopped declarations have none.
@@ -203,6 +159,50 @@ impl Store {
         Ok(times.into_iter().max())
     }
 
+    /// The newest of an agent's own words: assistant `message`/`content` timeline entries of
+    /// `incarnation`, and mail the agent sent. What "new since you last looked" compares with;
+    /// tool calls, prompts and mail to the agent are activity, not prose. Both timeline seeks
+    /// use assistant-prose-only partial indexes, so non-prose history never enters the search.
+    pub fn agent_last_prose_at(
+        &self,
+        agent: &str,
+        incarnation: Option<&str>,
+        snapshot_index: u64,
+    ) -> Result<Option<u128>> {
+        let connection = self.readers.get();
+        let mut times = Vec::new();
+        if let Some(incarnation) = incarnation {
+            let local: Option<i64> = connection.prepare_cached(
+                "SELECT observed_at_unix_ms FROM local_observations INDEXED BY local_observations_timeline_prose_index
+                 WHERE subject=?1 AND kind='harness.timeline'
+                   AND json_extract(body, '$.fields.incarnation_id')=?2
+                   AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+                   AND json_extract(body, '$.fields.role')='assistant'
+                   AND after_store_index<=?3 ORDER BY id DESC LIMIT 1")?.query_row(
+                /* sqlite-large-value: allow-for-now lv-hf3bd80ab8738 owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
+            ).optional()?;
+            times.extend(local.map(|time| time.max(0) as u128));
+            let replicated: Option<String> = connection.prepare_cached(
+                "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_timeline_prose_time_index
+                 WHERE subject=?1 AND kind='harness.timeline'
+                   AND json_extract(body, '$.fields.incarnation_id')=?2
+                   AND json_extract(body, '$.fields.entry_type') IN ('message','content')
+                   AND json_extract(body, '$.fields.role')='assistant'
+                   AND store_index<=?3
+                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1")?.query_row(
+                /* sqlite-large-value: allow-for-now lv-hc866b5f0d6f3 owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, incarnation, snapshot_index], |row| row.get(0),
+            ).optional()?;
+            times.extend(replicated.and_then(|time| time.parse::<u128>().ok()));
+        }
+        let sent: Option<String> = connection.prepare_cached(
+            "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_from_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+        )?.query_row(
+            /* sqlite-large-value: allow-for-now lv-h664eb9024d4f owner=fractal_store::store::seats TODO=trace-statement-and-value-representation */ params![agent, snapshot_index], |row| row.get(0),
+        ).optional()?;
+        times.extend(sent.and_then(|time| time.parse::<u128>().ok()));
+        Ok(times.into_iter().max())
+    }
+
     /// The login directory a seat's harness runs with on `host`: its account's, or the pool
     /// account this node placed it on, else the harness's own default login on that host. Only
     /// the seat's own node knows which pool account it chose, so a pooled seat on another node
@@ -270,6 +270,18 @@ impl Store {
         id.map(|id| self.claim_by_id(&id))
             .transpose()
             .map(Option::flatten)
+    }
+
+    /// Human-question authority is declaration metadata, not credential or graph ownership.
+    pub fn question_principal(&self, agent: &str) -> Result<Option<String>> {
+        let desired = self.desired_subject_with_writer(agent)?;
+        let declared = desired.as_ref().and_then(|(desired, _)| {
+            desired.desired.get("children")?.as_array()?.iter()
+                .find(|child| child["name"] == "principal")?
+                .get("arguments")?.get(0)?.as_str()
+        });
+        Ok(declared.map(str::to_owned)
+            .or_else(|| self.question_principal_default.get().cloned()))
     }
 
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
@@ -344,3 +356,50 @@ pub struct EndedDeclaration {
     pub declaration: DesiredSubject,
 }
 
+/// `Store::declaration_ended_by_stop` on `connection`, so a writer transaction reads its own state.
+pub fn declaration_ended_by_stop_tx(connection: &Connection, subject: &str) -> Result<Option<EndedDeclaration>> {
+    let Some((stop, writer)) = connection
+        .query_row(
+            "SELECT desired.subject, desired.kind, desired.body, desired.member,
+                    desired.owner_run, desired.owner_generation, desired.owner_step,
+                    desired.claim_id, claims.actor
+             FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
+             WHERE desired.subject = ?1 AND desired.kind = 'stop'",
+            [subject],
+            |row| {
+                Ok((
+                    (desired_from_row(row)?, row.get::<_, String>(7)?),
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let (stop, token) = stop;
+    let mut claim = claim_by_id_tx(connection, &token)?;
+    // A seat is stopped and started a few times at most; the bound only guards a cycle.
+    for _ in 0..64 {
+        let Some(current) = claim else {
+            return Ok(None);
+        };
+        let desired: DesiredSubject = serde_json::from_value(current.body)?;
+        if desired.kind == "agent" {
+            return Ok(Some(EndedDeclaration {
+                stop,
+                token,
+                writer,
+                declaration: desired,
+            }));
+        }
+        let [predecessor] = current.predecessors.as_slice() else {
+            return Ok(None);
+        };
+        if desired.kind != "stop" {
+            return Ok(None);
+        }
+        claim = claim_by_id_tx(connection, predecessor)?;
+    }
+    Ok(None)
+}

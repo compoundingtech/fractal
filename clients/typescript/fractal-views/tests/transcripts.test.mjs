@@ -21,7 +21,7 @@ function asFractalTui(body) {
   }
 }
 
-for (const name of ['claude', 'codex', 'deliveries', 'native-claude-run', 'native-omp-run']) {
+for (const name of ['claude', 'codex', 'deliveries', 'native-claude-run', 'native-omp-run', 'wakes']) {
   const expected = fixture(`${name}.expected.json`);
   const phone = conversationEntries(fixture(`${name}.json`), new Map()).map(entry => ({ body: asFractalTui(entry.body), id: entry.id }));
   assert.deepEqual(phone, expected, `${name}: the phone reads this transcript differently from the Fractal terminal UI`);

@@ -20,14 +20,14 @@ Every client's tests check against that file.
 
 ## Enrollment
 
-1. On a trusted machine, the person runs `st devices pair` (or the equivalent client-API call).
+1. On a trusted machine, the person runs `fractal devices pair` (or the equivalent client-API call).
    It returns a pairing code and a separate person-root fingerprint. Copy the fingerprint from this trusted machine independently of the code.
 2. The device sends `POST /v1/client/pairings/{id}/complete` with three fields:
    - `device_public_key`: the device's public key.
    - `key_storage`: `secure-enclave` or `software`. Optional.
    - `code`: the pairing code.
 3. The daemon pairs the device as before. When `device_public_key` is a signing key and the
-   pairing grants `control.messages` (`st devices pair --full-control`), the daemon also enrolls
+   pairing grants `control.messages` (`fractal devices pair --full-control`), the daemon also enrolls
    it. A device paired only to read, such as a display, gets no key that speaks for the person.
    Enrolment:
    - The person's root key, which that node holds, writes a `principal.key-granted` claim with
@@ -49,27 +49,89 @@ Every client's tests check against that file.
    Anything that key signs after the revocation is invalid on every member. What it signed
    before stays verified.
 
+### Person pairing verifier and recovery
+
+Person pairing codes contain 40 bits of randomness, expire after 300 seconds, and are
+single-use. Pairing IDs and the begin-claim subjects use independent random 128-bit
+values; neither reveals the code. New challenges store an HMAC-SHA-256 verifier in
+`code_hash`, with `verifier: "hmac-sha256-v1"` and the secret's SHA-256 fingerprint
+in `verifier_key_id`.
+The MAC input is the domain bytes `fractal/pairing-code-verifier/v1` (no NUL),
+then the full prefixed pairing ID's UTF-8 bytes, then the code's UTF-8 bytes.
+Each field is prefixed by its byte length as an unsigned big-endian 32-bit integer;
+no normalization is applied. A verifier cannot be reused for another pairing ID.
+Claims never contain the code or verifier secret. Possession of replicated claims alone
+does not permit offline code guessing against the keyed verifier. This does not increase
+the code's 40-bit entropy or replace its 300-second lifetime, an encrypted transport,
+or the independently obtained person-root fingerprint.
+
+The beginning member keeps the verifier secret at `state_dir/pairing-verifier/key`
+with mode 0600, in a mode-0700 `pairing-verifier` directory. This member-local secret
+is not replicated in claims or included in backups. Keep it private; a normal restart
+with the same secret preserves still-live challenges.
+
+A claim-only restore, a missing secret, or a newly generated or rotated secret cannot
+complete challenges created with the old secret. Completion returns HTTP 403,
+`pairing-restart-required`, with `retryable: false` and message `start pairing again`;
+begin a fresh pairing on the intended member instead of retrying that challenge.
+A wrong code against a challenge whose verifier key is still available remains
+`forbidden`. Historical challenges without the verifier marker are accepted only
+while unexpired and when their expiry is at most 300,000 ms after the claim timestamp;
+a longer legacy lifetime requires a fresh pairing, even if its expiry is still in
+the future. Already paired devices do not need to pair again solely for this change.
+
+After a binary downgrade to before keyed verifiers, the older binary ignores the
+verifier marker and compares `code_hash` with the unkeyed code digest. In-flight
+keyed pairings therefore fail with HTTP 403 `forbidden`, message `the pairing code
+is invalid, expired, or already used`, not `pairing-restart-required`. Restart the
+pairing on the downgraded member. No stored claims or verifier state need cleanup.
+
+There is no rollback protection if both the verifier secret and claims are restored
+to an earlier state together: a restored challenge may become usable again while
+its expiry remains in the future. This limitation is accepted; do not treat a
+coordinated secret-and-claims restore as preserving single-use history.
+
 ## CLI and terminal client pairing
 
-On the trusted machine, begin a pairing as the person:
+On the trusted member whose paired-only gateway the device will use, begin a pairing as the person:
 
 ```sh
-st devices pair cli-device --as person/avery --full-control
+fractal devices pair cli-device --as person/avery --full-control
 ```
+
+For iOS, add `--gateway https://member.example/base` with the explicit URL the phone can
+reach (HTTP or HTTPS, without a query or fragment). In an interactive terminal, the CLI
+shows a QR below the human output, with its local expiry time and seconds remaining.
+The QR contains only the pairing protocol tag and version, gateway, pairing ID, code,
+and expiry; never the person-root fingerprint. Copy that fingerprint independently from
+the trusted machine. A scan fills a candidate, not a trusted root or an automatic pairing.
+No QR or QR payload is emitted with `--json` or redirected stdout; JSON output is unchanged.
+Without `--gateway`, the CLI prints the usual manual instructions and a QR hint.
+The pair command always begins on its local member. A gateway URL matching a different
+configured member is refused offline before creating a challenge. Otherwise an anonymous
+`GET <gateway>/v1/health` checks the serving node in the native response's `value` envelope,
+retaining the gateway's base path. A different node is refused; a matching node continues
+without a warning. The request's three-second timeout bounds reachability, not pairing
+completion. Redirects are never followed: a redirect, unreachable gateway, or response
+without a node leaves identity unverified and produces a warning.
+Forwarders must reach the beginning member.
+Completion on any other member returns `pairing-origin-required` without consuming the code.
 
 On the device, complete it using the member gateway's HTTP or HTTPS origin and the returned
 pairing ID. The command prompts privately for the single-use code, or reads it from stdin:
 
 ```sh
-st devices complete https://member.example pairing/PAIRING_ID --fingerprint sha256:FINGERPRINT
+fractal devices complete https://member.example pairing/PAIRING_ID --fingerprint sha256:FINGERPRINT
 ```
+`MEMBER_URL` is an explicit argument to `devices complete`, not an instruction to begin
+remotely. It must reach the member where `devices pair` ran.
 
 HTTP is allowed by default for loopback, private addresses and tailnet addresses, including
 Tailscale's `100.64.0.0/10` range. Hostnames must resolve entirely to those addresses.
 **An HTTP address must already be an encrypted path**, such as Tailscale/WireGuard or an SSH
 tunnel: the pairing code and bearer credentials cross it. Both commands print this notice when
 using HTTP. Other HTTP addresses are refused by default. On an already encrypted path, use
-`--allow-public-http` with `st devices complete` to override that restriction.
+`--allow-public-http` with `fractal devices complete` to override that restriction.
 The override is saved as `allow_public_http: true` on that device in the private profile;
 existing profiles can set that field explicitly. The override also permits ambient HTTP proxies;
 ensure that the proxy path is encrypted and trusted too. HTTPS requires no override.
@@ -89,8 +151,8 @@ One atomic rename replaces both credential and key together; concurrent updates 
 Wrong or reused codes, invalid keys and failures before that commit leave the existing profile
 unchanged. If response validation or saving fails after the member consumes the code, the error
 identifies the possible orphaned device and gives a revoke hint. On the trusted machine, inspect
-`st devices ls --as person/avery`, then revoke that device with
-`st devices revoke device/DEVICE_ID --as person/avery` before beginning another pairing.
+`fractal devices ls --as person/avery`, then revoke that device with
+`fractal devices revoke device/DEVICE_ID --as person/avery` before beginning another pairing.
 The new device may have a live bearer even though the client retained its previous profile.
 If a connection fails before an answer arrives, inspect the trusted device list because the
 client cannot know whether the member consumed the code.
@@ -114,7 +176,7 @@ its code; inspect signing history on the trusted member. Every refusal after enr
 that revocation. This withdraws signing authority without rewriting the original grant. Retry with
 a fresh signing key. A process crash or a storage failure can prevent cleanup and leave an unused
 signing grant; inspect principal grant and revocation history on the trusted member in that case.
-There is no completed device record for such a grant in `st devices ls`; pairing revocation only
+There is no completed device record for such a grant in `fractal devices ls`; pairing revocation only
 covers completed devices. The trusted begin response carries optional `person_root_fingerprint`.
 The anonymous advertisement never supplies a fingerprint or key.
 New completions require a full person-root fingerprint (`sha256:` plus the 43-character
@@ -231,14 +293,14 @@ signature migration, which inventories each stored claim's carried signatures. U
 inventory is complete, or while it is stopped on a persisted fault, the member cannot say whether
 the nonce was used, so it refuses the signed send rather than risk admitting a replay. Agents
 and the local CLI are not affected, because the daemon signs for them and they carry no device
-nonce. `st doctor` names the fault. A busy, locked or unopenable database is retried and never
+nonce. `fractal doctor` names the fault. A busy, locked or unopenable database is retried and never
 persisted as a fault. Neither is a judgment pass that a request's read deadline or cancellation
 interrupted: the paced signature job, which has no request deadline, does that work. After the
 named defect is repaired, a person or the fleet's fault agent runs
-`st replication signatures resume --reason TEXT` on that member.
+`fractal replication signatures resume --reason TEXT` on that member.
 
 Only the daemon that first accepts the send checks the time. Every member checks the signature
-and its chain when the claim arrives, and records the verdict (`st doctor`, claim-signatures).
+and its chain when the claim arrives, and records the verdict (`fractal doctor`, claim-signatures).
 It never checks the time, so the verdict is the same everywhere, whatever order claims arrive
 in.
 

@@ -26,8 +26,14 @@ pub fn missing_binding_tx(connection: &Connection, step: &StepRunView) -> Result
             if row.kind == "agent" {
                 return Ok(false);
             }
-            deliberate_stop |=
-                row.kind == "stop" && row.owner_run.is_none() && row.owner_generation.is_none();
+            if row.kind == "stop" && row.owner_run.is_none() && row.owner_generation.is_none() {
+                // A daemon's one-shot completion is observed process lifecycle, not a person
+                // deliberately quieting the mission's binding. Keep explicit root stops quiet.
+                let automatic_one_shot = seats::declaration_ended_by_stop_tx(connection, name)?
+                    .is_some_and(|ended| ended.writer.as_deref() == Some("daemon/runtime")
+                        && ended.declaration.member.as_ref().is_some_and(|member| member.one_shot));
+                deliberate_stop |= !automatic_one_shot;
+            }
         }
     }
     Ok(!deliberate_stop)

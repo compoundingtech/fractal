@@ -16,9 +16,9 @@ lane() {
 }
 
 toolchain() {
-  [ "$(pnpm --version)" = 12.15.0 ] || { echo "pnpm $(pnpm --version) is not 12.15.0" >&2; return 1; }
+  [ "$(pnpm --version)" = 12.17.0 ] || { echo "pnpm $(pnpm --version) is not 12.17.0" >&2; return 1; }
   [ "$(node --version)" = v24.20.0 ] || { echo "Node $(node --version) is not 24.20.0" >&2; return 1; }
-  grep -q '"packageManager": "pnpm@12.15.0"' package.json || { echo 'package.json must declare pnpm@12.15.0' >&2; return 1; }
+  grep -q '"packageManager": "pnpm@12.17.0"' package.json || { echo 'package.json must declare pnpm@12.17.0' >&2; return 1; }
   # The checked-in Buck root is the Nix-rendered consumer root below Genie's three-line header.
   [ -n "${FRACTAL_WEB_BUCK_ROOT:-}" ] || { echo 'run inside nix develop .#web' >&2; return 1; }
   [ ! -s .buckroot ] || { echo '.buckroot must be empty' >&2; return 1; }
@@ -142,6 +142,7 @@ stream_kit() {
     lane "UI kit typecheck" pnpm --filter @fractal/ui typecheck
     lane "UI kit scenario story check" pnpm --filter @fractal/ui test:stories
     lane "UI kit tab-strip policy" pnpm -C packages/fractal-ui run test:tab-strip
+    lane "UI kit entity descriptor" pnpm -C packages/fractal-ui run test:entity
   fi
   case "${KIT_INPUTS:-true}" in
     true)
@@ -170,6 +171,9 @@ exclusive_lanes() {
       lane "UI kit gate set, a11y and budget controls" node --test packages/fractal-ui/scripts/kit-play-gate.browser-test.mjs
     fi
     lane "UI kit Storybook and module graph" kit_storybook
+    if first_shard; then
+      lane "UI kit deterministic lifecycle controls" node --test --test-timeout=120000 packages/fractal-ui/scripts/details-determinism.browser-test.mjs
+    fi
   fi
   if first_shard; then
     # Replay covers the app even when no kit inputs changed; never duplicate it across kit shards.

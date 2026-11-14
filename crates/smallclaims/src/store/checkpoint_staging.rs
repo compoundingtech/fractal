@@ -277,7 +277,7 @@ impl Store {
     ) -> Result<StagedSet> {
         let scope = scope.map(|kinds| kinds.iter().map(|kind| (*kind).to_owned()).collect::<Vec<_>>());
         self.runtime.checkpoint_preflight()?;
-        let _span = crate::profile::span_with_io("checkpoint.capture");
+        let _span = super::checkpoint_accounting::Phase::start("capture", "checkpoint.capture");
         // Admit before lock_staging creates the scratch directory or lock file.
         let space = if self.shared_memory { None } else {
             Some(match scope.as_deref() {
@@ -378,10 +378,11 @@ impl Store {
     /// the set and the rules, and the file's identity fixes both.
     pub fn plan_staged_checkpoint(&self, staged: &StagedSet) -> Result<StagedPlan> {
         self.runtime.checkpoint_preflight()?;
+        let mut phase = super::checkpoint_accounting::Phase::start("plan", "checkpoint.plan");
         if let Some(plan) = staged.plan()? {
+            phase.count(plan.dropped_claims as u64);
             return Ok(plan);
         }
-        let _span = crate::profile::span_with_io("checkpoint.plan");
         // One transaction on the staging file: a plan cut short leaves no marks behind.
         let transaction = staged.staging.unchecked_transaction()?;
         transaction.execute_batch(
@@ -389,6 +390,7 @@ impl Store {
         )?;
         self.runtime.plan_staged_checkpoint_drops(&StagedPlanner { store: self, staged })?;
         let plan = staged.finish(&transaction, self.runtime.checkpoint_rules_digest())?;
+        phase.count(plan.dropped_claims as u64);
         transaction.commit()?;
         #[cfg(any(test, feature = "test-support"))]
         if REFERENCE_PLAN.with(std::cell::Cell::get) {

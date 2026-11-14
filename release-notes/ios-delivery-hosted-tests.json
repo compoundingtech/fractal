@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Run the daily iOS delivery Python integration suite in the hosted parallel script-test lane, with explicit sparse-source and evidence inputs.",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "CI coverage only; no application or wire change."},
+  "downtime": {"status": "none", "detail": "No live service or device change."},
+  "manual": {"status": "none", "detail": "Hosted CI runs the unmodified suite with ordinary Git. No operator action or local fixture adapter is required."},
+  "recovery": {"status": "none", "detail": "No recovery change."}
+}

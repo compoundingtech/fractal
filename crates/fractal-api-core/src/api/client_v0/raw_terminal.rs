@@ -34,6 +34,8 @@ pub async fn splice(
     _upgrade: Option<opentelemetry::trace::SpanContext>,
     mut first_frame: Option<tracing::Span>,
 ) {
+    let started = std::time::Instant::now();
+    let mut first_frame_sent = false;
     let (mut sink, mut source) = socket.split();
     let (mut reader, mut writer) = transport.into_split();
     let proof_ready = tokio::sync::Notify::new();
@@ -144,6 +146,15 @@ pub async fn splice(
                     }
                     let first_span = first_frame.clone();
                     if first_frame_work(first_span, sink.send(axum::extract::ws::Message::Binary(bytes[..count].to_vec().into()))).await.is_err() { break; }
+                    if !first_frame_sent {
+                        tracing::debug!(
+                            phase = "first-frame",
+                            bytes = count,
+                            elapsed_ms = %started.elapsed().as_millis(),
+                            "raw terminal first frame sent after upgrade"
+                        );
+                        first_frame_sent = true;
+                    }
                     first_frame = None;
                 }
             }

@@ -1,0 +1,285 @@
+# Generated file - DO NOT EDIT
+# Source: burst.yml.genie.ts
+
+name: burst
+
+run-name: "burst ${{ inputs.suite }} ${{ inputs.sha }} ${{ inputs.request }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA to test
+        required: true
+        type: string
+      suite:
+        description: "One of: cargo-test, nextest, st-test-all"
+        required: true
+        type: string
+      args:
+        description: Extra arguments for cargo-test or nextest, split on spaces
+        required: false
+        type: string
+        default: ""
+      request:
+        description: Unique request id per dispatch ([A-Za-z0-9._-], at most 64)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "burst-${{ inputs.request }}"
+  cancel-in-progress: false
+
+jobs:
+  pending:
+    name: pending
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      SHA: ${{ inputs.sha }}
+      SUITE: ${{ inputs.suite }}
+      ARGS: ${{ inputs.args }}
+      REQUEST: ${{ inputs.request }}
+      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    steps:
+      - name: Validate the request
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::burst runs only from main's workflow (got $GITHUB_REF)"; exit 1; }
+          sha_pattern='^[0-9a-f]{40}$' request_pattern='^[A-Za-z0-9._-]{1,64}$' args_pattern='^[A-Za-z0-9_:./=@ ,+-]*$'
+          [[ "$SHA" =~ $sha_pattern ]] || { echo "::error::sha must match $sha_pattern"; exit 1; }
+          [[ "$REQUEST" =~ $request_pattern ]] || { echo "::error::request must match $request_pattern"; exit 1; }
+          [[ "$ARGS" =~ $args_pattern ]] || { echo "::error::args must match $args_pattern"; exit 1; }
+          case "$SUITE" in
+            cargo-test|nextest|st-test-all) ;;
+            *) echo "::error::suite must be one of: cargo-test nextest st-test-all"; exit 1 ;;
+          esac
+          if [ "$SUITE" = st-test-all ] && [ -n "$ARGS" ]; then echo "::error::st-test-all takes no args"; exit 1; fi
+      - name: Report the run as pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsS --retry 3 -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -d "{\"state\":\"pending\",\"context\":\"burst/$SUITE\",\"description\":\"request=$REQUEST\",\"target_url\":\"$RUN_URL\"}" > /dev/null
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Validates the request and posts a commit status without a checkout.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  burst:
+    name: burst
+    needs: [pending]
+    runs-on: ${{ fromJSON(vars.BURST_RUNS_ON || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3","namespace-features:github.run-id={0}"]', github.run_id)) }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      SHA: ${{ inputs.sha }}
+      SUITE: ${{ inputs.suite }}
+      ARGS: ${{ inputs.args }}
+      REQUEST: ${{ inputs.request }}
+      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    outputs:
+      exit: ${{ steps.suite.outputs.exit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        if: inputs.suite == 'st-test-all'
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          shallow=$(git rev-parse --git-path shallow)
+          errors=$(mktemp)
+          fetch() {
+            status=0
+            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+            cat "$errors" >&2
+            return "$status"
+          }
+          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+            exit 1
+          fi
+          rm -f "$shallow.full-fetch"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require the requested commit
+        run: 'head=$(git rev-parse HEAD); [ "$head" = "$SHA" ] || { echo "::error::checked out $head, not $SHA"; exit 1; }'
+      - name: Use the runner's own caches
+        run: |
+          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
+      - name: Restore the Cargo target and registry
+        id: cargo-cache
+        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ github.workspace }}/target
+            ${{ runner.temp }}/cargo-home/registry
+            ${{ runner.temp }}/cargo-home/git
+          key: "cargo-perf-cost-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock', 'Cargo.toml', 'crates/**/Cargo.toml', '.cargo/config.toml') }}"
+          restore-keys: "cargo-perf-cost-${{ runner.os }}-"
+      - name: Restore the local Nix cache
+        id: nix-cache
+        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/fractal-ci-cache"
+          key: "nix5-perf-cost-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
+          restore-keys: |
+            nix5-perf-cost-${{ runner.os }}-
+            nix4-perf-cost-${{ runner.os }}-
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test home and XDG state
+        run: |
+          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
+          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        if: env.CI_LOCAL_CACHES != '1'
+        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          python3 scripts/prepare-pnpm-source-inputs.py apply
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: inputs.suite == 'st-test-all'
+      - name: Run the suite
+        id: suite
+        env:
+          ST_TEST_ALL: |
+            python3 - <<'BURST_ST_TEST_ALL'
+            import importlib.machinery, importlib.util, shlex, subprocess, sys
+            loader = importlib.machinery.SourceFileLoader('st_test', 'scripts/st-test')
+            module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(module)
+            skip = set(module.KEYED) | {module.RUST_TESTS, module.WEB}
+            status = 0
+            for name, argv in module.LOCAL.items():
+                if name in skip:
+                    continue
+                print(f'burst: {name}: {shlex.join(argv)}', flush=True)
+                code = subprocess.run(argv, stdin=subprocess.DEVNULL).returncode
+                print(f'burst: {name} exit={code}', flush=True)
+                status = status or code
+            sys.exit(status)
+            BURST_ST_TEST_ALL
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          read -r -a argv <<< "$ARGS"
+          case "$SUITE" in
+            cargo-test) command=(nix develop -c cargo test --locked "${argv[@]}") ;;
+            nextest) command=(nix develop -c cargo nextest run --locked "${argv[@]}") ;;
+            st-test-all) command=(bash -c "$ST_TEST_ALL") ;;
+          esac
+          log="$RUNNER_TEMP/burst.log"
+          start=$(date +%s)
+          code=0
+          set -o pipefail
+          "${command[@]}" 2>&1 | tee "$log" || code=$?
+          line="burst suite=$SUITE sha=$SHA request=$REQUEST exit=$code seconds=$(( $(date +%s) - start ))"
+          printf 'exit=%s\nline=%s\n' "$code" "$line" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$line" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$line" | tee -a "$log"
+      - name: Retain the suite log
+        if: always() && steps.suite.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "burst-log-${{ inputs.request }}"
+          path: "${{ runner.temp }}/burst.log"
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Finish with the suite exit
+        if: always()
+        env:
+          EXIT: ${{ steps.suite.outputs.exit }}
+          LINE: ${{ steps.suite.outputs.line }}
+        run: |
+          [ -n "$EXIT" ] || { echo "::error::the suite did not run"; exit 1; }
+          printf '%s\n' "$LINE"
+          exit "$EXIT"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  report:
+    name: report
+    needs: [pending, burst]
+    if: always() && needs.pending.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      SHA: ${{ inputs.sha }}
+      SUITE: ${{ inputs.suite }}
+      ARGS: ${{ inputs.args }}
+      REQUEST: ${{ inputs.request }}
+      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    steps:
+      - name: Report the result on the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXIT: ${{ needs.burst.outputs.exit }}
+        run: |
+          if [ -z "$EXIT" ]; then state=error; elif [ "$EXIT" = 0 ]; then state=success; else state=failure; fi
+          curl -fsS --retry 3 -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -d "{\"state\":\"$state\",\"context\":\"burst/$SUITE\",\"description\":\"exit=${EXIT:-none} request=$REQUEST\",\"target_url\":\"$RUN_URL\"}" > /dev/null
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Posts the final commit status without a checkout.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Record the requested assistant principal when pairing begin is denied",
+  "replay": {"status": "none", "detail": "Existing audit claims are unchanged; no claim replay is required."},
+  "schema": {"status": "none", "detail": "No schema changes. Denied pairing begins now record an admitted requested principal when no session or grant identifies one."},
+  "rules": {"status": "none", "detail": "No authorization or checkpoint rule changes; admitted assistant principals are unchanged."},
+  "compatibility": {"status": "none", "detail": "Denied assistant/mcp pairing begins now audit assistant/mcp instead of assistant/chatgpt. Invalid requested IDs retain the assistant/chatgpt fallback. Existing actor and grant principal precedence is preserved."},
+  "downtime": {"status": "none", "detail": "No additional startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator actions, configuration changes or re-pairing required."},
+  "recovery": {"status": "none", "detail": "No persistent state migration or new rollback restrictions."}
+}

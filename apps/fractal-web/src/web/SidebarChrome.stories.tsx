@@ -9,7 +9,8 @@ import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { SidebarToolbar } from '../shell/sidebar/Toolbar.tsx'
 import { defaultFilters } from '../shell/sidebar/state.ts'
 import { ResponsiveAgentSidebar } from './ResponsiveAgentSidebar.tsx'
-import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
+import { SettingsControl, type SettingsScheme } from './SettingsDialog.tsx'
+import { useResolvedScheme } from './themePreference.ts'
 import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 
 const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'dark' }: {
@@ -18,14 +19,14 @@ const SidebarChromeSurface = ({ width = 256, viewport = 1440, initialScheme = 'd
   readonly initialScheme?: 'dark' | 'light'
 }) => {
   const [filters, setFilters] = React.useState(defaultFilters)
-  const [scheme, setScheme] = React.useState(initialScheme)
+  const [preference, setScheme] = React.useState<SettingsScheme>(initialScheme)
+  const scheme = useResolvedScheme(preference)
   const [collapsed, setCollapsed] = React.useState(false)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   return <main data-sidebar-chrome-story="" style={{ width: viewport }} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
-    <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}>
+    <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={440} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined} headerActions={<SettingsControl scheme={preference} onSchemeChange={setScheme} />}>
       <SidebarToolbar filters={filters} update={setFilters} hosts={['local']} showRows={[{ host: 'local', asking: false, others: true }]} />
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>Builder session</nav>
-      <SidebarChromeFooter onToggleScheme={() => setScheme(value => value === 'dark' ? 'light' : 'dark')} />
     </ResponsiveAgentSidebar>
     <section {...stylex.props(styles.thread)}><Aria.Button onPress={() => { setCollapsed(false); setDrawerOpen(true) }}>Open agents</Aria.Button></section>
   </main>
@@ -37,12 +38,16 @@ const assertChrome = (sidebar: HTMLElement): void => {
   const search = canvas.getByRole('textbox', { name: 'Search agents' })
   const bounds = sidebar.getBoundingClientRect()
   const field = search.getBoundingClientRect()
-  if (Math.abs(field.left - bounds.left - 8) > 0.1 || Math.abs(bounds.right - field.right - 8) > 0.1) throw new Error('Search must have two 8px insets')
+  const lastControl = canvas.getByRole('button', { name: /^Sort agents/ }).getBoundingClientRect()
+  if (Math.abs(field.left - bounds.left - 8) > 0.1 || Math.abs(bounds.right - lastControl.right - 8) > 0.1) throw new Error('Search row must have two 8px insets')
   if (getComputedStyle(search).borderRadius !== '6px') throw new Error('Search radius must be 6px')
   const wordmark = sidebar.querySelector('header strong')!
   if (getComputedStyle(wordmark).fontWeight !== '500') throw new Error('Wordmark weight must be 500')
-  for (const button of [canvas.getByRole('button', { name: /^(Collapse|Close) agents$/ }), canvas.getByRole('button', { name: 'Toggle color scheme' })]) {
-    if (Math.abs(button.getBoundingClientRect().left - bounds.left - 8) > 0.1) throw new Error('Chrome controls must align at 8px')
+  const collapse = canvas.getByRole('button', { name: /^(Collapse|Close) agents$/ }), settings = canvas.getByRole('button', { name: 'Settings' })
+  if (Math.abs(collapse.getBoundingClientRect().left - bounds.left - 8) > 0.1 || Math.abs(bounds.right - settings.getBoundingClientRect().right - 8) > 0.1) throw new Error('Chrome controls must align at 8px')
+  if (Math.abs(collapse.getBoundingClientRect().top - settings.getBoundingClientRect().top) > 0.1) throw new Error('Settings must share the header row')
+  if (sidebar.querySelector('footer') !== null) throw new Error('The sidebar has no footer')
+  for (const button of [collapse, settings]) {
     const icon = button.querySelector('svg')
     if (icon?.getAttribute('stroke') !== 'currentColor' || icon.getAttribute('fill') !== 'none' || icon.getAttribute('aria-hidden') !== 'true') throw new Error('Chrome controls must use decorative stroke icons')
   }
@@ -66,7 +71,7 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   const wordmark = sidebar.querySelector<HTMLElement>('header strong')!
   // Inject the reported failures into the real rendered nodes; the same criterion must reject each.
   for (const control of [
-    { node: field, style: 'margin-left: -8px', error: 'Search must have two 8px insets' },
+    { node: field, style: 'margin-left: -8px', error: 'Search row must have two 8px insets' },
     { node: field, style: 'border-radius: 2px', error: 'Search radius must be 6px' },
     { node: wordmark, style: 'font-weight: 700', error: 'Wordmark weight must be 500' },
   ]) {
@@ -80,8 +85,6 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   icon.replaceWith(glyph)
   try { await expect(() => assertChrome(sidebar)).toThrow('Chrome controls must use decorative stroke icons') }
   finally { glyph.replaceWith(icon) }
-  await userEvent.click(within(sidebar).getByRole('button', { name: 'Toggle color scheme' }))
-  assertChrome(sidebar)
   await userEvent.click(field)
   await userEvent.type(field, 'builder')
   await expect(field).toHaveValue('builder')
@@ -93,7 +96,7 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull())
 }
 
-const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and chrome footer over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. The chrome footer adds no status or reconnect action; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and header over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and settings controls share the header row with decorative stroke icons at the 8px insets. The wordmark is weight 500. The sidebar has no footer; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.

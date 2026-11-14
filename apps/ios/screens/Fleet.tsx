@@ -14,6 +14,9 @@ import { QualitySection } from './Quality';
 import { UsageCard } from './Usage';
 import { UNPINNED_WARNING } from '../pairingProof';
 import { fabricTargetLabel } from '../fabricTarget';
+import { parsePairingQr } from '../pairingQr';
+import { CAMERA_DENIED, SCAN_FAILED, scanOutcome } from '../pairingScan';
+import { scanPairingQrNative, isPairingQrPermissionDenied } from '../modules/fractal-pairing-scanner';
 
 function machineGlyph(state: string): { glyph: string; color: string } {
   if (state === 'local' || state === 'reachable' || state === 'dial-out') return { glyph: '●', color: theme.idle };
@@ -94,6 +97,7 @@ export function FleetScreen() {
         {carrierInfo.route.fellBack && carrierInfo.route.why ? <T color={theme.waiting}>{carrierInfo.route.why}</T> : null}
         {carrierInfo.issue ? <T color={theme.fault}>{carrierInfo.issue}</T> : null}
         <NotificationsSetting />
+        <Button label="re-pair this device" onPress={actions.repairDevice} />
         <Button label="forget this device" color={theme.red} onPress={() => Alert.alert('Forget this device?', 'You will need to pair again.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Forget', style: 'destructive', onPress: () => void actions.forget() }])} />
       </View>
       <CarrierSection />
@@ -243,7 +247,7 @@ function CarrierSection() {
   </>;
 }
 
-// Pairing: the one screen before a device has a credential.
+// Pairing: first enrollment or an in-place replacement of the saved profile.
 export function PairScreen() {
   const { carrierInfo: fabricInfo, actions: fabricActions } = useStore();
   useEffect(() => { if (fabricInfo.built) void fabricActions.loadFabricNode(); }, [fabricInfo.built]);
@@ -252,6 +256,28 @@ export function PairScreen() {
   const overFabric = carrierInfo.built && carrierInfo.choice === 'fabric' && !!carrierInfo.target;
   const [id, setId] = useState(pairDraft?.id ?? ''), [code, setCode] = useState(pairDraft?.code ?? '');
   const [fingerprint, setFingerprint] = useState(''), [unpinned, setUnpinned] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanNote, setScanNote] = useState('');
+  const scan = async () => {
+    setScanning(true); setScanNote('');
+    try {
+      const raw = await scanPairingQrNative();
+      const outcome = scanOutcome(raw === null ? null : parsePairingQr(raw), pairDraft?.gateway ?? (url || urlDraft));
+      if (outcome.kind === 'unchanged') return;
+      if (outcome.kind === 'issue') { setScanNote(outcome.text); return; }
+      const prefill = () => {
+        const { gateway, id, code } = outcome.candidate;
+        actions.prefillScannedPairing(gateway, id, code);
+      };
+      if (outcome.kind === 'prefill') { prefill(); return; }
+      Alert.alert('Pair with a different gateway?', 'The scanned gateway differs from the current gateway, including its base path. Only continue if you started this pairing on that machine. Your saved pairing stays unchanged until pairing succeeds.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Use scanned gateway', onPress: prefill },
+      ]);
+    } catch (error) {
+      setScanNote(isPairingQrPermissionDenied(error) ? CAMERA_DENIED : SCAN_FAILED);
+    } finally { setScanning(false); }
+  };
   useEffect(() => {
     if (pairDraft) { setId(pairDraft.id); setCode(pairDraft.code); setFingerprint(''); setUnpinned(false); }
   }, [pairDraft]);
@@ -260,7 +286,9 @@ export function PairScreen() {
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, paddingBottom: 48 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive">
       <T soft>Begin pairing on a trusted Fractal machine, then enter its short-lived ID, code, and the person-root fingerprint copied separately. Use HTTPS or an already encrypted path such as Tailscale for the paired-only gateway.</T>
-      {pairDraft ? <T soft>Pairing with {pairDraft.gateway}</T> : overFabric && !url ? <>
+      <Button label="Scan pairing QR code" disabled={busy || scanning} onPress={() => void scan()} />
+      {scanNote ? <Note tone="warning">{scanNote}</Note> : null}
+      {pairDraft ? <><T soft>Pairing with {pairDraft.gateway}</T>{gatewayTransport(pairDraft.gateway) === 'lan' ? <T color={theme.waiting}>{LAN_HTTP_WARNING}</T> : null}</> : overFabric && !url ? <>
         <T soft>Pairing over Fabric with {carrierInfo.target ? fabricTargetLabel(carrierInfo.target) : ''}. {carrierInfo.fabric.phase === 'ready' ? 'Fabric is connected.' : carrierInfo.fabric.phase === 'failed' || carrierInfo.fabric.phase === 'refused' ? carrierInfo.fabric.reason : 'Connecting to Fabric…'}</T>
         {carrierInfo.node ? <><T dim>This phone's fabric node ID, for the member's grant (public):</T><T selectable>{carrierInfo.node}</T></> : null}
       </> : <>
@@ -271,14 +299,14 @@ export function PairScreen() {
       {url || pairDraft || overFabric ? <>
         <SectionHeader title="pair" />
         <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} placeholder="pairing ID" value={id} onChangeText={setId} />
-        <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} placeholder="pairing code" value={code} onChangeText={setCode} />
+        <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} secureTextEntry placeholder="pairing code" value={code} onChangeText={setCode} />
         <Field autoCapitalize="none" autoCorrect={false} spellCheck={false} placeholder="person-root fingerprint (sha256:…)" value={fingerprint} onChangeText={value => { setFingerprint(value); setUnpinned(false); }} />
         {unpinned ? <Note tone="warning">{UNPINNED_WARNING}</Note> : null}
-        <Button label="pair this device" disabled={busy} onPress={submit} />
-        <Button label={unpinned ? 'require fingerprint again' : 'pair without a trusted fingerprint…'} disabled={busy} onPress={() => {
+        <Button label="Pair this device" disabled={busy || scanning} onPress={submit} />
+        {!pairDraft?.scanned ? <Button label={unpinned ? 'require fingerprint again' : 'pair without a trusted fingerprint…'} disabled={busy} onPress={() => {
           if (unpinned) { setUnpinned(false); return; }
           Alert.alert('Pair without identity verification?', UNPINNED_WARNING, [{ text: 'Cancel', style: 'cancel' }, { text: 'Use unpinned pairing', style: 'destructive', onPress: () => { setFingerprint(''); setUnpinned(true); } }]);
-        }} />
+        }} /> : null}
         {pairDraft ? <Button label="cancel re-pairing" disabled={busy} onPress={actions.cancelPairDraft} /> : null}
       </> : null}
     </ScrollView>

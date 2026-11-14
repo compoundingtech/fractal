@@ -22,6 +22,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 iroh-base = { version = "=1.0.2", default-features = false, features = ["key"] }
 jsonschema = { version = "0.33", default-features = false }
 libc = "0.2"
+fractal-socket-discovery = { path = "../fractal-socket-discovery" }
 opentelemetry = { version = "0.30", optional = true }
 ring = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -44,6 +45,7 @@ tracing-opentelemetry = { version = "0.31", default-features = false, optional =
 base64 = "0.22"
 hex = "0.4"
 ring = "0.17"
+regex = "1"
 sha2 = "0.10"
 tempfile = "3"
 opentelemetry_sdk = "0.30"

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A cancelled mission run whose finally step is assigned to a seat that was stopped or retired now finishes cancelling. Before, the step stayed blocked with \"no eligible agent is present in the desired graph\", so the run stayed `running · final-cancelled` with no way to set its outcome, and `repair` found nothing to repair. Fixes #5480.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay. A run already stuck in final-cancelled on a stopped or retired seat ends on the first reconcile pass after the upgrade."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No store schema change. The step ends through the existing step state claim, with status `cancelled`."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "In a cancelled run's final phase, a finally step with no eligible agent, after the step's own seat declarations are materialized, ends as `cancelled` only on positive evidence that its seats are gone: every agent it is assigned or available to selects a stop declaration in the desired graph, which both a stop and a retirement produce. The reason reads \"the mission run was cancelled and every eligible agent is stopped or retired: ...\", and the run goes on to cleanup and ends cancelled. A seat this host has never seen, for example one whose declaration has not replicated yet, is not evidence that it is gone: the step stays blocked as before and is offered to the seat once it arrives, so replication lag cannot skip cleanup. A run that finished its work and is in its ordinary final phase still waits with the step blocked, as before, even for a stopped seat. Steps for agentless work, a person or a seat the step declares itself are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Interoperates with the previous release in a mixed-version fleet. The reconciler of the host that evaluates the run decides the step's state, and the step state claim it writes is one the previous release already writes and reads. A previous-release host that evaluates the run keeps the step blocked, as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No step is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back restores the old behavior: a cancelled run's finally step with no eligible agent stays blocked and the run stays in final-cancelled."
+  }
+}

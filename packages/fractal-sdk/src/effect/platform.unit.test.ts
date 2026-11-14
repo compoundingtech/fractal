@@ -21,9 +21,11 @@ describe('host-independent SDK', () => {
   it.live('builds and follows without browser globals, sharing and releasing one authenticated socket', () => {
     const commands: { kind: string; id: string; collection?: string }[] = []
     const httpAuthorization: (string | null)[] = []
+    const httpClients: (string | null)[] = []
     let socketCount = 0
     let closes = 0
     let socketAuthorization: string | undefined
+    let socketClient: string | undefined
     const socket: CollectionSocket = {
       onopen: null, onmessage: null, onclose: null, onerror: null,
       send: (text) => { commands.push(JSON.parse(text)) },
@@ -32,6 +34,7 @@ describe('host-independent SDK', () => {
     const factory: CollectionSocketFactory = (_url, _protocols, headers) => {
       socketCount += 1
       socketAuthorization = headers.Authorization
+      socketClient = headers['x-st3-client']
       queueMicrotask(() => socket.onopen?.())
       return socket
     }
@@ -40,6 +43,7 @@ describe('host-independent SDK', () => {
       credential: () => 'paired-test-credential', client: 'sdk-node-test', socket: factory,
       fetch: async (_input, init) => {
         httpAuthorization.push(new Headers(init?.headers).get('authorization'))
+        httpClients.push(new Headers(init?.headers).get('x-st3-client'))
         return new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: { capabilities: [] } }))
       },
     })
@@ -64,6 +68,8 @@ describe('host-independent SDK', () => {
         expect(socketCount).toBe(1)
         expect(socketAuthorization).toBe('Bearer paired-test-credential')
         expect(httpAuthorization).toContain('Bearer paired-test-credential')
+        expect(socketClient).toBe('sdk-node-test')
+        expect(httpClients).toContain('sdk-node-test')
         expect(commands.filter((command) => command.kind === 'subscribe').map((command) => command.collection)).toEqual(['agents', 'missions'])
         expect(followKey(descriptor.spec)).not.toBe(followKey({ ...descriptor.spec, descriptor: 'another-decoder' }))
         const subscription = commands.find((command) => command.collection === 'missions')!

@@ -13,11 +13,11 @@ pub struct PublicationDefinition {
     pub token: String,
 }
 
-fn desired_value(desired: &DesiredSubject) -> Result<Value, St3Error> {
+fn desired_value(desired: &DesiredSubject) -> Result<Value, FractalError> {
     serde_json::to_value(desired).map_err(internal)
 }
 
-fn proposed(intent: &NormalizedIntent, subject: &str) -> Result<Option<Value>, St3Error> {
+fn proposed(intent: &NormalizedIntent, subject: &str) -> Result<Option<Value>, FractalError> {
     if let Some(desired) = intent.subjects.get(subject) {
         return desired_value(desired).map(Some);
     }
@@ -33,7 +33,7 @@ pub fn selected(
     connection: &Connection,
     subject: &str,
     at: Option<u64>,
-) -> Result<Option<PublicationDefinition>, St3Error> {
+) -> Result<Option<PublicationDefinition>, FractalError> {
     let selected = if let Some(id) = subject.strip_prefix("mission/") {
         // Mission selection is projected transactionally with the owned-set winner.
         let row: Option<(String, String, String)> = connection
@@ -62,7 +62,7 @@ pub fn selected(
                 // A derived owned-set retirement need not have its own intent.desired claim.
                 let tree = serde_json::from_str(&row.body).map_err(internal)?;
                 let accountable = fractal_schema::accountable::from_desired(&tree)
-                    .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
+                    .map_err(|e| FractalError::new(e.code, e.message))?.map(str::to_owned);
                 let desired = DesiredSubject {
                     accountable,
                     subject: subject.into(),
@@ -70,7 +70,31 @@ pub fn selected(
                     desired: tree,
                     member: row
                         .member
-                        .map(|body| serde_json::from_str(&body).map_err(internal))
+                        .map(|body| serde_json::from_str(&body).map_err(|error| {
+                            // serde_json exposes no structured unknown-variant/field code.
+                            // These prefixes identify unsupported schema throughout MemberSpec,
+                            // including nested enums and deny_unknown_fields structures. Tests
+                            // pin the wording; wrong types, missing fields and syntax stay loud.
+                            let message = error.to_string();
+                            if message.starts_with("unknown variant ")
+                                || message.starts_with("unknown field ")
+                            {
+                                // Typed decoding can stop at an unknown discriminator before
+                                // reaching malformed JSON later in the document. Validate the
+                                // entire syntax without materializing a second JSON tree.
+                                if let Err(syntax_error) =
+                                    serde_json::from_str::<serde::de::IgnoredAny>(&body)
+                                {
+                                    return internal(syntax_error);
+                                }
+                                FractalError::new(
+                                    "member-version-unproven",
+                                    format!("unsupported retained member schema for `{subject}`: {message}"),
+                                )
+                            } else {
+                                internal(error)
+                            }
+                        }))
                         .transpose()?,
                     owner_run: row.owner_run,
                     owner_generation: row.owner_generation,
@@ -121,7 +145,7 @@ pub fn diffs<'a>(
     intent: &NormalizedIntent,
     subjects: impl Iterator<Item = &'a str>,
     at: Option<u64>,
-) -> Result<BTreeMap<String, DeclarationDiff>, St3Error> {
+) -> Result<BTreeMap<String, DeclarationDiff>, FractalError> {
     let mut diffs = BTreeMap::new();
     for subject in subjects {
         let Some(after) = proposed(intent, subject)? else {

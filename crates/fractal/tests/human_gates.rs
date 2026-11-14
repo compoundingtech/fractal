@@ -22,12 +22,14 @@ const NODE: &str = "human-gates";
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory(NODE).unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: NODE.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -236,6 +238,141 @@ async fn review(
             .unwrap(),
     )
     .await
+}
+
+#[tokio::test]
+async fn feedback_on_an_unclaimed_pool_step_waits_for_a_worker_to_notify() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    let source = RELEASE.replace(
+        "mission \"release\"",
+        "agent \"example/worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }\nmission \"release\"",
+    ).replace("    agentless", "    available-to \"agent/example/worker\"")
+        .replace("type=\"human\"", "type=\"human\" mode=\"feedback\"");
+    apply(&store, &source, "pool-feedback");
+    let run = start(&store, "release", "pool-feedback-run");
+    let step = run.steps[0].subject.clone();
+    let reconciler = reconciler(&store);
+    reconcile_until(&reconciler, "the unclaimed feedback gate asked", || {
+        store.gate_request_for_owner(&step).unwrap().is_some()
+    });
+    let app = fractal_daemon::api::router(state);
+    let (status, feedback) = review(&app, &step, "changes-requested", "person/avery", Some("Revise the release notes.")).await;
+    assert_eq!(status, StatusCode::OK, "{feedback}");
+    reconciler.reconcile_once().unwrap();
+    let waiting = store.step_run(&step).unwrap().unwrap();
+    assert_eq!(waiting.status, "ready");
+    assert_eq!(waiting.attempt, 1);
+    store.append_claim(&ClaimInput {
+        subject: "agent/example/worker".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status": "running", "runtime_id": "worker", "incarnation_id": "worker-one"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: Some("pool-worker-running".into()),
+    }).unwrap();
+    store.work_action(&step, "claim", &fractal_daemon::model::WorkRequest {
+        wait_ms: None, actor: Some("agent/example/worker".into()), incarnation: Some("worker-one".into()),
+        summary: None, reason: None, evidence: Vec::new(), idempotency_key: "pool-worker-claim".into(),
+    }).unwrap();
+    reconcile_until(&reconciler, "feedback starts the next attempt", || {
+        store.step_run(&step).unwrap().unwrap().attempt == 2
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unclaimed_worker_gate_alerts_and_accepts_approval_without_duplicate_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    let source = RELEASE.replace(
+        "mission \"release\"",
+        "agent \"example/worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }\nmission \"release\"",
+    ).replace("    agentless", "    assigned-to \"agent/example/worker\"");
+    apply(&store, &source, "worker-release");
+    let run = start(&store, "release", "worker-release-run");
+    let step = run.steps[0].subject.clone();
+    let reconciler = reconciler(&store);
+    reconcile_until(&reconciler, "the unclaimed gate asked", || {
+        store.gate_request_for_owner(&step).unwrap().is_some()
+    });
+    assert_eq!(step_status(&store, &step), "ready");
+    assert!(store.step_run(&step).unwrap().unwrap().claimant.is_none());
+    let request = store.gate_request_for_owner(&step).unwrap().unwrap();
+    let app = fractal_daemon::api::router(state.clone());
+    let (socket, server) = serve(state, root.path()).await;
+    let (seen, _) = card(&app, "person/avery", &step).await.expect("no unclaimed gate alert");
+    let id = seen["id"].as_str().unwrap();
+    let listed = run_cli(&socket, &["alerts", "ls", "--as", "person/avery"]).await;
+    assert!(listed.status.success(), "{listed:?}");
+    assert!(String::from_utf8_lossy(&listed.stdout).contains(id), "{listed:?}");
+    let approved = run_cli(&socket, &["alerts", "approve", id, "--as", "person/avery"]).await;
+    assert!(approved.status.success(), "{approved:?}");
+
+    store.append_claim(&ClaimInput {
+        subject: "agent/example/worker".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
+            "status": "running", "runtime_id": "worker", "incarnation_id": "worker-one"
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("worker-running".into()),
+    }).unwrap();
+    for action in ["claim", "complete"] {
+        store.work_action(&step, action, &fractal_daemon::model::WorkRequest {
+            wait_ms: None,
+            actor: Some("agent/example/worker".into()),
+            incarnation: Some("worker-one".into()),
+            summary: Some("Release prepared.".into()),
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: format!("worker-{action}"),
+        }).unwrap();
+        reconciler.reconcile_once().unwrap();
+    }
+    reconcile_until(&reconciler, "the approved worker completed", || {
+        step_status(&store, &step) == "completed"
+    });
+    let requests = store.claims_for_subject_kind_at(&request.subject, "gate.requested", None, false, 10).unwrap();
+    assert_eq!(requests.claims.len(), 1);
+    assert!(card(&app, "person/avery", &step).await.is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn two_human_gates_for_one_reviewer_remain_answerable_in_declaration_order() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    let source = RELEASE.replace(
+        "    }\n  }\n}",
+        "    }\n    gate \"publish\" type=\"human\" {\n      reviewer \"person/avery\"\n      question \"Publish the approved release?\"\n    }\n  }\n}",
+    );
+    apply(&store, &source, "two-reviews");
+    let run = start(&store, "release", "two-reviews-run");
+    let step = run.steps[0].subject.clone();
+    let reconciler = reconciler(&store);
+    reconcile_until(&reconciler, "the first gate asked", || {
+        store.gate_request_for_owner(&step).unwrap().is_some()
+    });
+    let first = store.gate_request_for_owner(&step).unwrap().unwrap();
+    assert_eq!(first.body["fields"]["question"], "Ship this release?");
+    let app = fractal_daemon::api::router(state);
+    assert!(card(&app, "person/avery", &step).await.is_some());
+    let (status, approved) = review(&app, &step, "approved", "person/avery", None).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    reconcile_until(&reconciler, "the second gate asked", || {
+        store.gate_request_for_owner(&step).unwrap().is_some_and(|request| request.id != first.id)
+    });
+    let second = store.gate_request_for_owner(&step).unwrap().unwrap();
+    assert_eq!(second.body["fields"]["question"], "Publish the approved release?");
+    assert!(card(&app, "person/avery", &step).await.is_some());
+    let (status, approved) = review(&app, &step, "approved", "person/avery", None).await;
+    assert_eq!(status, StatusCode::OK, "{approved}");
+    reconcile_until(&reconciler, "both approvals complete the step", || {
+        step_status(&store, &step) == "completed"
+    });
+    assert!(card(&app, "person/avery", &step).await.is_none());
 }
 
 #[tokio::test]

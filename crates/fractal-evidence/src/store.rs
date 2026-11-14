@@ -28,7 +28,7 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };
@@ -126,6 +126,8 @@ pub mod owned_sets_tests;
 pub mod roster_fresh_proof_tests;
 #[cfg(test)]
 pub mod projection_catch_up_tests;
+#[cfg(test)]
+mod gate_runners_cost_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Let an agentless step's own exec stop and restart the step's execution clock with work wait and work resume, without an agent or --as",
+  "replay": {
+    "status": "none",
+    "detail": "Existing claims replay unchanged. An exec's wait or resume is the existing work.progress claim with the existing clock, wait_until_unix_ms and attempt fields, the exec as its actor, and a null claimant, claim incarnation and lease expiry. Every member that already folds waits projects and folds it as it does a seat's wait: the timing fold does not read the actor, and the step projection keeps the agentless step's status with no lease."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, claim kinds, claim fields, schema-version or registry changes, and no data rewrites."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "No rules-version change. The daemon now accepts work wait and work resume, and only those actions, from an exec actor: the exec must be running on the daemon's host from the launch named in the request (its ST3_START_OPERATION, or its generation id), be declared by that agentless step for its current attempt, and the step must be working. Agent work actions are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The work wait and work resume CLI default --as to the exec named by ST3_SUBJECT and --incarnation to ST3_START_OPERATION when the caller has no ST_AGENT and runs inside an exec; with an agent identity or an explicit --as they behave as before. The wire request is unchanged. Roll out daemons before execs rely on it: an older daemon answers an exec's request with inactive-work-incarnation, and an older CLI inside an exec still requires --as. Waits are safe to rely on only once every member that folds step timing runs a build with the step wait clock."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work, migration or new background work; an exec's wait arms the same single reconciler wake at its deadline as a seat's wait."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required. A mission exec adopts it by calling fractal work wait \"$ST_STEP_RUN\" --for DURATION --reason TEXT and fractal work resume \"$ST_STEP_RUN\" around its external wait."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes. Reverting stops new exec waits; recorded exec waits still fold as before, each ending at its deadline at the latest."
+  }
+}

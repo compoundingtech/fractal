@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Improve native release build reliability during dependency archive outages",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Dependency contents and pinned hashes are unchanged; native release builds preseed verified packages using bounded transport retries and archive fallback."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Release transport failures leave normal dependency fetching available; content-hash mismatches remain fatal."}
+}

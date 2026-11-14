@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A message this member closes with a local mark leaves the client messages open page at once, and its reminder group's next message becomes current in the same write. Before this, while the selector fold was catching up, the closed message stayed on the open page with status closed, and its group had no open winner",
+  "replay": {"status": "none", "detail": "No claim or projection replay. A closed mark updates the message's live selector header and its reminder group's currency in place, as the later fold would; the page also reads the mark live."},
+  "schema": {"status": "none", "detail": "No table, index or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change; marks and selectors stay outside every digest."},
+  "compatibility": {"status": "none", "detail": "Mixed-version fleets are unaffected: marks and selectors are member-local, and the page is served by the member that holds them; no wire or stored-format change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing to recover. A relayed close (relayed_closes.rs) still waits for the fold as before."}
+}

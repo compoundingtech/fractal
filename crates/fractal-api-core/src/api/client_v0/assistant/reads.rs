@@ -5,6 +5,7 @@
 use crate::MissionsStore;
 use crate::SeatsStore;
 use crate::EvidenceStore;
+use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 use super::*;
 use crate::api::published_attention::{
     published_assistant_attention_rows, published_view_not_ready,
@@ -20,8 +21,9 @@ pub const DEFAULT_RESPONSE_BYTES: usize = 4 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 16 * 1024;
 
 const ATTENTION_KINDS: &[&str] = &[
+    "host-hold",
     "human-gate", "launch-approval", "revision-approval", "unread-message", "person-step",
-    "agent-request", "fault", "harness-login", "harness-prompt",
+    "agent-request", "fault", "harness-login", "harness-prompt", "model-drift",
 ];
 pub const AGENT_STATES: &[&str] = &[
     "desired", "starting", "running", "waiting", "stopped", "failed", "suspended",
@@ -39,6 +41,14 @@ const CONVERSATION_FIELDS: &[&str] = &[
 ];
 const TERMINAL_FIELDS: &[&str] = &[
     "agent_id", "terminal_id", "incarnation_id", "screen_revision", "max_response_bytes",
+];
+const SLO_HISTORY_FIELDS: &[&str] = &["id", "since_ms", "until_ms", "steps", "max_response_bytes"];
+/// The objective and budget row fields an assistant reads. `explain` is long derived prose and
+/// diagnostic fields (evidence, source, coverage, host, provider) stay on the person surface.
+const SLO_ROW_FIELDS: &[&str] = &[
+    "id", "kind", "account", "about", "target", "current", "window", "remaining_percent",
+    "status", "tone", "resets_at_unix_ms", "measured_at_unix_ms", "forecast_used_percent",
+    "forecast_basis_minutes", "runs_out_at_unix_ms",
 ];
 
 #[allow(clippy::too_many_arguments)]
@@ -72,10 +82,49 @@ pub async fn project_with_context(
                 "title": item["title"], "detail": item["detail"], "request": attention_request(item),
             })))
         },
+        "availability" => {
+            allow(parameters, SUMMARY_FIELDS, max_bytes)?;
+            availability(state, max_bytes, context).await
+        }
         "conversation-content" => Ok((snapshot.clone(), conversation(state, parameters, max_bytes).await?)),
         "terminal-content" => Ok((snapshot.clone(), terminal(state, parameters, max_bytes).await?)),
+        "slo" => page(state, snapshot, projection, parameters, max_bytes, binding, context).await,
+        "slo-history" => {
+            allow(parameters, SLO_HISTORY_FIELDS, max_bytes)?;
+            Ok((snapshot.clone(), slo_history(state, parameters).await?))
+        }
         _ => Err(ApiError::not_found("unknown assistant projection")),
     }
+}
+
+/// One objective or budget row with only the allowlisted fields.
+fn slo_item(row: &Value) -> Value {
+    Value::Object(SLO_ROW_FIELDS.iter()
+        .filter_map(|field| row.get(*field).map(|value| ((*field).to_owned(), value.clone())))
+        .collect())
+}
+
+/// What was left of one exactly named objective or budget across a period.
+async fn slo_history(state: &AppState, parameters: &BTreeMap<String, String>) -> Result<Value, ApiError> {
+    fn number<T: std::str::FromStr>(parameters: &BTreeMap<String, String>, name: &str) -> Result<Option<T>, ApiError> {
+        parameters.get(name).map(|value| value.parse::<T>()
+            .map_err(|_| validation(format!("query parameter `{name}` must be an unsigned integer"))))
+            .transpose()
+    }
+    let id = required(parameters, "id")?;
+    if !identifier_allowed(id) {
+        return Err(validation("id must be an exact objective or budget id from the SLO list"));
+    }
+    let query = crate::api::SloHistoryQuery {
+        id: id.to_owned(),
+        since_ms: number(parameters, "since_ms")?,
+        until_ms: number(parameters, "until_ms")?,
+        steps: number(parameters, "steps")?,
+    };
+    let axum::Json(mut body) = crate::api::operations::get_slo_history(
+        axum::extract::State(state.clone()), axum::extract::Query(query)).await?;
+    body["kind"] = json!("slo-history");
+    Ok(body)
 }
 
 /// Every parameter is named by the projection; a stated budget must be the one enforced.
@@ -193,7 +242,7 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                     // The scalar state rules of overlay_agent_resources/overlay_down, followed
                     // by the same local delivery assessment; no card is built just to count it.
                     let mut runtime = agent["state"].as_str();
-                    if age.is_some_and(|age| age > 90_000)
+                    if age.is_some_and(|age| u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis())
                         && matches!(reported, Some("ready" | "idle")) && runtime == Some("running")
                     {
                         runtime = Some("waiting");
@@ -204,7 +253,7 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                         {
                             runtime = Some(match reported {
                                 Some("working") => "running",
-                                Some("ready" | "idle") if age.is_some_and(|age| age <= 90_000) => "running",
+                                Some("ready" | "idle") if age.is_some_and(|age| u128::from(age) <= HARNESS_OBSERVATION_FRESHNESS.as_millis()) => "running",
                                 _ => "waiting",
                             });
                         } else if agent["_launch_since_ms"].as_u64()
@@ -240,6 +289,54 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
         })
     })
     .await?
+}
+
+/// The grant person's effective availability and current directive note, from one store
+/// snapshot. The assistant is not the person, so raw device presence is withheld.
+/// The availability fields are never cut. The note text is cut on a character boundary
+/// to what the budget leaves after the whole response envelope, measured with the same
+/// codec as delivery; `directive_note_truncated` says whether it was.
+async fn availability(
+    state: &AppState,
+    max_bytes: usize,
+    context: &response_body::Context,
+) -> Result<(ClientSnapshot, Value), ApiError> {
+    use fractal_store::store::availability::AvailabilityStore as _;
+    let person = owner(state)?;
+    let reader = state.clone();
+    let (snapshot, availability, mut note) = blocking_store(move || {
+        reader.store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&reader, index);
+            let now = client_snapshot_time(&snapshot);
+            let availability = reader.store.person_availability(&person, now)?.without_presence();
+            let note = fractal_store::store::directive_notes::current(&reader.store.readers.get(), &person, now)?;
+            Ok((snapshot, availability, note))
+        })
+    })
+    .await?;
+    let text = note.as_mut().map(|note| std::mem::take(&mut note.text)).unwrap_or_default();
+    // Measured with the longer flag literal, so the delivered body never exceeds it.
+    let mut value = json!({
+        "kind": "person-availability", "availability": availability, "directive_note": note,
+        "directive_note_truncated": false,
+    });
+    let envelope = context.value_envelope_size(&snapshot, &value)?;
+    let mut remaining = max_bytes.checked_sub(envelope)
+        .ok_or_else(|| budget_exceeded("the availability does not fit the response budget"))?;
+    let mut end = 0;
+    for character in text.chars() {
+        let size = encoded_len(character.encode_utf8(&mut [0; 4]));
+        if size > remaining {
+            break;
+        }
+        remaining -= size;
+        end += character.len_utf8();
+    }
+    if !value["directive_note"].is_null() {
+        value["directive_note"]["text"] = json!(&text[..end]);
+        value["directive_note_truncated"] = json!(end < text.len());
+    }
+    Ok((snapshot, value))
 }
 
 /// Native cards put informational person-step requests in `update`, not `request`.

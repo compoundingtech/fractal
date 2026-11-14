@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "PTY registry reconciliation now finalizes durable producer ownership even after an applied start has left the pending-start cleanup path. Server records capture PID generation and boot identity; a vanished or reused generation is closed only after its work and server scopes are also proven closed. Closure records include a typed reason and publication_pending=false, allowing ended producers to be reclaimed without treating registry absence as proof.",
+  "replay": { "status": "none", "detail": "No claim or projection changes." },
+  "schema": { "status": "none", "detail": "Native PTY sidecars now record server identity and typed closure metadata; no database schema changes." },
+  "rules": { "status": "none", "detail": "Live, inaccessible, malformed, partial, or boot-ambiguous server evidence cannot authorize generation-based closure." },
+  "compatibility": { "status": "none", "detail": "Existing scope-only server records retain scope-based closure; they never authorize PID-generation closure." },
+  "downtime": { "status": "none", "detail": "Takes effect after restart on the updated runtime." },
+  "manual": { "status": "none", "detail": "No manual changes to producer directories are required." },
+  "recovery": { "status": "none", "detail": "Closure is durable and conservative; ambiguous producer directories remain pending." }
+}

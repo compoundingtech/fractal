@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Opt-in daemon-local admission for a trusted API readiness reading and one native fault per missed objective episode",
+  "replay": {"status": "none", "detail": "Existing claims and projections are unchanged. An enabled member persists one admitted pending cut and replays it before accepting a successor after restart."},
+  "schema": {"status": "none", "detail": "No SQL, client wire or claim schema change."},
+  "rules": {"status": "none", "detail": "Uses existing system-only claims. The new readiness fault condition prevents fallback assignment when the explicit reviewer stops or retires. Other faults retain their routing rules."},
+  "compatibility": {"status": "changed", "detail": "An enabled member adds a native API readiness objective. Builds that predate readiness_slo reject that optional config key; absent the key behavior is unchanged."},
+  "downtime": {"status": "none", "detail": "No added downtime on upgrade. Enabling or removing the policy uses the usual daemon restart."},
+  "manual": {"status": "changed", "detail": "Off by default. Upgrade every fault reader before enabling to preserve owner-only routing. Install the trusted publisher, select exactly one executor, monitored member and declared reviewer in readiness_slo, and validate the source and receiver in isolation."},
+  "recovery": {"status": "changed", "detail": "Remove readiness_slo from the daemon configuration before rolling back. Existing open native faults remain available to the reviewer. Keep the admitted-cut checkpoint while re-enabling the same policy."}
+}

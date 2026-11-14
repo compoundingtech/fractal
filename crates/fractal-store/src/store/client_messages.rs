@@ -5,16 +5,24 @@ use super::*;
 const TABLE: &str = "local_client_message_selectors_v1";
 const MARKER: &str = "client_message_selectors_v1_cut";
 const BACKFILL_MARKER: &str = "client_message_selectors_v1_backfill";
-const FOLD_MARKER: &str = "client_message_selectors_v1_fold";
+pub(super) const FOLD_MARKER: &str = "client_message_selectors_v1_fold";
 const MALFORMED_MARKER: &str = "client_message_selectors_v1_malformed_desired";
 const TRIGGER_MARKER: &str = "client_message_selectors_v1_trigger_generation";
+/// The last mirror subject the stream re-seed has passed ([`seed_stream_headers`]).
+const STREAM_SEED_MARKER: &str = "client_message_selectors_v1_stream_seed";
+/// Present while every mirrored stream item has the header this build folds for it. The schema's
+/// triggers remove it whenever a stream item is queued or a stream header goes, under any build,
+/// and only this build puts it back ([`confirm_stream_headers`]), so a start without it re-seeds.
+const STREAM_WHOLE_MARKER: &str = "client_message_selectors_v1_stream_headers_whole";
 // Leave ample room for SQLite's durable commit below the 100ms transaction target.
 pub const BACKFILL_SUBJECTS: usize = 16;
 pub const BACKFILL_CLEAR_ROWS: usize = 64;
 pub const FOLD_CLAIMS: usize = 64;
 pub const PRUNE_ROWS: usize = 64;
 const BACKFILL_WORK_BUDGET: std::time::Duration = std::time::Duration::from_millis(10);
-const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb72fc75f85f1 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
+#[cfg(any(test, feature = "test-support"))]
+const TEST_FOLD_BUDGET_MARKER: &str = "client_message_selectors_v1_test_fold_budget_us";
+const SELECTOR_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3a20861ab64f owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_selectors_v1(
  subject TEXT NOT NULL,born_index INTEGER NOT NULL,retired_index INTEGER,
  sender TEXT NOT NULL DEFAULT 'requester',recipient TEXT NOT NULL DEFAULT '',
@@ -76,6 +84,19 @@ CREATE INDEX IF NOT EXISTS client_selector_destructive ON local_client_message_s
  WHERE born_index=-2;
 CREATE INDEX IF NOT EXISTS client_selector_retired_cut ON local_client_message_selectors_v1(retired_index)
  WHERE retired_index IS NOT NULL;
+-- A stream header (created_index from messages_shard::STREAM_INDEX_BASE) retired or deleted by any
+-- build: a build without stream headers folds a stream subject to none, so the next start of one
+-- with them re-seeds (STREAM_WHOLE_MARKER).
+CREATE TRIGGER IF NOT EXISTS client_selector_stream_header_retired AFTER UPDATE OF retired_index ON local_client_message_selectors_v1
+WHEN OLD.born_index>=0 AND OLD.retired_index IS NULL AND NEW.retired_index IS NOT NULL AND OLD.created_index>=281474976710656
+BEGIN
+ DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
+END;
+CREATE TRIGGER IF NOT EXISTS client_selector_stream_header_deleted AFTER DELETE ON local_client_message_selectors_v1
+WHEN OLD.born_index>=0 AND OLD.retired_index IS NULL AND OLD.created_index>=281474976710656
+BEGIN
+ DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
+END;
 CREATE TABLE IF NOT EXISTS local_client_message_publications(
  through_index INTEGER PRIMARY KEY,published_at_unix_ms INTEGER NOT NULL
 ) WITHOUT ROWID;
@@ -192,9 +213,10 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     let trigger_generation: Option<String> = connection.query_row(
         "SELECT value FROM meta WHERE key=?1", [TRIGGER_MARKER], |row| row.get(0),
     ).optional()?;
-    if trigger_generation.as_deref() != Some("1") {
+    if trigger_generation.as_deref() != Some("2") {
         // Upgrade old source capture once, never churn SQLite's schema on reopen.
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc0ebfddf4a2b owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS client_message_cut_repair;DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h27dc7fe74bfd owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS local_stream_lifecycle_client_selector;")?;
     }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb6aa628a36c9 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_cut_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL);
@@ -215,7 +237,7 @@ END;
 "#)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf3d82e91a912 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ SELECTOR_SCHEMA)?;
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hb92e5d1ad214 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-h990276e7632d owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'2') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [TRIGGER_MARKER],
     )?;
     // Older completed v1 caches acquire a conservative first-publication cohort.
@@ -223,6 +245,13 @@ END;
         /* sqlite-large-value: allow-for-now lv-h06b3f8910df0 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_publications SELECT CAST(value AS INTEGER),?2 FROM meta WHERE key=?1 AND NOT EXISTS(SELECT 1 FROM local_client_message_publications)",
         params![MARKER,u64::try_from(crate::client_values::client_now_ms())?],
     )?;
+    if trigger_generation.as_deref() != Some("2") {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hc678d4a7585b owner=fractal_store::store::client_messages TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+             SELECT DISTINCT subject,-1,1,1 FROM claims WHERE kind='message.expired'
+             ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|1,created_index=created_index+1", [],
+        )?;
+    }
     Ok(())
 }
 
@@ -251,6 +280,8 @@ struct Header {
 }
 
 type FieldSelection = (smallclaims::store::canonical::ClaimKey, Option<String>);
+/// A client page's rows: each message's view, its metadata, and whether it is current mail.
+pub type ClientMessageRows = Vec<(MessageView,Value,bool)>;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -305,18 +336,53 @@ fn desired_selection(connection: &Connection, subject: &str) -> Result<DesiredSe
     }
 }
 
+/// A stream item's header, from its mirror row (stream_mirror.rs), when the graph holds no
+/// `message.sent` for it: a subject the graph holds is the graph's. Its `created_index` is past
+/// every graph index, as `messages_shard::message_view`'s, so a page tells the two apart.
+fn stream_header(connection: &Connection, subject: &str) -> Result<Option<Header>> {
+    let row: Option<(i64,String,i64,bool)> = connection.prepare_cached(
+        "SELECT sent_ms,fields,stream_index,
+          EXISTS(SELECT 1 FROM local_stream_lifecycle WHERE subject=?1 AND kind='message.closed')
+          OR EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=?1)
+         FROM local_stream_sent WHERE subject=?1
+          AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent')",
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h5a7e8f605584 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+    let Some((sent_ms,fields,stream_index,closed)) = row else { return Ok(None); };
+    let closed = closed || message_expiry::status(connection, subject)? == Some("expired");
+    let fields: Value = serde_json::from_str(&fields)?;
+    let to = fields["to"].as_str().unwrap_or_default();
+    let sender = normalize_message_party(fields["from"].as_str().unwrap_or("requester"));
+    let recipient = normalize_message_party(to);
+    let tags = fields["tags"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>();
+    let reminder = tags.iter().find_map(|tag|tag.strip_prefix("reminder:")).map(str::to_owned);
+    let version = tags.iter().find_map(|tag|tag.strip_prefix("version:")).and_then(|version|version.parse::<u64>().ok()).unwrap_or_default();
+    let bare = recipient.strip_prefix("agent/").filter(|suffix|!suffix.contains('/')).unwrap_or(&recipient);
+    let native_mailbox = to == recipient || to == bare;
+    Ok(Some(Header { sender,mailbox:native_mailbox,closed,reminder,version:format!("{version:020}"),
+        sent_key:crate::client_values::client_timestamp(u128::try_from(sent_ms.max(0))?),
+        created_index:messages_shard::STREAM_INDEX_BASE + u64::try_from(stream_index)?,
+        desired_mask:0,native_mailbox,recipient }))
+}
+
 fn folded_header(connection: &Connection, work: &mut FoldWork) -> Result<Option<Header>> {
+    if let Some(header) = stream_header(connection, &work.subject)? {
+        work.first = None;
+        work.base = None;
+        return Ok(Some(header));
+    }
     let Some(sent_key) = work.first.take() else { return Ok(None); };
     if let Some(mut base) = work.base.take() {
         base.sent_key = sent_key;
         return Ok(Some(base));
     }
-    // The shared index's closed, or this member's closed mark (message_marks.rs), which never
-    // changes the shared index.
+    // The shared index's closed, this member's closed mark (message_marks.rs), or a seat's host's
+    // close it relayed (relayed_closes.rs), neither of which changes the shared index.
     let indexed: Option<(u64,bool)> = connection.prepare_cached("SELECT created_index,closed OR EXISTS(SELECT 1 FROM local_message_marks
-        WHERE message=message_index.subject AND kind='message.closed') FROM message_index WHERE subject=?1")?
+        WHERE message=message_index.subject AND kind='message.closed')
+        OR EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=message_index.subject) FROM message_index WHERE subject=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h28ac822f10fc owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
     let Some((created_index,index_closed)) = indexed else { return Ok(None); };
+    let index_closed = index_closed || message_expiry::status(connection, &work.subject)? == Some("expired");
     let [sender,recipient,tags,status] = std::mem::take(&mut work.values).map(|value| value.and_then(|(_, value)| value));
     let desired = match desired_selection(connection, &work.subject)? {
         DesiredSelection::Absent => None,
@@ -421,8 +487,25 @@ fn bounded_position(transaction: &Transaction<'_>, row: &SelectionRow, budget: &
     Ok((through == row.index).then(|| count.saturating_sub(1)))
 }
 
-fn scan_selection(transaction: &Transaction<'_>, work: &mut FoldWork, budget: &mut FoldBudget, started: std::time::Instant) -> Result<bool> {
-    while budget.claims < FOLD_CLAIMS && started.elapsed() < BACKFILL_WORK_BUDGET {
+/// The wall time one pass folds for. A test pins a store's own (Store::set_client_message_fold_budget);
+/// builds without test support never read it.
+fn fold_work_budget(_transaction: &Transaction<'_>) -> Result<std::time::Duration> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(micros) = _transaction.query_row("SELECT value FROM meta WHERE key=?1", [TEST_FOLD_BUDGET_MARKER], |row| row.get::<_, String>(0)).optional()? {
+        return Ok(std::time::Duration::from_micros(micros.parse()?));
+    }
+    Ok(BACKFILL_WORK_BUDGET)
+}
+
+/// A pass stops at its time budget only once it has done some work. On a loaded host a loan's own
+/// reads can outlast the budget, and a pass that then stopped before its first row would save the
+/// same place every loan and never finish.
+fn spent(budget: &FoldBudget, started: std::time::Instant, limit: std::time::Duration) -> bool {
+    (budget.claims > 0 || budget.subjects > 0 || budget.scratch_rows > 0) && started.elapsed() >= limit
+}
+
+fn scan_selection(transaction: &Transaction<'_>, work: &mut FoldWork, budget: &mut FoldBudget, started: std::time::Instant, limit: std::time::Duration) -> Result<bool> {
+    while budget.claims < FOLD_CLAIMS && !spent(budget, started, limit) {
         let Some(row) = next_selection_row(transaction, work)? else { return Ok(true); };
         budget.claims += 1;
         let Some(position) = bounded_position(transaction, &row, budget)? else { return Ok(false); };
@@ -531,6 +614,41 @@ fn reminder_winners(transaction: &Transaction<'_>,reminder: &str,recipient: Opti
     if let Some(subject)=winner {
         set_current(transaction,&subject,recipient.is_none().then_some(true),recipient.is_some().then_some(true),cut,now)?;
     }
+    Ok(())
+}
+
+/// A closed mark (message_marks.rs) moves no index, so a page pinned to the published cut cannot
+/// hold it back, and while its header waits for the fold its reminder group has no open winner.
+/// Close the subject's live header in place, as a mark counts at every cut, and move its group's
+/// winner: that header and its group's top candidates, nothing else. A fold with saved work on the
+/// subject keeps it, and the page reads the mark until that fold finishes. Once a later version
+/// has folded past the published cut, that cut's next winner shares its row with the live cut,
+/// where the later version wins, so the page picks it for a reader pinned there (page_sql).
+pub(super) fn close_marked(transaction: &Transaction<'_>,subject: &str) -> Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(()); }
+    if !selectors_ready(transaction)? || projection_blocks_selectors(transaction,Some(subject))? { return Ok(()); }
+    let saved: Option<String> = transaction.query_row("SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0)).optional()?;
+    if saved.map(|saved| serde_json::from_str::<FoldWork>(&saved)).transpose()?.is_some_and(|work| work.subject==subject) { return Ok(()); }
+    let Some((_,header)) = current_header(transaction,subject)? else { return Ok(()); };
+    if header.closed { return Ok(()); }
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h316d1fc30c66 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_client_message_selectors_v1 SET closed=1 WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL",[subject])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hea48a278f076 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ r#"UPDATE local_client_message_selectors_v1 SET
+ global_current=(closed=0 AND (reminder IS NULL OR NOT EXISTS(
+  SELECT 1 FROM local_client_message_selectors_v1 rival WHERE rival.born_index>=0 AND rival.retired_index IS NULL AND rival.closed=0
+   AND rival.reminder=local_client_message_selectors_v1.reminder AND (rival.version,rival.subject)>(local_client_message_selectors_v1.version,local_client_message_selectors_v1.subject)))),
+ recipient_current=(closed=0 AND mailbox=1 AND (reminder IS NULL OR NOT EXISTS(
+  SELECT 1 FROM local_client_message_selectors_v1 rival WHERE rival.born_index>=0 AND rival.retired_index IS NULL AND rival.closed=0 AND rival.mailbox=1
+   AND rival.recipient=local_client_message_selectors_v1.recipient AND rival.reminder=local_client_message_selectors_v1.reminder AND (rival.version,rival.subject)>(local_client_message_selectors_v1.version,local_client_message_selectors_v1.subject))))
+WHERE born_index>=0 AND retired_index IS NULL AND subject IN (
+ SELECT ?1
+ UNION
+ SELECT (SELECT subject FROM local_client_message_selectors_v1 INDEXED BY client_selector_reminder_candidates
+  WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND reminder=?2 ORDER BY version DESC,subject DESC LIMIT 1)
+ UNION
+ SELECT (SELECT subject FROM local_client_message_selectors_v1 INDEXED BY client_selector_recipient_reminder_candidates
+  WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND mailbox=1 AND reminder=?2 AND recipient=?3 ORDER BY version DESC,subject DESC LIMIT 1))"#,
+        params![subject,header.reminder,header.recipient])?;
     Ok(())
 }
 
@@ -690,6 +808,58 @@ fn fold_incomplete(connection: &Connection) -> Result<bool> {
     )?)
 }
 
+fn stream_seed_incomplete(connection: &Connection) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [STREAM_SEED_MARKER], |row| row.get(0),
+    )?)
+}
+
+/// Mark the stream headers whole once nothing this build folds is left: no pending header, no
+/// fold or backfill in progress and no re-seed. Each commit's fold calls it; it is two lookups
+/// when the marker is there.
+fn confirm_stream_headers(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hb1c87956ef60 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) SELECT ?1,'1'
+         WHERE NOT EXISTS(SELECT 1 FROM meta WHERE key IN (?1,?2,?3,?4))
+          AND NOT EXISTS(SELECT 1 FROM local_client_message_fold_batches)
+          AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 INDEXED BY client_selector_pending WHERE born_index=-1)",
+        params![STREAM_WHOLE_MARKER, STREAM_SEED_MARKER, FOLD_MARKER, BACKFILL_MARKER],
+    )?;
+    Ok(())
+}
+
+/// Queue one page of mirrored stream items that have no live header. A build without stream
+/// headers refolds a stream subject it is handed to no header (a rollback past this one, while
+/// its mirror runs, drops each one closed meanwhile, and queues none it mirrors), so a start
+/// that finds the stream headers not whole ([`STREAM_WHOLE_MARKER`]) passes over the mirror once.
+fn seed_stream_headers(transaction: &Transaction<'_>) -> Result<()> {
+    let Some(after): Option<String> = transaction.query_row(
+        "SELECT value FROM meta WHERE key=?1", [STREAM_SEED_MARKER], |row| row.get(0),
+    ).optional()? else { return Ok(()); };
+    let page = BACKFILL_SUBJECTS * 4;
+    let subjects = transaction.prepare_cached(
+        "SELECT subject FROM local_stream_sent WHERE subject>?1 ORDER BY subject LIMIT ?2",
+    )?.query_map(params![after, page], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for subject in &subjects {
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h45f2ce961c30 owner=fractal_store::store::client_messages TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+             SELECT ?1,-1,1,1 WHERE NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1
+               WHERE subject=?1 AND born_index>=0 AND retired_index IS NULL)
+              AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent')
+             ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|1,created_index=created_index+1",
+            [subject],
+        )?;
+    }
+    // Past the last page the marker goes; otherwise it moves to this page's last subject.
+    let last = subjects.last().filter(|_| subjects.len() == page);
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hdad79852ce9a owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET value=?2 WHERE key=?1 AND ?2 IS NOT NULL", params![STREAM_SEED_MARKER, last],
+    )?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hedbfe9eeda28 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1 AND ?2 IS NULL", params![STREAM_SEED_MARKER, last])?;
+    Ok(())
+}
+
 fn backfill_incomplete(connection: &Connection) -> Result<bool> {
     Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [BACKFILL_MARKER], |row| row.get(0),
@@ -753,7 +923,8 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
         }
         BackfillPhase::Headers => {
             let subjects = transaction.prepare_cached(
-                "SELECT subject FROM message_index WHERE subject>?1 AND created_index>0 ORDER BY subject LIMIT ?2",
+                "SELECT subject FROM message_index WHERE subject>?1 AND created_index>0
+                 UNION SELECT subject FROM local_stream_sent WHERE subject>?1 ORDER BY subject LIMIT ?2",
             )?.query_map(params![progress.after, BACKFILL_SUBJECTS], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for subject in &subjects {
@@ -896,7 +1067,7 @@ pub(super) fn open(connection: &mut Connection) -> Result<()> {
     if !initialized {
         let transaction = connection.transaction()?;
         let populated: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM message_index WHERE created_index>0)",
+            "SELECT EXISTS(SELECT 1 FROM message_index WHERE created_index>0) OR EXISTS(SELECT 1 FROM local_stream_sent)",
             [], |row| row.get(0),
         )?;
         if populated {
@@ -910,6 +1081,17 @@ pub(super) fn open(connection: &mut Connection) -> Result<()> {
     // Recover one bounded allowance for an existing cut, including reminder
     // eligibility invalidated by offline claim edits/deletes. Initial backfill
     // remains owned by the post-serving worker.
+    // A published cut whose stream headers are not whole (a first start of this build, or one
+    // after a build without them ran) seeds them again from the start of the mirror; an initial
+    // backfill reads the mirror itself.
+    if initialized && !backfill_incomplete(connection)? {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h2168e8a2f839 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) SELECT ?1,'' WHERE EXISTS(SELECT 1 FROM local_stream_sent)
+              AND NOT EXISTS(SELECT 1 FROM meta WHERE key=?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![STREAM_SEED_MARKER, STREAM_WHOLE_MARKER],
+        )?;
+    }
     if initialized && !backfill_incomplete(connection)?
         && (has_pending(connection)? || fold_incomplete(connection)?) {
         let transaction = connection.transaction()?;
@@ -921,18 +1103,22 @@ pub(super) fn open(connection: &mut Connection) -> Result<()> {
 
 /// The runtime's sole managed outer-COMMIT selector callback. Append, apply,
 /// replay and repair helpers only capture durable pending work through triggers.
-pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudget> {
-    #[cfg(any(test, feature = "test-support"))]
-    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(FoldBudget::default()); }
-    // Startup/rebuild owns this queue until every header is available. Ordinary
-    // replay hooks must not publish an incomplete selector projection.
-    let ready: bool = transaction.query_row(
+// Startup/rebuild owns the queue until every header is available. Ordinary
+// replay hooks must not publish an incomplete selector projection.
+fn selectors_ready(transaction: &Transaction<'_>) -> Result<bool> {
+    Ok(transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)
          AND NOT EXISTS(SELECT 1 FROM meta WHERE key=?2)",
         params![MARKER, BACKFILL_MARKER], |row| row.get(0),
-    )?;
-    if !ready { return Ok(FoldBudget::default()); }
+    )?)
+}
+
+pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudget> {
+    #[cfg(any(test, feature = "test-support"))]
+    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(FoldBudget::default()); }
+    if !selectors_ready(transaction)? { return Ok(FoldBudget::default()); }
     let budget = flush_pending(transaction, true)?;
+    confirm_stream_headers(transaction)?;
     #[cfg(any(test, feature = "test-support"))]
     if transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_client_message_versions'))",[],|row|row.get::<_,bool>(0))? {
         super::client_messages_version_benchmark::flush(transaction)?;
@@ -970,9 +1156,10 @@ fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBud
     let started = std::time::Instant::now();
     let mut budget = FoldBudget::default();
     if projection_blocks_selectors(transaction, None)? { return Ok(budget); }
+    let limit = fold_work_budget(transaction)?;
     let saved: Option<String> = transaction.query_row("SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0)).optional()?;
     let mut active = saved.map(|saved| serde_json::from_str::<FoldWork>(&saved)).transpose()?;
-    while budget.subjects < BACKFILL_SUBJECTS && budget.claims < FOLD_CLAIMS && started.elapsed() < BACKFILL_WORK_BUDGET {
+    while budget.subjects < BACKFILL_SUBJECTS && budget.claims < FOLD_CLAIMS && !spent(&budget, started, limit) {
         if projection_blocks_selectors(transaction, active.as_ref().map(|work| work.subject.as_str()))? { break; }
         let pending: Option<(String,u8,u64,Option<String>,String)> = if let Some(work) = &active {
             transaction.prepare_cached("SELECT subject,dirty_flags,created_index,reminder,recipient FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=-1")?
@@ -999,7 +1186,7 @@ fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBud
             work.phase = FoldPhase::Scan;
         }
         if matches!(work.phase, FoldPhase::Scan) {
-            if !scan_selection(transaction, &mut work, &mut budget, started)? {
+            if !scan_selection(transaction, &mut work, &mut budget, started, limit)? {
                 save_fold_work(transaction, &work)?;
                 break;
             }
@@ -1114,22 +1301,51 @@ fn has_selector_cleanup(connection: &Connection) -> Result<bool> {
 fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) -> String {
     let flag=if person { "recipient_current" } else { "global_current" };
     let alive=if current { "retired_index IS NULL" } else { "born_index<=?1 AND (retired_index IS NULL OR retired_index>?1)" };
-    let eligible=if history { String::new() } else { format!("AND {flag}=1") };
+    // This member's closed mark (message_marks.rs) moves no index, so the cut cannot leave it out and
+    // a header may not have folded it yet. The page reads it live, as the message's status does.
+    let marked=|subject: &str|format!("EXISTS(SELECT 1 FROM local_message_marks WHERE message={subject} AND kind='message.closed')");
+    let eligible=if history { String::new() } else { format!("AND {flag}=1 AND NOT {}",marked("local_client_message_selectors_v1.subject")) };
     let recipient_scope=if person { "AND recipient=?2 AND mailbox=1" } else { "" };
-    let branch=|index: &str,scope: &str,alive: &str| {
-        let range=|keyset: &str|format!("SELECT subject,born_index,sent_key,created_index,{flag} current FROM local_client_message_selectors_v1 INDEXED BY {index} WHERE born_index>=0 AND {alive} {recipient_scope} {scope} {eligible} {keyset} AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 quarantine WHERE quarantine.subject=local_client_message_selectors_v1.subject AND quarantine.born_index=-2 AND quarantine.created_index>?1) AND EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index WHERE claims.subject=local_client_message_selectors_v1.subject AND claims.store_index<=?1) ORDER BY sent_key DESC,subject LIMIT ?6");
+    // A stream item's header has no graph claim; ?7 bounds it to the stream items the page's
+    // first read could see, as ?1 bounds graph headers to their claims.
+    let base=messages_shard::STREAM_INDEX_BASE;
+    let picked=|source: &str,scope: &str,alive: &str,pick: &str,current: &str| {
+        let range=|keyset: &str|format!("SELECT subject,born_index,sent_key,created_index,{current} current,closed FROM {source} WHERE born_index>=0 AND {alive} {recipient_scope} {scope} {pick} {keyset} AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 quarantine WHERE quarantine.subject=local_client_message_selectors_v1.subject AND quarantine.born_index=-2 AND quarantine.created_index>?1) AND (CASE WHEN local_client_message_selectors_v1.created_index>={base} THEN local_client_message_selectors_v1.created_index<=?7 ELSE EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index WHERE claims.subject=local_client_message_selectors_v1.subject AND claims.store_index<=?1) END) ORDER BY sent_key DESC,subject LIMIT ?6");
         if after {
             let tied=range("AND sent_key=?4 AND subject>?5");
             let earlier=range("AND sent_key<?4");
             format!("SELECT * FROM (SELECT * FROM ({tied}) UNION ALL SELECT * FROM ({earlier})) ORDER BY sent_key DESC,subject LIMIT ?6")
         } else { range("") }
     };
+    let branch=|index: &str,scope: &str,alive: &str|picked(&format!("local_client_message_selectors_v1 INDEXED BY {index}"),scope,alive,&eligible,flag);
+    // A cut's reminder winner whose header a later version retired after the cut keeps its
+    // currency there. When this member's closed mark has since closed it, the group's next row at
+    // the cut stands in for it: the top one, by version, that is neither closed nor marked. The
+    // retirements since the cut are read once: the closed winners among them, and the candidates
+    // among them, which join the group's live ones born by the cut.
+    let (candidates_index,group,winner_scope,group_by)=if person {
+        ("client_selector_recipient_reminder_candidates","AND c.recipient=w.recipient AND c.reminder=w.reminder AND c.mailbox=1","AND w.recipient=?2 AND w.mailbox=1","w.recipient,w.reminder")
+    } else { ("client_selector_reminder_candidates","AND c.reminder=w.reminder","","w.reminder") };
+    let live_next=format!("(SELECT c.version||' '||c.subject FROM local_client_message_selectors_v1 c INDEXED BY {candidates_index} WHERE c.born_index>=0 AND c.retired_index IS NULL AND c.born_index<=?1 AND c.closed=0 {group} AND NOT {} ORDER BY c.version DESC,c.subject DESC LIMIT 1)",marked("c.subject"));
+    // version is 20 digits, so the version-and-subject keys order as (version, subject).
+    let stand_in=format!("(SELECT stand_in.* FROM (\
+WITH since AS MATERIALIZED (SELECT subject,recipient,mailbox,closed,reminder,version,{flag} flag FROM local_client_message_selectors_v1 INDEXED BY client_selector_retired_cut \
+WHERE retired_index>?1 AND born_index>=0 AND born_index<=?1 AND reminder IS NOT NULL),\
+closed_winners AS (SELECT * FROM since w WHERE w.flag=1 {winner_scope} AND {}) \
+SELECT substr(max(next),22) subject FROM (SELECT {group_by},{live_next} next FROM closed_winners w \
+UNION ALL SELECT {group_by},c.version||' '||c.subject FROM closed_winners w JOIN since c ON c.closed=0 {group} AND NOT {}) w GROUP BY {group_by}\
+) next CROSS JOIN local_client_message_selectors_v1 stand_in WHERE stand_in.subject=next.subject AND {} LIMIT -1) local_client_message_selectors_v1",
+        marked("w.subject"),marked("c.subject"),
+        "stand_in.born_index>=0 AND stand_in.born_index<=?1 AND (stand_in.retired_index IS NULL OR stand_in.retired_index>?1)");
     let eligible_branch = |all: &str,live: &str,retired: &str,scope: &str| {
         if history { return branch(all,scope,alive); }
         if current { return branch(live,scope,alive); }
         let live = branch(live,scope,"retired_index IS NULL AND born_index<=?1");
         let retired = branch(retired,scope,"retired_index IS NOT NULL AND born_index<=?1 AND retired_index>?1");
-        format!("SELECT * FROM (SELECT * FROM ({live}) UNION ALL SELECT * FROM ({retired})) ORDER BY sent_key DESC,subject LIMIT ?6")
+        // By their primary key, before any page term: the stand-ins are a handful of subjects, and
+        // LIMIT keeps SQLite from merging those terms in and seeking them on a page index.
+        let stand_in = picked(&stand_in,scope,alive,&format!("AND {flag}=0"),"1");
+        format!("SELECT * FROM (SELECT * FROM ({live}) UNION ALL SELECT * FROM ({retired}) UNION ALL SELECT * FROM ({stand_in})) ORDER BY sent_key DESC,subject LIMIT ?6")
     };
     let candidates=if actor && !person {
         let sender=eligible_branch("client_selector_sender","client_selector_sender_eligible","client_selector_sender_retired_eligible","AND sender=?3");
@@ -1144,11 +1360,12 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
             eligible_branch("client_selector_order","client_selector_global_eligible","client_selector_global_retired_eligible","")
         }
     };
-    format!("SELECT subject,created_index,current FROM ({candidates}) WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) ORDER BY sent_key DESC,subject")
+    let marked=marked("page.subject");
+    format!("SELECT subject,created_index,current AND NOT {marked},closed OR {marked} FROM ({candidates}) page WHERE (?1 IS NULL OR ?1 IS NOT NULL) AND (?2 IS NULL OR ?2 IS NOT NULL) AND (?3 IS NULL OR ?3 IS NOT NULL) AND (?4 IS NULL OR ?4 IS NOT NULL) AND (?5 IS NULL OR ?5 IS NOT NULL) AND (?7 IS NULL OR ?7 IS NOT NULL) ORDER BY sent_key DESC,subject")
 }
 
-fn selectors_not_ready() -> St3Error {
-    St3Error::new("message-selectors-not-ready", "message selector initialization is still in progress")
+fn selectors_not_ready() -> FractalError {
+    FractalError::new("message-selectors-not-ready", "message selector initialization is still in progress")
 }
 
 /// Owns checkpoint policy across initial backfill loans and interleaved writes.
@@ -1190,6 +1407,16 @@ impl Store {
         Ok(if has_pending(&connection)? { through.min(published.parse()?) } else { through })
     }
 
+    /// Pins how long each of this store's fold passes runs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_client_message_fold_budget(&self, budget: std::time::Duration) -> Result<()> {
+        self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h888b095a594c owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![TEST_FOLD_BUDGET_MARKER, budget.as_micros().to_string()],
+        )?;
+        Ok(())
+    }
+
     pub fn client_message_selectors_pending(&self) -> Result<bool> {
         let connection = self.readers.get();
         Ok(has_pending(&connection)? || backfill_incomplete(&connection)?)
@@ -1200,7 +1427,7 @@ impl Store {
         {
             let connection = self.readers.get();
             if projection_blocks_selectors(&connection, None)? { return Ok(false); }
-            if !has_pending(&connection)? && !backfill_incomplete(&connection)? && !fold_incomplete(&connection)? && !has_selector_cleanup(&connection)? { return Ok(false); }
+            if !has_pending(&connection)? && !backfill_incomplete(&connection)? && !fold_incomplete(&connection)? && !has_selector_cleanup(&connection)? && !stream_seed_incomplete(&connection)? { return Ok(false); }
         }
         let mut connection = self.connection.write_background();
         if backfill_incomplete(&connection)? {
@@ -1210,12 +1437,23 @@ impl Store {
         let transaction = connection.transaction()?;
         let ready: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [MARKER], |row| row.get(0))?;
         if !ready { return Ok(false); }
+        seed_stream_headers(&transaction)?;
         transaction.commit()?;
-        Ok(has_pending(&connection)? || fold_incomplete(&connection)? || has_selector_cleanup(&connection)?)
+        Ok(has_pending(&connection)? || fold_incomplete(&connection)? || has_selector_cleanup(&connection)? || stream_seed_incomplete(&connection)?)
     }
 
-    pub fn client_messages_page(&self,person: Option<&str>,actor: Option<&str>,history: bool,through: u64,after: Option<&(u128,String)>,limit: usize) -> Result<Vec<(MessageView,Value,bool)>> {
+    pub fn client_messages_page(&self,person: Option<&str>,actor: Option<&str>,history: bool,through: u64,after: Option<&(u128,String)>,limit: usize) -> Result<ClientMessageRows> {
+        Ok(self.client_messages_page_within(person,actor,history,(through,None),after,limit)?.0)
+    }
+
+    /// [`Self::client_messages_page`] with its stream frontier: `cut` is the page's graph cut and
+    /// stream frontier. The stream items it may list are those the mirror held at the frontier
+    /// (stream_mirror.rs), or at this read when `None`, as a page's graph items are those at the
+    /// graph cut. Answers the frontier it used, for the page's continuation to carry.
+    pub fn client_messages_page_within(&self,person: Option<&str>,actor: Option<&str>,history: bool,cut: (u64,Option<u64>),after: Option<&(u128,String)>,limit: usize) -> Result<(ClientMessageRows,u64)> {
+        let (through,stream_through)=cut;
         let connection=self.readers.get();
+        let stream_through=match stream_through { Some(stream_through)=>stream_through, None=>stream_mirror::sent_through(&connection)? };
         let last_change: Option<String>=connection.prepare_cached("SELECT value FROM meta WHERE key=?1")?.query_row(/* sqlite-large-value: allow-for-now lv-he75ba568317d owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [MARKER],|row|row.get(0)).optional()?;
         let last_change=last_change.ok_or_else(selectors_not_ready)?;
         let published = last_change.parse::<u64>()?;
@@ -1227,8 +1465,8 @@ impl Store {
         static SQL: std::sync::LazyLock<[String;32]>=std::sync::LazyLock::new(||std::array::from_fn(|flags|page_sql(flags&1!=0,flags&2!=0,flags&4!=0,flags&8!=0,flags&16!=0)));
         let flags=usize::from(person.is_some())|(usize::from(actor.is_some())<<1)|(usize::from(history)<<2)|(usize::from(current)<<3)|(usize::from(after.is_some())<<4);
         let key=after.map(|(at,_)|crate::client_values::client_timestamp(*at));
-        let rows=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5a47c2ff7e59 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL[flags])?.query_map(params![through,person,actor,key,after.map(|(_,subject)|subject),limit.saturating_add(1)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,bool>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        let subjects=rows.iter().map(|(subject,_,_)|subject).collect::<Vec<_>>();
+        let rows=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5a47c2ff7e59 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &SQL[flags])?.query_map(params![through,person,actor,key,after.map(|(_,subject)|subject),limit.saturating_add(1),messages_shard::STREAM_INDEX_BASE.saturating_add(stream_through)],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,bool>(2)?,row.get::<_,bool>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let subjects=rows.iter().filter(|(_,created,..)|*created<messages_shard::STREAM_INDEX_BASE).map(|(subject,..)|subject).collect::<Vec<_>>();
         static METADATA_SQL: std::sync::LazyLock<String>=std::sync::LazyLock::new(||canonical_sql(r#"
 WITH subjects AS (SELECT value subject FROM json_each(?1)),ends AS (
  SELECT subject,
@@ -1241,11 +1479,50 @@ SELECT ends.subject,first.accepted_at_unix_ms,last.accepted_at_unix_ms,last.id,
 FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.id=ends.last_id
 "#));
         let mut metadata=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd0a352d48f07 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &METADATA_SQL)?.query_map(params![serde_json::to_string(&subjects)?,through],|row|Ok((row.get::<_,String>(0)?,json!({"sent_at":row.get::<_,String>(1)?,"updated_at":row.get::<_,String>(2)?,"revision":row.get::<_,String>(3)?,"session_id":row.get::<_,Option<String>>(4)?}))))?.collect::<rusqlite::Result<BTreeMap<_,_>>>()?;
-        rows.into_iter().map(|(subject,created,current)| {
-            let message=message_view_at(&connection,&subject,created,Some(through))?;
-            let metadata=metadata.remove(&subject).ok_or_else(||anyhow::anyhow!("message cut metadata is unavailable"))?;
+        let rows=rows.into_iter().map(|(subject,created,current,closed)| {
+            let (message,mut metadata)=if created>=messages_shard::STREAM_INDEX_BASE {
+                self.stream_page_row(&connection,&subject)?
+            } else {
+                (message_view_at(&connection,&subject,created,Some(through))?,
+                 metadata.remove(&subject).ok_or_else(||anyhow::anyhow!("message cut metadata is unavailable"))?)
+            };
+            // The header's closed counts a seat's host's relayed close (relayed_closes.rs), which
+            // the message's own status does not.
+            metadata["closed"]=json!(closed);
             Ok((message,metadata,current))
-        }).collect()
+        }).collect::<Result<Vec<_>>>()?;
+        Ok((rows,stream_through))
+    }
+
+    /// A stream item's view and page metadata ([`Self::stream_message_metadata`]).
+    fn stream_page_row(&self,connection: &Connection,subject: &str) -> Result<(MessageView,Value)> {
+        let unavailable=||anyhow::anyhow!("message cut metadata is unavailable");
+        let metadata=self.stream_message_metadata_on(connection,subject)?.ok_or_else(unavailable)?;
+        let message=messages_shard::message_view(self,subject)?.ok_or_else(unavailable)?;
+        Ok((message,metadata))
+    }
+
+    /// A stream item's client metadata, as a graph message's comes from its claims: `sent_at`
+    /// (the mirror's, which its selector header's `sent_key` is made from, so a continuation's
+    /// key matches the header it follows), `updated_at` and `revision` (its last lifecycle step,
+    /// or its send), and `session_id`. The session and steps are read from the shard, outside
+    /// the graph's snapshot: both shard tables only grow, so they can run ahead of the header
+    /// but never behind it. `None` when the mirror does not hold it.
+    pub fn stream_message_metadata(&self,subject: &str) -> Result<Option<Value>> {
+        self.stream_message_metadata_on(&self.readers.get(),subject)
+    }
+
+    fn stream_message_metadata_on(&self,connection: &Connection,subject: &str) -> Result<Option<Value>> {
+        let Some(sent_ms)=connection.prepare_cached("SELECT sent_ms FROM local_stream_sent WHERE subject=?1")?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h332e688f0621 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [subject],|row|row.get::<_,i64>(0)).optional()? else { return Ok(None); };
+        let Some(sent)=messages_shard::mailbox_reads::sent_claim(self,subject)? else { return Ok(None); };
+        let session_id=sent.body.pointer("/fields/session_id").and_then(Value::as_str).map(str::to_owned);
+        let last=messages_shard::lifecycle_marks(self,subject)?.unwrap_or_default().into_iter().max_by_key(|(_,_,at)|*at);
+        let (updated_at,revision)=match last {
+            Some((kind,actor,at))=>(at.to_string(),messages_shard::lifecycle_receipt(&self.graph.origin,subject,&kind,Some(&actor),&Default::default()).id),
+            None=>(sent_ms.to_string(),sent.id),
+        };
+        Ok(Some(json!({"sent_at":sent_ms.to_string(),"updated_at":updated_at,"revision":revision,"session_id":session_id})))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1294,7 +1571,7 @@ FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.i
         let actor=actor.filter(|actor|Some(*actor)!=person.as_deref());
         let sql=format!("EXPLAIN QUERY PLAN {}",page_sql(person.is_some(),actor.is_some(),history,true,after));
         let connection=self.readers.get();
-        let rows=connection.prepare(/* sqlite-large-value: allow-for-now lv-h636b3b2da75c owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &sql)?.query_map(params![current_index(&connection)?,person,actor,after.then_some("2027-01-15T08:00:00.000Z"),after.then_some("message/selector-000001"),21],|row|row.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows=connection.prepare(/* sqlite-large-value: allow-for-now lv-h636b3b2da75c owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ &sql)?.query_map(params![current_index(&connection)?,person,actor,after.then_some("2027-01-15T08:00:00.000Z"),after.then_some("message/selector-000001"),21,messages_shard::STREAM_INDEX_BASE],|row|row.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
@@ -1537,6 +1814,9 @@ mod tests {
     #[test]
     fn single_send_selector_is_visible_immediately_after_commit() {
         let store = Store::open_memory("node").unwrap();
+        // Exercise commit publication, not whether a loaded host fits the 10 ms allowance.
+        // The largest representable test budget leaves the row/subject bounds intact.
+        store.set_client_message_fold_budget(std::time::Duration::from_micros(u64::MAX)).unwrap();
         send(&store, "message/immediate", "agent/sender", "1");
         assert!(!store.client_message_selectors_pending().unwrap());
         assert_eq!(assert_commit_budget(&store).subjects, 1);
@@ -1566,6 +1846,36 @@ mod tests {
         send(&store,"message/new","agent/rival","+18446744073709551615");send(&store,"message/z-overflow","agent/rival","18446744073709551616");
         store.read_snapshot(|through| {let current=store.client_messages_page(Some("person/recipient"),Some("agent/filtered"),false,through,None,1)?;assert!(current.is_empty());
             let history=store.client_messages_page(Some("person/recipient"),Some("agent/filtered"),true,through,None,1)?;assert_eq!(history.len(),1);assert!(!history[0].2);Ok(())}).unwrap();
+    }
+
+    #[test]
+    fn a_fold_pass_moves_forward_when_its_own_reads_outlast_the_budget() {
+        let store = Store::open_memory("node").unwrap();
+        // A zero budget is spent before a pass reaches its first row, as a loan's own reads can
+        // spend the real one on a loaded host.
+        store.set_client_message_fold_budget(std::time::Duration::ZERO).unwrap();
+        for index in 0..BACKFILL_SUBJECTS {
+            store.append_claim(&ClaimInput {
+                subject: format!("message/outlasted-{index:02}"), kind: "message.sent".into(),
+                actor: Some("agent/sender".into()), fields: BTreeMap::from([
+                    ("from".into(), json!("agent/sender")), ("to".into(), json!("person/recipient")),
+                    ("content".into(), json!(format!("body {index}"))),
+                    ("status".into(), json!("sent")), ("tags".into(), json!([])),
+                ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        assert!(store.client_message_selectors_pending().unwrap(), "every commit's fold stopped after its first row");
+        let mut loans = 0;
+        while store.maintain_client_message_selectors().unwrap() {
+            loans += 1;
+            assert!(loans < 1_000, "{loans} loans left the fold where it was");
+        }
+        assert!(!store.client_message_selectors_pending().unwrap());
+        let headers: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(headers, BACKFILL_SUBJECTS);
     }
 
     fn seed_backfill(store: &Store, count: usize) {
@@ -2003,7 +2313,7 @@ mod tests {
         ] {
             let sql = format!("EXPLAIN QUERY PLAN {}", page_sql(person.is_some(),actor.is_some(),false,false,true));
             let plan = connection.prepare(&sql).unwrap().query_map(
-                params![through,person,actor,crate::client_values::client_timestamp(1_800_000_000_000),"message/backfill-0000",6],
+                params![through,person,actor,crate::client_values::client_timestamp(1_800_000_000_000),"message/backfill-0000",6,messages_shard::STREAM_INDEX_BASE],
                 |row| row.get::<_,String>(3),
             ).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             for index in indexes {
@@ -2013,6 +2323,15 @@ mod tests {
             assert!(!plan.iter().any(|step|step.contains("client_selector_order") ||
                 (step.contains("client_selector_sender ") || step.contains("client_selector_recipient "))),
                 "closed/superseded versions cannot be the continuation's scan path: {plan:?}");
+            // A closed winner's stand-in: the retirements since the cut read once, the groups' live
+            // candidates from the reminder index, their retired ones by an index on that one read,
+            // and the stand-ins by their primary key.
+            let candidates = if person.is_some() { "client_selector_recipient_reminder_candidates" } else { "client_selector_reminder_candidates" };
+            for step in ["SEARCH local_client_message_selectors_v1 USING INDEX client_selector_retired_cut (retired_index>?)",
+                &format!("SEARCH c USING INDEX {candidates} ("),"SEARCH c USING AUTOMATIC",
+                "SEARCH stand_in USING PRIMARY KEY (subject=?"] {
+                assert!(plan.iter().any(|seen|seen.starts_with(step)), "a stand-in must {step}: {plan:?}");
+            }
         }
     }
 

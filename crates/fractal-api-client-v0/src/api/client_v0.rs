@@ -7,6 +7,7 @@ use crate::ConversationReadsStore;
 use crate::CustomStore;
 use crate::GlassesStore;
 use crate::ArrangementsStore;
+use crate::ReadPositionsStore;
 use crate::DeclarationsStore;
 use crate::LanesStore;
 use crate::MissionListStore;
@@ -36,15 +37,28 @@ pub use fractal_api_core::api::client_v0::{ClientSession, CollectionSubscribe, E
 pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, capabilities, conversation_session_id, cut_oversized_timeline_entry, events, fabric_boundary_forbidden, message_provenance, mission_list_cards_with, native_page_cursor_snapshot, now, person_filter};
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
+pub mod attention_budget;
 pub mod assistant;
+pub mod browser_pairing;
+#[cfg(test)]
+mod browser_pairing_tests;
+pub mod device_renewal;
+pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
+mod github_plugin_reads;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
+pub mod mission_declaration;
+pub mod source_maps;
 pub mod raw_terminal;
 pub mod private_notes;
+pub mod quota;
+mod usage_hub;
+pub mod read_positions;
+pub mod attention_controls;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -65,6 +79,10 @@ mod collection_refresh_tests;
 mod conversation_follow_tests;
 #[cfg(test)]
 mod launch_detail_tests;
+#[cfg(test)]
+mod mission_history_tests;
+#[cfg(test)]
+mod run_reach_tests;
 #[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
@@ -97,6 +115,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/arrangements/{person_name}/{uuid}/memberships",
             get(arrangements::memberships),
         )
+        .route("/v1/client/read-positions", get(read_positions::list))
         .route("/v1/client/glasses", get(glasses_list))
         .route(
             "/v1/client/glasses/{id}",
@@ -109,6 +128,16 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(request_latency),
         )
         .route("/v1/client/usage", get(usage_period))
+        .route("/v1/client/attention-budget", get(attention_budget::get))
+        .route("/v1/client/quota", get(quota::read))
+        .route("/v1/client/usage/quota", get(usage_hub::read))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}", get(github_plugin_reads::pull))
+        .route("/v1/client/plugins/github/{owner}/{repo}/issues/{number}", get(github_plugin_reads::issue))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation", get(github_plugin_reads::conversation))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks", get(github_plugin_reads::checks))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files", get(github_plugin_reads::files))
+        .route("/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}", get(github_plugin_reads::comment))
+        .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -117,6 +146,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(subject_definition),
         )
         .route("/v1/client/publication-definition", get(publication_definition))
+        .route("/v1/client/mission-declaration", get(mission_declaration::get))
+        .route("/v1/client/source-maps", get(source_maps::get))
+        .route("/v1/client/source-blobs/{hash}", get(source_maps::blob))
         .route("/v1/client/now", get(now))
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
@@ -132,6 +164,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(agent_declaration),
         )
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
+        .route("/v1/client/agent-related-runs/{*id}", get(related_runs::get))
         .route("/v1/client/status-history/{*id}", get(status_history))
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
         .route("/v1/client/harness-questions", get(harness_questions::list))
@@ -189,6 +222,12 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
+        .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
+        .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
+        .route("/v1/client/pairings/renewals/stage", post(device_renewal::stage))
+        .route("/v1/client/pairings/renewals/pending", post(device_renewal::pending))
+        .route("/v1/client/pairings/renewals/complete", post(device_renewal::complete))
         .route("/v1/client/assistant/grants/{id}", get(assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(assistant::pin_read_trust))
@@ -197,6 +236,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(assistant::pin_read_trust))
         .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(assistant::update_policy))
         .route("/v1/client/assistant/summary", get(assistant::read_projection))
+        .route("/v1/client/assistant/availability", get(assistant::read_projection))
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
@@ -206,6 +246,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo-history", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
         .route(
             "/v1/client/pairings/{id}/complete",
@@ -332,11 +374,11 @@ fn record_subscription_page(value: &Value, bytes: usize) {
     span.record("span.label", format!("{collection} {rows}"));
 }
 
-const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
-const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
+const CONVERSATION_SUBPROTOCOL: &str = "fractal.client.conversation.v0";
 
-const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
+const COLLECTION_SUBPROTOCOL: &str = "fractal.client.collections.v0";
 
 pub async fn request_latency(
     Extension(session): Extension<ClientSession>,
@@ -435,7 +477,7 @@ pub async fn collection_stream(
     let selected = super::wire_names::selected_protocol(&protocols, COLLECTION_SUBPROTOCOL)
         .ok_or_else(|| validation("the collection WebSocket requires exactly one supported collections protocol"))?
         .to_owned();
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Collections);
     Ok(websocket
         .protocols([selected])
         .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
@@ -528,8 +570,8 @@ async fn collection_items_with_windows(
 ) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     if !matches!(
         request.collection.as_str(),
-        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
-            | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
+        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships"
+            | "read-positions" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
     }
@@ -558,13 +600,13 @@ async fn collection_items_with_windows(
     if request.collection == "glasses" && (request.person.is_some() || request.actor.is_some()) {
         return Err(validation("glasses select the session person"));
     }
-    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") && request.actor.is_some() {
-        return Err(validation("arrangements select an explicit person, not an actor"));
+    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions") && request.actor.is_some() {
+        return Err(validation("arrangements and read positions select an explicit person, not an actor"));
     }
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
-    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
+    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions")
         || (windows.is_some() && session.transport != "unix")
     {
         Some(if state.store.readers.has_request_reader() {
@@ -604,6 +646,8 @@ async fn collection_items_with_windows(
             }
         }
         Some(person)
+    } else if request.collection == "read-positions" {
+        Some(read_positions::person(current, request.person.as_deref(), false)?)
     } else if matches!(request.collection.as_str(), "attention" | "summary" | "devices") {
         person_filter(session, request.person.as_deref())?
     } else {
@@ -621,7 +665,7 @@ async fn collection_items_with_windows(
     let subject = request.subject.clone();
     let status = request.status.clone();
     let collection = request.collection.clone();
-    let custom_forms = session.custom_forms;
+    let attention_compatibility = session.attention_compatibility();
     let arrangement_window = matches!(collection.as_str(), "arrangements" | "ordered-memberships");
     let mut admitted = collection != "agents";
     // Attribute the first frame, and any later cold root; never create a per-frame span.
@@ -680,6 +724,7 @@ async fn collection_items_with_windows(
                             request.person.as_deref(),
                             false,
                         )?),
+                        "read-positions" => Some(read_positions::person(&current, request.person.as_deref(), false)?),
                         "attention" | "summary" | "devices" => person_filter(&current, request.person.as_deref())?,
                         _ => person.clone(),
                     };
@@ -858,6 +903,10 @@ async fn collection_items_with_windows(
                 let owner_revision = if collection == "arrangements" && subject.is_none() {
                     Some(CollectionRevision::Owner(store.arrangement_inventory_revision(
                         person.as_deref().expect("explicit arrangement owner"))?))
+                } else if collection == "read-positions" {
+                    // Any change to the person's positions, inside the window's rows or not.
+                    Some(CollectionRevision::Owner(store.read_position_revision(
+                        person.as_deref().expect("explicit read-position owner"))?))
                 } else {
                     None
                 };
@@ -913,6 +962,10 @@ async fn collection_items_with_windows(
                             None,
                             limit.saturating_add(1),
                         )?,
+                        "read-positions" => store.read_positions(
+                            person.as_deref().expect("explicit read-position owner"),
+                            index,
+                        )?,
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
                             None => {
@@ -960,7 +1013,7 @@ async fn collection_items_with_windows(
                         )?,
                         _ => unreachable!(),
                     };
-                    client_attention_compatibility(&mut items, custom_forms);
+                    client_attention_compatibility(&mut items, attention_compatibility);
                     // Agent status/availability depends on live local delivery presence; overlay and
                     // filter it on every read, after reusing the immutable graph-derived rows.
                     if collection == "agents" {
@@ -1087,6 +1140,7 @@ fn collection_window_label(collection: &str) -> &'static str {
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
         "ordered-memberships" => "stream collection/ordered-memberships",
+        "read-positions" => "stream collection/read-positions",
         "summary" => "stream collection/summary",
         "clients" => "stream collection/clients",
         "usage" => "stream collection/usage",
@@ -2457,10 +2511,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
                     let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
+                    let read_positions_changed = subscriptions.values().any(|s| s.request.collection == "read-positions") && state.store.read_positions_changed(weighed, index).unwrap_or(true);
                     affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
                         || (memberships_changed && s.request.collection == "ordered-memberships")
+                        || (read_positions_changed && s.request.collection == "read-positions")
                         || match &claims {
                             Err(_) => true,
                             Ok(claims) => claims.len() >= 10_000
@@ -2709,7 +2765,7 @@ pub async fn agent_workspace(
                 return Ok(None);
             };
             if !status.conflicts.is_empty() {
-                return Err(anyhow::anyhow!(St3Error::new(
+                return Err(anyhow::anyhow!(FractalError::new(
                     "validation-failed",
                     "agent has conflicting declarations",
                 )));
@@ -2738,7 +2794,7 @@ pub async fn agent_workspace(
                     return Ok(Some((client_snapshot_at(&state, index), value)));
                 }
                 if desired.kind != "stop" || claim.predecessors.len() != 1 {
-                    return Err(anyhow::anyhow!(St3Error::new(
+                    return Err(anyhow::anyhow!(FractalError::new(
                         "validation-failed",
                         "agent has no unambiguous prior declaration",
                     )));
@@ -2788,7 +2844,8 @@ pub async fn agent_declaration(
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).map_err(ApiError::bad)?;
     let accountable = fractal_schema::accountable::from_desired(&tree)
-        .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
+        .map_err(|e| ApiError::bad(FractalError::new(e.code, e.message)))?.map(str::to_owned);
+    let declared_admission = fractal_api_core::api::client_declared_admission(&tree);
     let mut value = json!({
         "id": subject,
         "revision": revision,
@@ -2797,6 +2854,9 @@ pub async fn agent_declaration(
         "revisions": revisions,
     });
     if let Some(person) = accountable { value["accountable"] = json!(person); }
+    if let Some(admission) = declared_admission {
+        value["declared_admission"] = serde_json::to_value(admission).map_err(ApiError::internal)?;
+    }
     Ok(Json(value))
 }
 
@@ -2821,7 +2881,7 @@ pub async fn usage_period(
         .since_ms
         .unwrap_or(until_ms.saturating_sub(86_400_000));
     if since_ms > until_ms {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
@@ -2871,7 +2931,7 @@ pub async fn subject_definition(
         require_scope(&session, "read.declarations")?;
     }
     if !query.subject.starts_with("agent/") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a definition subject must start with `agent/`; missions are published revisions \
              without a canonical declaration",
@@ -2918,7 +2978,7 @@ pub async fn subject_definition(
     if serde_json::to_vec(&value).map_err(ApiError::internal)?.len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the applied definition exceeds the client response limit",
         )));
@@ -2944,7 +3004,7 @@ pub async fn publication_definition(
         .iter()
         .any(|prefix| query.subject.starts_with(prefix))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a publication definition subject must start with agent/, mission/, or schedule/",
         )));
@@ -2969,7 +3029,7 @@ pub async fn publication_definition(
         .len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the published definition exceeds the client response limit",
         )));
@@ -2980,6 +3040,9 @@ pub async fn publication_definition(
 const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -2998,6 +3061,7 @@ fn session_claim_actor(session: &ClientSession) -> String {
         "requester".into()
     }
 }
+
 
 fn mission_visualization(
     store: &Store,
@@ -3034,7 +3098,7 @@ fn mission_visualization(
         decisions.extend(super::client_launch_decision_resources(store, &session)?);
     }
     Ok(Some(json!({
-        "version":"st3.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
+        "version":"fractal.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
         "mission":mission_id, "nodes":nodes, "edges":edges, "groups":[],
         "timeline":{"entries":timeline}, "swimlanes":[], "goals":mission.goals,
         "constraints":mission.constraints, "gates":mission.gates, "resources":mission.products,
@@ -3049,8 +3113,20 @@ pub fn mission_resources(
     history: bool,
     selected_id: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
+    mission_resources_for_run(store, snapshot_index, history, selected_id, None)
+}
+
+/// [`mission_resources`], with `requested_run`'s timing, history and enrichment lifted on a detail
+/// read beside the open runs and the latest finished run.
+pub fn mission_resources_for_run(
+    store: &Store,
+    snapshot_index: u64,
+    history: bool,
+    selected_id: Option<&str>,
+    requested_run: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
     store.read_snapshot(|_| {
-        mission_resources_filtered(store, snapshot_index, history, selected_id, None)
+        mission_resources_filtered(store, snapshot_index, history, selected_id, None, requested_run)
     })
 }
 
@@ -3093,7 +3169,10 @@ fn mission_resources_filtered(
     history: bool,
     selected_id: Option<&str>,
     page_ids: Option<&[String]>,
+    requested_run: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
+    let requested_run = requested_run.filter(|_| selected_id.is_some());
+    let at_unix_ms = client_now_ms();
     let human_attention_runs = store.human_attention_runs()?;
     let mut missions = BTreeMap::<String, Vec<MissionRunView>>::new();
     // A detail or a page reads only its own missions' runs, definitions, seats and states.
@@ -3233,13 +3312,27 @@ fn mission_resources_filtered(
             let latest_finished = runs.iter().rev().find(|run| {
                 matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
             });
+            let timing_runs = runs.iter().filter(|run|
+                !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
+                    || latest_finished.is_some_and(|latest| latest.subject == run.subject)
+                    || requested_run == Some(run.subject.as_str()))
+                .map(|run| run.subject.clone()).collect::<Vec<_>>();
+            let timing = store.mission_step_timestamps_for_runs(&timing_runs, None)?;
+            // A detail also folds each enriched step's attempts, waits and transitions.
+            let histories = if selected_id.is_some() {
+                store.mission_step_histories_for_runs(&timing_runs, at_unix_ms)?
+            } else {
+                BTreeMap::new()
+            };
             let run_details = runs
                 .iter()
                 .map(|header| {
-                    // Enrich open runs and only the newest finished run, on the header snapshot.
+                    // Enrich open runs, the newest finished run and a requested run, on the
+                    // header snapshot.
                     let run = if selected_id.is_some()
                         && (!matches!(header.status.as_str(), "completed" | "failed" | "cancelled")
-                            || latest_finished.is_some_and(|run| run.subject == header.subject))
+                            || latest_finished.is_some_and(|run| run.subject == header.subject)
+                            || requested_run == Some(header.subject.as_str()))
                     {
                         store.mission_run(&header.id)?.ok_or_else(|| {
                             anyhow::anyhow!("mission run {} disappeared during detail read", header.id)
@@ -3247,7 +3340,9 @@ fn mission_resources_filtered(
                     } else if selected_id.is_some() {
                         store.with_step_states(header.clone(), true)?
                     } else {
-                        header.clone()
+                        let mut run = header.clone();
+                        store.enrich_mission_run_lineage(&mut run)?;
+                        run
                     };
                     let done = run
                         .steps
@@ -3267,8 +3362,8 @@ fn mission_resources_filtered(
                             json!({
                                 "id": step.subject,
                                 "title": step.title,
-                                "assignee": step.assigned_to,
-                                "claimant": step.claimant,
+                                "assignee": step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                                "claimant": step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                                 "state": client_work_state(&step.status),
                                 "since": client_timestamp(step.updated_at_unix_ms),
                                 "progress_at": step.progress_at_unix_ms.map(client_timestamp),
@@ -3323,7 +3418,9 @@ fn mission_resources_filtered(
                         });
                     let blocker = run.scheduler_fault.as_ref().map(|reason| json!({
                         "step": run.steps.first().map(|step| &step.subject), "reason": reason, "scope": crate::reconcile::FIRST_READINESS_FAULT_SCOPE,
-                    })).or_else(||
+                    })).or_else(|| run.programs.iter().find_map(|program| program.fault.as_ref().map(|fault| json!({
+                        "step": program.step_run, "reason": fault.reason, "scope": fault.scope,
+                    })))).or_else(||
                         run.steps.iter().find(|step| step.status == "blocked").map(
                             |step| json!({"step": step.subject, "reason": step.blocked_reason}),
                         ));
@@ -3332,6 +3429,19 @@ fn mission_resources_filtered(
                     let shows_steps = selected_id.is_some()
                         || !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                         || latest.is_some_and(|latest| latest.subject == run.subject);
+                    let open_run = !matches!(run.status.as_str(), "completed" | "failed" | "cancelled");
+                    let step_etas = if selected_id.is_some() && open_run {
+                        store.mission_run_step_etas(&run.subject)?
+                    } else {
+                        BTreeMap::new()
+                    };
+                    let executions = if selected_id.is_some() {
+                        run.steps.iter().map(|step| {
+                            Ok((step.subject.as_str(), store.step_executions(&step.subject)?))
+                        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?
+                    } else {
+                        BTreeMap::new()
+                    };
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()
@@ -3339,12 +3449,13 @@ fn mission_resources_filtered(
                                 let loop_run = run.loops.iter().find(|loop_run| {
                                     loop_run.step_run == step.subject
                                 });
+                                let program = run.programs.iter().find(|program| program.step_run == step.subject);
                                 let wake = step.wake.as_ref().filter(|_| {
                                     !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                                         && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped")
                                 }).map(|wake| {
                                     json!({
-                                        "assignee": wake.assignee,
+                                        "assignee": fractal_schema::canonical_agent_actor(&wake.assignee),
                                         "assignee_state": wake.assignee_state,
                                         "incarnation_id": wake.incarnation_id,
                                         "attempts": wake.attempts,
@@ -3353,17 +3464,19 @@ fn mission_resources_filtered(
                                         "failure": wake.failure,
                                     })
                                 });
-                                json!({
+                                let mut value = json!({
                                     "id": step.subject,
                                     "path": step.step,
                                     "title": step.title,
                                     "state": client_work_state(&step.status),
                                     "attempt": step.attempt,
-                                    "assignee": step.assigned_to,
-                                    "claimant": step.claimant,
+                                    "assignee": step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                                    "claimant": step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                                     "agentless": step.agentless,
                                     "keep_open": crate::mission::step_keeps_open(definition.map(|(definition, _)| definition), &step.step),
                                     "since": client_timestamp(step.updated_at_unix_ms),
+                                    "started_at": timing.get(step.subject.as_str()).and_then(|times| times.0),
+                                    "completed_at": timing.get(step.subject.as_str()).and_then(|times| times.1),
                                     "last_progress": step.progress_summary,
                                     "progress_at": step.progress_at_unix_ms.map(client_timestamp),
                                     "blocked_reason": step.blocked_reason.as_deref().or_else(|| run.scheduler_fault.as_deref().filter(|_| step.status == "pending")),
@@ -3379,27 +3492,85 @@ fn mission_resources_filtered(
                                     "wake": wake,
                                     "claim_expires_at": step.claim_expires_at_unix_ms.map(client_timestamp),
                                     "nudged_at": step.nudged_at_unix_ms.map(client_timestamp),
-                                })
+                                });
+                                if let Some(history) = histories.get(step.subject.as_str()) {
+                                    value["attempts"] = json!(history.attempts);
+                                    value["waits"] = json!(history.waits);
+                                    value["transitions"] = json!(history.transitions);
+                                    value["history_complete"] = json!(history.complete);
+                                }
+                                if let Some(executions) = executions.get(step.subject.as_str()) {
+                                    value["executions"] = json!(executions);
+                                }
+                                // Detail reads that enrich the run (`Store::mission_run`) carry
+                                // its program steps' journals.
+                                if let Some(program) = program {
+                                    let journal = &program.journal;
+                                    value["program"] = json!({
+                                        "open_key": journal.open.first(),
+                                        "entries": journal.entries.iter().map(|entry| json!({
+                                            "key": entry.key,
+                                            "status": entry.status,
+                                            "started_at": entry.started_at_unix_ms.map(client_timestamp),
+                                            "ended_at": entry.ended_at_unix_ms.map(client_timestamp),
+                                            "ms": entry.ms,
+                                            "error": entry.error,
+                                            "child": entry.child,
+                                        })).collect::<Vec<_>>(),
+                                        "truncated": journal.truncated,
+                                        "last_entry_at": journal.last_entry_at_unix_ms.map(client_timestamp),
+                                        "stalled_after_ms": program.stalled_after_ms,
+                                        "fault": program.fault.as_ref().map(|fault| json!({"scope": fault.scope, "reason": fault.reason})),
+                                    });
+                                }
+                                if let Some((low, high, samples)) = step_etas.get(&step.step)
+                                    .filter(|_| !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
+                                {
+                                    value["eta"] = json!({"low_ms": low, "high_ms": high, "samples": samples});
+                                }
+                                value
                             })
                             .collect::<Vec<_>>()
                     });
-                    Ok::<Value, anyhow::Error>(json!({
+                    let mut value = json!({
                         "id": run.subject,
                         "generation_id": run.generation,
+                        "revision": run.revision,
                         "requester": run.requester,
+                        "retried_by": run.retried_by,
                         "status": run.status,
                         "phase": run.phase,
                         "progress": {"done": done, "total": run.steps.len()},
                         "current_steps": current_steps,
                         "must_act": must_act,
                         "state_since": client_timestamp(state_since),
+                        "started_at": run.created_at_unix_ms,
+                        "completed_at": run_state.and_then(|state| state.completed_at_unix_ms),
+                        "eta": if matches!(run.status.as_str(), "completed" | "failed" | "cancelled") {
+                            None
+                        } else {
+                            store.mission_run_eta(&run.subject, at_unix_ms)?
+                        },
                         "outcome": outcome,
                         "last_progress": last_progress,
                         "blocker": blocker,
                         "after": run.after,
                         "deadline": run.deadline_at_unix_ms.map(client_timestamp),
                         "steps": steps,
-                    }))
+                    });
+                    if let Some(source) = &run.retry_of {
+                        value["retry_of"] = json!(source);
+                    }
+                    for (field, value_field) in [
+                        ("supersedes", &run.supersedes),
+                        ("superseded_by", &run.superseded_by),
+                        ("supersession_fault", &run.supersession_fault),
+                    ] {
+                        if let Some(text) = value_field {
+                            value[field] = json!(text);
+                        }
+                    }
+                    Ok::<Value, anyhow::Error>(value)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let state = if run_details.iter().any(|run| run["blocker"]["scope"] == crate::reconcile::FIRST_READINESS_FAULT_SCOPE) { "blocked" } else { state };
@@ -3426,7 +3597,7 @@ fn mission_resources_filtered(
             } else {
                 None
             };
-            Ok::<Option<Value>, anyhow::Error>(Some(json!({
+            let mut value = json!({
                 "id": mission,
                 "kind": "mission",
                 "revision": revision,
@@ -3451,7 +3622,17 @@ fn mission_resources_filtered(
                     "actionable": !historical,
                     "reasons": if historical { vec![state] } else { Vec::<&str>::new() }
                 }
-            })))
+            });
+            if let Some(admission) = definition.and_then(|(definition, _)| {
+                crate::model::DeclaredAdmission::from_declaration(
+                    definition.declared_priority.as_ref(),
+                    definition.declared_lane.as_ref(),
+                    definition.declared_budgets.as_ref(),
+                )
+            }) {
+                value["declared_admission"] = serde_json::to_value(admission)?;
+            }
+            Ok::<Option<Value>, anyhow::Error>(Some(value))
         })
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()
@@ -3478,7 +3659,7 @@ fn runtime_resources_for_id(
         include_owner.then_some(id),
         snapshot.store_index,
     )?;
-    let status = state.store.status_for_subject_names_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
+    let status = state.store.status_for_subject_names_for_generic_reads_at(subjects, snapshot.store_index, true, crate::store::ClaimsReduction::Runtime)?;
     Ok(runtime_resources_from_status(state, snapshot, session, status)?
         .into_iter()
         .filter(|runtime| runtime["id"] == id || (include_owner && runtime["owner_id"] == id))
@@ -3608,7 +3789,7 @@ fn observer_subscription_detail_at(
         || (!id.starts_with(&format!("{kind}/"))
             && id.len() + kind.len() + 1 > MAX_DETAIL_KEY_BYTES)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "projection-detail-too-large",
             "observer/subscription detail ID exceeds the 4096 byte key budget",
         )
@@ -3651,7 +3832,7 @@ fn observer_subscription_detail_at(
         // Source bytes bound JSON decoding and rendering; escaping can enlarge the output.
         // Refuse the complete item rather than truncate any field or fall back to a list.
         if serde_json::to_vec(&value)?.len() + serde_json::to_vec(snapshot)?.len() > 512 * 1024 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "projection-detail-too-large",
                 "observer/subscription detail output exceeds the 512 KiB response budget",
             )
@@ -3672,7 +3853,7 @@ async fn observer_subscription_detail(
         state.store.clone().read_snapshot(|index| {
             use crate::store::observer_subscription_detail::{DetailBudget, MAX_DETAIL_KEY_BYTES};
             if state.node.len() > MAX_DETAIL_KEY_BYTES {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "projection-detail-too-large",
                     "observer/subscription detail host metadata exceeds the 4096 byte budget",
                 )
@@ -3690,7 +3871,7 @@ async fn observer_subscription_detail(
                 observer_subscription_detail_at(&state, kind, &id, &snapshot, &mut budget)
             })?;
             let value = value.ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "not-found",
                     format!("{kind} `{}` does not exist", client_detail_id(kind, &id)),
                 )
@@ -3847,7 +4028,7 @@ fn operation_checks(
             {
                 report.refreshing = true;
                 let state = state.clone();
-                std::thread::spawn(move || refresh_operation_report(&state, key, None));
+                std::thread::spawn(move || refresh_operation_report(&state, key));
             }
             return Ok(report.checks.clone());
         }
@@ -4052,6 +4233,7 @@ pub async fn missions(
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: after_key.clone(),
                 expires_at_unix_ms,
             })
@@ -4249,18 +4431,30 @@ fn missions_tree_value_within(
         "truncated": truncated }))
 }
 
+/// `GET /v1/client/missions/{id}?run=`: the run whose timing and step history the detail lifts
+/// beside its open runs and its latest finished run. Other query keys are ignored, as before.
+#[derive(Debug, Default, Deserialize)]
+pub struct MissionDetailQuery {
+    run: Option<String>,
+}
+
 pub async fn mission_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<MissionDetailQuery>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let store = state.store.clone();
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
+    let requested_run = query.run.filter(|run| !run.is_empty()).map(|run| {
+        if run.starts_with("mission-run/") { run } else { format!("mission-run/{run}") }
+    });
+    let requested = requested_run.clone();
     let mut items = super::blocking_store(move || {
-        let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
+        let mut items = mission_resources_for_run(&store, snapshot_index, true, Some(&selected), requested.as_deref())?;
         // The presentation the missions list publishes for this mission; a read computes none.
         if let Some(published) = store.published_missions_list().newest()
             && let Some(card) = published.rows.cards.get(&selected)
@@ -4274,6 +4468,13 @@ pub async fn mission_detail(
     })
     .await?;
     // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    if let Some(run) = &requested_run
+        && items.first().is_some_and(|item| {
+            !item["runs"].as_array().is_some_and(|runs| runs.iter().any(|known| known == run))
+        })
+    {
+        return Err(ApiError::not_found("the requested run does not belong to this mission"));
+    }
     fractal_api_core::api::message_reads::relay_client_wakes(&state, &mut items)
         .await
         .map_err(ApiError::internal)?;
@@ -4711,6 +4912,7 @@ fn native_replay_extent(
     let (tail, suppressed) = canonical_native_slice(
         state, snapshot, source, session, session_id, &messages,
         crate::external_sessions::TimelineOrder::Sequence, None, limit, managed, false,
+        &mut conversation_blocks::NativeReadAdmission::default(),
     )?;
     if source.driver != crate::external_sessions::ExternalDriver::OpenCode
         && tail.generation != generation
@@ -4768,6 +4970,7 @@ fn conversation_first_page_at_generation(
                     let (head, suppressed) = canonical_native_slice(
                         state, snapshot, source, session, session_id, &messages,
                         crate::external_sessions::TimelineOrder::Sequence, None, 1, managed, false,
+                        &mut conversation_blocks::NativeReadAdmission::default(),
                     )?;
                     Some(head.items.iter().filter_map(native_entry_sequence).max().unwrap_or(0)
                         .max(suppressed))
@@ -5424,7 +5627,7 @@ pub async fn conversation_stream(
     } else {
         conversation_read_now(&state, &session, &session_id, query.after.as_deref())?;
     }
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Conversation);
     presence.follow("conversation", format!("conversation:{id}"));
     Ok(websocket
         .protocols([selected])
@@ -5569,19 +5772,29 @@ pub async fn pairing_begin(
             "the pairing request requires a valid version, device name, and concrete initiating person",
         ));
     }
-    let mut random = [0_u8; 10];
+    let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let code = random[..8]
         .iter()
         .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char)
         .collect::<String>();
-    let stable = hex::encode(Sha256::digest(
-        format!("{}:{code}", request.device_name).as_bytes(),
-    ));
-    let pairing_id = format!("pairing/{}", &stable[..24]);
-    let subject = format!("custom/client/pairing-{}", &stable[..24]);
-    let expires_at = client_now_ms() + 300_000;
+    begin_person_challenge(state, session, request, code)
+}
+
+// Keep entropy generation separate from claim construction so the same-code case
+// can prove identities and all other stored fields are independent of the code.
+fn begin_person_challenge(
+    state: AppState,
+    session: ClientSession,
+    request: PairingBegin,
+    code: String,
+) -> Result<Json<Value>, ApiError> {
+    let stable = pairing_verifier::random_id().map_err(ApiError::internal)?;
+    let pairing_id = format!("pairing/{stable}");
+    let subject = format!("custom/client/pairing-{stable}");
+    let expires_at = client_now_ms() + pairing_verifier::CHALLENGE_TTL_MS;
+    let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let person_id = request.person_id;
     let fabric_gateway = request.fabric_gateway == Some(true);
     let scopes: Vec<&str> = match (request.full_control.unwrap_or(false), request.scopes) {
@@ -5618,15 +5831,19 @@ pub async fn pairing_begin(
         ("device_name".into(), Value::String(request.device_name)),
         ("person_id".into(), Value::String(person_id.clone())),
         ("scopes".into(), json!(scopes)),
-        ("code_hash".into(), Value::String(credential_digest(&code))),
+        ("verifier".into(), Value::String(pairing_verifier::MARKER.into())),
+        ("verifier_key_id".into(), Value::String(pairing_verifier::key_id(&verifier_key))),
         ("expires_at_unix_ms".into(), json!(expires_at)),
     ]);
+    let stored_pairing_id = begun_fields["pairing_id"].as_str().expect("pairing ID is a string");
+    let code_hash = pairing_verifier::digest(&verifier_key, stored_pairing_id, &code);
+    begun_fields.insert("code_hash".into(), Value::String(code_hash));
     if fabric_gateway {
         begun_fields.insert("fabric_gateway".into(), Value::Bool(true));
     }
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject,
             kind: "custom.client.pairing-begun".into(),
             actor: Some(person_id.clone()),
@@ -5759,31 +5976,19 @@ fn fabric_node_still_paired(
     device: &str,
     node: &str,
 ) -> Result<bool, ApiError> {
-    let revoked = state
-        .store
-        .claims_for_kind_at("custom.client.pairing-revoked", None, true, 10_000)
-        .map_err(ApiError::internal)?
-        .claims
-        .into_iter()
-        .filter_map(|claim| {
-            claim
-                .body
-                .pointer("/fields/device_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect::<BTreeSet<_>>();
     let now = client_now_ms();
-    Ok(completed.iter().any(|claim| {
+    for claim in completed {
         let field = |name: &str| claim.body.pointer(&format!("/fields/{name}"));
-        let other = field("device_id").and_then(Value::as_str);
-        claim.origin == state.node
+        if claim.origin == state.node
             && field("fabric_node_id").and_then(Value::as_str) == Some(node)
-            && other.is_some_and(|other| other != device && !revoked.contains(other))
-            && field("expires_at_unix_ms")
-                .and_then(Value::as_u64)
-                .is_some_and(|expires| u128::from(expires) > now)
-    }))
+            && field("device_id").and_then(Value::as_str).is_some_and(|other| other != device)
+            && state.store.pairing_completion_is_trusted(claim, now).map_err(ApiError::internal)?
+            && !state.store.pairing_completion_is_revoked(claim).map_err(ApiError::internal)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // Proof preparation must not let simultaneous completions enroll a second key after another
@@ -5828,24 +6033,69 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.body["fields"]["browser_request"] == true
+        && (browser_pairing::approval(&state, &begun)? != "approved"
+            || request.device_public_key != format!("browser:{id}")
+            || request.fabric_node_id.is_some())
+    {
+        return Err(forbidden("browser pairing requires its owner's approved request"));
+    }
+    if begun.origin != state.store.origin() {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "pairing-origin-required".into(),
+            message: "complete pairing on the member that began it".into(),
+            details: Box::default(),
+        });
+    }
+    if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
+        return Err(forbidden("the pairing challenge requires a new pairing"));
+    }
     let used = !state
         .store
         .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
         .map_err(ApiError::internal)?
         .claims
         .is_empty();
-    let valid_code = begun
-        .body
-        .pointer("/fields/code_hash")
-        .and_then(Value::as_str)
-        == Some(credential_digest(&request.code).as_str());
+    let restart = pairing_verifier::restart;
     let expires = begun
         .body
         .pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
         .unwrap_or_default();
-    if used || !valid_code || expires <= client_now_ms() {
+    let now = client_now_ms();
+    let expected = begun.body.pointer("/fields/code_hash").and_then(Value::as_str).unwrap_or_default();
+    let valid_code = match begun.body.pointer("/fields/verifier") {
+        Some(Value::String(marker)) if marker == browser_pairing::VERIFIER => {
+            if begun.body["fields"]["browser_request"] != true {
+                return Err(restart());
+            }
+            browser_pairing::verify_request_key(&request.code, expected)
+        }
+        Some(Value::String(marker)) if marker == pairing_verifier::MARKER => {
+            let key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
+            if begun.body.pointer("/fields/verifier_key_id").and_then(Value::as_str)
+                != Some(pairing_verifier::key_id(&key).as_str())
+            {
+                return Err(restart());
+            }
+            let stored_pairing_id = begun.body.pointer("/fields/pairing_id")
+                .and_then(Value::as_str).ok_or_else(restart)?;
+            pairing_verifier::verify(&key, stored_pairing_id, &request.code, expected)
+        }
+        Some(_) => return Err(restart()),
+        None => {
+            if begun.body["fields"]["browser_request"] == true {
+                return Err(restart());
+            }
+            if !pairing_verifier::legacy_window_open(expires, begun.accepted_at_unix_ms, now) {
+                return Err(restart());
+            }
+            expected == credential_digest(&request.code)
+        }
+    };
+    if used || !valid_code || expires <= now {
         return Err(forbidden(
             "the pairing code is invalid, expired, or already used",
         ));
@@ -5872,8 +6122,7 @@ pub async fn pairing_complete(
         .to_owned();
     let session_actor = format!("{person_id}/session/{actor_suffix}");
     let expires_at = client_now_ms() + 30 * 24 * 60 * 60 * 1_000;
-    // The concrete scope list was sealed into the authenticated local begin
-    // claim. Legacy pending challenges retain their original limited grant.
+    // The concrete scope list was sealed into the authenticated local begin claim.
     let scopes = match begun.body.pointer("/fields/scopes") {
         Some(Value::Array(values)) => values
             .iter()
@@ -5964,7 +6213,7 @@ pub async fn pairing_complete(
     if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }
-    let completed = state.store.append_claim(&ClaimInput {
+    let completed = state.store.append_client_operation_claim(&ClaimInput {
         subject: begun.subject.clone(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some(person_id.clone()),
@@ -6311,7 +6560,7 @@ pub async fn terminal_stream(
         query.incarnation.as_deref(),
         stream_capability,
     )?;
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Terminal);
     presence.follow("terminal", format!("terminal:{id}"));
     Ok(websocket
         .protocols([selected.to_owned()])
@@ -6568,6 +6817,31 @@ fn terminal_attachment_subject(id: &str) -> Result<String, ApiError> {
         .ok_or_else(|| validation("the terminal attachment ID is invalid"))
 }
 
+fn trusted_terminal_attachment(state: &AppState, claim: &ClaimRecord, session: &ClientSession) -> Result<bool, ApiError> {
+    let actor = if session.authority_actor.starts_with("person/")
+        || session.authority_actor.starts_with("agent/") {
+        session.authority_actor.as_str()
+    } else {
+        "requester"
+    };
+    Ok(claim.actor.as_deref() == Some(actor)
+        && state.store.client_operation_is_trusted(claim).map_err(ApiError::internal)?)
+}
+
+fn admitted_terminal_record<'a>(
+    state: &AppState, claims: &'a [ClaimRecord], session: &ClientSession, kind: Option<&str>,
+) -> Result<Option<&'a ClaimRecord>, ApiError> {
+    for claim in claims.iter().rev() {
+        if matches!(claim.kind.as_str(), "custom.client.terminal-attached" | "custom.client.terminal-consumed" | "custom.client.terminal-detached")
+            && kind.is_none_or(|kind| kind == claim.kind)
+            && claim.origin == state.store.origin()
+            && trusted_terminal_attachment(state, claim, session)? {
+            return Ok(Some(claim));
+        }
+    }
+    Ok(None)
+}
+
 fn terminal_attachment_id(session: &ClientSession, request: &ActionRequest) -> String {
     let stable = hex::encode(Sha256::digest(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
@@ -6587,10 +6861,10 @@ fn existing_terminal_attachment(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let Some(attached) = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-    else {
+    let Some(attached) = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))? else {
+        if claims.iter().any(|claim| claim.kind == "custom.client.terminal-attached") {
+            return Err(forbidden("the terminal attachment requires a new attach operation"));
+        }
         return Ok(None);
     };
     let old_digest = attached
@@ -6706,10 +6980,8 @@ fn terminal_attachment_response(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let attached = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-        .ok_or_else(|| ApiError::internal("the terminal attachment claim is missing"))?;
+    let attached = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -6732,9 +7004,8 @@ fn terminal_attachment_response(
     {
         return Err(remote_unavailable_for_owner(state, owner_host_id));
     }
-    let latest = claims
-        .last()
-        .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    let latest = admitted_terminal_record(state, &claims, session, None)?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     let expires = field("expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
@@ -6813,7 +7084,7 @@ fn create_terminal_attachment(
         derive_terminal_capability(state, &session.actor, &attachment_id, &live.owner_host_id)?;
     let digest = credential_digest(&capability);
     let expires_at = client_now_ms() + TERMINAL_ATTACHMENT_TTL_MS;
-    let appended = state.store.append_claim(&ClaimInput {
+    let appended = state.store.append_client_operation_claim(&ClaimInput {
         subject,
         kind: "custom.client.terminal-attached".into(),
         actor: Some(session_claim_actor(session)),
@@ -6903,6 +7174,7 @@ fn consume_terminal_attachment_mode(
         remote_terminal_live_session(state, &terminal_subject(terminal_id), incarnation)
     }).transpose()?;
     let valid = is_current
+        && trusted_terminal_attachment(state, &attached, session)?
         && attached.origin == state.store.origin()
         && field("session_actor").and_then(Value::as_str) == Some(session.actor.as_str())
         && field("raw_mode").and_then(Value::as_str) == raw_mode
@@ -6939,20 +7211,27 @@ fn consume_terminal_attachment_mode(
         return Ok(());
     }
     let _span = crate::profile::span("terminal/capability-consume");
+    let claims = state.store.claims_for(&attached.subject, None).map_err(ApiError::internal)?;
+    if admitted_terminal_record(state, &claims, session, None)?.is_none_or(|head| head.id != attached.id) {
+        return Err(forbidden("the terminal stream capability was already consumed"));
+    }
+    let raw_head = claims.last().ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: attached.subject.clone(),
             kind: "custom.client.terminal-consumed".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                field("attachment_id")
-                    .cloned()
-                    .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
-            )]),
+            fields: BTreeMap::from([
+                (
+                    "attachment_id".into(),
+                    field("attachment_id")
+                        .cloned()
+                        .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
+                ),
+            ]),
             evidence: vec![attached.id.clone()],
-            expected_subject: Some(Some(attached.id.clone())),
+            expected_subject: Some(Some(raw_head.id.clone())),
             idempotency_key: None,
         })
         .map_err(|_| forbidden("the terminal stream capability was already consumed"))?;
@@ -6971,14 +7250,8 @@ fn detach_terminal_attachment(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let attached = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "terminal attachment `{attachment_id}` does not exist"
-            ))
-        })?;
+    let attached = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -7000,24 +7273,23 @@ fn detach_terminal_attachment(
     if incarnation != request.fence.runtime_incarnation.as_deref() {
         return Err(stale("the terminal attachment incarnation fence is stale"));
     }
-    let latest = claims
-        .last()
-        .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    let latest = admitted_terminal_record(state, &claims, session, None)?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
+    let raw_head = claims.last().ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
     if latest.kind == "custom.client.terminal-detached" {
         return Ok(attachment_id);
     }
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject,
             kind: "custom.client.terminal-detached".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                Value::String(attachment_id.clone()),
-            )]),
+            fields: BTreeMap::from([
+                ("attachment_id".into(), Value::String(attachment_id.clone())),
+            ]),
             evidence: vec![latest.id.clone()],
-            expected_subject: Some(Some(latest.id.clone())),
+            expected_subject: Some(Some(raw_head.id.clone())),
             idempotency_key: None,
         })
         .map_err(ApiError::bad)?;
@@ -7037,7 +7309,7 @@ fn terminal_stream_envelope(state: &AppState, value: Value) -> Value {
 fn terminal_stream_error(error: &ApiError) -> Value {
     json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": format!("request/{}", new_request_id()),
         "code": client_error_code(Some(&error.code)),
         "message": error.message,
@@ -7347,7 +7619,7 @@ fn validate_message_session(
 
 fn import_lookup_error(error: anyhow::Error) -> ApiError {
     if error.is::<crate::external_sessions::AmbiguousSession>() {
-        ApiError::bad(St3Error::new("ambiguous-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("ambiguous-import-session", error.to_string()))
     } else {
         ApiError::internal(error)
     }
@@ -7389,7 +7661,7 @@ async fn import_external_session_action(
     }
 
     let import = crate::external_sessions::import_seat(&external).map_err(|error| {
-        ApiError::bad(St3Error::new("invalid-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("invalid-import-session", error.to_string()))
     })?;
     let seat_intent = parse_intent(&import.kdl, &state.node).map_err(ApiError::bad)?;
     let seat_preview = state
@@ -7403,7 +7675,7 @@ async fn import_external_session_action(
         )
         .map_err(ApiError::bad)?;
     if !seat_preview.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-import-seat",
             seat_preview.blockers.join("; "),
         )));
@@ -7504,7 +7776,7 @@ fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<
     let target = client_detail_id("step-run", target);
     let work = state
         .store
-        .step_run(&target)
+        .step_run_fenced(&target)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("work `{target}` does not exist")))?;
     if fence.mission_generation.as_deref() != Some(work.generation.as_str())
@@ -7590,6 +7862,8 @@ async fn apply_runtime_control_intent(
             expected_subjects: preview.subject_tokens,
             idempotency_key: format!("{}:runtime-intent", request.idempotency_key),
             actor: Some(actor.to_owned()),
+            program_bundles: Default::default(),
+            force_reason: None,
         }),
     )
     .await?
@@ -7856,7 +8130,6 @@ async fn create_agent(
         ("model", &parameters.model),
         ("effort", &parameters.effort),
         ("host", &parameters.host),
-        ("description", &parameters.description),
         ("repo", &parameters.repo),
         ("base", &parameters.base),
         ("branch", &parameters.branch),
@@ -7864,6 +8137,13 @@ async fn create_agent(
         if let Some(value) = value {
             creation_string(value, field, 4096)?;
         }
+    }
+    if let Some(description) = &parameters.description {
+        creation_string(
+            description,
+            "description",
+            fractal_drivers::spec::AGENT_DESCRIPTION_MAX_BYTES,
+        )?;
     }
     if let Some(message) = &parameters.message {
         creation_string(message, "message", 65536)?;
@@ -8027,7 +8307,7 @@ async fn dispatch_action(
             .0;
             Ok(vec![result.subject])
         }
-        "attention.resolve" => Err(ApiError::bad(St3Error::new(
+        "attention.resolve" => Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         ))),
@@ -8063,7 +8343,7 @@ async fn dispatch_action(
                         Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
                     };
                     if let Some(refused) = refused {
-                        return Err(ApiError::bad(St3Error::new(
+                        return Err(ApiError::bad(FractalError::new(
                             "stale-fence",
                             format!("{}{refused}", fractal_client::PROMPT_REFUSAL_PREFIX),
                         )));
@@ -8105,6 +8385,7 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    priority: None,
                     deadline_ms: p
                         .get("deadline_ms")
                         .map(|deadline| {
@@ -8142,7 +8423,7 @@ async fn dispatch_action(
             let target = parameter_string(p, "target_id")?;
             let result = state
                 .store
-                .finish_person_step_authorized(
+                .finish_person_step_kind(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -8152,7 +8433,7 @@ async fn dispatch_action(
                             .get("evidence")
                             .map(|value| {
                                 serde_json::from_value::<Vec<String>>(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "evidence must be an array of strings",
                                     ))
@@ -8166,7 +8447,7 @@ async fn dispatch_action(
                             .get("answer")
                             .map(|value| {
                                 serde_json::from_value(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "answer takes an optional id and optional text",
                                     ))
@@ -8176,6 +8457,8 @@ async fn dispatch_action(
                     },
                     action == "work.cancel-ask",
                     session.assistant_write.as_ref(),
+                    false,
+                    session.pairing_grant.as_deref().filter(|_| !session.local_peer).map(|grant| (grant, session.actor.as_str())),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {
@@ -8201,8 +8484,8 @@ async fn dispatch_action(
                 MessageSendRequest {
                     idempotency_key: request.idempotency_key.clone(),
                     // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if session.assistant_write.is_some() {
-                        assistant::PRINCIPAL.into()
+                    from: if let Some(authorization) = session.assistant_write.as_ref() {
+                        authorization.principal().into()
                     } else {
                         authority_actor.clone()
                     },
@@ -8534,16 +8817,20 @@ async fn dispatch_action(
                 .ok_or_else(|| {
                     ApiError::not_found(format!("mission run `{target}` does not exist"))
                 })?;
-            if request.fence.mission_generation.as_deref() != Some(current.generation.as_str()) {
-                return Err(stale("the mission generation fence is stale"));
-            }
+            let expected_generation = request.fence.mission_generation.as_deref()
+                .ok_or_else(|| stale("the mission generation fence is stale"))?;
             let reason = p
                 .get("reason")
                 .and_then(Value::as_str)
                 .unwrap_or("the mission was cancelled by its requester");
             state
                 .store
-                .request_mission_run_cancellation(&current.subject, reason)
+                .request_mission_run_cancellation_at_generation(
+                    &current.subject,
+                    reason,
+                    Some(expected_generation),
+                    Some(authority_actor.as_str()),
+                )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![current.subject])
@@ -8831,6 +9118,7 @@ async fn dispatch_action(
                 idempotency_key: request.idempotency_key.clone(),
                 reason,
                 host: if action == "agent.resume" { p.get("host").and_then(Value::as_str).map(str::to_owned) } else { None },
+                force: false,
             };
             let fence = super::SuspensionFence {
                 incarnation,
@@ -9010,19 +9298,25 @@ async fn dispatch_action(
                 .store
                 .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
                 .map_err(ApiError::internal)?;
-            let paired = claims
-                .claims
-                .iter()
-                .find(|claim| {
-                    claim
-                        .body
-                        .pointer("/fields/device_id")
-                        .and_then(Value::as_str)
-                        == Some(device.as_str())
-                })
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("paired device `{device}` does not exist"))
-                })?;
+            let mut paired = None;
+            let mut legacy = None;
+            let mut legacy_revoked = None;
+            for claim in &claims.claims {
+                if claim.body.pointer("/fields/device_id").and_then(Value::as_str) == Some(device.as_str()) {
+                    if state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+                        paired = Some(claim);
+                        break;
+                    }
+                    if state.store.pairing_completion_is_revoked(claim).map_err(ApiError::internal)? {
+                        legacy_revoked.get_or_insert(claim);
+                    } else {
+                        legacy.get_or_insert(claim);
+                    }
+                }
+            }
+            let paired = paired.or(legacy_revoked).or(legacy).ok_or_else(|| {
+                ApiError::not_found(format!("paired device `{device}` does not exist"))
+            })?;
             if paired.origin != state.node {
                 let issuer = client_host_id(&paired.origin);
                 return Err(ApiError {
@@ -9037,13 +9331,25 @@ async fn dispatch_action(
                     )])),
                 });
             }
+            if !state.store.pairing_completion_is_admitted(paired, client_now_ms()).map_err(ApiError::internal)? {
+                if session.transport != "unix" || !authority_actor.starts_with("person/")
+                    || paired.body.pointer("/fields/person_id").and_then(Value::as_str) != Some(authority_actor.as_str()) {
+                    return Err(forbidden("only the issuing Unix person can revoke this legacy pairing"));
+                }
+                if state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)? {
+                    return Err(validation("paired device is already revoked"));
+                }
+            }
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: paired.subject.clone(),
                     kind: "custom.client.pairing-revoked".into(),
                     actor: Some(authority_actor.clone()),
-                    fields: BTreeMap::from([("device_id".into(), Value::String(device.clone()))]),
+                    fields: BTreeMap::from([
+                        ("device_id".into(), Value::String(device.clone())),
+                        ("completion_id".into(), Value::String(paired.id.clone())),
+                    ]),
                     evidence: vec![paired.id.clone()],
                     expected_subject: None,
                     idempotency_key: Some(request.idempotency_key.clone()),
@@ -9206,7 +9512,7 @@ fn validate_action_admission(
         ));
     }
     if request.action_type == "attention.resolve" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         )));
@@ -9567,6 +9873,16 @@ async fn action_inner(
         "arrangement.membership.edit" => Some(arrangements::edit_memberships(&state, &session, &request).await?),
         _ => None,
     };
+    let read_position = if request.action_type == "read-position.advance" {
+        Some(read_positions::advance(&state, &session, &request).await?)
+    } else {
+        None
+    };
+    let attention_control = if matches!(request.action_type.as_str(), "attention.seen" | "attention.snooze" | "attention.dismiss") {
+        Some(attention_controls::control(&state, &session, &request).await?)
+    } else {
+        None
+    };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
     }
@@ -9579,6 +9895,10 @@ async fn action_inner(
         ]
     } else if let Some(claim) = &arrangement_claim {
         vec![claim.subject.clone()]
+    } else if let Some(advanced) = &read_position {
+        vec![advanced.id.clone()]
+    } else if let Some(controlled) = &attention_control {
+        controlled.affected.clone()
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
@@ -9589,6 +9909,14 @@ async fn action_inner(
     }
     if let Some(claim) = arrangement_claim {
         result[if request.action_type == "arrangement.membership.edit" { "membership_revision" } else { "arrangement_revision" }] = json!(claim.id);
+    }
+    if let Some(advanced) = &read_position {
+        // The stored position after the merge, whether or not this advance appended a claim.
+        result["read_position_at"] = json!(advanced.at);
+    }
+    if let Some(controls) = attention_control.and_then(|controlled| controlled.state) {
+        // The row's controls after the action, whether or not it appended a claim.
+        result["attention_control"] = controls;
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -10011,6 +10339,39 @@ mod tests {
             "an unchanged store index does not rebuild the list");
     }
 
+    #[test]
+    fn server_subprotocols_use_fractal_and_negotiate_legacy_offers() {
+        for (canonical, expected, legacy) in [
+            (TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0", "st3.client.terminal.v0"),
+            (CONVERSATION_SUBPROTOCOL, "fractal.client.conversation.v0", "st3.client.conversation.v0"),
+            (COLLECTION_SUBPROTOCOL, "fractal.client.collections.v0", "st3.client.collections.v0"),
+        ] {
+            assert_eq!(canonical, expected);
+            assert_eq!(super::super::wire_names::selected_protocol(&[legacy], canonical), Some(legacy));
+            assert_eq!(super::super::wire_names::selected_protocol(&[canonical], canonical), Some(canonical));
+        }
+    }
+
+    #[tokio::test]
+    async fn server_pairing_accepts_legacy_requests_and_emits_fractal() {
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let response = super::super::router(state).oneshot(Request::builder()
+                .method("POST").uri("/v1/client/pairings")
+                .header(LOCAL_PERSON_HEADER, "person/ada")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({
+                    "api_version": version, "device_name": "Old client", "person_id": "person/ada"
+                }).to_string())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["api_version"], "fractal.client.v0");
+            assert_eq!(response["value"]["kind"], "pairing-challenge");
+        }
+    }
+
     #[tokio::test]
     async fn published_runtimes_readiness_errors_survive_http_encoding() {
         for ended in [false, true] {
@@ -10034,7 +10395,7 @@ mod tests {
             let envelope: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
             assert_eq!(envelope["retryable"], !ended);
-            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["error_version"], "fractal.client.error.v0");
             assert_eq!(envelope["details"], json!({}));
         }
     }
@@ -10079,6 +10440,51 @@ mod tests {
             })).unwrap(),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
+    }
+
+    #[test]
+    fn notice_typed_resources_and_session_lookup_exclude_reserved_actual_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let owner = "agent/notice-owner";
+        observe_published_runtime(&state, owner, "running", true);
+        observe_published_runtime(&state, "agent/visible-owner", "running", true);
+        let clean = new_client_snapshot(&state);
+        let session = ClientSession::local(Some("person/operator")).unwrap();
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        // Seed an old-peer-shaped row below current custom-subject admission.
+        let hidden = state.store.connection.batched(|tx| -> anyhow::Result<_> {
+            let hidden = crate::store::append_claim_tx(
+                tx, state.store.origin(), owner, "runtime.observed", None,
+                &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret",
+                    "reason":"notice-secret","terminal":true,"status":"running"}}), &[], None,
+            )?;
+            tx.execute("UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+            Ok(hidden)
+        }).unwrap().unwrap();
+        state.store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+        let snapshot = new_client_snapshot(&state);
+        for history in [false, true] {
+            let runtimes = runtime_resources(&state, history, &snapshot, &session).unwrap();
+            assert_eq!(runtimes.len(), 1);
+            assert_eq!(runtimes[0]["owner_id"], "agent/visible-owner");
+            assert!(runtime_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap().is_empty());
+            let terminals = terminal_resources_for_owner(&state, history, &snapshot, &session, Some(owner)).unwrap();
+            assert_eq!(terminals.len(), 1);
+            assert!(!serde_json::to_string(&terminals).unwrap().contains("notice-secret"));
+        }
+        assert!(runtime_resources_for_id(&state, &snapshot, &session, "runtime/notice-secret", false).unwrap().is_empty());
+        let cards = crate::api::client_agent_resources(&state.store, true, &snapshot.created_at, snapshot.store_index).unwrap();
+        assert!(cards.iter().any(|card| card["id"] == owner));
+        assert!(!serde_json::to_string(&cards).unwrap().contains("notice-secret"));
+        assert!(!serde_json::to_string(&cards).unwrap().contains(&hidden.id));
+        let id = crate::api::managed_session_id(owner, "notice-secret");
+        assert!(crate::api::managed_session_owner_at(&state.store, snapshot.store_index, &id).unwrap().is_none());
+        assert!(crate::api::managed_session_owner_for_subject_at(&state.store, snapshot.store_index, &id, owner).unwrap().is_none());
+        let (publication, _) = published_runtimes::fold(&state.store, None).unwrap().unwrap();
+        assert_eq!(publication.rows.items.len(), 1);
+        assert_eq!(runtime_resources(&state, true, &clean, &session).unwrap().len(), 2);
+        assert!(state.store.claim_by_id(&hidden.id).unwrap().is_some());
     }
 
     fn publish_runtimes_once(state: &AppState) {
@@ -10661,7 +11067,7 @@ mission "queue-parity" state="ready" {
     #[test]
     fn terminal_contention_preserves_retryable_code_and_service_close() {
         for code in ["database-busy", "database-locked"] {
-            let envelope = terminal_stream_error(&ApiError::bad(St3Error::new(code, "fixture contention")));
+            let envelope = terminal_stream_error(&ApiError::bad(FractalError::new(code, "fixture contention")));
             assert_eq!(envelope["code"], code);
             assert_eq!(envelope["retryable"], true);
             assert_eq!(terminal_error_close_code(envelope["code"].as_str().unwrap()), 1011);
@@ -11407,7 +11813,7 @@ mission "differential" state="ready" {
         for collection in ["missions", "arrangements"] {
             let root = tempfile::tempdir().unwrap();
             let state = smallclaims::sqlite::with_read_limit_for_test(1, || test_state(root.path()));
-            let paired = state.store.append_claim(&ClaimInput {
+            let paired = state.store.append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/admission-preparation".into(),
                 kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
                 fields: serde_json::from_value(json!({
@@ -11760,8 +12166,12 @@ mission "differential" state="ready" {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abe";
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        state.store.bind_fleet(FLEET).unwrap();
+        let edge = Store::open_memory("edge").unwrap();
+        edge.bind_fleet(FLEET).unwrap();
         let mut recorded = crate::api::roster_stage_recorded().subscribe();
         let subject = "agent/fresh-pause";
         let append = |fields: Value| {
@@ -11796,8 +12206,23 @@ mission "differential" state="ready" {
             .await.expect("the refresher publishes the asked-for cut").unwrap();
 
         // Unchanged: plain reads during the pause answer from the publication and do not cut it
-        // short, however many ask.
-        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        // short, however many ask. The change comes from a peer: a claim this node wrote would
+        // cut the pause itself.
+        edge.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "harness.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"state":"idle", "driver":"codex",
+                "incarnation_id":"one"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let exchange = edge
+            .export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap())
+            .unwrap();
+        state.store.receive_replication_exchange("edge", FLEET, &exchange).unwrap();
+        state.store.validate_replication_backlog().unwrap();
+        state.store.apply_replication_repairs().unwrap();
+        state.store.project_replication_backlog().unwrap();
+        let idle = state.store.index().unwrap();
+        assert!(idle > working, "the peer's claim reached this node");
         for _ in 0..3 {
             let (Extension(snapshot), Json(page)) = list(false).await.unwrap();
             assert!(snapshot.store_index < idle, "a plain read answers from the publication");
@@ -12014,8 +12439,15 @@ mission "differential" state="ready" {
             "runtime_id":"fresh-roster", "incarnation_id":"one"}));
         let mut published = state.store.subscribe_agent_roster();
         crate::api::start_agent_roster(&state);
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(|revision| *revision > 0))
-            .await.unwrap().unwrap();
+        let complete = {
+            let store = state.store.clone();
+            move |_: &u64| store.published_agent_roster(store.index().unwrap(), false).is_some()
+        };
+        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete))
+            .await.expect("the refresher publishes a complete initial roster").unwrap();
+        // Freeze the refresher before advancing the graph so the unchanged-through read
+        // must use the old publication, not an identical one published at a newer cut.
+        let _admission = state.store.admit_agent_resources("other").await;
         let revision = *published.borrow_and_update();
         let (_, Json(before)) = client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default())).await.unwrap();
@@ -12043,7 +12475,6 @@ mission "differential" state="ready" {
 
         // A claim about the agent changes its card. Start a healthy attempt and hold it:
         // the fresh read must wait for this attempt's publication, not answer early.
-        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
@@ -13169,7 +13600,7 @@ mission "differential" state="ready" {
     }
 
     #[tokio::test]
-    async fn diagnostics_scope_is_in_default_device_and_full_control_pairing() {
+    async fn device_write_scopes_are_in_default_device_and_full_control_pairing() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let app = super::super::router(state.clone());
@@ -13190,9 +13621,50 @@ mission "differential" state="ready" {
             ).unwrap();
             let begun = begun.claims.iter().find(|claim|
                 claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
-            assert!(begun.body["fields"]["scopes"].as_array().unwrap()
-                .contains(&json!("write.client-diagnostics")));
+            let scopes = begun.body["fields"]["scopes"].as_array().unwrap();
+            for scope in ["write.client-diagnostics", "write.availability", "write.presence", "write.notes"] {
+                assert!(scopes.contains(&json!(scope)), "{scope}");
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn pairing_operations_issue_authenticated_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = super::super::router(state.clone());
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/client/pairings")
+            .header(LOCAL_PERSON_HEADER, "person/ada")
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "device_name": "Test phone",
+                "person_id": "person/ada", "scopes": ["read.projections"]
+            }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let begun: Value = serde_json::from_slice(&bytes).unwrap();
+        let challenge = &begun["value"];
+        let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+        let response = app.oneshot(Request::builder()
+            .method("POST").uri(format!("/v1/client/pairings/{id}/complete"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "code": challenge["code"],
+                "device_public_key": "test-device-public-key-with-at-least-32-characters"
+            }).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let completed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "{completed}");
+        let credential = completed["value"]["credential"].as_str().unwrap();
+        let request = Request::builder().uri("/v1/client/agents")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .body(Body::empty()).unwrap();
+        let session = authenticate(&state, &request, "fabric-loopback").unwrap();
+        assert_eq!(session.authority_actor, "person/ada");
+        assert!(session.allows("read.projections"));
+        assert!(revalidate_session(&state, &session).is_ok());
     }
 
     #[test]
@@ -13533,7 +14005,7 @@ mission "differential" state="ready" {
         let credential = "resources-reader";
         let app = super::super::fabric_router(state.clone());
         for (scopes, expected) in [(json!([]), StatusCode::FORBIDDEN), (json!(["read.projections"]), StatusCode::OK)] {
-            state.store.append_claim(&ClaimInput {
+            state.store.append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/resources-reader".into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/ada".into()),
@@ -13629,10 +14101,12 @@ mission "differential" state="ready" {
         AppState {
             seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
+            browser_pairing_login: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: node.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.to_path_buf(),
             pty_root: root.join("pty"),
             pty_binary: root.join("unused-pty"),
@@ -14216,6 +14690,32 @@ subscription "watch/source" {
                 .unwrap(),
             ids
         );
+    }
+
+    #[tokio::test]
+    async fn agent_create_refuses_a_charter_over_eight_kib_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "example");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        let description = "x".repeat(fractal_drivers::spec::AGENT_DESCRIPTION_MAX_BYTES + 1);
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/charter".into(),
+            action_type: "agent.create".into(),
+            idempotency_key: "agent-charter-too-long".into(),
+            fence: Fence::default(),
+            parameters: json!({"name":"parser", "harness":"codex", "description":description}),
+        };
+        let index = state.store.index().unwrap();
+        let error = create_agent(&state, &new_client_snapshot(&state), &session, &request)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message.contains("description must be nonempty, without NUL, and at most 8192 bytes"),
+            "{}",
+            error.message
+        );
+        assert_eq!(state.store.index().unwrap(), index);
     }
 
     #[tokio::test]
@@ -14906,8 +15406,12 @@ subscription "watch/source" {
         assert_eq!(statements(40), few.get());
     }
 
+    /// The first report since a start reads the last audit and never makes one: on a busy
+    /// host's store the audit read 335k statements in the first minute after a restart, while
+    /// every reconnecting client waited on the same disk. The daemon audits after that window,
+    /// and later reports show what it found.
     #[test]
-    fn startup_operation_audit_is_shared_and_later_reports_are_fresh() {
+    fn the_first_report_does_not_audit_and_later_reports_show_the_audit() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.append_client_claim(&ClaimInput {
@@ -14932,10 +15436,16 @@ subscription "watch/source" {
             at: Instant::now(),
             refreshing: true,
         });
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        refresh_operation_report(&state, key, Some(sender));
-        let drift = receiver.blocking_recv().unwrap().unwrap();
+        refresh_operation_report(&state, key);
+        assert!(state.store.last_operation_audit().is_none(), "the first report audited");
+        let checks = operation_checks(&state).unwrap().unwrap();
+        let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
+        assert_eq!(projection.status, "warn");
+        assert!(projection.message.starts_with("no operation audit has finished since the daemon started"), "{}", projection.message);
+
+        let drift = state.store.operation_projection_drift().unwrap();
         assert_eq!(drift.len(), 1);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
@@ -14947,7 +15457,7 @@ subscription "watch/source" {
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
         // Doctor reports the last audit and never audits inline: it still shows the drift the
-        // startup audit found until the next audit runs.
+        // audit found until the next audit runs.
         assert_eq!(projection_status(), "fail");
         assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
@@ -14955,7 +15465,7 @@ subscription "watch/source" {
         assert_eq!(projection_status(), "pass");
         assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         assert_eq!(checks.iter().find(|check| check.name == "operation-projection").unwrap().status, "fail");
     }
@@ -14986,7 +15496,7 @@ subscription "watch/source" {
         assert_eq!(pending[0]["severity"], "info");
         assert_eq!(pending[0]["state"], "running");
         assert_eq!(pending[0]["updated_at"], "2026-09-30T00:00:00Z");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let report = operation_resources(&state, "2026-09-30T00:00:00Z").unwrap();
         assert!(
             report.iter().all(|item| item["state"] != "running"),
@@ -15008,11 +15518,9 @@ subscription "watch/source" {
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();
         let started = test_state(other.path());
-        let audit = start_operation_report(&started).unwrap();
-        let drift = audit.blocking_recv().unwrap().unwrap();
-        assert!(drift.is_empty());
+        assert!(start_operation_report(&started));
         crate::store::STATEMENTS_RUN.with(|run| run.set(0));
-        assert!(!started.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
+        assert!(!started.store.repair_operation_projection_drift_from_audit(&[]).unwrap());
         assert_eq!(crate::store::STATEMENTS_RUN.with(std::cell::Cell::get), 0);
         let deadline = Instant::now() + Duration::from_secs(30);
         while operation_checks(&started).unwrap().is_none() {
@@ -15023,7 +15531,8 @@ subscription "watch/source" {
             std::thread::sleep(Duration::from_millis(10));
         }
         let made = operation_checks(&started).unwrap().unwrap();
-        assert!(start_operation_report(&started).is_none());
+        assert!(started.store.last_operation_audit().is_none());
+        assert!(!start_operation_report(&started));
         assert!(Arc::ptr_eq(
             &made,
             &operation_checks(&started).unwrap().unwrap()
@@ -15225,7 +15734,7 @@ subscription "watch/source" {
         let subject = "custom/client/pairing-named";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-begun".into(),
                 actor: Some("person/alex".into()),
@@ -15240,7 +15749,7 @@ subscription "watch/source" {
             .unwrap();
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
@@ -15271,9 +15780,7 @@ subscription "watch/source" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let append = |subject: &str, kind: &str, fields: Value| {
-            state
-                .store
-                .append_claim(&ClaimInput {
+            let input = ClaimInput {
                     subject: subject.into(),
                     kind: kind.into(),
                     actor: Some("person/alex".into()),
@@ -15281,8 +15788,12 @@ subscription "watch/source" {
                     evidence: Vec::new(),
                     expected_subject: None,
                     idempotency_key: None,
-                })
-                .unwrap()
+                };
+            if kind.starts_with("custom.client.pairing") {
+                state.store.append_client_operation_claim(&input)
+            } else {
+                state.store.append_claim(&input)
+            }.unwrap()
         };
         let seed = append(
             "message/history-seed",
@@ -15359,7 +15870,7 @@ subscription "watch/source" {
         for index in 0..300 {
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: format!("custom/client/pairing-{index}"),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/alex".into()),
@@ -15378,7 +15889,7 @@ subscription "watch/source" {
         }
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/pairing-0".into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/alex".into()),
@@ -15406,7 +15917,7 @@ subscription "watch/source" {
 
     #[test]
     fn steady_errors_preserve_store_conflicts_and_distinguish_terminal_lifetime() {
-        let conflict = ApiError::internal(anyhow::Error::new(St3Error::new(
+        let conflict = ApiError::internal(anyhow::Error::new(FractalError::new(
             "stale-subject",
             "the resource changed",
         )));
@@ -15802,7 +16313,7 @@ subscription "watch/source" {
     #[test]
     fn typed_identity_conflicts_preserve_client_wire_codes() {
         for code in ["identity-cycle", "identity-occupied", "identity-retired-source"] {
-            let error = ApiError::bad(St3Error::new(code, "identity conflict"));
+            let error = ApiError::bad(FractalError::new(code, "identity conflict"));
             assert_eq!(error.status, StatusCode::CONFLICT);
             let envelope = client_error_envelope(error.status,
                 &json!({"code":error.code,"message":error.message}), "request/identity");
@@ -15985,7 +16496,7 @@ subscription "watch/source" {
     }
 
     #[test]
-    fn legacy_terminal_attachment_replay_conflicts_without_execution() {
+    fn unmarked_terminal_attachment_requires_a_new_attach_operation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
@@ -16013,8 +16524,9 @@ subscription "watch/source" {
         let before = state.store.status(None).unwrap().store_index;
         let error = existing_terminal_attachment(&state, &session, &request, &current_digest)
             .unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "forbidden");
+        assert!(terminal_attachment_response(&state, &session, &attachment_id).is_err());
         assert_eq!(state.store.status(None).unwrap().store_index, before);
     }
 
@@ -16039,6 +16551,28 @@ subscription "watch/source" {
                 "ungranted"
             });
             assert!(!session.messages_paging);
+        }
+    }
+
+    #[test]
+    fn model_drift_attention_is_its_own_feature_not_implied_by_custom_forms() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (features, expected) in [
+            (None, false),
+            // What clients before the kind send: custom forms alone never imply it.
+            (Some("custom-subjects.v1, conversation-blocks.v1"), false),
+            (Some("model-drift-attention.v2"), false),
+            (Some("custom-subjects.v1, model-drift-attention.v1 , conversation-blocks.v1"), true),
+        ] {
+            let mut request = Request::builder().uri("/v1/client/attention");
+            if let Some(features) = features {
+                request = request.header("x-st3-features", features);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let session = authenticate(&state, &request, "unix").unwrap();
+            assert_eq!(session.model_drift_attention, expected, "{features:?}");
+            assert_eq!(session.attention_compatibility().model_drift, expected, "{features:?}");
         }
     }
 
@@ -16094,6 +16628,174 @@ subscription "watch/source" {
         }
     }
 
+    #[tokio::test]
+    async fn legacy_pairing_revoke_is_deny_only() {
+        for native in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let input = ClaimInput {
+                subject: "custom/client/legacy-revoke".into(),
+                kind: "custom.client.pairing-completed".into(),
+                actor: Some("person/alex".into()),
+                fields: serde_json::from_value(json!({
+                    "device_id":"device/legacy-revoke", "person_id":"person/alex",
+                    "credential_hash":credential_digest("legacy-revoke-secret"),
+                    "session_actor":"client/legacy-revoke", "scopes":["read.projections","control.pairing"],
+                    "expires_at_unix_ms":client_now_ms() as u64 + 60_000
+                })).unwrap(),
+                evidence:vec![], expected_subject:None, idempotency_key:None,
+            };
+            let completed = if native {
+                state.store.append_client_operation_claim(&input).unwrap()
+            } else {
+                state.store.append_claim(&input).unwrap()
+            };
+            if native {
+                // A newer retained record with the same device ID must not mask the admitted grant.
+                let mut retained = input.clone();
+                retained.subject = "custom/client/legacy-shadow".into();
+                retained.fields.insert("credential_hash".into(), json!("unrelated-retained-digest"));
+                state.store.append_claim(&retained).unwrap();
+            }
+            let bearer = Request::builder().uri("/v1/client/agents")
+                .header(AUTHORIZATION, "Bearer legacy-revoke-secret")
+                .body(Body::empty()).unwrap();
+            assert_eq!(authenticate(&state, &bearer, "fabric-loopback").is_ok(), native);
+            let snapshot = new_client_snapshot(&state);
+            let mut request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id:"action/legacy-revoke".into(),
+                action_type:"pairing.revoke".into(), idempotency_key:"legacy-revoke-test-key".into(),
+                fence: Fence { snapshot_id:snapshot.id.clone(), ..Default::default() },
+                parameters:json!({"target_id":"device/legacy-revoke"}),
+            };
+            for session in [
+                ClientSession::local(Some("person/other")).unwrap(),
+                ClientSession::local(Some("agent/bound")).unwrap(),
+                ClientSession::for_tests("client/remote", "person/alex", "fabric-loopback"),
+            ].into_iter().filter(|_| !native) {
+                assert_eq!(dispatch_action(&state, &snapshot, &session, &request).await.unwrap_err().status,
+                    StatusCode::FORBIDDEN);
+            }
+            let owner = if native {
+                let remote = authenticate(&state, &bearer, "fabric-loopback").unwrap();
+                validate_action_admission(&remote, &request).unwrap();
+                remote
+            } else {
+                ClientSession::local(Some("person/alex")).unwrap()
+            };
+            request.parameters = json!({"target_id":"device/unknown"});
+            assert_eq!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err().status,
+                StatusCode::NOT_FOUND);
+            request.parameters = json!({"target_id":"device/legacy-revoke"});
+            assert_eq!(device_resources(&state, &snapshot, "person/alex").unwrap().len(), usize::from(native));
+            dispatch_action(&state, &snapshot, &owner, &request).await.unwrap();
+            let revoked = state.store.claims_for_subject_kind_at(&completed.subject,
+                "custom.client.pairing-revoked", None, true, 1).unwrap().claims.remove(0);
+            assert!(state.store.client_operation_is_trusted(&revoked).unwrap());
+            assert!(state.store.pairing_revocation_is_trusted(&revoked, &completed).unwrap());
+            assert_eq!(state.store.client_operation_is_trusted(&completed).unwrap(), native);
+            assert!(authenticate(&state, &bearer, "fabric-loopback").is_err());
+            if native {
+                dispatch_action(&state, &snapshot, &owner, &request).await.unwrap();
+            } else {
+                assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
+                    .message.contains("already revoked"));
+            }
+            assert!(state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
+                completion_id:completed.id.clone(),
+                record_hash:fractal_store::pairing::record_hash(&completed.origin,
+                    completed.actor.as_deref(), &completed.body["fields"]).unwrap(),
+                until_unix_ms:fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS as u64,
+            }]).is_err());
+            if !native {
+                let mut shadow = input.clone();
+                shadow.subject = "custom/client/unrevoked-legacy-shadow".into();
+                state.store.append_claim(&shadow).unwrap();
+            }
+            if !native {
+                assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
+                    .message.contains("already revoked"));
+            }
+            let devices = device_resources(&state, &new_client_snapshot(&state), "person/alex").unwrap();
+            assert_eq!(devices.len(), 1);
+            assert_eq!(devices[0]["state"], "revoked");
+        }
+    }
+
+    #[test]
+    fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+        let now = cap - 60_000;
+        let claim = state.store.append_claim(&ClaimInput {
+            subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
+            actor:Some("person/alex".into()),
+            fields:serde_json::from_value(json!({
+                "credential_hash":"existing-test-digest", "session_actor":"client/existing",
+                "person_id":"person/alex", "scopes":["read.projections"],
+                "expires_at_unix_ms":cap + 60_000
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+        state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
+            completion_id:claim.id.clone(),
+            record_hash:fractal_store::pairing::record_hash(
+                &claim.origin, claim.actor.as_deref(), &claim.body["fields"],
+            ).unwrap(),
+            until_unix_ms:(cap + 60_000) as u64,
+        }]).unwrap();
+        let session = paired_client_session_at(&state, &claim, "fabric-loopback", false, now).unwrap();
+        assert!(session.allows("read.projections"));
+        assert!(!session.allows("terminal.control"));
+        assert_eq!(session.grant_expires_at, Some(cap));
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, cap).is_err());
+        let mut changed = claim.clone();
+        changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
+        assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        state.store.append_client_operation_claim(&ClaimInput {
+            subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
+            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+    }
+
+    #[tokio::test]
+    async fn unmarked_pairing_records_require_a_new_pairing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for actor in [Some("agent/example"), Some("person/alex"), None] {
+            let credential = format!("legacy-{actor:?}");
+            // Retained records use the same internal append seam as historical admission.
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/legacy-{}", credential_digest(&credential)),
+                kind: "custom.client.pairing-completed".into(),
+                actor: actor.map(str::to_owned),
+                fields: BTreeMap::from([
+                    ("credential_hash".into(), json!(credential_digest(&credential))),
+                    ("person_id".into(), json!("person/alex")),
+                    ("pairing_operation_version".into(), json!(1)),
+                    ("session_actor".into(), json!("client/legacy-session")),
+                    ("scopes".into(), json!(["read.projections"])),
+                    ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let request = Request::builder().uri("/v1/client/agents")
+                .header(AUTHORIZATION, format!("Bearer {credential}"))
+                .body(Body::empty()).unwrap();
+            assert!(authenticate(&state, &request, "fabric-loopback").is_err());
+            let response = super::super::fabric_router(state.clone()).oneshot(
+                Request::builder().uri("/v1/client/agents")
+                    .header(AUTHORIZATION, format!("Bearer {credential}"))
+                    .body(Body::empty()).unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
     #[test]
     fn paired_authentication_uses_pairing_claims_and_honors_revocation() {
         let root = tempfile::tempdir().unwrap();
@@ -16102,7 +16804,7 @@ subscription "watch/source" {
         let credential = "pairing-auth-test-secret";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
@@ -16156,7 +16858,7 @@ subscription "watch/source" {
         assert!(!authenticate(&state, &negotiated_request, "fabric-loopback").unwrap().messages_paging);
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/alex".into()),
@@ -16262,6 +16964,19 @@ mission "example/looped" state="ready" {
         assert_eq!(current_run["current_steps"].as_array().unwrap().len(), 0);
         assert!(current_run["state_since"].is_string());
         assert!(current_run["outcome"].is_null());
+        assert_eq!(current_run["started_at"], second.created_at_unix_ms as u64);
+        assert!(current_run["completed_at"].is_null());
+        let published = mission_list_cards_with(&state.store, &["mission/example/looped".into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        for run in looped["run_details"].as_array().unwrap() {
+            let card_run = published[0]["run_details"].as_array().unwrap().iter()
+                .find(|candidate| candidate["id"] == run["id"]).unwrap();
+            for key in ["started_at", "completed_at"] {
+                assert_eq!(card_run[key], run[key], "{key}");
+            }
+        }
+        let first_completed = looped["run_details"].as_array().unwrap().iter()
+            .find(|run| run["id"] == first.subject).unwrap()["completed_at"].clone();
+        assert!(first_completed.is_u64());
 
         state
             .store
@@ -16295,6 +17010,7 @@ mission "example/looped" state="ready" {
             "its work shipped before it was cancelled"
         );
         assert_eq!(finished["state_since"], finished["outcome"]["at"]);
+        assert_eq!(finished["completed_at"], first_completed);
 
         // Retired once no run is open, the mission leaves the current view at once, even with
         // a run that ended moments ago, and its history names it retired.
@@ -16304,7 +17020,7 @@ mission "example/looped" state="ready" {
             .unwrap();
         state
             .store
-            .retire_mission("example/looped", "person/operator", "retire-looped")
+            .retire_mission("example/looped", "person/operator", "retire-looped", None)
             .unwrap();
         let current =
             mission_resources(&state.store, state.store.index().unwrap(), false, None).unwrap();
@@ -16322,6 +17038,182 @@ mission "example/looped" state="ready" {
         assert_eq!(retired["state"], "retired");
     }
 
+    #[test]
+    fn mission_list_and_detail_preserve_retry_links_without_null_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "retry-node");
+        let mission = "mission/example/retry-links";
+        let source = r#"version 2
+mission "example/retry-links" state="ready" {
+  goal "Keep retry lineage visible."
+  step "work" { agentless }
+}"#;
+        let intent = crate::graph::parse_intent(source, "retry-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "publish-retry-links", Some("person/operator")).unwrap();
+        let start = |key: &str| state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let original = start("retry-links-original");
+        state.store.set_mission_run_state(&original.id, "failed", "terminal", Some("a gate failed")).unwrap();
+        let retried = state.store.retry_mission_run(&original.subject, &crate::model::MissionRunRetryRequest {
+            actor: "person/operator".into(), same_revision: false, reason: None,
+            idempotency_key: "retry-links-new".into(),
+        }).unwrap();
+        state.store.set_mission_run_state(&retried.id, "failed", "terminal", Some("another gate failed")).unwrap();
+        let ordinary = start("retry-links-ordinary");
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+        for items in [&cards, &detail, &history] {
+            let card = items.iter().find(|item| item["id"] == mission).unwrap();
+            let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+            let runs = card["run_details"].as_array().unwrap();
+            let original_view = runs.iter().find(|run| run["id"] == original.subject).unwrap();
+            assert!(original_view.get("retry_of").is_none(), "{original_view}");
+            assert_eq!(original_view["retried_by"], json!([retried.subject]));
+            let retry_view = runs.iter().find(|run| run["id"] == retried.subject).unwrap();
+            assert_eq!(retry_view["retry_of"], original.subject);
+            let ordinary_view = runs.iter().find(|run| run["id"] == ordinary.subject).unwrap();
+            assert!(ordinary_view.get("retry_of").is_none(), "{ordinary_view}");
+            assert_eq!(ordinary_view["retried_by"], json!([]));
+            for run in runs {
+                for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                    assert!(run.get(field).is_none(), "{run}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mission_public_readers_decode_supersession_links_and_input_refusal() {
+        for compatible in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "supersession-node");
+            let mission = "mission/example/supersession";
+            let source = r#"version 2
+mission "example/supersession" state="ready" {
+  input "value" kind="text"
+  goal "Keep publication lineage visible."
+  step "work" { agentless }
+}"#;
+            let publish = |source: &str, key: &str| {
+                let intent = crate::graph::parse_intent(source, "supersession-node").unwrap();
+                let preview = state.store.mission(&intent, crate::model::IntentInput {
+                    kdl: source.into(), source_name: None,
+                }).unwrap();
+                state.store.apply_as(&intent, &preview.subject_tokens, key, Some("person/operator")).unwrap();
+            };
+            publish(source, "supersession-original");
+            let original = state.store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None,
+                inputs: BTreeMap::from([("value".into(), "retained".into())]),
+                idempotency_key: "supersession-source".into(),
+            }).unwrap();
+            let changed = if compatible {
+                source.replace("Keep publication lineage visible.", "Keep replacement lineage visible.")
+            } else {
+                source.replace("input \"value\"", "input \"replacement\"")
+            };
+            publish(&changed, "supersession-next");
+            let latest = state.store.mission_spec(mission, None).unwrap().unwrap();
+            let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+            let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+            for items in [&cards, &detail, &history] {
+                let card = items.iter().find(|item| item["id"] == mission).unwrap();
+                let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+                let runs: Vec<fractal_client::MissionRunSummary> =
+                    serde_json::from_value(card["run_details"].clone()).unwrap();
+                let old = runs.iter().find(|run| run.id == original.subject).unwrap();
+                assert!(old.retry_of.is_none());
+                assert!(old.retried_by.is_empty());
+                assert!(old.supersedes.is_none());
+                if compatible {
+                    let successor = old.superseded_by.as_ref().unwrap();
+                    let replacement = runs.iter().find(|run| &run.id == successor).unwrap();
+                    assert_eq!(replacement.supersedes.as_deref(), Some(original.subject.as_str()));
+                    assert!(replacement.superseded_by.is_none());
+                    assert!(replacement.supersession_fault.is_none());
+                    assert!(old.supersession_fault.is_none());
+                } else {
+                    assert_eq!(old.status, "running");
+                    assert!(old.superseded_by.is_none());
+                    let fault = old.supersession_fault.as_deref().unwrap();
+                    assert!(fault.contains(&original.revision), "{fault}");
+                    assert!(fault.contains(&latest.revision), "{fault}");
+                    assert!(fault.contains("replacement") && fault.contains("value"), "{fault}");
+                }
+                for run in card["run_details"].as_array().unwrap() {
+                    for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                        assert!(run.get(field).is_none_or(Value::is_string), "{run}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mission_eta_uses_card_cut_and_detail_snapshot_and_is_null_without_samples_or_when_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "eta-node");
+        let mission = "mission/example/eta";
+        let source = "version 2\nmission \"example/eta\" state=\"ready\" {\n goal \"Finish.\"\n concurrent-runs max=2\n step \"work\" { agentless; }\n}\n";
+        let intent = crate::graph::parse_intent(source, "eta-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "publish-eta", Some("person/operator")).unwrap();
+        let start = |key: &str| state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "example/eta".into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let first = start("eta-first");
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        assert_eq!(cards[0]["run_details"][0].get("eta"), Some(&Value::Null));
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        assert_eq!(detail[0]["run_details"][0].get("eta"), Some(&Value::Null));
+        state.store.set_step_state(&first.steps[0].subject, "working", None).unwrap();
+        state.store.set_step_state(&first.steps[0].subject, "completed", None).unwrap();
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        assert!(cards[0]["run_details"][0]["completed_at"].is_null());
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        for run in [&cards[0]["run_details"][0], &detail[0]["run_details"][0]] {
+            assert_eq!(run["eta"], json!({"remaining_low_ms":0,"remaining_high_ms":0,"basis":{"method":"per-step","samples":0},"as_of":run["eta"]["as_of"]}));
+            let schema: Value = serde_json::from_str(include_str!("../../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+            assert!(jsonschema::options().with_draft(jsonschema::Draft::Draft202012).build(&schema["$defs"]["MissionRunSummary"]["properties"]["eta"]).unwrap().is_valid(&run["eta"]));
+        }
+        state.store.set_mission_run_state(&first.id, "completed", "terminal", Some("done")).unwrap();
+        let second = start("eta-second");
+        let cut = client_now_ms();
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], cut, &BTreeSet::new()).unwrap();
+        let runs = cards[0]["run_details"].as_array().unwrap();
+        let open = runs.iter().find(|run| run["id"] == second.subject).unwrap();
+        let expected = state.store.mission_run_eta(&second.subject, cut).unwrap().unwrap();
+        assert_eq!(open["eta"], expected);
+        assert_eq!(open["eta"]["as_of"], json!(cut));
+        assert_eq!(open["eta"]["basis"], json!({"method":"per-step","samples":1}));
+        assert_eq!(open["eta"].as_object().unwrap().len(), 4);
+        assert!(open["eta"]["remaining_low_ms"].is_u64());
+        assert!(open["eta"]["remaining_high_ms"].is_u64());
+        assert!(runs.iter().find(|run| run["id"] == first.subject).unwrap()["eta"].is_null());
+        let before = client_now_ms();
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        let after = client_now_ms();
+        let runs = detail[0]["run_details"].as_array().unwrap();
+        let open = runs.iter().find(|run| run["id"] == second.subject).unwrap();
+        let detail_cut = u128::from(open["eta"]["as_of"].as_u64().unwrap());
+        assert!((before..=after).contains(&detail_cut));
+        assert_eq!(open["eta"], state.store.mission_run_eta(&second.subject, detail_cut).unwrap().unwrap());
+        assert!(runs.iter().find(|run| run["id"] == first.subject).unwrap()["eta"].is_null());
+    }
+
     /// A mission's detail reads only its own runs, seats and states, and says what the whole
     /// history says about them.
     #[test]
@@ -16329,8 +17221,9 @@ mission "example/looped" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "detail-node");
         for mission in ["example/detail", "example/neighbor"] {
+            let steps = (0..25).map(|index| format!("step \"do-{index:02}\" {{ agentless; }}\n")).collect::<String>();
             let source = format!(
-                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  step \"do\" {{ assigned-to \"agent/doer\" }}\n}}\n"
+                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  {steps}}}\n"
             );
             let intent = crate::graph::parse_intent(&source, "detail-node").unwrap();
             let preview = state
@@ -16352,7 +17245,7 @@ mission "example/looped" state="ready" {
                     Some("person/operator"),
                 )
                 .unwrap();
-            for run in 0..2 {
+            for run in 0..3 {
                 let view = state
                     .store
                     .create_mission_run(&crate::model::MissionRunRequest {
@@ -16365,7 +17258,11 @@ mission "example/looped" state="ready" {
                         idempotency_key: format!("{mission}-{run}"),
                     })
                     .unwrap();
-                if run == 0 {
+                for step in &view.steps {
+                    state.store.set_step_state(&step.subject, "working", None).unwrap();
+                }
+                if run < 2 {
+                    state.store.set_step_state(&view.steps[0].subject, "completed", None).unwrap();
                     for phase in ["cleanup-completed", "terminal"] {
                         state
                             .store
@@ -16382,6 +17279,26 @@ mission "example/looped" state="ready" {
             let detail = mission_resources(&state.store, index, true, Some(mission)).unwrap();
             assert_eq!(detail.len(), 1);
             let detail = &detail[0];
+            let finished = detail["run_details"].as_array().unwrap().iter()
+                .filter(|run| run["status"] == "completed").collect::<Vec<_>>();
+            assert_eq!(finished.len(), 2);
+            assert!(finished[0]["steps"][0]["started_at"].is_null());
+            assert!(finished[0]["steps"][0]["completed_at"].is_null());
+            assert!(finished[1]["steps"][0]["started_at"].is_u64());
+            assert!(finished[1]["steps"][0]["completed_at"].is_u64());
+            assert_eq!(finished[1]["steps"].as_array().unwrap().len(), 25);
+            assert!(finished[1]["steps"][24]["started_at"].is_u64(), "detail keeps full-step timing");
+            let before = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get);
+            let published = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let read = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get) - before;
+            assert_eq!(read, 40, "only 20 preview subjects from the open and latest finished runs");
+            for run in finished {
+                let card_run = published[0]["run_details"].as_array().unwrap().iter()
+                    .find(|candidate| candidate["id"] == run["id"]).unwrap();
+                for key in ["started_at", "completed_at"] {
+                    assert_eq!(card_run["steps"][0][key], run["steps"][0][key], "{key}");
+                }
+            }
             for field in [
                 "runs",
                 "state",
@@ -16490,7 +17407,7 @@ mission "example/looped" state="ready" {
             let root = tempfile::tempdir().unwrap();
             let state = test_state_named(root.path(), "live-run-node");
             let steps = (0..24).map(|i| format!(
-                "  step \"step-{i:02}\" {{ assigned-to \"agent/worker-{i:02}\" }}\n"
+                "  step \"step-{i:02}\" {{ assigned-to \"agent/live-run-node.worker-{i:02}\" }}\n"
             )).collect::<String>();
             let source = format!(
                 "version 2\nmission \"example/live\" state=\"ready\" {{\n  goal \"Keep live metadata.\"\n  concurrent-runs max=10\n{steps}}}"
@@ -16921,6 +17838,7 @@ mission "example/zero-run" state="ready" {
         )
         .unwrap();
         assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["visualization"]["version"], "fractal.visualization.v0");
         assert_eq!(
             details[0]["visualization"]["mission"],
             "mission/example/zero-run"
@@ -18680,11 +19598,11 @@ mission "example/zero-run" state="ready" {
         .unwrap();
         assert_eq!(page["items"].as_array().unwrap().len(), 20);
         assert_eq!(page["page"]["has_more"], true);
-        // A relayed owner read negotiates conversation blocks, so it also reads the newest 200
-        // entries its header summarizes; the frame itself is still the 20 asked for.
+        // The owner folds the newest 200 entries for its header, but only prepares
+        // display bodies for the page and its has-more probe.
         assert_eq!(
             conversation_blocks::prepared_bodies(),
-            CLIENT_MAX_PAGE_ITEMS,
+            21,
             "the owner prepared {} bodies for a 20-entry relayed frame",
             conversation_blocks::prepared_bodies()
         );
@@ -22951,6 +23869,7 @@ mission "example/zero-run" state="ready" {
             .collect::<Vec<_>>();
         assert_eq!(lifecycle.len(), 2);
         for claim in lifecycle {
+            assert!(trusted_terminal_attachment(&restarted, &claim, &session).unwrap());
             let projected = safe_event_projection(
                 &restarted,
                 &EventRecord {
@@ -23402,6 +24321,75 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_operations_mark_attach_consume_and_detach_records() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        state.store.append_claim(&ClaimInput {
+            subject: "agent/terminal-owner".into(), kind: "runtime.observed".into(),
+            actor: Some("agent/terminal-owner".into()),
+            fields: serde_json::from_value(json!({
+                "runtime_id":"terminal-runtime", "incarnation_id":"terminal-runtime:i1",
+                "status":"running", "terminal":true
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let Json(attachment) = raw_terminal::attachment(
+            State(state.clone()), Extension(session.clone()), AxumPath("agent/terminal-owner".into()),
+            Json(serde_json::from_value(json!({
+                "runtime_incarnation":"terminal-runtime:i1", "mode":"attach"
+            })).unwrap()),
+        ).await.unwrap();
+        let capability = attachment["stream_capability"].as_str().unwrap();
+        let attached = state.store.claims_for_kind_at(
+            "custom.client.terminal-attached", None, true, 1,
+        ).unwrap().claims.remove(0);
+        assert!(trusted_terminal_attachment(&state, &attached, &session).unwrap());
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "terminal-peer");
+        let retained = |kind: &str| {
+            peer.store.append_claim(&ClaimInput {
+                subject:attached.subject.clone(),kind:kind.into(),actor:attached.actor.clone(),
+                fields:serde_json::from_value(attached.body["fields"].clone()).unwrap(),
+                evidence:vec![],expected_subject:None,idempotency_key:None,
+            }).unwrap();
+            let exchange = peer.store.export_replication_exchange(
+                "terminal-fleet", &state.store.replication_inventory().unwrap(),
+            ).unwrap();
+            state.store.receive_replication_exchange(peer.store.origin(), "terminal-fleet", &exchange).unwrap();
+            state.store.validate_replication_backlog().unwrap();
+            state.store.project_replication_backlog().unwrap();
+        };
+        retained("custom.client.terminal-attached");
+        retained("custom.client.terminal-consumed");
+        let attachment_id = attached.body["fields"]["attachment_id"].as_str().unwrap();
+        assert_eq!(terminal_attachment_response(&state, &session, attachment_id).unwrap()["state"], "available");
+        consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).unwrap();
+        assert!(consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).is_err());
+        retained("custom.client.terminal-detached");
+        assert_eq!(terminal_attachment_response(&state, &session, attachment_id).unwrap()["state"], "consumed");
+        detach_terminal_attachment(&state, &session, &ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id:"action/detach-marked".into(),
+            action_type:"terminal.detach".into(), idempotency_key:"detach-marked".into(),
+            fence: Fence { runtime_incarnation:Some("terminal-runtime:i1".into()), ..Fence::default() },
+            parameters:json!({"target_id":attachment_id}),
+        }).unwrap();
+        let claims = state.store.claims_for(&attached.subject, None).unwrap();
+        assert_eq!(claims.len(), 6);
+        let admitted = claims.iter().filter(|claim| trusted_terminal_attachment(&state, claim, &session).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(admitted.len(), 3);
+        assert_eq!(admitted[1].kind, "custom.client.terminal-consumed");
+        assert_eq!(admitted[2].kind, "custom.client.terminal-detached");
+    }
+
     #[test]
     fn raw_capability_refuses_changed_selected_owner_or_runtime() {
         for (bound_owner, bound_runtime) in [("host/another-owner", "r"), ("host/matrix-owner", "old")] {
@@ -23425,7 +24413,7 @@ mission "example/zero-run" state="ready" {
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
             let capability = "matrix-capability";
-            state.store.append_claim(&ClaimInput {
+            state.store.append_client_operation_claim(&ClaimInput {
                 subject: terminal_attachment_subject("terminal-attachment/matrix").unwrap(),
                 kind: "custom.client.terminal-attached".into(),
                 actor: Some(session_claim_actor(&session)),
@@ -23867,6 +24855,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,
@@ -24046,14 +25035,14 @@ mission "example/zero-run" state="ready" {
 
     #[test]
     fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
-        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
-        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
-        // freshness window nearly all the time, never older than a heartbeat.
+        // An idle report remains current through the shared freshness window; after that it
+        // still proves liveness until the separate heartbeat grace period expires.
         let started = 1_790_000_000_000_u64;
         for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
             let mut card = sessionless_card(json!("indeterminate"));
             overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
-            assert_eq!(card["state"], "waiting", "{age}");
+            let current = u128::from(age) <= fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+            assert_eq!(card["state"], if current { "running" } else { "waiting" }, "{age}");
             assert!(card.get("down_since").is_none(), "{age}");
             assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
         }
@@ -24251,6 +25240,7 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "status-cache");
         let subject = "agent/cedar";
+        let stale_age = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis() + 1_000;
         let append = |kind: &str, fields: Value| {
             state.store.append_claim(&ClaimInput {
                 subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
@@ -24259,7 +25249,7 @@ mission "example/zero-run" state="ready" {
             }).unwrap()
         };
         append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
-        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - 91_000) as u64}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - stale_age) as u64}));
         let index = state.store.index().unwrap();
         let before = client_agent_resources(&state.store, false, "", index).unwrap();
         let before = before.iter().find(|item| item["id"] == subject).unwrap();
@@ -24274,7 +25264,7 @@ mission "example/zero-run" state="ready" {
         peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
-        cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
+        cached_harness.observed_at_unix_ms = client_now_ms() - stale_age;
         aged[0]["_status_source"] = json!(cached_harness);
         let mut on_host = aged.clone();
         overlay_agent_resources(&peer.store, &mut aged, "").unwrap();

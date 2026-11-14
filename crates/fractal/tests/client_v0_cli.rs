@@ -18,12 +18,14 @@ use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "client-v0-cli".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.to_path_buf(),
         pty_root: root.join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -35,6 +37,69 @@ fn test_state(root: &Path) -> AppState {
         harness_question_sink: None,
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn sender_outcome_fixtures_render_raw_status_and_delivery_reason() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/fixtures/message-sender-outcomes.json")).unwrap();
+    for message in cases["items"].as_array().unwrap() {
+        let phase = message["state"].as_str().unwrap();
+        let reason = match phase {
+            "expired" => "cutoff-uncertain-attempt",
+            "delivered" => "the native transport accepted the message; waiting for recipient read",
+            "read" => "the recipient has read the message",
+            _ => panic!("unexpected fixture state"),
+        };
+        let case = serde_json::json!({
+            "id":message["id"], "subject":message["id"], "from":message["from"], "to":message["to"],
+            "content":message["content"], "created_index":1, "status":phase, "status_from":message["status_from"],
+            "delivery":{"phase":phase, "state":if phase == "delivered" { "pending" } else { phase }, "reason":reason}
+        });
+        for list in [false, true] {
+            for json in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let socket = root.path().join("sender.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let response = if list {
+                    serde_json::json!({"items":[case], "limit":100, "has_more":false, "next_cursor":null})
+                } else { case.clone() };
+                let response = serde_json::json!({"api_version":"fractal.v1", "value":response}).to_string();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let mut byte = [0];
+                        assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                        request.push(byte[0]);
+                    }
+                    stream.write_all(format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response.len(), response).as_bytes()).await.unwrap();
+                });
+                let args = if list { vec!["conversations", "ls", "agent/sender"] }
+                    else { vec!["conversations", "status", case["id"].as_str().unwrap()] };
+                let output = if json { run_cli(&socket, &args).await }
+                    else { run_cli_human(&socket, &args).await };
+                assert!(output.status.success(), "{}", failure(&output));
+                if json {
+                    let value = value(&output);
+                    if list { assert_eq!(value[0]["status"], case["status"]); }
+                    else { assert_eq!(value["delivery"], case["delivery"]); }
+                } else {
+                    let text = String::from_utf8(output.stdout).unwrap();
+                    assert!(text.contains(case["status"].as_str().unwrap()), "{text}");
+                    if !list {
+                        assert!(text.contains(case["delivery"]["reason"].as_str().unwrap()), "{text}");
+                    } else {
+                        assert!(!text.contains("unknown"), "{text}");
+                    }
+                }
+                server.await.unwrap();
+            }
+        }
     }
 }
 
@@ -497,6 +562,22 @@ async fn serve_for_test(socket: &Path, router: axum::Router) -> tokio::task::Joi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clients_cli_reports_its_fractal_machine_version() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let server = serve_for_test(&socket, fractal_daemon::api::router(test_state(root.path()))).await;
+    let listed = value(&run_cli(&socket, &["clients"]).await);
+    let version = value(&run_cli(&socket, &["--version"]).await);
+    let expected = format!("fractal {}", version["machine_version"].as_str().unwrap());
+    let items = listed["value"]["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| item["client"].as_str() == Some(expected.as_str())),
+        "{listed}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the_agent_asks() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
@@ -524,6 +605,138 @@ async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the
     assert!(none.status.success(), "{none:?}");
     assert_eq!(String::from_utf8_lossy(&none.stdout), "none this host's daemon has no lane bursts\n");
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_burst_cli_renews_as_held_and_says_lost_gives_back_and_fails_once_a_grant_is_not_renewed() {
+    use std::sync::Mutex;
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    // A daemon that grants with a 3 s lease, then answers the holder's renewal as a new ask, as a
+    // daemon that restarted and no longer finds the burst in the seat's slice does.
+    let asks = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let released = Arc::new(Mutex::new(0));
+    let (posted, deleted) = (asks.clone(), released.clone());
+    let router = axum::Router::new().route("/v1/agents/lane/burst", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+        let asks = posted.clone();
+        async move {
+            let mut asks = asks.lock().unwrap();
+            asks.push(body);
+            let value = if asks.len() == 1 {
+                serde_json::json!({"state": "granted", "lease_secs": 3})
+            } else {
+                serde_json::json!({"state": "waiting", "why": "burst lane for agent/garden/builder waits behind agent/garden/other", "lease_secs": 3})
+            };
+            axum::Json(serde_json::json!({"api_version": "st3.v1", "value": value}))
+        }
+    }).delete(move || {
+        let released = deleted.clone();
+        async move {
+            *released.lock().unwrap() += 1;
+            axum::Json(serde_json::json!({"api_version": "st3.v1", "value": {"released": true}}))
+        }
+    }));
+    let server = serve_for_test(&socket, router).await;
+    let binary = test_bin!("fractal-fixture").to_path_buf();
+    let holder = tokio::task::spawn_blocking(move || {
+        let mut command = fractal_daemon::test_support::command(binary);
+        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
+            .arg("--endpoint").arg(&socket)
+            .args(["agents", "burst", "garden/builder", "--cores", "8", "--memory", "24G", "--reason", "st-test", "--as", "agent/garden/builder"])
+            // Its stdin stays open, as st-test's does while the run holds the burst.
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let stdin = child.stdin.take();
+        let output = child.wait_with_output().unwrap();
+        drop(stdin);
+        output
+    });
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), holder).await.expect("the holder ends by itself").unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout),
+        "granted 8 24G\nlost burst lane for agent/garden/builder waits behind agent/garden/other\n", "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lane burst lost"), "{output:?}");
+    let asks = asks.lock().unwrap();
+    assert_eq!(asks.iter().map(|ask| ask["held"].clone()).collect::<Vec<_>>(), [Value::Bool(false), Value::Bool(true)]);
+    assert_eq!(*released.lock().unwrap(), 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_burst_cli_s_held_renewal_reaches_a_restarted_daemon_well_inside_the_lease_and_a_failed_one_is_retried_soon() {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    // Each daemon records when each ask reached it. The first grants with a 30 s lease (a renewal
+    // every 10 s); the one after the restart fails the first renewal it hears and grants the next.
+    type Asks = Arc<Mutex<Vec<(Instant, Value)>>>;
+    let daemon = |asks: Asks, released: Arc<Mutex<u32>>, fail_first: bool| {
+        axum::Router::new().route("/v1/agents/lane/burst", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+            let asks = asks.clone();
+            async move {
+                let mut asks = asks.lock().unwrap();
+                asks.push((Instant::now(), body));
+                if fail_first && asks.len() == 1 {
+                    return (axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({"code": "fixture-starting", "message": "the daemon is still starting"})));
+                }
+                (axum::http::StatusCode::OK, axum::Json(serde_json::json!({"api_version": "st3.v1",
+                    "value": {"state": "granted", "lease_secs": 30}})))
+            }
+        }).delete(move || {
+            let released = released.clone();
+            async move {
+                *released.lock().unwrap() += 1;
+                axum::Json(serde_json::json!({"api_version": "st3.v1", "value": {"released": true}}))
+            }
+        }))
+    };
+    let (before, after) = (Asks::default(), Asks::default());
+    let released = Arc::new(Mutex::new(0));
+    let first = serve_for_test(&socket, daemon(before.clone(), released.clone(), false)).await;
+    let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
+        .arg("--endpoint").arg(&socket)
+        .args(["agents", "burst", "garden/builder", "--cores", "8", "--memory", "24G", "--reason", "st-test", "--as", "agent/garden/builder"])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let stdin = child.stdin.take();
+    let until = |asks: Asks, count: usize| async move {
+        tokio::time::timeout(Duration::from_secs(40), async {
+            while asks.lock().unwrap().len() < count {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("the holder asks");
+    };
+    until(before.clone(), 1).await;
+    let granted_at = before.lock().unwrap()[0].0;
+    // The daemon restarts: its socket goes away before the holder's first renewal is due and is
+    // back two seconds after it, so that renewal meets a missing socket.
+    first.abort();
+    let _ = std::fs::remove_file(&socket);
+    tokio::time::sleep((granted_at + Duration::from_secs(12)).saturating_duration_since(Instant::now())).await;
+    let second = serve_for_test(&socket, daemon(after.clone(), released.clone(), true)).await;
+    let listening = Instant::now();
+    until(after.clone(), 2).await;
+    drop(stdin);
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap()).await.unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "granted 8 24G\n", "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("WARN renewing the lane burst"), "{output:?}");
+    assert_eq!(before.lock().unwrap().len(), 1, "the first daemon heard only the ask");
+    let after = after.lock().unwrap();
+    assert!(after.iter().all(|(_, ask)| ask["held"] == Value::Bool(true)), "{after:?}");
+    // The renewal that met the missing socket waits for it and reaches the new daemon at once.
+    let reconnect = after[0].0.saturating_duration_since(listening);
+    assert!(reconnect < Duration::from_secs(3), "the renewal reached the restarted daemon {reconnect:?} after it listened");
+    // The failed renewal is tried again after the 5 s poll, not a whole 10 s renewal later.
+    let retry = after[1].0 - after[0].0;
+    assert!(retry < Duration::from_secs(8), "a failed held renewal was retried after {retry:?}");
+    // Both land far inside the lease a restarted daemon keeps a raise found at start for.
+    assert!(after[1].0 - listening < Duration::from_secs(30), "{:?}", after[1].0 - listening);
+    assert_eq!(*released.lock().unwrap(), 1);
+    second.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -644,7 +857,7 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
                 "entry_type":"usage","final":true,"driver":"codex",
                 "incarnation_id":"inc-one","sequence":1,
                 "body":{"semantics":"response","model":"gpt-6.1-sol",
-                    "input_tokens":1000,"output_tokens":100,"total_tokens":1100}
+                    "input_tokens":1000,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":1100}
             }),
         );
         let rollup = store
@@ -2224,6 +2437,8 @@ mission "release-report" state="ready" {
                     "Release notes are ready",
                     "--body",
                     "The notes cover all three fixes.",
+                    "--speech",
+                    "Your release notes are ready.",
                     "--as",
                     &actor,
                     "--idempotency-key",
@@ -2247,6 +2462,7 @@ mission "release-report" state="ready" {
     // Not a request: clients that predate updates read it as a free-text card.
     assert!(item["request"].is_null(), "{item}");
     assert_eq!(item["update"]["about"], run.subject);
+    assert_eq!(item["update"]["speech"], "Your release notes are ready.");
     assert_eq!(
         item["action_parameters"]["work.done"]["answer"],
         serde_json::json!({"id": "read"})
@@ -2270,6 +2486,13 @@ mission "release-report" state="ready" {
     }
     let still_open = client.attention_list(None, None, false).await.unwrap();
     assert_eq!(still_open.value.items.len(), 1);
+    let fractal_client::Resource::Attention(card) = &still_open.value.items[0] else {
+        panic!("expected an attention card");
+    };
+    assert_eq!(
+        card.update.as_ref().and_then(|update| update.speech.as_deref()),
+        Some("Your release notes are ready.")
+    );
     assert_eq!(store.step_run(&subject).unwrap().unwrap().status, "ready");
 
     let opened = run_cli_human(
@@ -2433,7 +2656,7 @@ mission "cli/child" state="ready" {
         .unwrap();
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: "custom/client/cli-device".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),
@@ -2471,7 +2694,7 @@ mission "cli/child" state="ready" {
     assert!(socket.exists(), "client-v0 test socket did not appear");
 
     let now = value(&run_cli(&socket, &["now", "--as", "person/alex"]).await);
-    assert_eq!(now["api_version"], "st3.client.v0");
+    assert_eq!(now["api_version"], "fractal.client.v0");
     assert_eq!(now["value"]["collection"], "now");
     assert_eq!(now["value"]["filters"]["person"], "person/alex");
 
@@ -2484,7 +2707,7 @@ mission "cli/child" state="ready" {
         vec!["terminals", "ls"],
     ] {
         let page = value(&run_cli(&socket, &arguments).await);
-        assert_eq!(page["api_version"], "st3.client.v0", "{arguments:?}");
+        assert_eq!(page["api_version"], "fractal.client.v0", "{arguments:?}");
         assert_eq!(page["value"]["kind"], "page", "{arguments:?}");
         assert!(page["value"]["items"].is_array(), "{arguments:?}");
         assert!(page["value"]["filters"].is_object(), "{arguments:?}");
@@ -2524,7 +2747,7 @@ mission "cli/child" state="ready" {
     assert!(first_agent["value"]["page"]["next_cursor"].is_string());
 
     let machines = value(&run_cli(&socket, &["machines"]).await);
-    assert_eq!(machines["api_version"], "st3.client.v0");
+    assert_eq!(machines["api_version"], "fractal.client.v0");
     assert_eq!(machines["value"]["items"][0]["id"], "machine/client-v0-cli");
     assert_eq!(machines["value"]["items"][0]["kind"], "machine");
     assert_eq!(
@@ -2617,7 +2840,7 @@ mission "cli/child" state="ready" {
     );
 
     let activity = value(&run_cli(&socket, &["activity", "--limit", "10"]).await);
-    assert_eq!(activity["api_version"], "st3.client.v0");
+    assert_eq!(activity["api_version"], "fractal.client.v0");
     assert_eq!(activity["value"]["kind"], "event-page");
 
     let devices = value(&run_cli(&socket, &["devices", "--as", "person/alex"]).await);
@@ -2631,7 +2854,7 @@ mission "cli/child" state="ready" {
         )
         .await,
     );
-    assert_eq!(pairing["api_version"], "st3.client.v0");
+    assert_eq!(pairing["api_version"], "fractal.client.v0");
     assert_eq!(pairing["value"]["kind"], "pairing-challenge");
 
     let revoked = value(
@@ -2641,7 +2864,7 @@ mission "cli/child" state="ready" {
         )
         .await,
     );
-    assert_eq!(revoked["api_version"], "st3.client.v0");
+    assert_eq!(revoked["api_version"], "fractal.client.v0");
     assert_eq!(revoked["value"]["status"], "completed");
 
     let current = value(&run_cli(&socket, &["devices", "--as", "person/alex"]).await);
@@ -2725,7 +2948,7 @@ agent "queue-chief" {
 mission "queued-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step in each run."
-  step "work" { assigned-to "agent/queue-seat" }
+  step "work" { assigned-to "agent/client-v0-cli.queue-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-cli").unwrap();
@@ -2779,7 +3002,7 @@ mission "queued-work" state="ready" {
 
     let queue =
         value(&run_queue_cli(&socket, &config_home, true, &["agents", "queue", &seat]).await);
-    assert_eq!(queue["api_version"], "st3.client.v0");
+    assert_eq!(queue["api_version"], "fractal.client.v0");
     assert_eq!(queue["value"]["kind"], "agent-queue");
     assert_eq!(queue["value"]["next_work_id"], step(0));
 
@@ -3015,10 +3238,10 @@ async fn agents_and_missions_show_print_what_the_worker_last_reported() {
 agent "reporter" { workspace "/tmp"; command "true" }
 mission "reported-work" state="ready" {
   goal "Show what the worker said."
-  step "docs" { assigned-to "agent/reporter" }
+  step "docs" { assigned-to "agent/client-v0-cli.reporter" }
   step "build" {
     title "Build the parser"
-    assigned-to "agent/reporter"
+    assigned-to "agent/client-v0-cli.reporter"
   }
 }
 "#;
@@ -3207,7 +3430,7 @@ agent "queued-alias-seat" { workspace "/tmp"; command "true" }
 mission "queued-alias-work" state="ready" {
   concurrent-runs
   goal "Give the durable seat one step."
-  step "work" { assigned-to "agent/queued-alias-seat" }
+  step "work" { assigned-to "agent/client-v0-cli.queued-alias-seat" }
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, "client-v0-cli").unwrap();
@@ -3773,13 +3996,44 @@ async fn serve_creation_api(
     root: &Path,
     harness_state: Option<&'static str>,
 ) -> (PathBuf, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
+    serve_creation_api_with_read_gate(root, harness_state, None).await
+}
+
+#[derive(Default)]
+struct CreationReadGate {
+    created: std::sync::atomic::AtomicBool,
+    reads: std::sync::atomic::AtomicUsize,
+    event_waits: std::sync::atomic::AtomicUsize,
+    entered: Notify,
+    release: Notify,
+}
+
+async fn serve_creation_api_with_read_gate(
+    root: &Path,
+    harness_state: Option<&'static str>,
+    gate: Option<Arc<CreationReadGate>>,
+) -> (PathBuf, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
     let socket = root.join("st3.sock");
     let state = test_state(root);
     let store = state.store.clone();
     let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let store = store.clone();
+            let gate = gate.clone();
             async move {
+                use std::sync::atomic::Ordering;
+                if let Some(gate) = &gate {
+                    if request.uri().path().starts_with("/v1/client/agents/")
+                        && gate.created.load(Ordering::SeqCst)
+                        && gate.reads.fetch_add(1, Ordering::SeqCst) == 0
+                    {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                    if request.uri().path() == "/v1/events/page" {
+                        gate.event_waits.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 // This fixture supplies provider observations without launching a binary.
                 if request.uri().path() == "/v1/harnesses" {
                     return axum::response::IntoResponse::into_response(axum::Json(serde_json::json!({
@@ -3823,6 +4077,11 @@ async fn serve_creation_api(
                             })
                             .unwrap();
                     }
+                }
+                if applied && response.status().is_success()
+                    && let Some(gate) = &gate
+                {
+                    gate.created.store(true, Ordering::SeqCst);
                 }
                 response
             }
@@ -3978,6 +4237,154 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_start_uses_the_declared_workspace_on_a_remote_placement() {
+    // A declared agent placed on another member keeps its declaration's workspace when a
+    // different member starts it: the caller's own directory must not leak into the agent.
+    let root = tempfile::tempdir().unwrap();
+    let (socket, server) = serve_creation_api(root.path(), None).await;
+    let declared = "/srv/example-remote/dotfiles-build-capacity";
+    let source = root.path().join("remote.kdl");
+    std::fs::write(
+        &source,
+        format!(
+            "version 2\nhost \"distant\" {{\n agent \"dotfiles/build-capacity\" {{\n  workspace {declared:?}\n  harness \"omp\" {{}}\n  restart always\n }}\n}}\n"
+        ),
+    )
+    .unwrap();
+    value(
+        &run_cli(
+            &socket,
+            &["apply", "--no-gate-check", source.to_str().unwrap(),
+            "--as",
+            "person/avery",],
+        )
+        .await,
+    );
+    let subject = "agent/dotfiles/build-capacity";
+    let original = agent_declaration(&socket, subject).await;
+    assert_eq!(
+        original.member.as_ref().map(|member| member.host.as_str()),
+        Some("distant")
+    );
+    // The fixture daemon answers as another member, so the declared placement is remote and
+    // the declared workspace does not exist on this machine.
+    assert!(!std::path::Path::new(declared).exists());
+    let preview = run_cli(
+        &socket,
+        &["agents", "start", subject, "--as", "person/avery", "--print-kdl"],
+    )
+    .await;
+    assert!(preview.status.success(), "{preview:?}");
+    let intent =
+        fractal_daemon::parse_intent(&String::from_utf8(preview.stdout).unwrap(), "client-v0-cli")
+            .unwrap();
+    assert_eq!(intent.subjects[subject].member, original.member);
+    value(&run_cli(&socket, &["agents", "start", subject, "--as", "person/avery"]).await);
+    assert_eq!(
+        agent_declaration(&socket, subject).await.member,
+        original.member
+    );
+    // A workspace override names a path on the placement host: it is published as written
+    // even when the caller's machine has no such path.
+    let missing = root.path().join("not-created-on-the-caller");
+    assert!(!missing.exists());
+    value(
+        &run_cli(
+            &socket,
+            &[
+                "agents",
+                "start",
+                subject,
+                "--as",
+                "person/avery",
+                "--workspace",
+                missing.to_str().unwrap(),
+            ],
+        )
+        .await,
+    );
+    let changed = agent_declaration(&socket, subject).await;
+    let mut expected = original.member.unwrap();
+    expected.workspace = missing.to_str().unwrap().into();
+    expected.cwd = expected.workspace.clone();
+    assert_eq!(changed.member, Some(expected));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_start_asks_the_placement_host_to_name_a_new_agents_workspace() {
+    // A new agent placed on another member without --workspace gets the directory that member
+    // names through the relay, and the member creates it when the agent starts.
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let owner_root = root.path().join("distant");
+    std::fs::create_dir_all(&owner_root).unwrap();
+    let owner_socket = owner_root.join("st3.sock");
+    let owner = AppState {
+        store: Arc::new(Store::open_memory("distant").unwrap()),
+        node: "distant".into(),
+        ..test_state(&owner_root)
+    };
+    let owner_server = serve_for_test(&owner_socket, fractal_daemon::api::router(owner)).await;
+    let peer = smallclaims::sync::PeerState::new(
+        fractal_daemon::peer::MainBackend::new(owner_socket),
+        "distant".into(),
+        fractal_daemon::peer::FleetAuth::test("fleet-test", &[7; 32]),
+        smallclaims::sync::FleetContext::legacy(["client-v0-cli".to_owned()].into()),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer_server = tokio::spawn(async move {
+        let routes =
+            fractal_daemon::peer::fractal_routes(fractal_daemon::api::raw_terminal_owner_splice);
+        axum::serve(listener, smallclaims::sync::peer_router(peer, routes)).await
+    });
+    let secret = root.path().join("fleet-secret");
+    std::fs::write(&secret, [7_u8; 32]).unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut gateway = test_state(root.path());
+    gateway.client_relay =
+        fractal_daemon::peer::ClientRelay::from_config(&fractal_daemon::config::Config {
+            node: "client-v0-cli".into(),
+            fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            peers: vec![fractal_daemon::config::PeerConfig {
+                name: "distant".into(),
+                url: format!("http://{address}"),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    let socket = root.path().join("st3.sock");
+    let server = serve_for_test(&socket, fractal_daemon::api::router(gateway)).await;
+    let subject = "agent/example/routed";
+    let named = fractal_daemon::config::default_agent_workspace(subject)
+        .unwrap()
+        .display()
+        .to_string();
+    let args = ["agents", "start", subject, "--host", "distant", "--as", "person/avery"];
+    let preview = run_cli(&socket, &[&args[..], &["--print-kdl"][..]].concat()).await;
+    assert!(preview.status.success(), "{}", String::from_utf8_lossy(&preview.stderr));
+    let intent =
+        fractal_daemon::parse_intent(&String::from_utf8(preview.stdout).unwrap(), "client-v0-cli")
+            .unwrap();
+    let member = intent.subjects[subject].member.as_ref().unwrap();
+    assert_eq!(
+        (member.host.as_str(), member.workspace.as_str(), member.workspace_create),
+        ("distant", named.as_str(), true)
+    );
+    value(&run_cli(&socket, &args).await);
+    let declared = agent_declaration(&socket, subject).await.member.unwrap();
+    assert_eq!(
+        (declared.host.as_str(), declared.workspace.as_str(), declared.workspace_create),
+        ("distant", named.as_str(), true)
+    );
+    server.abort();
+    peer_server.abort();
+    owner_server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agents_start_patches_only_explicit_typed_harness_fields() {
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve_creation_api(root.path(), None).await;
@@ -4063,6 +4470,10 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
 async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
     let root = tempfile::tempdir().unwrap();
     let (socket, server) = serve_creation_api(root.path(), None).await;
+    // No member reaches `placement`, so these starts name its workspace: a path for another
+    // member is published as written.
+    let workspace = root.path().join("on-the-placement");
+    let workspace = workspace.to_str().unwrap();
     for (identity, subject) in [
         ("example/worker", "agent/example/worker"),
         ("agent/example/worker", "agent/example/worker"),
@@ -4077,6 +4488,8 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
                 identity,
                 "--host",
                 "placement",
+                "--workspace",
+                workspace,
                 "--as",
                 "person/avery",
             ],
@@ -4095,6 +4508,8 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
                 identity,
                 "--host",
                 "placement",
+                "--workspace",
+                workspace,
                 "--as",
                 "person/avery",
                 "--print-kdl",
@@ -4105,6 +4520,37 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
         let kdl = String::from_utf8(preview.stdout).unwrap();
         let intent = fractal_daemon::parse_intent(&kdl, "client-v0-cli").unwrap();
         assert!(intent.subjects.contains_key(subject), "{kdl}");
+        assert_eq!(
+            intent.subjects[subject]
+                .member
+                .as_ref()
+                .map(|member| member.workspace.as_str()),
+            Some(workspace),
+            "{kdl}"
+        );
+    }
+    // Without --workspace a new agent there gets the directory `placement` names, and an
+    // unreachable host names none: the start fails rather than borrowing a local path.
+    for preview in [false, true] {
+        let mut args = vec![
+            "agents",
+            "start",
+            "agent/example/unrouted",
+            "--host",
+            "placement",
+            "--as",
+            "person/avery",
+        ];
+        if preview {
+            args.push("--print-kdl");
+        }
+        let error = failure(&run_cli(&socket, &args).await);
+        assert!(
+            error.contains(
+                "placement did not name a workspace for `agent/example/unrouted`; pass --workspace"
+            ),
+            "{error}"
+        );
     }
     for preview in [false, true] {
         let mut args = vec![
@@ -4124,10 +4570,12 @@ async fn agents_start_accepts_explicit_identity_and_rejects_doubled_prefixes() {
         assert!(error.contains("ID or agent/ID"), "{error}");
     }
     let agents = value(&run_cli(&socket, &["agents", "ls", "--all"]).await);
-    assert!(
-        !agents.to_string().contains("accidental"),
-        "rejected identity created a seat: {agents}"
-    );
+    for refused in ["accidental", "unrouted"] {
+        assert!(
+            !agents.to_string().contains(refused),
+            "a refused start created a seat: {agents}"
+        );
+    }
     server.abort();
 }
 
@@ -4197,6 +4645,98 @@ async fn new_agent_explains_ready_starting_and_waiting_states_and_preserves_json
             }
         }
         server.abort();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_agent_observes_its_state_when_the_first_read_outlasts_the_ready_wait() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    for (harness, json) in [(Some("ready"), true), (Some("blocked"), false), (None, false)] {
+        let root = fractal_daemon::test_support::canonical_tempdir();
+        let gate = Arc::new(CreationReadGate::default());
+        let (socket, server) = serve_creation_api_with_read_gate(
+            root.path(), harness, Some(gate.clone()),
+        ).await;
+        let workspace = root.path().display().to_string();
+        let command = tokio::spawn(async move {
+            run_cli_mode(&socket, json, &[
+                "agents", "new", "demo", "--harness", "omp", "--model", "example-model",
+                "--workspace", &workspace, "--as", "person/avery", "--timeout", "100ms",
+            ]).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await.expect("the CLI did not start its first post-create agent read");
+        // The request has begun inside the 100 ms readiness wait. Keep it pending until
+        // that budget is certainly spent; the agent observations already exist in the store.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        gate.release.notify_one();
+        let output = tokio::time::timeout(Duration::from_secs(5), command)
+            .await.expect("the CLI did not finish after its current state was released")
+            .unwrap();
+        server.abort();
+        assert_eq!(gate.reads.load(Ordering::SeqCst), 1, "do not retry the cancelled read");
+        assert_eq!(gate.event_waits.load(Ordering::SeqCst), 0,
+            "an elapsed readiness budget must not start another event wait");
+        match harness {
+            Some("ready") => assert_eq!(value(&output)["harness_state"], "ready"),
+            Some("blocked") => {
+                assert!(!output.status.success());
+                assert!(String::from_utf8_lossy(&output.stdout).contains("Waiting for you"));
+                assert!(String::from_utf8_lossy(&output.stderr).contains("waiting for your input"));
+            }
+            None => {
+                assert!(!output.status.success());
+                assert!(String::from_utf8_lossy(&output.stdout).contains("Still starting"));
+                assert!(String::from_utf8_lossy(&output.stderr).contains("not ready after 100ms"));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_agent_reports_unknown_when_its_state_read_outlasts_the_grace() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    for json in [false, true] {
+        let root = fractal_daemon::test_support::canonical_tempdir();
+        let gate = Arc::new(CreationReadGate::default());
+        let (socket, server) = serve_creation_api_with_read_gate(
+            root.path(), Some("ready"), Some(gate.clone()),
+        ).await;
+        let workspace = root.path().display().to_string();
+        let started = std::time::Instant::now();
+        let command = tokio::spawn(async move {
+            run_cli_mode(&socket, json, &[
+                "agents", "new", "demo", "--harness", "omp", "--model", "example-model",
+                "--workspace", &workspace, "--as", "person/avery", "--timeout", "100ms",
+            ]).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await.expect("the CLI did not start its state read");
+        // Hold the read until the CLI itself ends its grace, without releasing or retrying it.
+        let output = tokio::time::timeout(Duration::from_secs(5), command)
+            .await.expect("the state read did not stop at its grace limit")
+            .unwrap();
+        gate.release.notify_one();
+        server.abort();
+        assert!(started.elapsed() >= Duration::from_secs(2), "the read lost its grace early");
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("current state is unknown"), "{error}");
+        assert!(error.contains("100ms plus a 2s state-read grace"), "{error}");
+        let rendered = String::from_utf8_lossy(&output.stdout);
+        if json {
+            assert!(rendered.is_empty(), "do not publish an invented agent state: {rendered}");
+        } else {
+            assert!(rendered.contains("Unknown"), "{rendered}");
+            assert!(!rendered.contains("Still starting"), "{rendered}");
+        }
+        assert_eq!(gate.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.event_waits.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -4751,6 +5291,281 @@ async fn note_cli_harness_cannot_write_or_borrow_configured_person() {
         assert!(!refusal.contains("daemon"), "{refusal}");
     }
 }
+
+/// A daemon on a private socket and a client config whose person is `person`.
+async fn availability_fixture(
+    root: &Path,
+    person: &str,
+) -> (Arc<Store>, PathBuf, PathBuf, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let config_home = root.join("config");
+    std::fs::create_dir_all(config_home.join("st3")).unwrap();
+    std::fs::write(config_home.join("st3/config.toml"), format!("person = \"{person}\"\n")).unwrap();
+    let state = test_state(root);
+    let store = state.store.clone();
+    let socket = root.join("st3.sock");
+    let served = socket.clone();
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix_with_ready(&served, fractal_daemon::api::router(state), || {
+            ready.send(()).unwrap();
+        })
+        .await
+    });
+    started.await.unwrap();
+    (store, socket, config_home, server)
+}
+
+/// Declare `agent/<origin>.NAME` authored by `person`, so the agent works for that person.
+fn declare_agent_for(store: &Store, name: &str, person: &str) -> String {
+    let source = format!("version 2\nagent \"{name}\" {{ workspace \"/tmp\"; command \"true\" }}");
+    let intent = fractal_daemon::graph::parse_intent(&source, store.origin()).unwrap();
+    let preview = store
+        .mission(&intent, IntentInput { kdl: source.clone(), source_name: None })
+        .unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, &format!("declare-{name}"), Some(person)).unwrap();
+    format!("agent/{}.{name}", store.origin())
+}
+
+fn rfc3339_ms(value: &Value) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap()).unwrap().timestamp_millis()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn availability_cli_person_sets_reports_presence_and_clears() {
+    let root = tempfile::tempdir().unwrap();
+    let (_store, socket, config_home, server) = availability_fixture(root.path(), "person/ada").await;
+    let cli = |json: bool, args: &'static [&'static str]| run_lane_cli(&socket, &config_home, None, json, args);
+
+    let fresh = value(&cli(true, &["availability"]).await);
+    assert_eq!(fresh["people"].as_array().unwrap().len(), 1);
+    let own = &fresh["people"][0];
+    assert_eq!(own["person"], "person/ada");
+    assert_eq!(own["status"], "available", "with no device reporting, agents ask normally");
+    assert_eq!(own["status_source"], "unreported");
+    assert_eq!(own["presence"], "unreported");
+    assert_eq!(own["interruptions"], "all");
+    assert_eq!(own["deadline_clock"], "run");
+
+    let before = chrono::Utc::now().timestamp_millis();
+    let set = value(&cli(true, &["availability", "set", "--status", "away", "--for", "1h"]).await);
+    let after = chrono::Utc::now().timestamp_millis();
+    assert_eq!(set["status"], "away");
+    assert_eq!(set["status_source"], "override");
+    let until = rfc3339_ms(&set["status_until"]);
+    assert!((before + 3_600_000..=after + 3_600_000).contains(&until), "{set}");
+    let shown = value(&cli(true, &["availability", "show"]).await);
+    assert_eq!(shown["people"][0], set);
+    let human = cli(false, &["availability"]).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.starts_with("person/ada\n"), "{human}");
+    assert!(
+        human.contains(&format!("status          away (set) until {}", set["status_until"].as_str().unwrap())),
+        "{human}"
+    );
+    assert!(human.contains("presence        unreported"), "{human}");
+
+    // With the override cleared and no device reporting, status is available and unreported.
+    let cleared = value(&cli(true, &["availability", "clear", "status"]).await);
+    assert_eq!(cleared["status"], "available");
+    assert_eq!(cleared["status_source"], "unreported");
+    assert!(cleared["status_until"].is_null());
+    // A locked device makes the derived status away; an active one makes it available and
+    // says when to report again if nothing changes (ten minutes after the last input).
+    let locked = value(&cli(true, &["availability", "presence", "locked"]).await);
+    assert_eq!(locked["availability"]["presence"], "locked");
+    assert_eq!(locked["availability"]["status"], "away");
+    assert_eq!(locked["availability"]["status_source"], "presence");
+    assert!(locked["report_again_at"].is_null(), "{locked}");
+    let before = chrono::Utc::now().timestamp_millis();
+    let active = value(&cli(true, &["availability", "presence", "active"]).await);
+    let after = chrono::Utc::now().timestamp_millis();
+    let present = &active["availability"];
+    assert_eq!(present["presence"], "present");
+    assert_eq!(present["status"], "available");
+    assert_eq!(present["status_source"], "presence");
+    assert!(present["presence_observed_at"].is_string());
+    let again = rfc3339_ms(&active["report_again_at"]);
+    assert!((before + 600_000..=after + 600_000).contains(&again), "{active}");
+    let human = cli(false, &["availability", "presence", "active"]).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("presence        present observed "), "{human}");
+    assert!(human.contains("Report again at "), "{human}");
+
+    let held = value(&cli(true, &[
+        "availability", "set", "--interruptions", "none", "--deadline-clock", "hold-all",
+        "--until", "2099-01-01T00:00:00Z",
+    ]).await);
+    assert_eq!(held["interruptions"], "none");
+    assert_eq!(held["interruptions_until"], "2099-01-01T00:00:00.000Z");
+    assert_eq!(held["deadline_clock"], "hold-all");
+    assert!(held["deadline_clock_since"].is_string());
+    assert_eq!(held["deadline_clock_until"], "2099-01-01T00:00:00.000Z");
+    let defaults = value(&cli(true, &["availability", "clear"]).await);
+    assert_eq!(defaults["status"], "available");
+    assert_eq!(defaults["status_source"], "presence");
+    assert_eq!(defaults["interruptions"], "all");
+    assert!(defaults["interruptions_until"].is_null());
+    assert_eq!(defaults["deadline_clock"], "run");
+    assert!(defaults["deadline_clock_since"].is_null() && defaults["deadline_clock_until"].is_null());
+
+    // Another person's read never carries presence.
+    let other = value(&cli(true, &["availability", "--person", "person/ada", "--actor", "person/avery"]).await);
+    assert_eq!(other["people"][0]["person"], "person/ada");
+    assert_eq!(other["people"][0]["status"], "available");
+    assert!(other["people"][0]["presence"].is_null());
+    let invalid: [&'static [&'static str]; 3] = [
+        &["availability", "set", "--status", "away", "--until", "2000-01-01T00:00:00Z"],
+        &["availability", "set", "--status", "away", "--until", "soon"],
+        &["availability", "presence", "inactive", "--observed-at", "2000-01-01T00:00:00Z"],
+    ];
+    for args in invalid {
+        assert!(!cli(true, args).await.status.success(), "{args:?}");
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn availability_cli_agent_reads_without_presence_and_cannot_write() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, socket, config_home, server) = availability_fixture(root.path(), "person/ada").await;
+    let agent = declare_agent_for(&store, "helper", "person/ada");
+    value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "availability", "set", "--status", "away", "--interruptions", "urgent", "--for", "2h",
+    ]).await);
+
+    let read = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &["availability"]).await);
+    let people = read["people"].as_array().unwrap();
+    assert_eq!(people.len(), 1, "{read}");
+    assert_eq!(people[0]["person"], "person/ada");
+    assert_eq!(people[0]["status"], "away");
+    assert_eq!(people[0]["interruptions"], "urgent");
+    assert!(people[0]["presence"].is_null() && people[0]["presence_observed_at"].is_null());
+    let human = run_lane_cli(&socket, &config_home, Some(&agent), false, &["availability"]).await;
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("interruptions   urgent"), "{human}");
+    assert!(!human.contains("presence "), "{human}");
+
+    let index = store.index().unwrap();
+    for args in [
+        vec!["availability", "set", "--status", "available"],
+        vec!["availability", "clear"],
+        vec!["availability", "presence", "active"],
+        vec!["availability", "set", "--status", "available", "--actor", "person/ada"],
+    ] {
+        let refusal = failure(&run_lane_cli(&socket, &config_home, Some(&agent), true, &args).await);
+        assert!(refusal.contains("agent"), "{refusal}");
+    }
+    let explicit = ["availability", "clear", "--actor", agent.as_str()];
+    let refusal = failure(&run_lane_cli(&socket, &config_home, None, true, &explicit).await);
+    assert!(refusal.contains("only a person can change their own availability"), "{refusal}");
+    assert_eq!(store.index().unwrap(), index, "a refused write reached the daemon");
+    server.abort();
+
+    // Refusal happens before any request: no daemon is needed to refuse.
+    let absent = root.path().join("absent.sock");
+    let refusal = failure(&run_lane_cli(&absent, &config_home, Some("agent/helper"), true, &[
+        "availability", "set", "--status", "away",
+    ]).await);
+    assert!(refusal.contains("agent") && !refusal.contains("daemon"), "{refusal}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn availability_surfaces_to_an_asking_agent_in_ask_and_now() {
+    let root = tempfile::tempdir().unwrap();
+    let (store, socket, config_home, server) = availability_fixture(root.path(), "person/ada").await;
+    let agent = declare_agent_for(&store, "asker", "person/ada");
+    let held = value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "availability", "set", "--status", "away", "--interruptions", "urgent",
+        "--deadline-clock", "hold-all", "--until", "2099-01-01T00:00:00Z",
+    ]).await);
+    let since = held["deadline_clock_since"].as_str().unwrap().to_owned();
+    let expected = format!(
+        "person/ada is away until 2099-01-01T00:00:00.000Z; interruptions: urgent until 2099-01-01T00:00:00.000Z; deadline clock: hold-all since {since} until 2099-01-01T00:00:00.000Z"
+    );
+    let ask = [
+        "work", "ask", "--for", "person/ada", "--title", "Choose a release date",
+        "--reason", "The release needs a date", "--new-run", "release-date",
+        "--idempotency-key", "availability-ask",
+    ];
+
+    let asked = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &ask).await);
+    assert!(asked["subject"].as_str().is_some_and(|subject| !subject.is_empty()), "{asked}");
+    let seen = &asked["person_availability"];
+    assert_eq!(seen["person"], "person/ada");
+    assert_eq!(seen["status"], "away");
+    assert_eq!(seen["status_until"], "2099-01-01T00:00:00.000Z");
+    assert_eq!(seen["interruptions"], "urgent");
+    assert_eq!(seen["deadline_clock"], "hold-all");
+    assert!(seen["presence"].is_null(), "an asker never sees raw presence");
+    assert_eq!(asked["urgent"], false);
+    assert!(asked.get("deadline_held").is_none(), "an ask without --deadline has no known deadline to hold: {asked}");
+    let human = run_lane_cli(&socket, &config_home, Some(&agent), false, &ask).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.trim_end().ends_with(&format!("{expected}\nthis ask is not urgent")), "{human}");
+
+    // The person's own Now names their availability before the ask waiting on them.
+    let own = run_lane_cli(&socket, &config_home, None, false, &["now"]).await;
+    assert!(own.status.success(), "{}", String::from_utf8_lossy(&own.stderr));
+    let own = String::from_utf8_lossy(&own.stdout);
+    assert!(own.starts_with(&format!("{expected}\n\n1 alert\n")), "{own}");
+    let own = value(&run_lane_cli(&socket, &config_home, None, true, &["now"]).await);
+    assert_eq!(own["availability"]["people"][0]["person"], "person/ada");
+    assert_eq!(own["availability"]["people"][0]["presence"], "unreported");
+    assert!(own["value"]["items"].as_array().is_some_and(|items| !items.is_empty()), "{own}");
+
+    // An agent reading Now sees the people it works for, without their presence.
+    let seat = run_lane_cli(&socket, &config_home, Some(&agent), false, &["now"]).await;
+    assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
+    assert!(String::from_utf8_lossy(&seat.stdout).starts_with(&format!("{expected}\n")));
+    let seat = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &["now"]).await);
+    let people = seat["availability"]["people"].as_array().unwrap();
+    assert_eq!(people.len(), 1, "{seat}");
+    assert_eq!(people[0]["status"], "away");
+    assert!(people[0]["presence"].is_null());
+
+    // With ask deadlines on, a critical ask that names a deadline is urgent and hold-all still
+    // holds that deadline; a routine one is held too.
+    store.set_ask_deadlines(true);
+    let deadline_ask = |key: &'static str, priority: &'static str| {
+        [
+            "work", "ask", "--for", "person/ada", "--title", "Stop the rollout?",
+            "--reason", "The rollout is failing", "--new-run", key,
+            "--idempotency-key", key, "--priority", priority, "--deadline", "4h",
+        ]
+    };
+    let critical = run_lane_cli(&socket, &config_home, Some(&agent), false, &deadline_ask("rollout-stop", "critical")).await;
+    assert!(critical.status.success(), "{}", String::from_utf8_lossy(&critical.stderr));
+    let critical = String::from_utf8_lossy(&critical.stdout);
+    assert!(
+        critical.trim_end().ends_with("this ask is urgent (priority critical); hold-all holds its deadline"),
+        "{critical}"
+    );
+    let routine = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &deadline_ask("rollout-check", "normal")).await);
+    assert_eq!(
+        (&routine["urgent"], &routine["deadline_held"]),
+        (&serde_json::json!(false), &serde_json::json!(true)),
+        "{routine}"
+    );
+
+    // With no override, a locked device makes the person away; the agent never sees the raw
+    // presence but its Now must still name the presence-derived away so it parks.
+    let cleared = run_lane_cli(&socket, &config_home, None, true, &["availability", "clear"]).await;
+    assert!(cleared.status.success(), "{}", String::from_utf8_lossy(&cleared.stderr));
+    let locked = run_lane_cli(&socket, &config_home, None, true, &["availability", "presence", "locked"]).await;
+    assert!(locked.status.success(), "{}", String::from_utf8_lossy(&locked.stderr));
+    let seat = run_lane_cli(&socket, &config_home, Some(&agent), false, &["now"]).await;
+    assert!(seat.status.success(), "{}", String::from_utf8_lossy(&seat.stderr));
+    let seat = String::from_utf8_lossy(&seat.stdout);
+    assert!(seat.starts_with("person/ada is away\n"), "{seat}");
+    let seat = value(&run_lane_cli(&socket, &config_home, Some(&agent), true, &["now"]).await);
+    let people = seat["availability"]["people"].as_array().unwrap();
+    assert_eq!((people[0]["status"].as_str(), people[0]["status_source"].as_str()), (Some("away"), Some("presence")), "{seat}");
+    assert!(people[0]["presence"].is_null(), "{seat}");
+    server.abort();
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_and_work_detail_reads_ignore_script_actor_with_one_notice() {
     let root = tempfile::tempdir().unwrap();
@@ -5156,6 +5971,7 @@ async fn alerts_cli_uses_granted_agent_identity_and_sender_owned_update_sources(
     let update = state
         .store
         .ask_person(&PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

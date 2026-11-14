@@ -1,4 +1,5 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
+import { clientReadAuthorization, credentialExpiredMessage } from '../data/source.ts'
 
 /**
  * One read of a Fractal document by name (the newest version) or by its immutable `name@hash`
@@ -7,7 +8,7 @@ import { ClientError, plainError, type FractalClient } from '@fractal/client'
 export type DocumentRead =
   | { readonly _tag: 'Text'; readonly reference: string; readonly text: string }
   | { readonly _tag: 'Binary'; readonly reference: string; readonly size: number }
-  | { readonly _tag: 'Unavailable'; readonly reason: 'not-found' | 'ungranted' | 'failed'; readonly detail: string }
+  | { readonly _tag: 'Unavailable'; readonly reason: 'not-found' | 'unauthorized' | 'ungranted' | 'failed'; readonly detail: string }
 
 export interface DocumentPort {
   readonly read: (name: string) => Promise<DocumentRead>
@@ -39,8 +40,9 @@ export const gatewayDocuments = (client: FractalClient): DocumentPort => ({
       if (error instanceof ClientError && error.response.code === 'not-found') {
         return { _tag: 'Unavailable', reason: 'not-found', detail: `There is no document ${name}.` }
       }
-      if (error instanceof ClientError && (error.response.code === 'forbidden' || error.status === 403)) {
-        return { _tag: 'Unavailable', reason: 'ungranted', detail: 'Reading documents has not been granted to this device.' }
+      const reason = clientReadAuthorization(error)
+      if (reason !== undefined || (error instanceof ClientError && error.response.code === 'forbidden')) {
+        return { _tag: 'Unavailable', reason: reason ?? 'ungranted', detail: reason === 'unauthorized' ? credentialExpiredMessage : 'Reading documents has not been granted to this device.' }
       }
       return { _tag: 'Unavailable', reason: 'failed', detail: `The document could not be read: ${plainError(error)}.` }
     }

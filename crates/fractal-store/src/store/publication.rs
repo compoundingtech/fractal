@@ -3,12 +3,16 @@ use super::*;
 use crate::model::MemberSpec;
 use crate::publication::{Interruption, interruption};
 
-pub type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
+pub type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), FractalError> + Sync;
 
 #[derive(Default)]
 pub struct CommitChecks<'a> {
     pub owned: Option<&'a owned_sets::Options>,
     pub guard: Option<&'a Guard>,
+    /// `--force --reason`: accept ad hoc changes to owned-set members as source debt.
+    pub force: Option<&'a str>,
+    /// Recorded beside an owned-set commit only; never part of any digest.
+    pub source_map: Option<&'a fractal_schema::source_map::SourceMap>,
 }
 
 pub struct Check {

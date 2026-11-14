@@ -40,6 +40,8 @@ export type HarnessNotice =
   | { readonly _tag: 'Interjection'; readonly from: string; readonly to?: string; readonly payload: string; readonly raw: string }
   | { readonly _tag: 'SkillInvocation'; readonly skill: string; readonly by: string; readonly payload: string; readonly raw: string }
   | { readonly _tag: 'Delivery'; readonly from: string; readonly to: string; readonly subject?: string; readonly payload: string; readonly raw: string }
+  /** Harness bookkeeping the host shows only on request; `payload` is its redacted preview. */
+  | { readonly _tag: 'SystemRecord'; readonly record: string; readonly payload: string; readonly raw: string }
 
 export type BackgroundJobState = 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown'
 export type BackgroundJobOutcomeCount = { readonly state: BackgroundJobState; readonly count: number }
@@ -113,8 +115,13 @@ export type ConversationItem =
       readonly _tag: 'Message'
       readonly id: string
       readonly messageId: string
+      /** Who wrote it; `daemon/runtime` for a wake. */
+      readonly author?: string
       readonly from?: string
       readonly to?: string
+      /** The body, when the window holds it; a header alone has none. */
+      readonly text?: string
+      readonly attachments?: readonly Attachment[]
       readonly title?: string
       readonly replyTo?: string
       readonly at: string
@@ -177,7 +184,7 @@ export type ConversationItem =
   | {
       readonly _tag: 'Event'
       readonly id: string
-      readonly kind: 'resource-observed' | 'harness-message' | 'subagent-result' | 'irc' | 'background-job' | 'compaction' | 'interjection' | 'skill-invocation' | 'delivery'
+      readonly kind: 'resource-observed' | 'harness-message' | 'subagent-result' | 'irc' | 'background-job' | 'compaction' | 'interjection' | 'skill-invocation' | 'delivery' | 'system-record'
       readonly title: string
       readonly text: string
       readonly sender: Sender

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "GitHub pollers key event operations by their complete canonical observation, preventing concurrent observers from conflicting while preserving event-level deduplication",
+  "replay": {"status": "none", "detail": "No replay or history rewrite. Graph event listings and idle queue-exit reads fold existing and new observations by event subject."},
+  "schema": {"status": "none", "detail": "The github.event v1 subject and fields, including observer, at, head_sha and detail, are unchanged. No tables or generic claim request hashes change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "New producers use github-event-observation:v1 plus a fingerprint of the subject and all canonical fields instead of github-event:SUBJECT. Exact retries retain their operation; distinct observations do not collide. Old global-key claims remain readable and fold together with new claims as one event. Subscription and watch delivery identities are unchanged. Two unmodified old producers may still conflict with each other; this change does not repair their historical operation conflicts."},
+  "downtime": {"status": "none", "detail": "No coordinated shutdown or migration is required."},
+  "manual": {"status": "none", "detail": "No manual step for adopting observation keys; pre-existing operation conflicts still require the separate recovery path."},
+  "recovery": {"status": "none", "detail": "Older builds can read the unchanged claim fields. Rolling back a producer restores its old global-key collision risk; rolling back graph listing and idle readers also restores their per-observation listing and timestamp behavior."}
+}

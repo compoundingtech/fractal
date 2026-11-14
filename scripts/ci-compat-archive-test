@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""Offline producer contract and generated workflow archive wiring regressions."""
+import importlib.machinery
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import zipfile
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader("compat_archive", str(ROOT / "scripts/ci-compat-archive"))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+helper = importlib.util.module_from_spec(spec)
+loader.exec_module(helper)
+LINUX = "x86_64-unknown-linux-gnu"
+DARWIN = "aarch64-apple-darwin"
+
+
+class ArchiveTests(unittest.TestCase):
+    def test_clean_extraction_and_closed_cache_hit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            archive = root / "archives/pinned.tar.gz"
+            calls = []
+
+            def fake(command, *, env, check):
+                extraction = Path(command[3])
+                self.assertTrue(extraction.is_dir())
+                self.assertEqual(list(extraction.iterdir()), [])
+                self.assertEqual(command[4:], ["--target", LINUX, "--save-archive", str(archive)])
+                self.assertTrue(check)
+                calls.append(extraction)
+                if "COMPAT_BASELINE_ARCHIVE" in env:
+                    self.assertEqual(env["COMPAT_BASELINE_ARCHIVE"], str(archive))
+                    if not archive.exists() or archive.read_bytes() != b"verified":
+                        raise subprocess.CalledProcessError(1, command)
+                archive.write_bytes(b"verified")
+
+            with patch.dict(os.environ, {"COMPAT_BASELINE_ARCHIVE": "/unrelated/archive"}):
+                helper.prepare("fleet", LINUX, archive, cache_hit=False, root=root, run=fake)
+            self.assertFalse(calls[-1].exists(), "verification extraction must be cleaned")
+            helper.prepare("messaging", LINUX, archive, cache_hit=True, root=root, run=fake)
+            archive.write_bytes(b"corrupt")
+            with self.assertRaises(subprocess.CalledProcessError):
+                helper.prepare("fleet", LINUX, archive, cache_hit=True, root=root, run=fake)
+            archive.unlink()
+            with self.assertRaises(subprocess.CalledProcessError):
+                helper.prepare("fleet", LINUX, archive, cache_hit=True, root=root, run=fake)
+            self.assertEqual(len(calls), 4, "corrupt/missing hits must not retry a network miss")
+            self.assertEqual(len(set(calls)), 4, "each verification uses a fresh extraction")
+
+    def test_runtime_identity_deduplicates_content_not_kinds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".github").mkdir()
+            def pin(kind, linux_sha, darwin_sha):
+                (root / f".github/{kind}-compat-baseline.json").write_text(json.dumps({
+                    "bundles": {LINUX: {"sha256": linux_sha}, DARWIN: {"sha256": darwin_sha}}}))
+            def identity(kind, target=LINUX):
+                return helper.identity(kind, target, root=root)
+            pin("fleet", "a" * 64, "a" * 64)
+            pin("messaging", "a" * 64, "a" * 64)
+            self.assertEqual(identity("fleet"), identity("messaging"))
+            self.assertNotEqual(identity("fleet")["key"], identity("fleet", DARWIN)["key"])
+            pin("messaging", "b" * 64, "a" * 64)
+            self.assertNotEqual(identity("fleet")["key"], identity("messaging")["key"])
+            self.assertNotEqual(identity("fleet")["path"], identity("messaging")["path"])
+            pin("messaging", "invalid", "a" * 64)
+            with self.assertRaises(ValueError):
+                identity("messaging")
+
+    def test_generated_consumer_wiring(self):
+        expected = {
+            "fleet.yml": ["linux-test-build", "linux-tests", "linux-tests-shard-2", "linux-tests-shard-3", "linux-tests-shard-4", "linux-fleet-compat"],
+            "main-upkeep.yml": ["linux-tests", "linux-fleet-compat", "proof-linux-test-build", "proof-linux-tests", "proof-linux-fleet-compat"],
+            "daily-long.yml": ["linux-test-build", "daily-tests", "daily-tests-shard-2", "mail-redelivery-canaries", "linux-fleet-compat"],
+            "debug-assertions-daily.yml": ["debug-assertions-tests"],
+            "macos.yml": ["macos-ci"],
+        }
+        for filename, consumers in expected.items():
+            text = (ROOT / ".github/workflows" / filename).read_text()
+            jobs = {match.group(1): match.group(2) for match in re.finditer(
+                r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", text[text.index("\njobs:\n"):], re.M | re.S)}
+            target = DARWIN if filename == "macos.yml" else LINUX
+            producer_id = f"compat-archives-{target}"
+            self.assertEqual(sum(name.startswith("compat-archives-") for name in jobs), 1, filename)
+            producer = jobs[producer_id]
+            self.assertIn("runs-on: ubuntu-latest", producer)
+            kinds = ["messaging"] if filename in ["macos.yml", "debug-assertions-daily.yml"] else ["fleet", "messaging"]
+            self.assertEqual(producer.count("uses: actions/cache/save@v4"), len(kinds), filename)
+            self.assertNotIn("restore-keys:", producer)
+            self.assertEqual(producer.count("uses: actions/upload-artifact@v4"), len(kinds), filename)
+            self.assertIn("if-no-files-found: error", producer)
+            for name, job in jobs.items():
+                if "scripts/ci-evidence-gate" in job:
+                    self.assertNotIn(producer_id, job, name)
+                    self.assertNotIn("ci-compat-archive", job, name)
+                    self.assertNotIn("actions/download-artifact@", job, name)
+            if filename == "main-upkeep.yml":
+                self.assertIn("proof-evidence-gate-linux-fleet-compat", jobs)
+                self.assertNotIn(producer_id, jobs["proof-evidence-gate-linux-fleet-compat"])
+            for kind in kinds:
+                self.assertIn(f"ci-compat-archive identity {kind} {target}", producer)
+            if len(kinds) == 2:
+                self.assertIn("steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256", producer)
+            for name in consumers:
+                with self.subTest(workflow=filename, consumer=name):
+                    job = jobs[name]
+                    self.assertIn(producer_id, job)
+                    self.assertIn("ci-compat-archive identity", job)
+                    self.assertNotIn("actions/download-artifact@", job)
+                    self.assertIn("python3 scripts/ci-compat-archive download", job)
+                    # A later checkout cleans the untracked archive after a successful download.
+                    download = job.index("python3 scripts/ci-compat-archive download")
+                    self.assertNotIn("uses: actions/checkout@", job[download:])
+                    self.assertIn("CI_TEST_ARCHIVE_ARTIFACT_ID:", job)
+                    self.assertIn("GH_TOKEN: ${{ github.token }}", job)
+                    self.assertNotIn("Restore the prepared compatibility archive", job)
+                    self.assertIn("Require successful archive preparation", job)
+                    self.assertNotIn("uses: actions/cache/save@v4", job.split("steps:", 1)[1].split("- name: Require successful archive preparation", 1)[0])
+
+    def test_every_archive_artifact_is_attempt_scoped(self):
+        for workflow in ("fleet", "main-upkeep", "daily-long", "debug-assertions-daily", "macos"):
+            text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
+            artifacts = re.findall(
+                r"uses: actions/(?:upload|download)-artifact@v4\n(.*?)(?=\n      - |\n  [\w-]+:|\Z)",
+                text, re.S)
+            compatibility = [block for block in artifacts if ".outputs['artifact-name']" in block]
+            self.assertTrue(compatibility, workflow)
+            for block in compatibility:
+                self.assertIn(".outputs['artifact-name']", block, workflow)
+                self.assertNotIn("overwrite:", block, workflow)
+                self.assertIn("retention-days: 7", block, workflow)
+        first = helper.artifact_name("pin", "producer", "1")
+        self.assertNotEqual(first, helper.artifact_name("pin", "producer", "2"))
+        self.assertNotEqual(first, helper.artifact_name("pin", "proof-producer", "1"))
+
+    def test_partial_rerun_consumers_keep_the_producer_attempt(self):
+        for workflow in ("fleet", "main-upkeep", "daily-long", "debug-assertions-daily", "macos"):
+            text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
+            producer_outputs = dict(re.findall(r"artifact-(fleet|messaging): (.+)", text))
+            downloads = re.findall(
+                r"- name: Download the prepared compatibility archive\n(.*?)(?=\n      - |\n  [\w-]+:|\Z)",
+                text, re.S)
+            compatibility = [block for block in downloads if "outputs['artifact-" in block]
+            self.assertTrue(compatibility, workflow)
+            for block in compatibility:
+                self.assertNotIn("github.run_attempt", block, workflow)
+                kind = re.search(r"outputs\['artifact-(fleet|messaging)'\]", block).group(1)
+                self.assertRegex(block, r"needs(?:\['(?:proof-)?compat-archives-[^']+'\]|\.(?:proof-)?compat-archives-[\w-]+)\.outputs")
+                output = producer_outputs[kind]
+                self.assertIn(".outputs['artifact-name']", output)
+                # Successful producer step outputs survive consumer-only reruns.
+                retained_output = helper.artifact_name("pinned-archive", "producer", "1")
+                needs = {f"artifact-{kind}": retained_output}
+                self.assertEqual(needs[f"artifact-{kind}"], "pinned-archive-job-producer-attempt-1")
+                self.assertNotEqual(needs[f"artifact-{kind}"], "pinned-archive-job-producer-attempt-2")
+
+    def test_empty_artifact_name_fails_before_download(self):
+        source = (ROOT / ".github/workflows/compat-archive.ts").read_text()
+        command = re.search(r"run: '(\[ -n \"\$COMPAT_ARCHIVE_NAME\"[^\n]+)'", source).group(1)
+        for name, expected in (("", 1), ("pinned-archive-attempt-1", 0)):
+            result = subprocess.run(["bash", "-c", command], env={**os.environ, "COMPAT_ARCHIVE_NAME": name},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, expected)
+            if not name:
+                self.assertIn("empty artifact name; refusing to download all run artifacts", result.stdout)
+        for workflow in ("fleet", "main-upkeep", "daily-long", "debug-assertions-daily", "macos"):
+            text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
+            guards = re.findall(
+                r"- name: Require an explicit prepared archive name\n(.*?)"
+                r"- name: Download the prepared compatibility archive", text, re.S)
+            self.assertTrue(guards, workflow)
+            self.assertEqual(len(guards), text.count("- name: Download the prepared compatibility archive"))
+            for guard in guards:
+                self.assertRegex(guard, r"COMPAT_ARCHIVE_NAME: \$\{\{ needs(?:\[|\.)")
+                self.assertIn("outputs['artifact-", guard)
+                self.assertIn(command, guard)
+                self.assertNotIn("\n        if:", guard)
+
+    def test_private_zip_is_verified_before_consumer_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".github").mkdir()
+            payload = b"verified baseline archive"
+            sha = hashlib.sha256(payload).hexdigest()
+            (root / ".github/fleet-compat-baseline.json").write_text(
+                json.dumps({"bundles": {LINUX: {"sha256": sha}}}))
+            zipped = root / "fixture.zip"
+            with zipfile.ZipFile(zipped, "w") as bundle:
+                bundle.writestr(f"{sha}.tar.gz", payload)
+            metadata = {"id": 123, "name": "pinned-attempt-1", "expired": False,
+                        "workflow_run": {"id": 456, "head_sha": "a" * 40},
+                        "size_in_bytes": zipped.stat().st_size,
+                        "digest": "sha256:" + hashlib.sha256(zipped.read_bytes()).hexdigest()}
+            destination = root / "consumer/baseline.tar.gz"
+
+            def transfer(endpoint, archive, size, metrics, timeout):
+                self.assertFalse(destination.exists())
+                archive.write_bytes(zipped.read_bytes())
+
+            def verify(kind, target, archive, *, cache_hit, root):
+                self.assertFalse(destination.exists())
+                self.assertTrue(cache_hit)
+                self.assertEqual(archive.read_bytes(), payload)
+
+            event_path = root / "event.json"
+            event_path.write_text(json.dumps({"pull_request": {"head": {"sha": "a" * 40}}}))
+            env = {"CI_TEST_ARCHIVE_ARTIFACT_ID": "123", "COMPAT_ARCHIVE_NAME": "pinned-attempt-1",
+                   "GITHUB_REPOSITORY_ID": "789", "GITHUB_RUN_ID": "456", "GITHUB_SHA": "a" * 40,
+                   "GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(event_path)}
+            implementation = {"transfer_zip": transfer,
+                              "digest": lambda path: hashlib.sha256(path.read_bytes()).hexdigest()}
+            with patch.dict(os.environ, env), patch.object(helper.subprocess, "check_output",
+                    side_effect=lambda *a, **k: json.dumps(metadata).encode()), \
+                 patch.object(helper.runpy, "run_path", return_value=implementation), \
+                 patch.object(helper, "prepare", side_effect=verify) as verified:
+                for event in ("pull_request", "push", "merge_group"):
+                    with self.subTest(event=event), patch.dict(os.environ, {
+                            "GITHUB_EVENT_NAME": event,
+                            "GITHUB_SHA": ("b" if event == "pull_request" else "a") * 40}):
+                        helper.download("fleet", LINUX, destination, root=root)
+                        self.assertEqual(destination.read_bytes(), payload)
+                        destination.unlink()
+                        metadata["workflow_run"]["head_sha"] = "c" * 40
+                        with self.assertRaisesRegex(ValueError, "metadata identity"):
+                            helper.download("fleet", LINUX, destination, root=root)
+                        metadata["workflow_run"]["head_sha"] = "a" * 40
+                        self.assertFalse(destination.exists())
+                self.assertEqual(verified.call_count, 3)
+                metadata["digest"] = "sha256:" + "0" * 64
+                with self.assertRaisesRegex(ValueError, "ZIP size/digest"):
+                    helper.download("fleet", LINUX, destination, root=root)
+                self.assertFalse(destination.exists())
+                self.assertEqual(verified.call_count, 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

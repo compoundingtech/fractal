@@ -8,7 +8,7 @@ order: 6
 
 The Fractal MCP server connects an MCP client to the daemon's paired-client gateway. It exposes a closed set of tools for alerts, missions, agents, conversations, and explicitly scoped writes. It does not expose daemon control or give an assistant person authority.
 
-The Rust package is `fractal-chatgpt`; its executable is `st-chatgpt`. The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
+The Rust package and binary are `fractal-chatgpt`. The supported assistant principal is `assistant/chatgpt`, including when a generic MCP client uses the adapter. Pairing requires the configured owning person's explicit consent to disclose assistant reads to OpenAI. Do not use a person credential for this server.
 
 The [external-assistant contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md) defines the authority and wire behavior. Remote access is a restricted dogfood path, not an authenticated public service.
 
@@ -19,16 +19,29 @@ Install and configure [Fractal](../getting-started/install.md) first. The daemon
 Build the adapter from the repository root with Rust and the repository's build prerequisites:
 
 ```sh
-cargo build --release -p fractal-chatgpt --bin st-chatgpt
+cargo build --release -p fractal-chatgpt --bin fractal-chatgpt
 ```
 
-The binary is `target/release/st-chatgpt`. Alternatively, obtain it from the repository's Nix package:
+The binary is `target/release/fractal-chatgpt`. Alternatively, obtain the current Nix package:
 
 ```sh
-nix build github:compoundingtech/fractal#st-chatgpt
+nix build github:compoundingtech/fractal#fractal-chatgpt
 ```
 
-That binary is `result/bin/st-chatgpt`. Use a matching Fractal revision. The examples below assume the binary is on `PATH`.
+That binary is `result/bin/fractal-chatgpt`. Use a matching Fractal revision. The shell examples below assume `fractal-chatgpt` is on `PATH`; in the MCP client configuration, use the absolute path to the binary produced by your chosen installation method.
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+The legacy executable `st-chatgpt` and Nix attribute `packages.st-chatgpt` remain bridged aliases for existing deployments. New installations use `fractal-chatgpt`.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias -->
+
+Call telemetry uses the `fractal_chatgpt::call` target and is disabled by default. Set
+`RUST_LOG=off,fractal_chatgpt::call=info` to enable content-free call summaries on stderr.
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+During a mixed-version rollout, set
+`RUST_LOG=off,fractal_chatgpt::call=info,st_chatgpt::call=info` before upgrading.
+The hard allowlist accepts both targets, but this release emits only `fractal_chatgpt::call`;
+an old-target-only environment filter does not enable the renamed events.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-07-fractal-chatgpt-telemetry-target -->
 
 ## Pair and prepare a grant
 
@@ -48,7 +61,7 @@ Pairing and grant administration are explicit owner operations, not adapter star
      --consent-evidence CONSENT_RECORD
    ```
 
-   Nothing is granted implicitly. Omit the conversation scope if conversation access is not intended. Add `--scope write.assistant.answers` or `--scope write.assistant.messages` only when the owner explicitly authorizes that write capability. Read consent is not write authorization.
+   Nothing is granted implicitly. Omit the conversation scope if conversation access is not intended. Add `--scope read.assistant.slo` for the SLO tools; it reads operational objective and budget rows, not conversation content. Add `--scope write.assistant.answers` or `--scope write.assistant.messages` only when the owner explicitly authorizes that write capability. Read consent is not write authorization.
 
 2. Before the single-use challenge expires (five minutes), complete it on the adapter machine. `MEMBER_ORIGIN` is the issuer gateway's HTTP or HTTPS origin, without a path. The code is read privately from stdin:
 
@@ -83,12 +96,15 @@ CLI pairing selects `caller-bound-allow`: reads within the sealed scopes, consen
 Use stdio when the MCP client launches a local process:
 
 ```sh
-st-chatgpt --transport stdio \
-  --socket /PATH/TO/st3-client.sock \
+fractal-chatgpt --transport stdio \
+  --socket /PATH/TO/fractal-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
 
-Use the daemon's **paired-client** socket, whose filename must be `st3-client.sock`, not its control socket. All paths in the examples are placeholders, not defaults.
+Use the daemon's **paired-client** socket, whose filename must be `fractal-client.sock`, not its control socket. All paths in the examples are placeholders, not defaults.
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction -->
+The adapter also accepts the legacy paired-client filename `st3-client.sock` during migration. It rejects both `fractal.sock` and `st3.sock`; an explicitly supplied path is never substituted.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal -->
 
 A generic MCP client configuration looks like this; adapt the outer configuration format to your client. Use absolute paths and keep the bearer out of the configuration:
 
@@ -96,10 +112,10 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
 {
   "mcpServers": {
     "fractal": {
-      "command": "/PATH/TO/st-chatgpt",
+      "command": "/PATH/TO/fractal-chatgpt",
       "args": [
         "--transport", "stdio",
-        "--socket", "/PATH/TO/st3-client.sock",
+        "--socket", "/PATH/TO/fractal-client.sock",
         "--credential-file", "/PATH/TO/mcp-private/credential"
       ]
     }
@@ -112,8 +128,8 @@ A generic MCP client configuration looks like this; adapt the outer configuratio
 HTTP is the default transport. The default listen address is `127.0.0.1:8787`:
 
 ```sh
-st-chatgpt --transport http --listen 127.0.0.1:8787 \
-  --socket /PATH/TO/st3-client.sock \
+fractal-chatgpt --transport http --listen 127.0.0.1:8787 \
+  --socket /PATH/TO/fractal-client.sock \
   --credential-file /PATH/TO/mcp-private/credential
 ```
 
@@ -140,14 +156,17 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_alert_answer` | `write.assistant.answers` | Write | Execute one typed person-ask answer using the alert's current episode and fence. |
 | `fractal_missions_list` | `read.assistant.missions` | Read | List mission metadata. |
 | `fractal_agents_list` | `read.assistant.agents` | Read | List agent metadata, not priorities or conversation content. |
+| `fractal_availability_get` | `read.assistant.availability` | Read | Read the owning person's own effective status (available/away, override expiry), interruptions (all/urgent/none), deadline clock (run/hold-routine/hold-all), and current directive note; raw device presence is never shown. The note text is cut to fit `max_response_bytes` and `directive_note_truncated` is then true; read again with a larger budget, up to 16384, for the whole note. Park blocking asks while the person is away or interruptions is none. Grant the scope explicitly with `--scope read.assistant.availability`. |
 | `fractal_conversations_list` | `read.assistant.conversation` | Read | Discover source-bounded conversation metadata and read handles without conversation content. |
 | `fractal_conversation_detail` | `read.assistant.conversation` | Read | Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. |
 | `fractal_conversation_timeline` | `read.assistant.conversation` | Read | Page bounded chat excerpts and revision-pinned read handles. |
 | `fractal_conversation_search` | `read.assistant.conversation` | Read | Search bounded plain conversation text snippets. |
 | `fractal_conversation_read` | `read.assistant.conversation` | Read | Read one bounded revision-pinned conversation content range. |
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
+| `fractal_slo_list` | `read.assistant.slo` | Read | Page every objective and budget row: target, current measurement, window, remaining budget, status and forecast. Continue with `value.page.next_cursor`. |
+| `fractal_slo_history` | `read.assistant.slo` | Read | Chart what was left of one row (`id` from `fractal_slo_list`) across a period of at most 7 days, in 1 to 1000 steps. |
 
-The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This deprecation concerns MCP tool names, not the `st-chatgpt` executable name.
+The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the bridged executable alias.
 
 ## Limits and grant lifecycle
 
@@ -182,7 +201,7 @@ The corresponding `st_*` tool names are hidden, deprecated aliases for cached cl
 | Missing-scope denial | Inspect the exact grant. Replace policy explicitly if the owner authorizes the scope; do not substitute a person credential. |
 | `response-budget-exceeded` | Request a smaller page or content range, or raise the requested byte budget within the policy maximum. A single oversized item may still fail. |
 | `page-cursor-expired` or stale content revision | Restart discovery and use newly returned cursors/read handles. Do not manufacture a cursor or reference. |
-| Socket rejected or unavailable | Use the current daemon's `st3-client.sock`, run the adapter on that machine, and check local ownership/access. A control socket is intentionally rejected. |
+| Socket rejected or unavailable | Use the current daemon's `fractal-client.sock`, run the adapter on that machine, and check local ownership/access. A control socket is intentionally rejected. |
 | Tunnel connects but tools are unavailable | Check the loopback adapter and grant first, then the operator-owned tunnel's forwarding to `/mcp` and the client's MCP support. Do not expose a non-loopback listener to bypass the problem. |
 
 For authority, consent, proof-gated reads, write semantics, and remote-access requirements, read the [external-assistant engineering contract](https://github.com/compoundingtech/fractal/blob/main/docs/st3/external-assistants.md).

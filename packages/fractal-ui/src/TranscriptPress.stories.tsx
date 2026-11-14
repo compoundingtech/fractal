@@ -75,34 +75,38 @@ export const SameRowsDuringPress: Story = { ...contractFixture, play: async ({ c
 } }
 export const SameRowsDuringPressLight: Story = { ...SameRowsDuringPress, args: { scheme: 'light' } }
 
-/** A genuinely new row during the press still lets Retry take the click; the jump appears only after release. */
+/** A genuinely new row during the press still lets Retry take the click; a press at the end is not a scroll away, so the lane follows after release. */
 export const NewRowDuringPress: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
-  const { canvas, jump, retries } = await ready(canvasElement, abortSignal)
+  const { viewport, canvas, jump, retries } = await ready(canvasElement, abortSignal)
   await pressAcross(canvas.getByRole('button', { name: 'Retry' }), async () => {
     canvas.getByRole('button', { name: 'Append agent reply' }).click()
     await settleFrames()
     await expect(jump, 'jump revealed during the press').not.toBeVisible()
   })
   await waitFor(() => expect(retries).toHaveTextContent('1'))
-  await waitFor(() => expect(jump).toBeVisible())
+  await waitFor(() => expect(atEnd(viewport), 'the lane stopped following after a press').toBe(true))
+  await expect(jump).not.toBeVisible()
   await expect(retries).toHaveTextContent('1')
 } }
 export const NewRowDuringPressLight: Story = { ...NewRowDuringPress, args: { scheme: 'light' } }
 
 
+const atEnd = (viewport: HTMLElement) => viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2
 const pointer = (target: Element, type: 'pointerdown' | 'pointerup', pointerId: number, pointerType: 'mouse' | 'touch') => target.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, pointerId, pointerType, isPrimary: pointerType === 'mouse', button: 0, buttons: type === 'pointerdown' ? 1 : 0, width: 1, height: 1, pressure: type === 'pointerdown' ? 0.5 : 0 }))
 
-/** A press whose release the page never sees (the window blurs) does not keep the jump hidden. */
+/** A press whose release the page never sees (the window blurs) does not keep holding the lane: it follows new rows again. */
 export const BlurEndsPress: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
-  const { canvas, jump } = await ready(canvasElement, abortSignal)
+  const { viewport, canvas } = await ready(canvasElement, abortSignal)
   pointer(canvas.getByRole('button', { name: 'Retry' }), 'pointerdown', 1, 'mouse')
   window.dispatchEvent(new Event('blur'))
+  const height = viewport.scrollHeight
   canvas.getByRole('button', { name: 'Append agent reply' }).click()
-  await waitFor(() => expect(jump, 'jump latched hidden after the window blurred').toBeVisible())
+  await waitFor(() => expect(viewport.scrollHeight).toBeGreaterThan(height))
+  await waitFor(() => expect(atEnd(viewport), 'press latched after the window blurred').toBe(true))
 } }
 export const BlurEndsPressLight: Story = { ...BlurEndsPress, args: { scheme: 'light' } }
 
-/** With two pointers down, releasing one keeps the dock still; the reveal waits for the last release. */
+/** With two pointers down, releasing one keeps the dock still; following owns the lane again after the last release. */
 export const SecondPointerHoldsDock: Story = { ...contractFixture, play: async ({ canvasElement, abortSignal }) => {
   const { viewport, canvas, jump } = await ready(canvasElement, abortSignal)
   const retry = canvas.getByRole('button', { name: 'Retry' })
@@ -114,7 +118,9 @@ export const SecondPointerHoldsDock: Story = { ...contractFixture, play: async (
   await settleFrames()
   await expect(jump, 'jump revealed while a second pointer is down').not.toBeVisible()
   pointer(viewport, 'pointerup', 2, 'touch')
-  await waitFor(() => expect(jump).toBeVisible())
+  canvas.getByRole('button', { name: 'Append agent reply' }).click()
+  await waitFor(() => expect(atEnd(viewport), 'the lane stopped following after both releases').toBe(true))
+  await expect(jump).not.toBeVisible()
 } }
 export const SecondPointerHoldsDockLight: Story = { ...SecondPointerHoldsDock, args: { scheme: 'light' } }
 
@@ -156,7 +162,9 @@ export const InsertAbovePressedRow: Story = { ...contractFixture, play: async ({
   })
   await waitFor(() => expect(retries).toHaveTextContent('1'))
   await expect(Math.abs(row.getBoundingClientRect().top - top), 'pressed row snapped on release').toBeLessThanOrEqual(1)
-  await waitFor(() => expect(jump).toBeVisible())
+  // The press was at the end: the lane still follows, and the failed send stays the last line in view.
+  await expect(atEnd(viewport), 'the lane stopped following after a press').toBe(true)
+  await expect(jump).not.toBeVisible()
   await settleFrames()
   await expect(retries).toHaveTextContent('1')
   await expect(Math.abs(row.getBoundingClientRect().top - top), 'history anchor undid compensation after the dock settled').toBeLessThanOrEqual(1)

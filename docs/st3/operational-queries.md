@@ -1,5 +1,103 @@
 # Operational queries
 
+## Bulk desired declarations
+
+Use `fractal subject desired --json [--all | SUBJECT...] [--kind K]` to read desired
+declarations and selected declaration tokens with cheap actual summaries, without
+reducing status or folding cards. The existing CLI noun is `subject`, singular.
+An empty subject selection means all declarations; explicit names are exact IDs.
+The API is `GET /v1/desired?subject=ID&subject=ID&kind=K&limit=N&cursor=TOKEN`.
+Repeated URL-encoded `subject` parameters select exact names; omitting them selects all.
+`kind` and `cursor` are optional. At most 1,000 supplied names are accepted
+(`desired-batch-limit` otherwise). Page limit defaults to 1,000 and cannot exceed 1,000;
+zero or an over-limit value returns HTTP 422 `desired-page-limit`.
+Each page is `{"items":[...],"next_cursor":null,"store_index":123}`: `items` contains
+flattened `DesiredSubject` entries plus `desired_token` and optional extensible `actual`,
+`next_cursor` is an opaque string or `null`, and `store_index` is a `u64`.
+All sources for a page are read in one store snapshot.
+
+The cursor binds the store origin, pinned claim read cut, shared graph projection progress,
+desired row-write generation, selection filters, limit and last subject. The graph projection
+frontier covers both selected desired declarations and mission definitions; backlog projection
+can advance it without appending a claim or changing `store_index`. A durable per-store
+generation advances transactionally on every desired row insert, update or delete, including
+repair that leaves the claim cut and graph health unchanged. Continue with unchanged subjects,
+kind and limit. Each continuation validates the claim cut, graph health/frontier and row-write
+generation with bounded reads in the same pinned snapshot; any change returns typed
+`desired-cursor-expired`, never a silent
+restart or retry. No historical snapshot or pagination cache is retained. The CLI follows
+every cursor with limit 1,000 and unchanged
+filters, then prints one final JSON array. Any page failure, including cursor invalidation,
+fails the command without partial stdout.
+
+This GET inherits the single desired GET's `read.projections` authorization, deadline and
+read admission, including refusal of paired devices without that scope. It remains a read
+during fleet drain and performs no status reduction or cold card folds.
+See the [CLI reference](../site/reference/cli.md#bulk-desired-declarations) for the
+selection and response contract. Missing actual fields are not negative observations:
+fetch the card with `fractal subject show SUBJECT` or `fractal agents show AGENT`.
+
+The kind filter matches the literal desired declaration kind. Stopped and terminally
+retired agents have kind `stop`, not `agent`; unfiltered all includes their retained
+declarations. Agent revision summaries also apply to those retained declarations.
+Synthesized published mission entries have `desired_token: null`, matching mission
+cards, because mission publications are not desired-table rows. Their publication
+claim IDs are not replacement desired tokens; compare `actual.revision` and
+`actual.digest` for declaration changes.
+For agents, `actual` contains only the maintained published declaration `revision`
+when available, matching the card's desired content revision. It omits runtime
+`status`, `operation_status`, `state`, `host`, `incarnation_id`, `suspension`, `hold`,
+`kind`, and `repo`, and card-level `actual_origin` and `projection`
+(`layer`, `runtime_incarnation`). Those have no cheap, correct maintained source
+for this snapshot path: fetch the card. For bulk roster status, use
+`fractal agents ls --all --json`; roster fields such as `state`, `host_id`, and
+`operational` are not interchangeable with card state, host, or projection fields.
+
+A retained member containing an unsupported enum variant anywhere in its schema,
+or an unknown field in a structure that rejects unknown fields, produces
+`actual: {"unavailable":{"code":"member-version-unproven"}}` for that item,
+instead of failing the batch. Its declaration and selected token remain in the page;
+the current daemon omits `member` when it cannot decode it. The unavailable marker
+replaces the normal actual summary, so it carries no revision. Other items keep their
+normal summaries. The authority is the full `MemberSpec` serde schema, including
+nested discriminators and `deny_unknown_fields` structures, not a numeric wire version.
+Malformed JSON, wrong types, missing required fields, database, mission,
+declaration-body and other unrelated failures still fail the page.
+The CLI retains raw extensible item JSON from newer servers, including member
+payloads it cannot itself decode, and preserves unavailable markers.
+
+Non-agent actual summaries contain the published declaration `revision` and `digest`,
+plus `state` when cheaply maintained (`draft`, `ready`, or `retired` for missions).
+They never contain the published body. `digest` is `sha256:` followed by lowercase
+hexadecimal SHA-256 of the UTF-8 canonical JSON text of the published declaration:
+recursively sort object keys, preserve array order, and use compact JSON with no
+whitespace. The input is the declaration itself, not the surrounding
+`PublicationDefinition` metadata, revision, or selected desired token.
+
+The raw paged desired API is not a client-v0 operation. The committed Rust, Swift and
+TypeScript clients are generated from `docs/st3/client-v0/schemas/operations.json`
+and `client-v0.schema.json`, so this route does not change those inputs or outputs.
+Their regeneration command is `cargo run --locked -p fractal-client-codegen`;
+it also invokes `rustfmt` internally. No generator execution is needed for this route.
+
+## Single-subject status reads
+
+`GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain
+the full canonical claim ID vector. Subject `show`, `inspect`, and successful non-verdict
+`trace wait` output therefore retain claim provenance; `claims=[]` still proves an empty
+history, not a skipped reduction. Bounded `recent_claims` reads are unchanged. There is no
+`omit_claims` HTTP mode.
+
+Owned-set preview and resource/member reads use an internal `Fields` reduction instead.
+It skips claim IDs, counts and session boundaries, then returns only actual state across
+the store boundary. No `SubjectStatus` or unenumerated `claims=[]` is serialized on that path;
+owned-set wire shapes remain unchanged. This avoids provenance work under those snapshots,
+but actual-state and harness folding can still depend on history.
+A desired-only caller should use `GET /v1/desired/SUBJECT`,
+which reads the desired record without reducing actual state or claims.
+
+## Published operational lists
+
 Mission lists page mission IDs and return compact cards with at most three recent runs and
 twenty step previews per run. Progress counts cover every step; a larger total signals an
 incomplete step preview.
@@ -43,38 +141,49 @@ rebuild duration includes failed attempts. The background rebuild still reduces 
 runtime collection; publication removes that work from ordinary list requests.
 
 ```sh
-st missions ls --all
-st missions ls --all --cursor 'CURSOR'
-st missions show mission/example/build
+fractal missions ls --all
+fractal missions ls --all --cursor 'CURSOR'
+fractal missions show mission/example/build
 ```
 
-Showing a mission with multiple runs prints counts by state, the ten newest runs, and the ten
-newest failed runs with reasons. Showing a mission with one run opens that run. `--follow`
-requires choosing an exact run when the mission has multiple runs.
+Showing a mission with multiple runs prints counts by state, and two windows: the ten
+newest runs and the ten newest failed runs with reasons. Each window says so, and names
+the full-history read: `fractal missions ls --all --mission mission/example/build`.
+Showing a mission with one run opens that run. `--follow` requires choosing an exact
+run when the mission has multiple runs. The published missions list is the same kind of
+window: `active_runs`, `total_runs`, and `run_counts` count the entire history, while the
+card previews at most three runs and `runs_truncated` says when the preview is incomplete.
 
-To investigate outcomes in a time window:
+To investigate outcomes in a time window, or every terminal transition of one mission:
 
 ```sh
-st missions ls --since 6h --status failed
-st work ls --since 6h --status timed-out
-st work ls --since 2026-10-01T00:00:00Z --until 2026-10-01T06:00:00Z --status cancelled
+fractal missions ls --since 6h --status failed
+fractal missions ls --all --mission mission/example/build
+fractal missions ls --all --mission mission/example/build --status failed
+fractal work ls --since 6h --status timed-out
+fractal work ls --since 2026-10-01T00:00:00Z --until 2026-10-01T06:00:00Z --status cancelled
 ```
 
 `--since` and `--until` accept RFC3339 timestamps or durations in milliseconds, seconds,
-minutes, or hours. Supplying either time filter or `--status` selects terminal transition history
-across missions. Status accepts `failed`, `cancelled`, `timed-out`, and `completed`; without a
+minutes, or hours. Supplying either time filter, `--status`, or `--mission` selects terminal
+transition history. Status accepts `failed`, `cancelled`, `timed-out`, and `completed`; without a
 status filter, all terminal transitions are returned. A timeout is a failed transition whose
 recorded reason names a timeout. Cleanup sometimes omits the reason in the terminal claim;
-the reader recovers it from an earlier transition for that outcome.
+the reader recovers it from an earlier transition for that outcome. `--mission` keeps one
+mission's terminal transitions across every page (`/v1/outcome-history?collection=missions&mission=...`);
+other missions' runs never appear. Running and waiting runs are not terminal transitions and
+never appear in this history: read `/v1/mission-runs?mission=...` for the active runs.
 
 These are events, so retries preserve earlier failures and a run can appear more than once.
 Times are the graph claims' accepted timestamps. `--as` on work also filters by the recorded
 actor or step assignment. Pages contain reasons and their claim IDs; the continuation printed
-by the command fixes the original time window. Resume using that command without repeating
-relative time filters. JSON includes `next_cursor`, and an exhausted page has `has_more=false`.
+by the command fixes the original time window and `--mission`. Resume using that command without
+repeating relative time filters. JSON includes `next_cursor`, and an exhausted page has `has_more=false`.
 History cursors and page order are local to the serving daemon, like raw claim-history cursors;
 they are not shared state folds. Reason selection uses canonical claim order, including recovery
 from an earlier transition, so replicated arrival order cannot choose a different reason.
+A daemon that predates `--mission` answers the unfiltered page; the command refuses it with
+"this daemon does not support --mission; upgrade the daemon" instead of mislabelling it.
 
 Native lease polling uses `GET /v1/work?actor=...&view=renewal`: only the actor's
 currently held claimed/working/verifying/blocked steps, with owner and lease validity applied. This view
@@ -96,9 +205,9 @@ of ranking the complete transport history. Original success timestamps, clock-sk
 expiry, and dial-out membership exclusions still decide whether that evidence is usable.
 
 ```sh
-st doctor
-st doctor --performance
-st doctor --performance --json
+fractal doctor
+fractal doctor --performance
+fractal doctor --performance --json
 ```
 
 The daemon always keeps bounded request, background task, and SQL timing aggregates for the
@@ -141,4 +250,5 @@ without running dependency checks. File profiling remains available for deeper i
 
 The local API serves `/v1/mission-overview?mission=...`, `/v1/outcome-history?collection=...`,
 and `/v1/performance`. Outcome API times are epoch milliseconds; `before` resumes by immutable
-claim index and `limit` is between 1 and 200.
+claim index and `limit` is between 1 and 200. `mission` on outcome history keeps one mission's
+terminal transitions; `status`, time window, and cursor paging compose with it unchanged.

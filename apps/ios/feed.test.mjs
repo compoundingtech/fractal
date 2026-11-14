@@ -378,6 +378,37 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   feed.close();
 }
 
+{
+  // Read positions: each frame of the person's collection says re-list; a reconnect subscribes again.
+  const { client, sockets } = fakeClient();
+  const { handlers } = watch();
+  const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
+  let changed = 0;
+  const follow = feed.followReadPositions('person/avery', { onChanged: () => changed++ });
+  await settle();
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'subscribe', id: 'read-positions', collection: 'read-positions', person: 'person/avery', limit: 100 });
+  sockets[0].frame({ kind: 'snapshot', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(1), items: [], order: [], has_more: false });
+  sockets[0].frame({ kind: 'changes', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(2), upserts: [], removes: [], order: [], has_more: false });
+  assert.equal(changed, 2);
+  sockets[0].frame({ kind: 'resync', id: 'read-positions', retryable: true });
+  assert.equal(sockets[0].sent.filter(command => command.id === 'read-positions').length, 1, 'daemon retries temporary resync itself');
+  sockets[0].frame({ kind: 'resync', id: 'read-positions', retryable: false });
+  assert.equal(sockets[0].sent.filter(command => command.id === 'read-positions').length, 2, 'a final resync subscribes again');
+  sockets[0].frame({ kind: 'error', id: 'read-positions', code: 'remote-unavailable', message: 'busy' });
+  await settle(40);
+  assert.equal(sockets[0].sent.filter(command => command.id === 'read-positions').length, 3, 'a transient error subscribes again later');
+  sockets[0].drop(new Error('test drop'));
+  await settle(40);
+  assert.deepEqual(sockets[1].sent.filter(command => command.id === 'read-positions').at(-1), { kind: 'subscribe', id: 'read-positions', collection: 'read-positions', person: 'person/avery', limit: 100 });
+  sockets[1].frame({ kind: 'snapshot', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(3), items: [], order: [], has_more: false });
+  assert.equal(changed, 3);
+  follow.close();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'unsubscribe', id: 'read-positions' });
+  sockets[1].frame({ kind: 'snapshot', id: 'read-positions', collection: 'read-positions', snapshot: snapshot(4), items: [], order: [], has_more: false });
+  assert.equal(changed, 3, 'nothing is heard after closing');
+  feed.close();
+}
+
 // ---- A socket that never opens is a failed try, not a wait without end: the feed says reconnecting and tries again.
 test('a collections socket that never opens is given up on and tried again', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });
@@ -400,5 +431,111 @@ test('a collections socket that never opens is given up on and tried again', asy
   late[0]({ close() { closed = true; }, subscribe() {}, unsubscribe() {} });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(closed, true);
+  feed.close();
+});
+
+test('the open deadline covers a returned carrier until its WebSocket handshake', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });
+  const { client, sockets } = fakeClient({ autoOpen: false });
+  const { seen, handlers } = watch();
+  let carrierClosed = 0;
+  const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [1000, 2000], 1000, true, 30_000,
+    () => ({ close() { carrierClosed++; }, onping: null }));
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  await flush();
+  assert.equal(sockets.length, 1);
+  assert.deepEqual(subscribed(sockets[0]), [], 'no subscriptions before onOpen');
+  t.mock.timers.tick(OPEN_WAIT_MS - 1);
+  await flush();
+  assert.equal(sockets[0].closed, false);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(sockets[0].closed, true, 'the actual pending carrier is closed at 15 seconds');
+  assert.ok(carrierClosed > 0);
+  assert.equal(seen.connection.at(-1), 'reconnecting: Fractal did not answer');
+  sockets[0].open();
+  sockets[0].frame({ kind: 'snapshot', id: 'agents', collection: 'agents', snapshot: snapshot(1), items: [], order: [], has_more: false });
+  assert.equal(seen.updates, 0, 'late events cannot revive the expired attempt');
+  t.mock.timers.tick(1000);
+  await flush();
+  sockets[1].open();
+  await flush();
+  assert.deepEqual(subscribed(sockets[1]), ['attention', 'missions', 'agents']);
+  assert.notEqual(seen.connection.at(-1), 'live', 'handshake alone does not mark the feed live');
+  sockets[1].drop(new Error('before a snapshot'));
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(sockets.length, 2, 'handshake alone does not reset retry backoff');
+  t.mock.timers.tick(1000);
+  await flush();
+  sockets[2].open();
+  await flush();
+  sockets[2].frame({ kind: 'snapshot', id: 'agents', collection: 'agents', snapshot: snapshot(2), items: [], order: [], has_more: false });
+  assert.equal(seen.connection.at(-1), 'live');
+  t.mock.timers.tick(OPEN_WAIT_MS);
+  await flush();
+  assert.equal(sockets[2].closed, false, 'successful handshake cancels the opening deadline');
+  feed.close();
+});
+
+test('Share sheet inactivity keeps the live feed and retries; background suspends both', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });
+  const { client, sockets } = fakeClient();
+  const foreground = new ForegroundGate('active');
+  const { seen, handlers } = watch();
+  const feed = new Feed(client, handlers, foreground, () => 'action/test', [1000]);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  await flush();
+  foreground.update('inactive');
+  assert.equal(sockets[0].closed, false, 'a Share sheet does not tear down the socket');
+  sockets[0].frame({ kind: 'snapshot', id: 'agents', collection: 'agents', snapshot: snapshot(1), items: [], order: [], has_more: false });
+  assert.equal(seen.connection.at(-1), 'live', 'updates still arrive while inactive');
+  sockets[0].drop(new Error('network loss during Share sheet'));
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(sockets.length, 2, 'network failures still retry while inactive');
+  foreground.update('active');
+  await flush();
+  assert.equal(sockets.length, 2, 'dismissing the Share sheet does not open another socket');
+  foreground.update('background');
+  assert.equal(sockets[1].closed, true);
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(sockets.length, 2, 'background schedules no retries');
+  foreground.update('inactive');
+  await flush();
+  assert.equal(sockets.length, 2, 'inactive on the way back does not resume background work');
+  foreground.update('active');
+  await flush();
+  assert.equal(sockets.length, 3);
+  feed.close();
+});
+
+test('backgrounding or reconnecting during handshake closes the pending carrier', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });
+  const { client, sockets } = fakeClient({ autoOpen: false });
+  const foreground = new ForegroundGate('active');
+  const { seen, handlers } = watch();
+  const feed = new Feed(client, handlers, foreground, () => 'action/test', [1000]);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  await flush();
+  foreground.update('background');
+  await flush();
+  assert.equal(sockets[0].closed, true);
+  t.mock.timers.tick(OPEN_WAIT_MS + 1000);
+  await flush();
+  assert.equal(sockets.length, 1);
+  assert.deepEqual(seen.connection, ['connecting'], 'cancelling an attempt is not a transport failure');
+  foreground.update('active');
+  await flush();
+  feed.reconnect();
+  await flush();
+  assert.equal(sockets[1].closed, true);
+  sockets[1].open();
+  await flush();
+  assert.deepEqual(subscribed(sockets[1]), []);
+  sockets[2].open();
+  await flush();
+  assert.deepEqual(subscribed(sockets[2]), ['attention', 'missions', 'agents']);
   feed.close();
 });

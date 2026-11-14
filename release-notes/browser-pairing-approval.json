@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Approve per-browser message-capable device grants through existing native person asks",
+  "replay": {"status": "none", "detail": "No claim replay is required. Browser requests and device grants use the existing pairing and person-ask claim paths."},
+  "schema": {"status": "none", "detail": "No database schema changes or data migration."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade is required."},
+  "compatibility": {"status": "changed", "detail": "Existing native person asks render Approve and Deny answers without an app update. Browser approval requires an existing paired device with control.pairing and a native admission receipt from an answering member running this build or later; answers from older members fail closed. Browser grants receive web read scopes and control.messages only. Browser requests use a dedicated verifier for a 32-byte lowercase-hex request key, independent of legacy native challenge verification. The normal limited device-pairing scope list is unchanged."},
+  "downtime": {"status": "none", "detail": "No additional startup work or expected interruption."},
+  "manual": {"status": "changed", "detail": "Browser pairing is disabled by default. Before enabling browser_pairing_login, update the answering members to this build or later; otherwise requests fail closed. Configure the owning person and browser_pairing_login in daemon configuration, matching the publisher's admitted tailnet login. Compare the display code with the browser before approving its five-minute request. Each publisher device may begin ten requests per five minutes, with at most three pending per login."},
+  "recovery": {"status": "none", "detail": "No migration or additional swap-back restrictions. Browser grants expire after 30 days and can be revoked through existing device controls or by the browser itself."}
+}

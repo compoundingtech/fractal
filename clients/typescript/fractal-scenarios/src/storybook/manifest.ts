@@ -132,7 +132,8 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "none",
     "one-of-each-kind",
     "many",
-    "sidebar-tabs"
+    "sidebar-tabs",
+    "answerable"
   ],
   "conversation": [
     "default",
@@ -176,5 +177,11 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "page-cursor-expired",
     "evicted",
     "progress-absent"
+  ],
+  "objectives": [
+    "default",
+    "none",
+    "loading",
+    "unsafe-link"
   ]
 }

@@ -26,7 +26,6 @@ const LOCK_NAME: &str = ".harness-timeline.lock";
 const MAX_OPERATIONS: usize = 4_096;
 const MAX_RECORD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
-const MAX_STRING_CHARS: usize = 8_192;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,7 +108,6 @@ pub struct Writer {
     lock_path: PathBuf,
     driver: String,
     incarnation_id: String,
-    model: Option<String>,
     account: Option<String>,
     turn_models: BTreeMap<String, String>,
 }
@@ -125,15 +123,9 @@ impl Writer {
             lock_path: agent_dir.join(LOCK_NAME),
             driver: driver.into(),
             incarnation_id: incarnation_id.into(),
-            model: None,
             account: None,
             turn_models: BTreeMap::new(),
         }
-    }
-
-    pub fn with_model(mut self, model: Option<String>) -> Self {
-        self.model = model;
-        self
     }
 
     /// The opaque paying account (see [`account_label`]) stamped on each response usage entry
@@ -437,7 +429,6 @@ pub fn observe_codex(writer: &mut Writer, message: &Value, thread_id: &str) -> R
             .pointer("/params/model")
             .and_then(Value::as_str)
             .or_else(|| writer.turn_models.get(turn_id).map(String::as_str))
-            .or(writer.model.as_deref())
             .map(str::to_owned);
         return writer.append(
             format!("codex:usage:{}:{session_total}", message.pointer("/params/turnId").and_then(Value::as_str).unwrap_or("unknown")),
@@ -448,19 +439,19 @@ pub fn observe_codex(writer: &mut Writer, message: &Value, thread_id: &str) -> R
                 // inside `outputTokens`. st's buckets are disjoint, as Claude reports them:
                 // `input_tokens` is the uncached remainder, so the buckets sum to the total and
                 // each one is priced once.
-                let field = |key| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let field = |key| usage.get(key).and_then(Value::as_u64);
                 let cached = field("cachedInputTokens");
                 let cache_writes = field("cacheWriteInputTokens");
                 json!({
                     "semantics": "response", "driver": "codex",
                     "model": model,
-                    "input_tokens": field("inputTokens").saturating_sub(cached).saturating_sub(cache_writes),
+                    "input_tokens": field("inputTokens").zip(cached).map(|(input, cached)| input.saturating_sub(cached).saturating_sub(cache_writes.unwrap_or(0))),
                     "output_tokens": field("outputTokens"),
-                    "reasoning_tokens": field("reasoningOutputTokens"),
+                    "reasoning_tokens": usage.get("reasoningOutputTokens").and_then(Value::as_u64),
                     "cached_tokens": cached,
                     "cache_write_tokens": cache_writes,
                     "turn_id": message.pointer("/params/turnId"),
-                    "total_tokens": total,
+                    "total_tokens": field("totalTokens"),
                 })
             },
             true,
@@ -751,7 +742,7 @@ pub(crate) fn claude_usage_body(value: &Value, turn_id: &str) -> Option<Value> {
         return None;
     }
     let tokens = value.pointer("/message/usage")?;
-    let bucket = |key| tokens.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let bucket = |key| tokens.get(key).and_then(Value::as_u64);
     let input = bucket("input_tokens");
     let output = bucket("output_tokens");
     let cache_writes = bucket("cache_creation_input_tokens");
@@ -759,17 +750,19 @@ pub(crate) fn claude_usage_body(value: &Value, turn_id: &str) -> Option<Value> {
     // Claude splits cache writes by TTL; a one-hour write costs more than a five-minute one.
     let cache_writes_1h = tokens
         .pointer("/cache_creation/ephemeral_1h_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .min(cache_writes);
+        .and_then(Value::as_u64);
     Some(json!({
         "semantics": "response", "driver": "claude",
         "model": value.pointer("/message/model"),
+        "response_id": value.pointer("/message/id").and_then(Value::as_str),
+        "stop_reason": value.pointer("/message/stop_reason").and_then(Value::as_str),
         "turn_id": turn_id,
         "input_tokens": input, "output_tokens": output,
         "cache_write_tokens": cache_writes, "cache_write_1h_tokens": cache_writes_1h,
         "cached_tokens": cache_reads,
-        "total_tokens": input.saturating_add(output).saturating_add(cache_writes).saturating_add(cache_reads),
+        "total_tokens": input.zip(output).zip(cache_writes).zip(cache_reads).map(
+            |(((input, output), writes), reads)| input.saturating_add(output).saturating_add(writes).saturating_add(reads)
+        ),
     }))
 }
 
@@ -955,7 +948,8 @@ pub fn observe_channel_frame(writer: &mut Writer, frame: &Value) -> Result<()> {
             _ => Role::Assistant,
         };
         let id = message
-            .get("id")
+            .get("responseId")
+            .or_else(|| message.get("id"))
             .and_then(Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| source_id(message, "channel:message"));
@@ -975,38 +969,8 @@ pub fn observe_channel_frame(writer: &mut Writer, frame: &Value) -> Result<()> {
                 true,
             )?;
         }
-        if let Some(usage) = message.get("usage").filter(|usage| usage.is_object()) {
-            // pi and omp report disjoint buckets: `input` excludes cache reads and writes.
-            let tokens = |keys: &[&str]| {
-                keys.iter()
-                    .find_map(|key| usage.get(*key).and_then(Value::as_u64))
-                    .unwrap_or(0)
-            };
-            let input = tokens(&["input", "inputTokens"]);
-            let output = tokens(&["output", "outputTokens"]);
-            let cache_reads = tokens(&["cacheRead"]);
-            let cache_writes = tokens(&["cacheWrite"]);
-            let sum = input
-                .saturating_add(output)
-                .saturating_add(cache_reads)
-                .saturating_add(cache_writes);
-            let mut body = json!({
-                "semantics": "response", "driver": writer.driver,
-                "model": message.get("model").and_then(Value::as_str).or(writer.model.as_deref()),
-                "provider": message.get("provider").and_then(Value::as_str),
-                "input_tokens": input, "output_tokens": output,
-                "cached_tokens": cache_reads, "cache_write_tokens": cache_writes,
-                "total_tokens": usage.get("totalTokens").and_then(Value::as_u64).filter(|total| *total >= sum).unwrap_or(sum),
-            });
-            // The harness's own price for this response, when its model registry knows one.
-            if let Some(cost) = usage
-                .get("cost")
-                .and_then(Value::as_f64)
-                .filter(|cost| cost.is_finite() && *cost >= 0.0)
-            {
-                body["cost"] = json!(cost);
-                body["currency"] = json!("USD");
-            }
+        if role == Role::Assistant {
+            let body = channel_response_usage(message, &writer.driver);
             writer.append(
                 format!("{id}:usage"),
                 Role::System,
@@ -1017,6 +981,74 @@ pub fn observe_channel_frame(writer: &mut Writer, frame: &Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Terminal pi/OMP response evidence. Absent observations stay absent; zero is evidence.
+fn channel_response_usage(message: &Value, driver: &str) -> Value {
+    let usage = message.get("usage").filter(|usage| usage.is_object()).unwrap_or(&Value::Null);
+    let tokens = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| usage.get(*key).and_then(Value::as_u64))
+    };
+    // pi and OMP report disjoint buckets. Subsets below are never added again.
+    let input = tokens(&["input", "inputTokens"]);
+    let output = tokens(&["output", "outputTokens"]);
+    let cache_reads = tokens(&["cacheRead"]);
+    let cache_writes = tokens(&["cacheWrite"]);
+    let sum = input.zip(output).zip(cache_reads).zip(cache_writes).map(
+        |(((input, output), reads), writes)| {
+            input.saturating_add(output).saturating_add(reads).saturating_add(writes)
+        },
+    );
+    let mut body = json!({
+        "semantics": "response", "driver": driver,
+        "response_id": message.get("responseId").and_then(Value::as_str),
+        "model": message.get("model").and_then(Value::as_str),
+        "provider": message.get("provider").and_then(Value::as_str),
+        "api": message.get("api").and_then(Value::as_str),
+        "stop_reason": message.get("stopReason").and_then(Value::as_str),
+        "started_at_unix_ms": message.get("timestamp").and_then(Value::as_u64),
+        "completed_at_unix_ms": message.get("completedAt").and_then(Value::as_u64),
+        "duration_ms": nonnegative_number(message.get("duration")),
+        "ttft_ms": nonnegative_number(message.get("ttft")),
+        "input_tokens": input, "output_tokens": output,
+        "cached_tokens": cache_reads, "cache_write_tokens": cache_writes,
+        "cache_write_1h_tokens": usage.pointer("/cttl/ephemeral1h").and_then(Value::as_u64),
+        "reasoning_tokens": tokens(&["reasoningTokens"]),
+        "total_tokens": tokens(&["totalTokens"]).or(sum),
+    });
+    // Keep the existing scalar total: accounting already gives reported cost precedence
+    // over the shared rate card. Components are evidence, not additional spend.
+    let cost = usage.get("cost");
+    if let Some(total) = nonnegative_number(cost.and_then(|cost| cost.get("total")))
+        .or_else(|| nonnegative_number(cost))
+    {
+        body["cost"] = json!(total);
+        body["currency"] = json!("USD");
+    }
+    let mut components = Map::new();
+    for (source, target) in [
+        ("input", "input"),
+        ("output", "output"),
+        ("cacheRead", "cache_read"),
+        ("cacheWrite", "cache_write"),
+    ] {
+        if let Some(amount) = nonnegative_number(cost.and_then(|cost| cost.get(source))) {
+            components.insert(target.into(), json!(amount));
+        }
+    }
+    if !components.is_empty() {
+        body["cost_components"] = Value::Object(components);
+        body["currency"] = json!("USD");
+    }
+    if let Some(quantity) = nonnegative_number(usage.get("premiumRequests")) {
+        body["provider_quota"] = json!({"unit": "premium_requests", "quantity": quantity});
+    }
+    body
+}
+
+fn nonnegative_number(value: Option<&Value>) -> Option<f64> {
+    value.and_then(Value::as_f64).filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 fn item_text(value: &Value) -> Option<String> {
@@ -1250,36 +1282,21 @@ fn normalize_body(entry_type: EntryType, source_id: &str, value: Value) -> (Valu
         ),
         EntryType::Usage => {
             let mut body = Map::new();
-            for key in [
-                "semantics",
-                "driver",
-                "model",
-                "provider",
-                "account",
-                "input_tokens",
-                "output_tokens",
-                "cached_tokens",
-                "cache_write_tokens",
-                "cache_write_1h_tokens",
-                "reasoning_tokens",
-                "turn_id",
-                "total_tokens",
-                "context_used_tokens",
-                "context_window_tokens",
-                "context_used_percent",
-                "cost",
-                "currency",
-            ] {
-                if let Some(value) = value.get(key).filter(|value| !value.is_null()) {
-                    body.insert(key.into(), value.clone());
-                }
-            }
             let allowed = [
                 "semantics",
                 "driver",
                 "model",
                 "provider",
                 "account",
+                "response_id",
+                "api",
+                "stop_reason",
+                "started_at_unix_ms",
+                "completed_at_unix_ms",
+                "duration_ms",
+                "ttft_ms",
+                "cost_components",
+                "provider_quota",
                 "input_tokens",
                 "output_tokens",
                 "cached_tokens",
@@ -1294,6 +1311,11 @@ fn normalize_body(entry_type: EntryType, source_id: &str, value: Value) -> (Valu
                 "cost",
                 "currency",
             ];
+            for key in allowed {
+                if let Some(value) = value.get(key).filter(|value| !value.is_null()) {
+                    body.insert(key.into(), value.clone());
+                }
+            }
             (Value::Object(body), 0, omitted_keys(&value, &allowed), 0)
         }
         EntryType::Redaction => (
@@ -1328,53 +1350,7 @@ fn omitted_keys(value: &Value, allowed: &[&str]) -> u64 {
     })
 }
 
-fn normalize_conversation_text(text: &str) -> (String, u64, u64) {
-    let original_chars = text.chars().count();
-    let bounded = text.chars().take(MAX_STRING_CHARS).collect::<String>();
-    let mut redacted_bytes = 0_u64;
-    let mut output = String::with_capacity(bounded.len());
-    let mut cursor = 0;
-    let mut redact_next = false;
-    let words = bounded.match_indices(|character: char| !character.is_whitespace());
-    for (start, _) in words {
-        if start < cursor {
-            continue;
-        }
-        let end = bounded[start..]
-            .find(char::is_whitespace)
-            .map_or(bounded.len(), |offset| start + offset);
-        let word = &bounded[start..end];
-        output.push_str(&bounded[cursor..start]);
-        let lower = word.to_ascii_lowercase();
-        let sensitive = redact_next
-            || lower.starts_with("sk-")
-            || lower.starts_with("ghp_")
-            || word.starts_with("AKIA")
-            || lower.starts_with("token=")
-            || lower.starts_with("password=")
-            || lower.starts_with("authorization=");
-        if sensitive {
-            redacted_bytes = redacted_bytes.saturating_add(word.len() as u64);
-            if let Some((prefix, _)) = word.split_once('=') {
-                output.push_str(prefix);
-                output.push_str("=[REDACTED]");
-            } else {
-                output.push_str("[REDACTED]");
-            }
-            redact_next = false;
-        } else {
-            output.push_str(word);
-            redact_next = lower == "bearer" || lower == "authorization:";
-        }
-        cursor = end;
-    }
-    output.push_str(&bounded[cursor..]);
-    (
-        output,
-        redacted_bytes,
-        original_chars.saturating_sub(MAX_STRING_CHARS) as u64,
-    )
-}
+use fractal_runtime::transcript::normalize_conversation_text;
 
 fn safe_tool_name(value: Option<&str>) -> String {
     value
@@ -1784,7 +1760,7 @@ mod tests {
             json!({"type":"user","uuid":"turn-b","sessionId":"native-current"}),
             json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-a","model":"claude-example","usage":{"input_tokens":7,"output_tokens":5,"cache_creation_input_tokens":11,"cache_read_input_tokens":13}}}),
             json!({"type":"user","uuid":"tool-result-b","sessionId":"native-current","message":{"content":[{"type":"tool_result","tool_use_id":"tool-b","content":"done"}]}}),
-            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-b","model":"claude-example","usage":{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":17}}}),
+            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-b","model":"claude-example","usage":{"input_tokens":3,"output_tokens":4,"cache_creation_input_tokens":0,"cache_read_input_tokens":17}}}),
             json!({"type":"user","uuid":"turn-c","sessionId":"native-current"}),
         ];
         fs::write(
@@ -1829,9 +1805,9 @@ mod tests {
         let transcript = projects.join("native-current.jsonl");
         let lines = [
             json!({"type":"user","uuid":"turn-a","sessionId":"native-current"}),
-            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-a","model":"claude-example","usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5}}}),
+            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-a","model":"claude-example","usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":0}}}),
             json!({"type":"user","uuid":"tool-a","sessionId":"native-current","message":{"content":[{"type":"tool_result","content":"x".repeat(3 * 1024 * 1024)}]}}),
-            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-b","model":"claude-example","usage":{"input_tokens":7,"output_tokens":11,"cache_read_input_tokens":13}}}),
+            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-b","model":"claude-example","usage":{"input_tokens":7,"output_tokens":11,"cache_read_input_tokens":13,"cache_creation_input_tokens":0}}}),
         ];
         fs::write(
             &transcript,
@@ -1866,8 +1842,8 @@ mod tests {
     #[test]
     fn codex_keeps_multiple_responses_in_one_turn() {
         let temporary = tempfile::tempdir().unwrap();
-        let mut writer = Writer::new(temporary.path(), "codex", "inc-current")
-            .with_model(Some("gpt-example".into()));
+        let mut writer = Writer::new(temporary.path(), "codex", "inc-current");
+        writer.remember_turn_model("turn-a", "gpt-example");
         for (last, total) in [(10, 10), (20, 30)] {
             observe_codex(&mut writer, &json!({"method":"thread/tokenUsage/updated","params":{"threadId":"thread-a","turnId":"turn-a","tokenUsage":{"last":{"inputTokens":last,"outputTokens":0,"cachedInputTokens":0,"totalTokens":last},"total":{"totalTokens":total}}}}), "thread-a").unwrap();
         }
@@ -2171,7 +2147,6 @@ mod tests {
     fn codex_usage_records_disjoint_buckets_and_the_paying_account() {
         let temporary = tempfile::tempdir().unwrap();
         let mut writer = Writer::new(temporary.path(), "codex", "inc-current")
-            .with_model(Some("gpt-example".into()))
             .with_account(Some("codex/aaaaaaaaaaaaaaaa".into()));
         // Codex counts cached input inside `inputTokens` and reasoning inside `outputTokens`.
         observe_codex(&mut writer, &json!({"method":"thread/tokenUsage/updated","params":{"threadId":"thread-a","turnId":"turn-a","tokenUsage":{"last":{"inputTokens":1000,"cachedInputTokens":900,"outputTokens":50,"reasoningOutputTokens":20,"totalTokens":1050},"total":{"totalTokens":1050}}}}), "thread-a").unwrap();
@@ -2215,9 +2190,132 @@ mod tests {
         assert_eq!(usage[0]["total_tokens"], 603);
         assert_eq!(usage[0]["cost"], 0.0125);
         assert_eq!(usage[0]["currency"], "USD");
-        assert_eq!(usage[1]["total_tokens"], 15);
+        assert!(usage[1].get("total_tokens").is_none());
+        assert!(usage[1].get("cached_tokens").is_none());
+        assert!(usage[1].get("cache_write_tokens").is_none());
         assert!(usage[1].get("cost").is_none());
         assert!(usage[1].get("account").is_none());
+    }
+
+    #[test]
+    fn omp_terminal_response_evidence_matches_the_public_contract() {
+        // Metadata-only extracts of observed OMP terminal messages. IDs are replaced;
+        // prompt, content, credentials, request controls and local paths are excluded.
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../tests/fixtures/harness-timeline/omp-response-evidence.json"
+        )).unwrap();
+        let mut expected: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/response-evidence.json"
+        )).unwrap();
+        for body in &mut expected {
+            body.as_object_mut().unwrap().remove("attribution");
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(temporary.path(), "omp", "inc-current");
+        for message in &messages {
+            let frame = json!({"type":"timeline", "event":"message_end", "payload":{"message":message}});
+            observe_channel_frame(&mut writer, &frame).unwrap();
+            observe_channel_frame(&mut writer, &frame).unwrap();
+            // Same provider response with a different local snapshot must still count once.
+            let mut restated = frame;
+            restated["payload"]["message"]["id"] = json!("different-local-message-id");
+            observe_channel_frame(&mut writer, &restated).unwrap();
+        }
+        assert_eq!(usage_bodies(temporary.path()), expected);
+    }
+
+    #[test]
+    fn channel_response_unknowns_are_not_zero_or_requested_model_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(temporary.path(), "omp", "inc-current");
+        let frame = json!({"type":"timeline","event":"message_end","payload":{"message":{
+            "role":"assistant", "usage":{"input":7, "output":8,
+                "cost":{"input":0.25}, "premiumRequests":1.5}
+        }}});
+        observe_channel_frame(&mut writer, &frame).unwrap();
+        let bodies = usage_bodies(temporary.path());
+        let body = &bodies[0];
+        for key in ["model", "provider", "api", "response_id", "stop_reason",
+            "started_at_unix_ms", "completed_at_unix_ms", "duration_ms", "ttft_ms",
+            "cached_tokens", "cache_write_tokens", "cache_write_1h_tokens",
+            "reasoning_tokens", "total_tokens", "cost"]
+        {
+            assert!(body.get(key).is_none(), "{key} must remain unknown");
+        }
+        assert_eq!(body["cost_components"], json!({"input":0.25}));
+        assert_eq!(body["provider_quota"], json!({"unit":"premium_requests","quantity":1.5}));
+        assert_eq!(body["currency"], "USD");
+        assert!(body["cost_components"].get("output").is_none());
+    }
+
+    #[test]
+    fn channel_response_preserves_complete_bucket_sum_and_rejects_invalid_numbers() {
+        let body = channel_response_usage(&json!({"usage":{
+            "input":1, "output":2, "cacheRead":3, "cacheWrite":4,
+            "reasoningTokens":1, "cttl":{"ephemeral1h":4},
+            "cost":{"total":-1, "input":-0.1, "output":0},
+            "premiumRequests":-2
+        }, "duration":-1, "ttft":0}), "omp");
+        assert_eq!(body["total_tokens"], 10);
+        assert!(body.get("cost").is_none());
+        assert!(body.get("provider_quota").is_none());
+        assert_eq!(body["duration_ms"], Value::Null);
+        assert_eq!(body["ttft_ms"], 0.0);
+        assert_eq!(body["cost_components"], json!({"output":0.0}));
+    }
+
+    #[test]
+    fn channel_terminal_metadata_survives_without_usage_and_nonterminal_copies_do_not_count() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(temporary.path(), "omp", "inc-current");
+        let message = json!({"role":"assistant", "responseId":"response-without-usage",
+            "model":"actual-model", "provider":"actual-provider", "api":"actual-api"});
+        for event in ["message_update", "agent_end"] {
+            observe_channel_frame(&mut writer, &json!({
+                "type":"timeline", "event":event, "payload":{"message":message}
+            })).unwrap();
+        }
+        assert!(read(&timeline_path(temporary.path()))
+            .is_none_or(|record| record.operations.iter().all(|operation| operation.entry_type != "usage")));
+        observe_channel_frame(&mut writer, &json!({
+            "type":"timeline", "event":"message_end", "payload":{"message":message}
+        })).unwrap();
+        observe_channel_frame(&mut writer, &json!({
+            "type":"timeline", "event":"message_end", "payload":{"message":{
+                "role":"user", "usage":{"input":99}
+            }}
+        })).unwrap();
+        let bodies = usage_bodies(temporary.path());
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["response_id"], "response-without-usage");
+        assert_eq!(bodies[0]["model"], "actual-model");
+        assert_eq!(bodies[0]["provider"], "actual-provider");
+        assert_eq!(bodies[0]["api"], "actual-api");
+        assert!(bodies[0].get("total_tokens").is_none());
+        assert!(bodies[0].get("cost").is_none());
+    }
+
+    #[test]
+    fn native_optional_response_subsets_remain_unknown_when_absent() {
+        let body = claude_usage_body(&json!({"message":{
+            "id":"claude-response", "model":"claude-example", "stop_reason":"end_turn",
+            "usage":{"input_tokens":2,"output_tokens":3}
+        }}), "turn-a").unwrap();
+        assert_eq!(body["response_id"], "claude-response");
+        assert_eq!(body["stop_reason"], "end_turn");
+        assert_eq!(body["cache_write_1h_tokens"], Value::Null);
+        assert_eq!(body["cache_write_tokens"], Value::Null);
+        assert_eq!(body["cached_tokens"], Value::Null);
+        assert_eq!(body["total_tokens"], Value::Null);
+        let temporary = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(temporary.path(), "codex", "inc-current");
+        observe_codex(&mut writer, &json!({"method":"thread/tokenUsage/updated","params":{
+            "threadId":"thread-a","turnId":"turn-a","tokenUsage":{
+                "last":{"inputTokens":10,"cachedInputTokens":0,"outputTokens":5,"totalTokens":15},
+                "total":{"totalTokens":15}
+            }
+        }}), "thread-a").unwrap();
+        assert!(usage_bodies(temporary.path())[0].get("reasoning_tokens").is_none());
     }
 
     #[test]
@@ -2260,7 +2358,7 @@ mod tests {
         let subagents = project.join("native-a/subagents");
         fs::create_dir_all(&subagents).unwrap();
         let transcript = project.join("native-a.jsonl");
-        let response = |id: &str, output: u64| json!({"type":"assistant","sessionId":"native-a","isSidechain":true,"message":{"id":id,"model":"claude-example","usage":{"input_tokens":1,"output_tokens":output,"cache_read_input_tokens":100}}});
+        let response = |id: &str, output: u64| json!({"type":"assistant","sessionId":"native-a","isSidechain":true,"message":{"id":id,"model":"claude-example","usage":{"input_tokens":1,"output_tokens":output,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}});
         fs::write(
             &transcript,
             format!("{}\n", json!({"type":"assistant","sessionId":"native-a","message":{"id":"main-a","model":"claude-example","usage":{"input_tokens":2,"output_tokens":3}}})),

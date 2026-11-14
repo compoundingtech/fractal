@@ -3,9 +3,13 @@ use std::collections::BTreeMap;
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
-use crate::model::{GateSpec, St3Error};
+use crate::model::{GateSpec, FractalError};
 
 use crate::declaration_syntax::*;
+
+// Dormant grammar only: public dispatch stays closed until the complete policy is ready.
+#[allow(dead_code)]
+mod agent_review;
 
 const BUILT_IN_EXEC_GATES: &[&str] = &["merged", "ci-passed", "cargo-test"];
 
@@ -25,11 +29,11 @@ pub fn gate_name(gate: &GateSpec) -> &str {
     }
 }
 
-pub fn one_duration(node: &KdlNode) -> Result<u64, St3Error> {
+pub fn one_duration(node: &KdlNode) -> Result<u64, FractalError> {
     ensure_no_properties(node)?;
     ensure_no_children(node)?;
     let [entry] = node.entries() else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-argument-count",
             format!("node `{}` needs one duration", node.name().value()),
         ));
@@ -38,15 +42,15 @@ pub fn one_duration(node: &KdlNode) -> Result<u64, St3Error> {
         KdlValue::String(value) => parse_duration(value, true),
         KdlValue::Integer(value) if *value > 0 => u64::try_from(*value)
             .map(|value| value * 1_000)
-            .map_err(|_| St3Error::new("duration-range", "duration is too large")),
-        _ => Err(St3Error::new(
+            .map_err(|_| FractalError::new("duration-range", "duration is too large")),
+        _ => Err(FractalError::new(
             "invalid-duration",
             "a required duration must be positive",
         )),
     }
 }
 
-pub fn parse_baseline_gate(node: &KdlNode, name: String) -> Result<GateSpec, St3Error> {
+pub fn parse_baseline_gate(node: &KdlNode, name: String) -> Result<GateSpec, FractalError> {
     reject_type(node)?;
     ensure_no_properties(node)?;
     parse_predicate_gate(node, name)
@@ -59,14 +63,14 @@ pub fn parse_built_in_gate(
     name: String,
     body: &KdlDocument,
     default_host: &str,
-) -> Result<GateSpec, St3Error> {
+) -> Result<GateSpec, FractalError> {
     let kinds = body
         .nodes()
         .iter()
         .filter(|child| BUILT_IN_EXEC_GATES.contains(&child.name().value()))
         .collect::<Vec<_>>();
     let [check] = kinds.as_slice() else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-gate-shape",
             format!("gate `{name}` needs exactly one built-in check"),
         ));
@@ -83,9 +87,9 @@ pub fn parse_built_in_gate(
     }
     reject_type(check)?;
     let word = |value: &str| crate::gate_kinds::shell_word(value);
-    let required = |property: &str| -> Result<String, St3Error> {
+    let required = |property: &str| -> Result<String, FractalError> {
         property_string(check, property)?.ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "missing-gate-field",
                 format!("gate `{name}` needs {kind} {property}=\"...\""),
             )
@@ -113,7 +117,7 @@ pub fn parse_built_in_gate(
             ) {
                 (Some(reference), None) | (None, Some(reference)) => reference,
                 _ => {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-gate-shape",
                         format!("gate `{name}` needs ci-passed commit=\"SHA\" or branch=\"NAME\""),
                     ));
@@ -165,23 +169,23 @@ pub fn parse_built_in_gate(
     })
 }
 
-pub fn parse_gate(node: &KdlNode, default_host: &str) -> Result<GateSpec, St3Error> {
+pub fn parse_gate(node: &KdlNode, default_host: &str) -> Result<GateSpec, FractalError> {
     reject_type(node)?;
     ensure_only_properties(node, &["type", "mode"])?;
     let name = one_string_with_children(node)?;
     if name.is_empty() || name.len() > 160 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-gate-name",
             "a gate name must contain 1 through 160 bytes",
         ));
     }
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-gate-body", format!("gate `{name}` has no body")))?;
+        .ok_or_else(|| FractalError::new("missing-gate-body", format!("gate `{name}` has no body")))?;
     let gate_type = property_string(node, "type")?;
     let mode = property_string(node, "mode")?;
     if mode.is_some() && gate_type.as_deref() != Some("human") {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-gate-mode",
             "only a human gate accepts a mode",
         ));
@@ -205,13 +209,13 @@ pub fn parse_gate(node: &KdlNode, default_host: &str) -> Result<GateSpec, St3Err
         return parse_running_gate(node, name, default_host);
     }
     if gate_type.is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-gate-type",
             format!("gate `{name}` has an invalid type"),
         ));
     }
     if body.nodes().len() != 1 {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-gate-shape",
             format!("gate `{name}` needs exactly one predicate"),
         ));
@@ -219,7 +223,7 @@ pub fn parse_gate(node: &KdlNode, default_host: &str) -> Result<GateSpec, St3Err
     parse_predicate_gate(&body.nodes()[0], name)
 }
 
-pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, St3Error> {
+pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, FractalError> {
     reject_type(child)?;
     match child.name().value() {
         "exists" => {
@@ -234,7 +238,7 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
             ensure_no_properties(child)?;
             let subject = one_string(child)?;
             if !subject.starts_with("doc/") {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-document-reference",
                     format!("gate `{name}` names `{subject}`; a document gate needs doc/NAME"),
                 ));
@@ -248,7 +252,7 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
             ensure_no_properties(child)?;
             let subject = one_string(child)?;
             if !subject.starts_with("mission-run/") {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-empty-subject",
                     "empty requires a full mission run subject",
                 ));
@@ -259,7 +263,7 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
         "has" | "lacks" => {
             let values = positional_strings(child)?;
             if values.len() != 2 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-text-predicate",
                     "has and lacks require a subject and text",
                 ));
@@ -269,7 +273,7 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
                 values[0].split('/').next(),
                 Some("file" | "doc" | "message")
             ) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unsupported-predicate-subject",
                     "has and lacks require a file, document, or message subject",
                 ));
@@ -297,21 +301,21 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
                 .map(|entry| entry.value())
                 .collect::<Vec<_>>();
             if entries.len() != 4 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-field-predicate",
                     "field requires path, subject, operator, and value",
                 ));
             }
             let path = value_string(entries[0])?;
             if !valid_field_path(&path) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-field-path",
                     format!("invalid field path `{path}`"),
                 ));
             }
             let operator = value_string(entries[2])?;
             if !matches!(operator.as_str(), "is" | "starts-with" | "contains") {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-field-operator",
                     format!("invalid field operator `{operator}`"),
                 ));
@@ -335,14 +339,14 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
                 .map(|entry| entry.value())
                 .collect::<Vec<_>>();
             if entries.len() != 2 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-quantified-predicate",
                     "every and not-every require a list field path and subject",
                 ));
             }
             let path = value_string(entries[0])?;
             if !valid_field_path(&path) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-field-path",
                     format!("invalid field path `{path}`"),
                 ));
@@ -350,13 +354,13 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
             let subject = value_string(entries[1])?;
             validate_full_subject(&subject)?;
             let body = child.children().ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "empty-quantified-predicate",
                     "every and not-every require at least one field predicate",
                 )
             })?;
             if body.nodes().is_empty() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "empty-quantified-predicate",
                     "every and not-every require at least one field predicate",
                 ));
@@ -364,7 +368,7 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
             let mut fields = Vec::with_capacity(body.nodes().len());
             for predicate in body.nodes() {
                 if predicate.name().value() != "field" {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-quantified-predicate",
                         "every and not-every accept only field predicates",
                     ));
@@ -378,21 +382,21 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
                     .map(|entry| entry.value())
                     .collect::<Vec<_>>();
                 if entries.len() != 3 {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-quantified-field",
                         "a quantified field requires path, operator, and value",
                     ));
                 }
                 let path = value_string(entries[0])?;
                 if !valid_field_path(&path) {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-field-path",
                         format!("invalid field path `{path}`"),
                     ));
                 }
                 let operator = value_string(entries[1])?;
                 if !matches!(operator.as_str(), "is" | "starts-with" | "contains") {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "invalid-field-operator",
                         format!("invalid field operator `{operator}`"),
                     ));
@@ -427,7 +431,7 @@ pub fn parse_predicate_gate(child: &KdlNode, name: String) -> Result<GateSpec, S
                 duration_ms: duration,
             })
         }
-        other => Err(St3Error::new(
+        other => Err(FractalError::new(
             "unknown-gate",
             format!("unknown gate predicate `{other}`"),
         )),
@@ -438,11 +442,11 @@ pub fn parse_running_gate(
     node: &KdlNode,
     name: String,
     default_host: &str,
-) -> Result<GateSpec, St3Error> {
+) -> Result<GateSpec, FractalError> {
     ensure_only_properties(node, &["type", "mode"])?;
     let body = node
         .children()
-        .ok_or_else(|| St3Error::new("missing-gate-body", format!("gate `{name}` has no body")))?;
+        .ok_or_else(|| FractalError::new("missing-gate-body", format!("gate `{name}` has no body")))?;
     let gate_type = property_string(node, "type")?;
     let mode = property_string(node, "mode")?;
     let allowed: &[&str] = match gate_type.as_deref() {
@@ -459,7 +463,7 @@ pub fn parse_running_gate(
         ],
         Some("human") => &["reviewer", "question", "review"],
         Some(other) => {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-gate-type",
                 format!("gate `{name}` has invalid type `{other}`"),
             ));
@@ -472,14 +476,14 @@ pub fn parse_running_gate(
     if gate_type.as_deref() == Some("human") {
         let mode = mode.unwrap_or_else(|| "approve".into());
         if !matches!(mode.as_str(), "approve" | "feedback") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-human-gate-mode",
                 format!("human gate `{name}` has invalid mode `{mode}`"),
             ));
         }
         let reviewer = required_child_string(body, "reviewer", &name)?;
         if !reviewer.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-human-reviewer",
                 "a human gate needs a full person subject",
             ));
@@ -494,7 +498,7 @@ pub fn parse_running_gate(
             let target = one_string(field)?;
             validate_full_subject(&target)?;
             if review_targets.contains(&target) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "duplicate-human-review-target",
                     format!("human review target `{target}` repeats"),
                 ));
@@ -532,23 +536,23 @@ pub fn parse_running_gate(
         }
         Some("llm") => {
             let tools = child_strings(body, "tools")?.ok_or_else(|| {
-                St3Error::new("missing-gate-field", format!("gate `{name}` needs tools"))
+                FractalError::new("missing-gate-field", format!("gate `{name}` needs tools"))
             })?;
             let token_budget = child_integer(body, "token-budget")?.ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-gate-field",
                     format!("gate `{name}` needs token-budget"),
                 )
             })?;
             if token_budget <= 0 {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-token-budget",
                     "an LLM token budget must be positive",
                 ));
             }
             for tool in &tools {
                 if !matches!(tool.as_str(), "shell" | "git" | "gh" | "network") {
-                    return Err(St3Error::new(
+                    return Err(FractalError::new(
                         "unsupported-capability",
                         format!("gate tool `{tool}` is not registered"),
                     ));
@@ -556,7 +560,7 @@ pub fn parse_running_gate(
             }
             let time_limit_ms = child_string(body, "time-limit")?
                 .ok_or_else(|| {
-                    St3Error::new(
+                    FractalError::new(
                         "missing-gate-field",
                         format!("gate `{name}` needs time-limit"),
                     )
@@ -579,7 +583,7 @@ pub fn parse_running_gate(
     }
 }
 
-pub fn validate_pull_request_locator(locator: &str) -> Result<(), St3Error> {
+pub fn validate_pull_request_locator(locator: &str) -> Result<(), FractalError> {
     let valid = locator
         .rsplit_once('#')
         .is_some_and(|(repository, number)| {
@@ -591,7 +595,7 @@ pub fn validate_pull_request_locator(locator: &str) -> Result<(), St3Error> {
     if valid {
         Ok(())
     } else {
-        Err(St3Error::new(
+        Err(FractalError::new(
             "invalid-pull-request",
             format!("`{locator}` is not a pull request; write OWNER/REPO#NUMBER"),
         ))

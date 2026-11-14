@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The hourly fleet admission residue count reads each replicated envelope's key from an index instead of its row, so it no longer reads every envelope's payload page from disk: about 13 GB down to about 0.2 GB a run on a 2.3-million-envelope member.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or projection change. The count visits the same validated envelopes with the same signers, and doctor reports the same residue."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, durable claim or projection table changes. The query uses the primary-key index replica_envelopes already has."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, retention or graph digest rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed-version compatible with the previous release. Only a local read query changes, and both versions count the same residue from the same store."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Activating the new binary uses the ordinary managed daemon replacement path."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No state repair, queue deletion or configuration changes required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent format changes or new rollback restrictions. A rolled-back binary reads every envelope row again."
+  }
+}

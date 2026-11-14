@@ -32,9 +32,9 @@ pub struct WaitingOnQuery {
 }
 
 /// The published state both reads use, or why it cannot be served now.
-struct Sources {
-    work: Arc<Publication<WorkRows>>,
-    missions: Arc<Publication<MissionRows>>,
+pub(crate) struct Sources {
+    pub(crate) work: Arc<Publication<WorkRows>>,
+    pub(crate) missions: Arc<Publication<MissionRows>>,
 }
 
 fn unavailable() -> ApiError {
@@ -47,7 +47,7 @@ fn unavailable() -> ApiError {
     }
 }
 
-fn sources(store: &Store) -> Result<Sources, ApiError> {
+pub(crate) fn sources(store: &Store) -> Result<Sources, ApiError> {
     let list = store.published_work_list();
     let work = match list.current() {
         ListRead::Served(publication, _) => publication,
@@ -132,6 +132,13 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
         wait.detail = ask
             .and_then(|ask| ask.view.title.clone().or_else(|| ask.view.goals.first().cloned()))
             .or_else(|| view.blocked_reason.clone());
+        // A program asks under one of its keys: name it.
+        if let Some(key) = row.value["program"]["open_key"].as_str() {
+            wait.detail = Some(match wait.detail.take() {
+                Some(detail) => format!("{key}: {detail}"),
+                None => key.to_owned(),
+            });
+        }
         return wait;
     }
     if view.status == "blocked" {
@@ -145,6 +152,7 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
     if view.agentless {
         wait.who = Some("st".into());
         match row.value["gate_kind"].as_str() {
+            Some("program") => classify_program(&mut wait, view, &row.value["program"], context.now),
             Some("watch") => wait.kind = WaitKind::Watching,
             Some("run") => {
                 wait.kind = WaitKind::Hold;
@@ -240,6 +248,34 @@ fn classify(row: &WorkRow, context: &Context<'_>) -> StepWait {
     wait
 }
 
+/// A program step moves while its journal does: past its `stalled-after` without a new entry it
+/// has made no progress. The detail names the innermost open key and what it waits on.
+fn classify_program(wait: &mut StepWait, view: &StepRunView, program: &Value, now: u128) {
+    let at = |name: &str| program[name].as_u64().map(u128::from);
+    let since = [at("last_entry_at_unix_ms"), view.execution_started_at_unix_ms]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(view.updated_at_unix_ms);
+    let stalled_after = program["stalled_after_ms"]
+        .as_u64()
+        .unwrap_or(crate::program_journal::DEFAULT_STALLED_AFTER_MS);
+    wait.since_unix_ms = Some(since);
+    wait.kind = if now.saturating_sub(since) > u128::from(stalled_after) {
+        WaitKind::NoProgress
+    } else {
+        WaitKind::Program
+    };
+    wait.detail = Some(match (program["open_key"].as_str(), program["child"].as_str()) {
+        (Some(key), Some(child)) => format!("{key} waits on {child}"),
+        (Some(key), None) => match at("open_since_unix_ms") {
+            Some(started) => format!("{key} running for {}", describe_age(now.saturating_sub(started))),
+            None => format!("{key} running"),
+        },
+        (None, _) => "between steps".to_owned(),
+    });
+}
+
 /// Most blocking first: the causes in their order, a step that asked before the ask it made,
 /// then whatever has waited longest.
 fn sort_waits(waits: &mut [StepWait]) {
@@ -288,6 +324,7 @@ pub fn describe(wait: &StepWait, now: u128) -> String {
             _ => format!("{}: held{detail}", wait.path),
         },
         WaitKind::Working => format!("{}: {who} working, last progress {age} ago{detail}", wait.path),
+        WaitKind::Program => format!("{}: program, last journal entry {age} ago{detail}", wait.path),
         WaitKind::Verifying => format!("{}: verifying{detail}", wait.path),
         WaitKind::Ready => format!("{}: ready for {age}", wait.path),
         WaitKind::Queued => format!("{}: queued for {who}{detail}", wait.path),

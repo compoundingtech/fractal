@@ -7,7 +7,7 @@ fn a_named_run_probe_reads_the_runs_steps_not_every_step_of_the_seat() {
     let plan = writer
         .prepare(/* sqlite-large-value: allow-for-now lv-hf932ad4cefc8 owner=fractal_store::store::seat_queue_plan_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {SEAT_QUEUE_NAMED_RUN_QUERY}"))
         .unwrap()
-        .query_map(params!["agent/garden/seat", "garden/tend"], |row| row.get::<_, String>(3))
+        .query_map(params![work_actor_spellings_json("agent/garden/seat"), "garden/tend"], |row| row.get::<_, String>(3))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();

@@ -424,36 +424,41 @@ impl EvidenceStore for Store {
 
     fn mission_gate_runners(&self) -> Result<Vec<MissionGateRunner>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(
-            "SELECT DISTINCT subject, origin,
-                    COALESCE(json_extract(body, '$.fields.owner'),
-                      'legacy:' || substr(subject, 16, instr(substr(subject, 16), '/')-1))
-             FROM claims request WHERE kind='gate.requested'
-               AND (json_extract(body, '$.fields.runner') IN ('exec','loop-metric')
-                    OR json_extract(body, '$.fields.model') IS NOT NULL)
-               AND NOT EXISTS (
-                 SELECT 1 FROM claims stopped
-                 WHERE stopped.subject=request.subject AND stopped.kind='runtime.observed'
-                   AND json_extract(stopped.body, '$.fields.status')='stopped'
-               )",
-        )?;
-        let mut requests = BTreeMap::<String, Vec<(String, String)>>::new();
+        // Trigger-kept from the claims (`gate_runners`): reading the claims parsed every
+        // mechanical gate request in history, one 9.2 s query after a busy host's restart.
+        // Until the requests older than its triggers are copied, the list reads the claims.
+        let source = if crate::store::gate_runners::complete(&connection)? {
+            "local_gate_runners".to_owned()
+        } else {
+            format!("({})", crate::store::gate_runners::FROM_CLAIMS)
+        };
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha3d84de9cc54 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT DISTINCT runner.subject,
+                    COALESCE(json_extract(request.body, '$.fields.host'), runner.origin),
+                    runner.owner,
+                    COALESCE(json_extract(request.body, '$.fields.dispatch.owner_attempt'),
+                        json_extract(request.body, '$.fields.attempt'))
+             FROM {source} runner JOIN claims request ON request.id=runner.claim_id"
+        ))?;
+        let mut requests = BTreeMap::<String, Vec<(String, String, Option<u32>)>>::new();
         for row in statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<u32>>(3)?,
             ))
         })? {
-            let (subject, host, owner) = row?;
+            let (subject, host, owner, attempt) = row?;
             // A runner leaves this list once its stop is observed on it.
             smallclaims::touched::note_read(|| subject.clone());
-            requests.entry(owner).or_default().push((subject, host));
+            requests.entry(owner).or_default().push((subject, host, attempt));
         }
         // New requests, and owners that finish or move on.
         for kind in [
             "gate.requested",
             "step-run.state",
+            "step-run.retried",
             "mission-run.state",
             "run-generation.state",
         ] {
@@ -469,7 +474,7 @@ impl EvidenceStore for Store {
                     step.status IN ('completed','failed','cancelled')
                     OR generation.status IN ('completed','failed','cancelled','superseded')
                     OR run.phase='terminal' OR run.phase LIKE 'cleanup-%'
-                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%'
+                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%', step.attempt
              FROM step_runs step
              JOIN mission_runs run ON run.id=step.run_id
              JOIN mission_runs root ON root.id=run.root_run_id
@@ -478,7 +483,7 @@ impl EvidenceStore for Store {
              SELECT 'mission-run/' || run.id, 'mission-run/' || run.id,
                     run.phase IN ('final-cancelled','terminal') OR run.phase LIKE 'cleanup-%'
                     OR run.status IN ('completed','failed','cancelled')
-                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%'
+                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%', 1
              FROM mission_runs run
              JOIN mission_runs root ON root.id=run.root_run_id",
         )?;
@@ -488,17 +493,18 @@ impl EvidenceStore for Store {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, bool>(2)?,
+                row.get::<_, u32>(3)?,
             ))
         })? {
-            let (owner, owner_run, retired) = row?;
+            let (owner, owner_run, retired, current_attempt) = row?;
             for key in [owner.clone(), format!("legacy:{}", owner.replace('/', "."))] {
                 if let Some(requests) = requests.get(&key) {
-                    runners.extend(requests.iter().map(|(subject, host)| MissionGateRunner {
+                    runners.extend(requests.iter().map(|(subject, host, attempt)| MissionGateRunner {
                         subject: subject.clone(),
                         host: host.clone(),
                         owner_run: owner_run.clone(),
                         owner_step: owner.starts_with("step-run/").then(|| owner.clone()),
-                        retired,
+                        retired: retired || attempt.is_some_and(|attempt| attempt != current_attempt),
                     }));
                 }
             }
@@ -524,13 +530,13 @@ impl EvidenceStore for Store {
 
     fn human_gate_requests(&self) -> Result<Vec<(String, String, String)>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9b347ba24aa6 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc89d14431aec owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT request.id, json_extract(request.body, '$.fields.owner'), {}
              FROM claims request INDEXED BY claims_human_gate_request_index
              WHERE request.kind='gate.requested' AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
                AND json_extract(request.body, '$.fields.owner') IS NOT NULL
              ORDER BY CANONICAL_ASC(request)",
-            human_review_reassignment::reviewer_sql("request", None),
+            human_review_reassignment::reviewer_sql("request"),
         )))?;
         statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?

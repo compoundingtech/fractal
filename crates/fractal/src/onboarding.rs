@@ -7,7 +7,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use fractal_daemon::client::Client;
+use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::config::Config;
 use fractal_daemon::model::{
     ApplyRequest, ApplyResponse, DocumentListResponse, DocumentPutRequest, IntentInput,
@@ -57,7 +57,7 @@ fn client(config: &Config) -> Result<Client> {
             .person
             .as_deref()
             .context("onboarding needs a configured person")?,
-    )
+    ).map(|client| client.with_endpoint(Endpoint::DiscoveredUnix(config.client_discovery())))
 }
 
 /// Count every historical run, including completed and cancelled runs on another member.
@@ -425,6 +425,8 @@ async fn apply(
                 expected_subjects: preview.subject_tokens,
                 idempotency_key: hex::encode(hash.finalize()),
                 actor: config.person.clone(),
+                program_bundles: Default::default(),
+                force_reason: None,
             },
         )
         .await

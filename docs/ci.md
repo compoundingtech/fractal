@@ -23,6 +23,27 @@ successful change detection; failure and cancellation still fail. Main and manua
 require execution when web inputs changed. Evidence-skipped queue work is followed by
 the exact-source hosted proof described above.
 
+Sidebar fixture validation is part of the required `genie-freshness` check on pull requests
+and merge groups, before the TypeScript and web consumers. Each executing Rust test
+partition also runs it before nextest. The generator source is `fleet.yml.genie.ts`;
+regenerate with `nix develop .#genie --command genie`. The gate runs
+`node --test scripts/check-sidebar-fixtures.test.mjs` and
+`node scripts/check-sidebar-fixtures.mjs`, with failures stopping the lane. Local and
+signed freshness evidence runs the same commands through `scripts/ci-genie-freshness`.
+
+### Swift client execution
+
+`swift-client` is an optional, path-filtered Workspace CI lane on GitHub-hosted Linux.
+It compiles and tests `clients/swift/FractalClient` with the digest-pinned official
+Swift 6.0.3 image because the repository's Nix Swift package is 5.10.1, below the
+package's Swift tools 6.0 requirement. `scripts/ci-swift-client` mounts the checkout
+read-only, including shared fixtures, and places compiler output and caches in tmpfs.
+The lane uses the ordinary Workspace CI events and ready-PR admission.
+Changes to Swift clients, Swift templates, codegen sources, shared client fixtures,
+or the lane definition select execution; manual dispatch always selects it.
+It does not register a required context or sign/consume reusable evidence:
+its result is hosted execution proof only, not a replacement for a merge gate.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
@@ -49,6 +70,9 @@ merge-group/main/manual runs are preserved. Its token has only Actions write and
 Cancellation is asynchronous: the request summary is not terminal cancellation proof,
 and scheduling can start a legacy job before the observer runs. The one-day observation
 records actual build/test job starts as well as accepted requests and final cancellations.
+A cancellation HTTP 409 triggers one identity-checked metadata read: an already completed run
+is successful admission (including skipped runs); a still-active or unqualified run remains an
+explicit conflict failure. The observer does not retry the cancellation or force-cancel.
 GitHub does not emit the requested activity for reruns; do not rerun drafts.
 
 GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run retains
@@ -159,9 +183,12 @@ the workflow jobs have names such as `linux-tests` and `linux-clippy`.
 - `clippy`: checks all workspace targets and the standalone conversation model,
   applies the [warning ratchet](#clippy-warning-ratchet), and runs
   `cargo run --locked -p fractal-client-codegen -- --check`.
-- `fleet-compat`: tests against the previous-release native archive pinned in
-  `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and embedded
-  source/target metadata. It does not rebuild the baseline or its PTY dependency.
+- `fleet-compat`: tests against the oldest deployed source's native archive
+  pinned in `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and
+  embedded source/target metadata. It does not rebuild the baseline or its PTY
+  dependency. The log prints `compat-baseline: fleet source=SHA tag=fleet-SHA target=TARGET`,
+  including when the verified extracted binary is reused. See the
+  [deployment-pin update procedure](st3/compatibility.md#updating-the-deployed-main-baseline).
 - `mail-redelivery-canaries`: runs the explicit zero-retry regression selection
   used by the [daily mail canaries](#daily-mail-redelivery-canaries).
 - `conversation-model`: tests `fractal-conversation-ui` without default features
@@ -171,7 +198,7 @@ The `fleet-compat` stage also runs
 `deployed_pty_0_13_0_record_without_boot_id_binds_mailbox` through the production
 mailbox bind handler with a pinned PTY 0.13.0 (`063ff7f`) metadata fixture without
 `daemonBootId` and a matching live process start token. The same test belongs to the
-normal Rust suite. The previous-release fleet test uses a stub PTY and covers
+normal Rust suite. The pinned-main fleet test uses a stub PTY and covers
 replication; the metadata fixture covers native channel admission even when the
 devShell PTY advances.
 
@@ -223,6 +250,8 @@ or restoring build archives. When both entries exist, the cache job stops after 
 A miss is flagged as P0 and fills the missing entries with builds only: selected test
 executables, Clippy artifacts, the integration binary, the Genie shell, or the isolation
 archive and VM driver. The published fleet baseline is downloaded rather than compiled.
+Warmers reuse the setup checkout before probing and do not check out again afterward:
+the shared `withCompatArchives` download must survive until the historical baseline is read.
 These cache jobs do not repeat workspace tests or the isolation VM; the separately selected
 post-merge proof jobs provide hosted execution when queue evidence requires it. The
 TypeScript dependency cache is also kept on main without repeating its tests.
@@ -305,7 +334,7 @@ Nextest's final summary retains flaky outcomes. The four test lanes (`linux-test
 nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
 `genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
 not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
-lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+lines, for the `fractal/flakes` objective; the poller reads only the name (`docs/st3/plugins.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by
@@ -351,8 +380,8 @@ the default devShell supplies that `node`. See [the eval contract](../evals/frac
 
 ### Rolling compatibility baselines
 
-The fleet and messaging pins in `.github/*-compat-baseline.json` track the latest
-published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
+The fleet pin tracks the oldest deployed source; the messaging pin tracks
+the latest published stable release for testing the next candidate. Each contains `commit`, `tag`, policy
 `why`, `exception_reason` (`null` ordinarily), and both native archive URLs and hex SHA256
 checksums. Fleet CI downloads, verifies and extracts the published native archive instead of
 rebuilding an old workspace. Messaging consumes the pinned published archive too; Nix adjusts
@@ -364,15 +393,15 @@ historical baseline flake input.
 
 The public-repository workflow runs `python3 scripts/compat-baseline-release check` on ready
 PRs, merge groups and main pushes (and manual dispatch). It paginates the actual published release
-list and excludes drafts, prereleases and unpublished tags. A baseline more than one published
-stable release behind the newest publication fails unless `exception_reason` gives an explicit
+list and excludes drafts, prereleases and unpublished tags for the stable messaging baseline.
+A stable baseline more than one published stable release behind the newest publication fails unless `exception_reason` gives an explicit
 temporary older-hold reason. An ordinary policy `why` does not waive freshness; blank reasons
 are invalid. Holds should identify the boundary and the condition for removing them.
 Failures distinguish `baseline is stale` from `release API unreachable`; the latter means
 freshness could not be determined, not that a pin needs updating. Archive downloads have a
 60-second network timeout and still fail closed.
 
-Daily and tag publication verify that the candidate's unheld pins already name the latest
+Daily and tag publication verify that the candidate's unheld stable messaging pin names the latest
 published stable release. After publication, `compat-baseline-release advance TAG` verifies
 the published `RELEASE.json` source against the dereferenced Git tag, checks archive bytes
 against `SHA256SUMS` and embedded `BUILD.json`, and opens a labelled draft baseline maintenance PR with
@@ -382,6 +411,9 @@ The upstream maintainers own review and merge of these maintenance PRs before th
 release. No auto-merge or enrollment is enabled by publication. The next release waits until
 that PR lands, except for explicitly held pins. A baseline-only maintenance delta is not a new
 daily release candidate, avoiding an endless release/repin loop.
+The source-addressed fleet pin is preserved by stable repins and publication.
+Update it with `repin-fleet fleet-SHA` as part of the deployment pin's
+[rollout procedure](st3/compatibility.md#updating-the-deployed-main-baseline).
 
 The tag publisher's token needs only `contents: write`; daily publication also needs
 `actions: read` to retrieve verified workflow artifacts. Only the separate postpublish advance
@@ -544,24 +576,25 @@ both generations continue to coordinate with Claude's own config lock.
 
 ### Isolation VM
 
-Four current-runtime controls cover the surviving work-scope obligations. Three
+Five current-runtime controls cover the surviving work-scope obligations. Four
 ignored tests live in the `fractal-runtime` package's `scope_cascade` binary:
 
 | Test | Guarantee |
 | --- | --- |
 | `exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | An exec scope survives its parent service's cgroup SIGKILL, keeps its incarnation and cgroup, then stops cleanly. |
+| `exec_survives_a_parent_service_sigkill_as_soon_as_spawn_returns` | An exec survives a cgroup SIGKILL of its parent service sent the moment its spawn returns, while the scope's start is held back: the spawn returns only once `systemd-run` has joined its scope. |
 | `pty_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | A PTY scope survives the same cascade with its incarnation and cgroup intact, then stops cleanly. |
 | `literal_environment_is_preserved_across_a_work_scope` | Literal environment values cross a real user scope unchanged. |
 
 The landed `fractal-runtime` library test
 `isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor`
-adds the fourth current-runtime control. It checks that a changed original request cannot
+adds the fifth current-runtime control. It checks that a changed original request cannot
 signal either workload, then retires an escaped descendant while its neighboring scope
 survives. The test remains ignored in ordinary CI; the VM explicitly selects it by package,
 `fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
 activation of the retirement primitive.
 
-All four controls need a real systemd user manager, which Namespace's runner image does not
+All five controls need a real systemd user manager, which Namespace's runner image does not
 boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
 job (`daily-long.yml`):
 
@@ -572,13 +605,13 @@ job (`daily-long.yml`):
    fractal-runtime `scope_cascade` and library binaries.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive and extracts it at the producer checkout's
-   path for its package working directories. It runs the four controls through nextest as a
+   path for its package working directories. It runs the five controls through nextest as a
    transient service of that user's systemd manager. The VM compiles nothing.
 
-The archive inventory must match the four exact package, binary, kind and test identities.
+The archive inventory must match the five exact package, binary, kind and test identities.
 Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
-The JUnit report must contain exactly those four distinct successful results, with no missing,
-extra, skipped, rerun or flaky result. All four tests must run and pass, with no isolation
+The JUnit report must contain exactly those five distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All five tests must run and pass, with no isolation
 opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
@@ -590,7 +623,7 @@ inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack s
 The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
 are disabled by the workspace configuration.
 The store cache key is
-`typescript-client-<os>-node24.18.0-pnpm12.15.0-<sha256 of pnpm-lock.yaml>`.
+`typescript-client-<os>-node24.18.0-pnpm12.17.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
 
@@ -598,7 +631,7 @@ The effect-utils GVS shared-store default and `pnpm:store:retire` task do not
 relocate this workspace's stores: Fractal uses the hoisted linker, a plain
 `nix develop .#web` shell (not the upstream pnpm devenv tasks), explicit
 `${{ runner.temp }}/pnpm-store` in CI, and a sandbox-local `$TMPDIR/store`
-for the fixed-output installation. Store cache keys track pnpm 12.15.0;
+for the fixed-output installation. Store cache keys track pnpm 12.17.0;
 no legacy-store retirement is needed for this cutover.
 
 After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
@@ -678,7 +711,7 @@ their sandbox flags and declared-input boundary remain unchanged.
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
-  `fractal-web-pnpm-<os>-pnpm12.15.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  `fractal-web-pnpm-<os>-pnpm12.17.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
@@ -825,13 +858,13 @@ the UI owners' choice. `KIT_PLAY_SET=critical` selects only stories tagged `crit
 empty selection fails). `commit` narrows the critical stories to fit about 60 seconds
 on the 4-vCPU runner (the critical set took about 185 s): each story runs in one case, dark at
 440 or light at 1440 chosen by a hash of its id, so both schemes and both widths stay covered
-across the set; the layout stories in `BOTH_WIDTHS` run dark at 440 and 1440; the stories in
-`MERGE_ONLY` do not run per commit. The lists live in
-`packages/fractal-ui/scripts/kit-play-commit-set.mjs`, name only critical stories (a rename fails
-the gate), and the receipt records what the run omitted. Per commit this leaves out the
-other three cases of every story (the other scheme and width pairs; the `BOTH_WIDTHS` stories
-lose their light cases) and the two `MERGE_ONLY` stories (`transcript--no-green-all-states`,
-`sidebar-roster--hundred-agent-render`); merge groups run all of them.
+across the set; stories tagged `both-widths` run dark at 440 and 1440; stories tagged
+`merge-only` do not run per commit. These tags live beside `critical` on the stories and
+are read from the built Storybook index. Either policy tag without `critical`, or both
+policy tags on one story, fails the gate before tag selection or sharding. The receipt
+records omitted coverage; merge groups retain the full matrix. App stories under
+`apps/fractal-web/src/**/*.stories.tsx` are discovered and owned by the kit lane, so
+adding a story folder or assigning these tags requires no lane-definition edits.
 `KIT_PLAY_A11Y=off` sets addon-a11y's own `a11y.manual` global so axe does not run, and
 each case must then carry no a11y report, while with a11y on each case must carry exactly
 one passed a11y report; `KIT_PLAY_MAX_SECONDS` is the set's wall-time budget: every case
@@ -851,37 +884,55 @@ story-identity checks, matrix size and job timeout are unchanged.
 Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
 out into four non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
 and the gate refuses shard options for any set but `all`. Each shard validates the
-**full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
-cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
-configures N. `KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
+**full** Storybook index, then assigns longest measured stories first to the least-loaded
+shard, breaking ties by story ID and shard index. The committed `kit-play-costs.json`
+beside the runner records full four-case story costs from hosted merge-group logs.
+New stories use the manifest's median story cost. Shard 0 starts with a reservation
+equal to 20% of total estimated play work for its non-play lanes. Assignment is
+independent of index ordering and runner speed; adding a story can rebalance existing
+stories. `kitShardCount` in `.github/workflows/workspace-ci.ts` configures N.
+`KIT_PLAY_A11Y` and `KIT_PLAY_MAX_SECONDS` apply unchanged to each shard.
 Every shard generates and checks the app changelog registry after the frozen install,
 before starting any streams: Storybook imports it through the workspace stories.
 Every selected story still runs all four width/theme cases with the same runner and
-assertions. Empty shards fail unless N exceeds the story count. Shard 0 runs every
+assertions. A small index may leave a shard with no plays; its receipt still participates
+in exact full-index coverage. Shard 0 runs every
 stream in `scripts/ci-fractal-web`; the other shards run only the play index contracts,
 Storybook build and their strict plays. Browser controls and Storybook wait for every
 stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
 stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
 
-The job timeout stays **25 minutes**. On 2026-10-26, the two-shard full matrix
-exhausted shard 0's budget: [run 40357292970](https://github.com/compoundingtech/fractal/actions/runs/40357292970)
-spent about four minutes preparing the runner, six minutes installing and running
-the non-play streams, and two minutes on browser controls/builds before strict plays.
-Shard 0 was cancelled after 26m24s with only 998 of its 1,132 cases completed;
-shard 1 finished its 1,265 cases in 13m02s of plays. This is not a larger shard-0
-story partition: shard 0 also owns the other lanes. Play speed varies too:
-[run 40359051491](https://github.com/compoundingtech/fractal/actions/runs/40359051491)
-took 20m39s for shard 1's same 1,265 cases, leaving little room even without
-the non-play lanes. These jobs use GitHub-hosted runners. Observed shard-0 runs
-took 1,444–1,530 seconds on EPYC 7763 runners versus 822–1,065 seconds on
-EPYC 9V45/9V74 runners; the overruns correlate with runner CPU type, not
-contention on a local build host. Four shards halve each old parity partition while preserving
-the stable hash rule, all cases, axe and receipt coverage. A third shard would
-reduce plays by only about a third, leaving less headroom for shard 0's fixed work
-and the observed runner variation. Extra shards duplicate setup and the small
-Storybook build; they do not duplicate app tests or browser controls. These are
-historical timings, not a measured runtime guarantee for the four-shard workflow.
+The job timeout stays **25 minutes**. The ten most recent merge-group runs inspected
+on 2026-11-13 contained six executing web matrices, three skipped lanes and one matrix
+not yet scheduled. Job durations (minutes, including setup and cleanup) were:
+
+| Run | Shard 0 | Shard 1 | Shard 2 | Shard 3 |
+| --- | ---: | ---: | ---: | ---: |
+| [43382323570](https://github.com/compoundingtech/fractal/actions/runs/43382323570) | 25.53 cancelled | 16.73 | 10.48 | 10.50 |
+| [43344153135](https://github.com/compoundingtech/fractal/actions/runs/43344153135) | 24.05 | 17.28 | 9.22 | 14.48 |
+| [43343940579](https://github.com/compoundingtech/fractal/actions/runs/43343940579) | 0.55 failed before plays | 14.20 | 11.47 | 12.15 |
+| [43339162862](https://github.com/compoundingtech/fractal/actions/runs/43339162862) | 23.63 failed | 17.47 | 11.37 | 12.38 |
+| [43325952348](https://github.com/compoundingtech/fractal/actions/runs/43325952348) | 25.42 cancelled | 13.33 | 9.45 | 13.38 |
+| [43288610870](https://github.com/compoundingtech/fractal/actions/runs/43288610870) | 17.40 | 17.27 | 11.50 | 14.32 |
+
+The old equal-probability hash partition ignored both story cost and shard 0's other
+work. In run 43382323570, shard 0 reached strict plays only at 07:22:13Z after starting
+at 07:07:08Z, leaving under ten minutes for its unchanged story share. Reserving
+non-play work and distributing measured story costs addresses this structural skew
+without adding runners, increasing the timeout, or dropping stories or axe.
+The same shard-1 set took 13.63–14.24 play minutes on EPYC 7763 runners and
+10.53–10.56 on EPYC 9V74 runners in this sample. Runner speed contributes, but
+cannot explain away shard 0's fixed overhead. The longest measured individual
+case was `sidebar-tree--filter-keystroke-to-paint` (111–172 seconds); the scheduler
+spreads such expensive stories instead of treating them like static stories.
+The manifest uses the median of each story's complete observed case samples;
+partial story prefixes from cancelled jobs are excluded when a complete sample exists.
+Refresh it explicitly with `node packages/fractal-ui/scripts/kit-play-costs.mjs`
+followed by its `sourceJobs` IDs (or a newly reviewed sample). This fetches hosted
+logs; ordinary execution and CI remain offline with respect to the manifest.
+Manual `gh workflow run fleet.yml --ref BRANCH` forces all web inputs and selects
+the same full story/a11y matrix as merge groups; no trigger or label change is needed.
 
 Every shard publishes `receipt.json` in an artifact named
 `kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and
@@ -923,7 +974,7 @@ Calling-thread CPU excludes host descheduling and unrelated Node worker-thread C
 Each report includes all samples and host load averages; load never skips the lane or
 changes its thresholds.
 
-The web shell supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+The web shell supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
 mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching
@@ -1041,8 +1092,11 @@ with its own `/tmp`, and nothing the job started outlives it. The runner names a
 cache, use that Cargo home, and Cargo keeps its intermediate build files in a per-runner build
 directory, while sccache shares compiled crates between all runners and the Nix store is the
 machine's own. The machine's configuration lives in the private network repository.
-In GitHub Actions, both Rust dev shells use `scripts/ci-rustc-wrapper`: sccache's response-I/O
-fallback is enabled. A separate read-only `sccache --dist-status` preflight is bounded
+In GitHub Actions, both Rust dev shells default to `scripts/ci-rustc-wrapper`
+when `RUSTC_WRAPPER` is unset and neither `SCCACHE_CLIENT_SIDE` nor
+`SCCACHE_SERVER_UDS` names a host cache setup. Inherited wrappers (including an
+empty cache opt-out) and host cache settings are preserved. The CI wrapper enables
+sccache's response-I/O fallback. A separate read-only `sccache --dist-status` preflight is bounded
 to 15 seconds (five seconds to finish terminating it). A recognized preflight startup
 error or timeout disables caching for the rest of that job with a warning, before any
 compiler request is submitted. Signal statuses are preserved. Once compilation starts,
@@ -1269,8 +1323,8 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which Fractal builds in. It is
-the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
+The CPU budget (2 cores, the `cpu` objective's `load-max-cores`) comes from [`slo/objectives.kdl`](../slo/objectives.kdl), which Fractal builds in. It is
+the bound under this synthetic load, not the member's production CPU target (`cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
 stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.
@@ -1337,7 +1391,7 @@ not past it at the start, at its lowest 5-second sample or at the end.
 
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
-every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
+every path a target in [`slo/objectives.kdl`](../slo/objectives.kdl) covers, the targets that
 `GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
 `write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
@@ -1449,14 +1503,14 @@ durable snapshots and successful-main-only baselines.
 
 Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
-Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
+Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with expired
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
 current offer's receipt sequence; and delivered-but-unread retention across native channel
 restart. Claude's missing-channel cases also require automatic recovery, attachment during
 recheck without replacing the seat, and durable parking after three failed replacements.
 Its MCP bootstrap cases answer initialization with the daemon offline or binding pending,
 attach and reconnect in the same child, preserve native receipts, and cancel attachment on EOF.
-The mailbox cases seed hour-old sent mail and recent staged and delivered-but-unread
+The mailbox cases seed sent mail older than the stream's seven-day cutoff and recent staged and delivered-but-unread
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
 
@@ -1494,10 +1548,112 @@ release-integration and the default shell.
 | `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
 | `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
 | `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
+| `public-repo-history.yml` | Ordinary content check on pull requests and merge groups; ready for separately activated trusted required-workflow identity, but not currently a forgery-proof admission boundary. |
+| `burst.yml` | One allowlisted suite on one exact commit, by manual dispatch on main; see [burst runs](#burst-runs). |
 
-The content guard still rejects real machine/home identities and private fleet configuration
-references. Release workflows remain separate from the required gate; neither package
-verification nor the Nix package/check graph is made redundant by workspace nextest.
+### Required public history guard
+
+`public-repo-history` checks every introduced commit for public-clean content, not just the
+candidate's final tree. It currently runs as an ordinary check to catch honest mistakes.
+The forgery-proof trust anchor (organization required workflows or a dedicated producer
+App) is a separate decision; no such enforcement is claimed here. Hosted scanning loads
+`scripts/check-public-repo` and its policy from `github.workflow_sha`. That revision is
+trusted only when a required-workflow rule pins it to an approved source; ordinary candidate
+workflows can change their own scanner. The local hook uses accepted remote main's scanner.
+`BASE` and `HEAD` select the immutable history range, not the hosted scanner revision:
+
+```sh
+python3 <trusted-copy>/check-public-repo --repo "$PWD" --base BASE --head HEAD
+```
+
+It traverses `merge-base(BASE, HEAD)..HEAD`, recursively including merged side histories
+and merge commits. Every commit message is checked. Against every parent, additions,
+modifications and type changes contribute the complete introduced blobs, checked at
+their real repository paths; removed lines and synthetic diff headers are not authored
+content to scan. Gitlinks receive path checks only because they reference commits, not
+local blobs. This keeps path-specific policy intact and detects forbidden content anywhere
+in an introduced blob, not just on its added lines. Candidate scripts, configuration and
+dependencies are not executed to decide whether their content is public-clean.
+The content policy rejects real machine/home identities and private fleet configuration
+references. A dirty intermediate commit followed by a cleanup commit still fails, even when
+the head tree and the aggregate base-to-head diff are clean: merging retains that history.
+
+Create a replacement branch from a clean base, apply only public-clean changes and commit
+messages, and open a replacement PR. Do not force-push or rebase the existing PR to remove
+the offending history. A clean head cannot repair an already dirty introduced commit.
+
+The protection must require the **workflow identity**, not a `public-repo-history` status
+context attributed to the GitHub Actions app. Any candidate workflow with `statuses: write`
+can forge that context using the same app identity; a job name or integration ID does not
+identify trusted workflow code. Candidate `merge_group` YAML is likewise not a trust root.
+
+Use GitHub's organization-level **Require workflows to pass before merging** rule, selecting
+the public source repository `compoundingtech/fractal` (repository ID `1310762902`), path
+`.github/workflows/public-repo-history.yml`, and `sha` set to the full approved commit
+ID containing both the repaired workflow and scanner. Do not select a candidate PR or
+queue ref, or use a floating `ref` in place of the approved SHA. Scanner and policy
+are loaded from that same workflow SHA, not from a future main or candidate revision.
+Updates require a reviewed SHA repin. Keep main's pull-request, deletion and force-push
+protections and an empty bypass list. This rule belongs to an organization ruleset,
+not repository main ruleset `20563764`.
+
+**Activation prerequisite:** the observed organization plan is GitHub Free. GitHub documents
+[organization rulesets](https://docs.github.com/en/organizations/managing-organization-settings/creating-rulesets-for-repositories-in-your-organization)
+for Team and Enterprise plans; the required-workflow rule is not a repository-level rule,
+even for this public repository. Upgrade the organization to a supported plan before
+activation. If that is unavailable, a separately controlled, dedicated non-Actions GitHub
+App would be needed instead; no such app is provisioned by this change. The Actions status
+context is not an acceptable substitute. This change does not mutate live settings or
+claim that trusted enforcement is already active.
+
+After landing the workflow and history-capable scanner on trusted main, an administrator
+sets `TRUSTED_WORKFLOW_SHA` to that full approved landing commit ID. The following prints
+the exact organization ruleset payload for `POST /orgs/compoundingtech/rulesets`; it does
+not send a request. No activation SHA can be supplied before that trusted landing exists.
+
+```sh
+jq -n --arg sha "$TRUSTED_WORKFLOW_SHA" '{
+  "name": "public-repo-history",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "repository_id": { "repository_ids": [1310762902] },
+    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] }
+  },
+  "rules": [{
+    "type": "workflows",
+    "parameters": {
+      "do_not_enforce_on_create": false,
+      "workflows": [{
+        "repository_id": 1310762902,
+        "path": ".github/workflows/public-repo-history.yml",
+        "sha": $sha
+      }]
+    }
+  }]
+}'
+```
+
+The selected trusted workflow handles `pull_request` and `merge_group`, checks out
+`github.workflow_sha` for scanner and policy, and fetches immutable event base/head
+objects without checking out or executing the candidate. The event base remains the
+scanner's `--base`; it does not select scanner code. A trusted source without the scanner
+contract fails rather than falling back to candidate code. The token has only
+`contents: read`, is not persisted in the checkout, and publishes no commit status.
+After activation or a reviewed SHA repin, retrigger the PR and merge-queue runs so the
+required workflow runs under the new policy.
+
+Locally, `scripts/install-git-hooks` installs a lightweight, blocking content-only pre-push
+guard, using the trusted base's scanner before the existing evidence-signing path. The guard
+does not run candidate code, builds, tests or signing. `ST_SKIP_EVIDENCE=1` and
+`ST_EVIDENCE_LOCAL=off` do not skip it; bypassing the local hook does not bypass the hosted
+required check. Existing evidence-signing waits, background execution and non-blocking
+signing failures are unchanged. A landing-signing transition is a separate change, not part
+of this guard.
+
+Release workflows remain separate from the required gate; neither package verification nor
+the Nix package/check graph is made redundant by workspace nextest.
 
 ## Merge queue
 
@@ -1509,17 +1665,20 @@ gh pr merge NUMBER --auto --match-head-commit REVIEWED_HEAD
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
-`linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (these run on the
-`merge_group` event; see the
-trigger in `fleet.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
+`linux-gate`, `genie-freshness`, `typescript-client`, `fractal-web` and `public-repo-history`
+(these run on the `merge_group` event; see `fleet.yml.genie.ts` and
+`public-repo-history.yml.genie.ts`) and merges it with a merge commit when they pass. The pull
 request does not need to be rebased onto the latest `main` first. A draft cannot be queued. If a
 queued check fails, the entry leaves the queue and the pull request page says why: fix it and
 queue it again. The merge train (`st lanes join smalltalk`) is retired.
 
-The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
-by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
-bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
-merge method `MERGE`, grouping strategy `HEADGREEN`, three entries building at once,
+The repository ruleset (`.github/repo-settings.json`, generated from
+`repo-settings.json.genie.ts`, applied by an administrator and never by CI) requires the
+four workspace checks from GitHub Actions with an empty bypass list. The separate
+organization required-workflow rule described above supplies the public-history trust
+boundary; requiring a fifth Actions status context would not do so. The repository
+ruleset keeps the pull-request, deletion and force-push protections and configures the queue:
+merge method `MERGE`, grouping strategy `HEADGREEN`, five entries building at once,
 one through six entries per merge, a one-minute batch wait, and a 120-minute check-response
 timeout. These are the generated configuration, not a live-settings observation.
 See [capacity tuning](#merge-overflow-and-daily-namespace-minutes).
@@ -1549,6 +1708,47 @@ See Namespace's [resource limits](https://namespace.so/docs/architecture/compute
 and [profile concurrency controls](https://namespace.so/docs/solutions/github-actions/runner-controls/concurrent-runners)
 for the scheduler's limits, and GitHub's [merge queue settings](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
 for the distinction between build concurrency and merge batch size.
+
+## Burst runs
+
+`burst.yml` (generated from `burst.yml.genie.ts`) runs one allowlisted suite on one exact commit,
+on demand, in place of a long local build-host queue. It is not a required check and changes
+no evidence or merge-queue rule.
+
+```sh
+gh workflow run burst.yml --ref main -f sha=FULL_SHA -f suite=cargo-test \
+  -f args='-p fractal-runtime --lib' -f request=REQUEST_ID
+```
+
+| Suite | Command at the requested commit |
+| --- | --- |
+| `cargo-test` | `nix develop -c cargo test --locked ARGS` |
+| `nextest` | `nix develop -c cargo nextest run --locked ARGS` |
+| `st-test-all` | Every whole-run check in `scripts/st-test`'s local table, in its order and unsigned: today `typescript-client`, `genie-freshness`, `ci-script-tests` and `linux-gate` (`scripts/ci-local tests clippy fleet-compat`). The report readers sign nothing here, and the path-filtered `fractal-web` stays with Workspace CI. Takes no `args`. |
+
+`sha` must be 40 lowercase hex characters, `request` must match `^[A-Za-z0-9._-]{1,64}$`, and `args`
+must match `^[A-Za-z0-9_:./=@ ,+-]*$`. `args` reaches the command only through the environment and
+is split on spaces. Only a dispatch of main's workflow runs. The suite commands come from that
+workflow; the scripts they call come from the requested commit, which the `burst` job checks out
+with its credentials dropped and refuses unless `HEAD` is exactly `sha`. Give every dispatch its own
+`request`: runs are grouped by it and never cancelled, but a newer dispatch with the same id
+replaces one that is still waiting in the group.
+
+The `burst` job's token can only read the repository. Two small jobs that never check out `sha`
+post the `burst/SUITE` commit status on it: `pending` validates the inputs and posts pending with
+the run's URL; `report` posts success exactly when the suite exited 0, failure for another exit,
+and error when the suite never finished (setup failure, cancellation, timeout), with the
+description `exit=CODE request=REQUEST`. The suite log is the `burst-log-REQUEST` artifact. The
+last line of the suite step and the job summary is
+`burst suite=SUITE sha=SHA request=REQUEST exit=CODE seconds=N`, and the `burst` job fails exactly
+when `CODE` is not 0.
+
+The job runs on the 8x16 Namespace shape at priority 3, the same class as Performance, so it
+never outranks merge groups or required pull request work. The repository variable
+`BURST_RUNS_ON` (a JSON label array) replaces that runner without a workflow change. Builds use the
+fleet's dev/test settings. The job restores, but never saves, main upkeep's `perf-cost` Nix and
+Cargo entries: the dev shell's tools and the crate registry are warm, and build units the two
+builds share (such as build scripts) are reused; `perf-cost`'s own optimized units are not.
 
 ## Superseded merge groups
 

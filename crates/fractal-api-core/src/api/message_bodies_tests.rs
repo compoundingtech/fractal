@@ -288,9 +288,11 @@ fn node_state(root: &Path, name: &str) -> AppState {
     let store = Store::open(&dir.join("graph.db"), name).unwrap();
     store.bind_fleet(FLEET).unwrap();
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: Arc::new(store),
         node: name.into(),
+        api_socket: dir.join("api.sock"),
         state_dir: dir,
         ..super::tests::state(root)
     }

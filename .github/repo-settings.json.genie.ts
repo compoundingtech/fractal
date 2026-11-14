@@ -3,6 +3,11 @@ import { githubRepoSettings, githubRuleset } from '../repos/effect-utils/genie/e
 // Landing goes through GitHub's merge queue. This file declares the live ruleset: fractal-web
 // joined the required checks after both PR and merge-group runs had emitted it successfully.
 // Every required job must run on merge_group, or the queue never receives its checks and merges freeze.
+// Public history admission is a separate ORGANIZATION ruleset's `workflows` rule,
+// selecting .github/workflows/public-repo-history.yml from this repository's
+// approved immutable SHA. Repository settings cannot own an
+// organization ruleset; see docs/ci.md for its admin payload and plan prerequisite.
+// Never require its status context from app 15368: candidate Actions can forge it.
 export default githubRepoSettings({
   repository: { allow_auto_merge: true, delete_branch_on_merge: true },
   rulesets: [githubRuleset({
@@ -50,8 +55,10 @@ export default githubRepoSettings({
           merge_method: 'MERGE',
           // The live queue's tuning (ruleset 20563764, 2026-10-22): a group merges when its head is green.
           grouping_strategy: 'HEADGREEN',
-          // Start three groups with Namespace overflow; retain shared capacity for PRs.
-          max_entries_to_build: 3,
+          // Five groups build at once. Measured at three: 26% of entries waited over 20 minutes for a build slot
+          // (2026-11-03..10) while merge-group jobs on the owned pool started within 2.6 minutes (p99, 2026-11-06..10); a group
+          // beyond the owned pool's idle minimum overflows to Namespace at priority 1.
+          max_entries_to_build: 5,
           max_entries_to_merge: 6,
           min_entries_to_merge: 1,
           min_entries_to_merge_wait_minutes: 1,

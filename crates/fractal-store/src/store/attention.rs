@@ -20,6 +20,18 @@ impl Store {
         index: u64,
         history: bool,
     ) -> Result<StatusResponse> {
+        self.agent_card_status_view(names, index, history, false)
+    }
+
+    pub fn agent_card_status_for_generic_reads_at(
+        &self, names: Option<&BTreeSet<String>>, index: u64, history: bool,
+    ) -> Result<StatusResponse> {
+        self.agent_card_status_view(names, index, history, true)
+    }
+
+    fn agent_card_status_view(
+        &self, names: Option<&BTreeSet<String>>, index: u64, history: bool, generic: bool,
+    ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let index = selected_index(current_index(&connection)?, Some(index)).map_err(anyhow::Error::new)?;
         let names = match names {
@@ -28,8 +40,15 @@ impl Store {
                 .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?,
         };
+        let names = if generic {
+            let (mut agents, other): (BTreeSet<_>, BTreeSet<_>) =
+                names.into_iter().partition(|name| name.starts_with("agent/"));
+            agents.extend(self.generic_status_subject_names_at(other, index)?);
+            agents
+        } else { names };
         // The view and status passes share what they read of each subject.
-        let mut reads = card_fold::CardReads::new(index);
+        let mut reads = if generic { card_fold::CardReads::for_generic_reads(index) }
+            else { card_fold::CardReads::new(index) };
         let names = if history { names } else {
             self.current_view_candidates_with(&connection, names, index, true, &mut reads)?
         };
@@ -38,7 +57,7 @@ impl Store {
         let mut kept = HashMap::new();
         let mut missing = Vec::new();
         for name in &names {
-            match self.kept_subject_status(name, index, mode) {
+            match self.kept_subject_status(name, index, mode, generic) {
                 Some((status, _)) => {
                     kept.insert(name.clone(), status);
                 }
@@ -47,7 +66,7 @@ impl Store {
         }
         for (name, (status, action)) in self.agent_card_statuses(&connection, &missing, index, &mut reads)? {
             if newest {
-                self.keep_subject_status(&name, index, mode, &status, &action);
+                self.keep_subject_status(&name, index, mode, &status, &action, generic);
             }
             kept.insert(name, status);
         }
@@ -88,7 +107,7 @@ impl Store {
         &self,
         subject: &str,
         request: &AttentionRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         self.request_attention_closing(
             subject,
             request,
@@ -108,19 +127,19 @@ impl Store {
         subject: &str,
         request: &AttentionRequest,
         closing: &AttentionClosing,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         let until = closing.until.as_deref();
         if let Some(closed_by) = closing.closed_by.as_deref()
             && !matches!(closed_by, "person" | "st")
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-closed-by",
                 format!("`{closed_by}` cannot close an attention request; use `person`"),
             ));
         }
         if let Some(until) = until {
             if !crate::model::STATUS_WAIT_CONDITIONS.contains(&until) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-attention-until",
                     format!(
                         "`{until}` is not a wait condition; use one of {}",
@@ -129,7 +148,7 @@ impl Store {
                 ));
             }
             if request.targets.is_empty() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-attention-until",
                     "an until condition needs at least one target to watch",
                 ));
@@ -137,19 +156,19 @@ impl Store {
         }
         let reviewer = normalize_actor(&request.reviewer, "person");
         if !reviewer.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-reviewer",
                 "an attention reviewer must be a person subject",
             ));
         }
         if request.title.trim().is_empty() || request.reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-request",
                 "an attention request needs a title and a reason",
             ));
         }
         if !matches!(request.severity.as_str(), "warning" | "error") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-severity",
                 "attention severity must be warning or error",
             ));
@@ -157,10 +176,9 @@ impl Store {
         for target in &request.targets {
             fractal_schema::registry()
                 .validate_subject(target)
-                .map_err(|error| St3Error::new(error.code, error.message))?;
+                .map_err(|error| FractalError::new(error.code, error.message))?;
         }
         let actor = normalize_actor(&request.actor, "agent");
-        let step = attention_closing_step(&self.readers.get(), &actor, request, closing)?;
         let mut fields = BTreeMap::from([
             ("reviewer".into(), Value::String(reviewer)),
             ("title".into(), Value::String(request.title.clone())),
@@ -174,14 +192,13 @@ impl Store {
         if let Some(until) = until {
             fields.insert("until".into(), Value::String(until.into()));
         }
-        if let Some((step, attempt)) = step {
-            fields.insert("step".into(), Value::String(step));
-            fields.insert("step_attempt".into(), Value::from(attempt));
+        if let Some(step) = &closing.step {
+            fields.insert("step".into(), Value::String(step.clone()));
         }
         if let Some(closed_by) = &closing.closed_by {
             fields.insert("closed_by".into(), Value::String(closed_by.clone()));
         }
-        self.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.to_owned(),
             kind: "attention.requested".into(),
             actor: Some(actor),
@@ -189,10 +206,48 @@ impl Store {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: Some(request.idempotency_key.clone()),
-        })?;
+        };
+        let subjects = closing.step.iter().cloned().collect::<Vec<_>>();
+        let prepare = |connection: &Connection, input: &ClaimInput| {
+            let actor = input.actor.as_deref().expect("attention requests have an actor");
+            let mut fields = input.fields.clone();
+            // Base requests hashed the selected step and attempt. Reuse that binding for
+            // a receipt retry, but continue hashing every caller-supplied field afresh.
+            if let Some((operation, _)) = identities::claim_operation(input)?
+                && let Some((_, canonical_claim, _)) = operation_tx(connection, &operation).map_err(internal)?
+                && let Some(claim) = claim_by_id_tx(connection, &canonical_claim).map_err(internal)?
+                && let Some(previous) = claim.body.get("fields")
+                && let Some(step) = previous.get("step").and_then(Value::as_str)
+                && closing.until.is_none() && closing.closed_by.is_none()
+                && closing.step.as_deref().is_none_or(|requested| requested == step)
+            {
+                fields.insert("step".into(), Value::String(step.into()));
+                if let Some(attempt) = previous.get("step_attempt") {
+                    fields.insert("step_attempt".into(), attempt.clone());
+                }
+                return Ok(fields);
+            }
+            let step = attention_closing_step(connection, actor, request, closing)?;
+            if let Some((step, attempt)) = step {
+                fields.insert("step".into(), Value::String(step));
+                fields.insert("step_attempt".into(), Value::from(attempt));
+            }
+            Ok(fields)
+        };
+        append_claim_with_commit_context(
+            &self.graph, &input, None, None, None, None,
+            ClaimCommitContext {
+                run_projection_subjects: &subjects,
+                all_run_projections: closing.step.is_none()
+                    && closing.until.is_none() && closing.closed_by.is_none(),
+                prepare_request_fields: Some(&prepare),
+                ..Default::default()
+            },
+        )?;
+        self.run_projection_finished();
         self.attention_request(subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention request was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention request was not stored"))
     }
 
     /// Historical audit closure; current attention has no independent resolution.
@@ -200,9 +255,9 @@ impl Store {
         &self,
         subject: &str,
         request: &AttentionResolveRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         if !matches!(request.outcome.as_str(), "resolved" | "dismissed") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-outcome",
                 "an attention outcome must be resolved or dismissed",
             ));
@@ -216,7 +271,7 @@ impl Store {
         // outlives everyone who could close it. The resolution records who closed it.
         let actor = normalize_actor(&request.actor, "person");
         if !(actor.starts_with("person/") || actor.starts_with("agent/")) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-resolver",
                 format!("`{actor}` is neither a person nor an agent"),
             ));
@@ -225,7 +280,7 @@ impl Store {
             .attention_request(&subject)
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-attention-request",
                     format!("attention request `{subject}` does not exist"),
                 )
@@ -252,16 +307,16 @@ impl Store {
         })?;
         self.attention_request(&subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention resolution was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention resolution was not stored"))
     }
 
     pub fn withdraw_attention(
         &self,
         subject: &str,
         request: &AttentionWithdrawRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         if request.reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-withdrawal",
                 "an attention withdrawal needs a reason",
             ));
@@ -275,14 +330,14 @@ impl Store {
             .attention_request(&subject)
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-attention-request",
                     format!("attention request `{subject}` does not exist"),
                 )
             })?;
         let actor = normalize_actor(&request.actor, "agent");
         if actor != current.actor {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "wrong-attention-requester",
                 format!(
                     "attention request `{subject}` belongs to `{}`",
@@ -305,7 +360,7 @@ impl Store {
         })?;
         self.attention_request(&subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention withdrawal was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention withdrawal was not stored"))
     }
 
     pub fn attention_request(&self, subject: &str) -> Result<Option<AttentionRequestView>> {
@@ -499,8 +554,10 @@ impl Store {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
+        items.extend(self.model_drift_attention_items(person, as_of)?);
         items.extend(self.harness_prompt_attention_items(person, as_of)?);
         items.extend(self.custom_attention_items(person)?);
+        items.extend(self.host_hold_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
             self.broken_gate_items(person, as_of)?
@@ -508,6 +565,136 @@ impl Store {
                 .filter(|item| item.person.starts_with("person/")),
         );
         self.current_attention(items, as_of)
+    }
+
+    /// The unique publisher of an item from `attention_snapshot`, resolved at the caller's
+    /// read cut. Conversations are presentation links, not proof of source ownership.
+    ///
+    /// Seats use their selected member placement; run work uses the run's creating origin.
+    /// Fleet-global asks, launches and custom sources use their canonical creation's origin,
+    /// never the origin of a later answer or the replica reading them. Missing authority is
+    /// an error so a population refresh cannot publish a partial attention count.
+    pub fn attention_source_origins(&self, items: &[&AttentionItemView]) -> Result<Vec<String>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.readers.get();
+        let run_subject = |item: &AttentionItemView| {
+            item.mission_run.as_deref().map(|run| {
+                if run.starts_with("mission-run/") { run.to_owned() }
+                else { format!("mission-run/{run}") }
+            })
+        };
+        let mut sources = BTreeSet::new();
+        let mut custom_subjects = BTreeSet::new();
+        let mut actors = BTreeSet::new();
+        for item in items {
+            match item.kind.as_str() {
+                "person-step" | "agent-request" => {
+                    sources.insert((item.subject.clone(), "work.person-asked"));
+                    if let Some(run) = run_subject(item) {
+                        sources.insert((run, "mission-run.created"));
+                    }
+                }
+                "human-gate" | "revision-approval" => {
+                    if let Some(run) = run_subject(item) {
+                        sources.insert((run, "mission-run.created"));
+                    }
+                }
+                "launch-approval" => {
+                    sources.insert((item.subject.clone(), "planning-session.started"));
+                }
+                "fault" if item.mission_run.is_some() => {
+                    if let Some(run) = run_subject(item) {
+                        sources.insert((run, "mission-run.created"));
+                    }
+                }
+                "harness-login" | "harness-prompt" | "fault" | model_drift::MODEL_DRIFT_ATTENTION_KIND => {
+                    actors.insert(item.subject.clone());
+                }
+                kind if kind.starts_with("custom.") => {
+                    custom_subjects.insert(item.subject.clone());
+                }
+                _ => {}
+            }
+        }
+        // Select one canonical row per distinct source inside a single statement. Ask
+        // metadata intentionally retains request()'s treatment of repaired records.
+        let mut statement = connection.prepare(
+            /* sqlite-large-value: allow-for-now lv-h849fcd9021e0 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */
+            &canonical_sql(
+                "SELECT claims.subject, claims.kind, claims.origin, claims.actor
+                 FROM json_each(?1) requested JOIN claims ON claims.id=(
+                   SELECT claims.id FROM claims
+                   WHERE claims.subject=json_extract(requested.value,'$[0]')
+                     AND claims.kind=json_extract(requested.value,'$[1]')
+                     AND (claims.kind='work.person-asked' OR NOT EXISTS(
+                       SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'))
+                   ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
+            ),
+        )?;
+        let metadata = statement.query_map([serde_json::to_string(&sources)?], |row| {
+            Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                (row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)))
+        })?.collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        let custom = custom::attention_creation_owners(&connection, &custom_subjects)?;
+        let asks = metadata.iter().filter(|((_, kind), _)| kind == "work.person-asked")
+            .map(|(_, value)| value);
+        for (_, actor) in asks.chain(custom.values()) {
+            if let Some(actor) = actor.as_deref().filter(|actor| actor.starts_with("agent/")) {
+                actors.insert(actor.to_owned());
+            }
+        }
+        let mut statement = connection.prepare(
+            "SELECT subject, json_extract(member,'$.host') FROM desired
+             WHERE kind='agent' AND subject IN (SELECT value FROM json_each(?1))",
+        )?;
+        let members = statement.query_map([serde_json::to_string(&actors)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?.collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
+        let member_origin = |subject: &str| members.get(subject).cloned().flatten();
+        let source_index: BTreeMap<_, _> = metadata.iter()
+            .map(|((subject, kind), value)| ((subject.as_str(), kind.as_str()), value))
+            .collect();
+        let source = |subject: &str, kind: &str| source_index.get(&(subject, kind)).copied();
+        let owner = |creation: Option<&(String, Option<String>)>| {
+            creation.and_then(|(origin, actor)| {
+                if let Some(actor) = actor.as_deref().filter(|actor| actor.starts_with("agent/")) {
+                    member_origin(actor)
+                } else { Some(origin.clone()) }
+            })
+        };
+        items.iter().map(|item| {
+            let run_origin = || run_subject(item)
+                .and_then(|run| source(&run, "mission-run.created").map(|(origin, _)| origin.clone()));
+            let origin = match item.kind.as_str() {
+                "host-hold" => Some(self.origin.to_owned()),
+                "person-step" | "agent-request" => {
+                    if let Some(ask) = source(&item.subject, "work.person-asked") {
+                        owner(Some(ask))
+                    } else { run_origin() }
+                }
+                "human-gate" | "revision-approval" => run_origin(),
+                "launch-approval" => source(&item.subject, "planning-session.started")
+                    .map(|(origin, _)| origin.clone()),
+                "harness-login" | "harness-prompt" | model_drift::MODEL_DRIFT_ATTENTION_KIND => member_origin(&item.subject),
+                "fault" => {
+                    if item.mission_run.is_some() { run_origin() }
+                    else { member_origin(&item.subject) }
+                }
+                kind if kind.starts_with("custom.") => owner(custom.get(&item.subject)),
+                _ => None,
+            };
+            origin.filter(|origin| !origin.is_empty()).ok_or_else(|| anyhow::anyhow!(
+                "attention source ownership unavailable: kind={}, source={}, person={}, episode={}",
+                item.kind, item.subject, item.person, item.episode,
+            ))
+        }).collect()
+    }
+
+    #[cfg(test)]
+    fn attention_source_origin(&self, item: &AttentionItemView) -> Result<String> {
+        Ok(self.attention_source_origins(&[item])?.remove(0))
     }
 
     /// Keep the items requested by `as_of` whose run is still current, then order them.
@@ -879,7 +1066,7 @@ fn attention_closing_step(
     actor: &str,
     request: &AttentionRequest,
     closing: &AttentionClosing,
-) -> Result<Option<(String, u64)>, St3Error> {
+) -> Result<Option<(String, u64)>, FractalError> {
     if let Some(step) = &closing.step {
         let row = connection
             .query_row(
@@ -890,13 +1077,13 @@ fn attention_closing_step(
             .optional()
             .map_err(internal)?;
         let Some((status, attempt)) = row else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-step",
                 format!("`{step}` is not a step run on this host"),
             ));
         };
         if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "attention-step-ended",
                 format!("`{step}` already {status}, so its end cannot close a new request"),
             ));
@@ -934,7 +1121,7 @@ fn attention_closing_step(
         } else {
             "it names".into()
         };
-        St3Error::new(
+        FractalError::new(
             "attention-closes-never",
             format!(
                 "attention request `{}` would stay open forever: {who} no target that can end (a step, run generation, mission, run, agent, observer, subscription, loop run, message, attention item or observed pull request), no --until condition and no --step; pass --person-closes when only a person can close it",
@@ -1526,5 +1713,175 @@ mod pull_request_state_tests {
         assert_eq!(state(&store).as_deref(), Some("merged"));
         append(&store, "resource.observed", json!({"kind": "vcs.pull-request", "facts": {"state": "open"}}));
         assert_eq!(state(&store).as_deref(), Some("open"), "a newer observation is newer still");
+    }
+}
+
+#[cfg(test)]
+mod population_attention_ownership_tests {
+    use super::*;
+
+    fn item(kind: &str, source: &str, run: Option<&str>) -> AttentionItemView {
+        serde_json::from_value(json!({
+            "kind":kind, "subject":source, "person":"person/reviewer", "episode":"episode",
+            "title":"Needs a person", "detail":"An open source", "requested_at_unix_ms":1,
+            "mission_run":run, "conversation":"agent/presentation-only",
+        })).unwrap()
+    }
+
+    // Exercise the source reader against real claim and desired tables without unrelated
+    // mission/launch evaluation. These are projection fixtures, not alternate ownership rules.
+    fn source_claim(store: &Store, origin: &str, subject: &str, kind: &str, actor: &str) -> ClaimRecord {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        let claim = append_claim_record_tx(
+            &tx, origin, subject, kind, Some(actor), &json!({"fields":{}}), &[], None,
+        ).unwrap();
+        tx.commit().unwrap();
+        claim
+    }
+
+    fn place(store: &Store, subject: &str, host: &str) {
+        let claim = source_claim(store, "declaration-writer", subject, "observer.observed", "daemon/runtime");
+        store.connection.write().execute(
+            "INSERT INTO desired(subject,kind,revision,claim_id,body,member)
+             VALUES(?1,'agent','revision',?2,'{}',?3)",
+            params![subject, claim.id, json!({"host":host}).to_string()],
+        ).unwrap();
+    }
+
+    #[test]
+    fn seat_attention_uses_member_placement_not_writer_or_conversation() {
+        let store = Store::open_memory("replica").unwrap();
+        place(&store, "agent/source", "seat-host");
+        place(&store, "agent/presentation-only", "presentation-host");
+        for kind in ["harness-login", "harness-prompt", "fault", "model-drift"] {
+            assert_eq!(
+                store.attention_source_origin(&item(kind, "agent/source", None)).unwrap(),
+                "seat-host",
+            );
+        }
+    }
+
+    #[test]
+    fn run_attention_uses_creation_origin_on_every_replica() {
+        for reader in ["source-host", "replica-host"] {
+            let store = Store::open_memory(reader).unwrap();
+            source_claim(&store, "source-host", "mission-run/example", "mission-run.created", "person/reviewer");
+            source_claim(&store, "later-writer", "mission-run/example", "mission-run.state", "person/reviewer");
+            for kind in ["person-step", "human-gate", "revision-approval", "fault"] {
+                assert_eq!(
+                    store.attention_source_origin(&item(kind, "step-run/source", Some("mission-run/example"))).unwrap(),
+                    "source-host",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn launch_attention_uses_started_origin_not_preview_writer() {
+        let store = Store::open_memory("replica").unwrap();
+        source_claim(&store, "launch-host", "planning-session/example", "planning-session.started", "person/reviewer");
+        source_claim(&store, "preview-host", "planning-session/example", "planning-session.previewed", "person/reviewer");
+        assert_eq!(
+            store.attention_source_origin(&item("launch-approval", "planning-session/example", None)).unwrap(),
+            "launch-host",
+        );
+    }
+
+    #[test]
+    fn independent_agent_ask_uses_source_member_and_daemon_ask_uses_source_origin() {
+        let store = Store::open_memory("replica").unwrap();
+        place(&store, "agent/requester", "seat-host");
+        source_claim(&store, "request-writer", "step-run/agent-ask", "work.person-asked", "agent/requester");
+        source_claim(&store, "daemon-host", "step-run/daemon-ask", "work.person-asked", "daemon/runtime");
+        assert_eq!(
+            store.attention_source_origin(&item("person-step", "step-run/agent-ask", Some("mission-run/person-ask/a"))).unwrap(),
+            "seat-host",
+        );
+        assert_eq!(
+            store.attention_source_origin(&item("person-step", "step-run/daemon-ask", Some("mission-run/person-ask/b"))).unwrap(),
+            "daemon-host",
+        );
+    }
+
+    #[test]
+    fn attention_source_shared_requester_and_run_has_constant_statement_growth() {
+        let store = Store::open_memory("replica").unwrap();
+        place(&store, "agent/requester", "seat-host");
+        source_claim(&store, "run-host", "mission-run/shared", "mission-run.created", "person/reviewer");
+        let mut items = Vec::new();
+        for index in 0..50 {
+            let subject = format!("step-run/ask-{index}");
+            source_claim(&store, "ask-writer", &subject, "work.person-asked", "agent/requester");
+            items.push(item("person-step", &subject, Some("mission-run/shared")));
+            items.push(item("human-gate", &format!("step-run/gate-{index}"), Some("shared")));
+        }
+        // Match the refresher: acquire one read snapshot before counting ownership
+        // statements, excluding one-time reader/snapshot setup from either sample.
+        store.read_snapshot(|_| {
+            let measure = |items: &[AttentionItemView]| {
+                let refs: Vec<_> = items.iter().collect();
+                let before = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get);
+                let owners = store.attention_source_origins(&refs).unwrap();
+                let statements = crate::store::STATEMENTS_RUN.with(std::cell::Cell::get) - before;
+                for (item, origin) in items.iter().zip(owners) {
+                    assert_eq!(origin, if item.kind == "person-step" { "seat-host" } else { "run-host" });
+                }
+                statements
+            };
+            let small = measure(&items[..2]);
+            let large = measure(&items);
+            assert_eq!(small, 2, "ownership uses canonical metadata and member placement batches");
+            assert_eq!(large, small, "shared requester/run ownership must use batch statements");
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn custom_source_uses_registered_creation_owner() {
+        let store = Store::open_memory("replica").unwrap();
+        custom::tests_shared_delivery::registration(&store);
+        let creation = custom::tests_shared_delivery::request(&store, "custom/garden/review/v1/attention-owner");
+        place(&store, creation.actor.as_deref().unwrap(), "custom-owner-host");
+        let selected = custom::attention_creation_owners(
+            &store.readers.get(), &BTreeSet::from([creation.subject.clone()]),
+        ).unwrap().remove(&creation.subject).unwrap();
+        assert_eq!(selected, (creation.origin.clone(), creation.actor.clone()));
+        let rows = store.custom_attention_items(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(store.attention_source_origin(&rows[0]).unwrap(), "custom-owner-host");
+    }
+
+    #[test]
+    fn fleet_global_custom_source_uses_canonical_creation_origin() {
+        let store = Store::open_memory("global-source-host").unwrap();
+        custom::tests_shared_delivery::registration(&store);
+        store.append_claim(&ClaimInput {
+            subject: "custom/garden/review/v1/global-owner".into(),
+            kind: custom::tests_shared_delivery::example().creation_kind,
+            actor: Some("person/owner".into()),
+            fields: serde_json::from_value(json!({
+                "title":"A global question", "detail":"Keep the source?",
+                "recipient":"person/lichen",
+            })).unwrap(),
+            ..custom::tests_shared_delivery::empty_input()
+        }).unwrap();
+        let rows = store.custom_attention_items(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(store.attention_source_origin(&rows[0]).unwrap(), "global-source-host");
+    }
+
+    #[test]
+    fn absent_authority_is_not_guessed_from_conversation_or_reading_host() {
+        let store = Store::open_memory("replica").unwrap();
+        place(&store, "agent/presentation-only", "presentation-host");
+        for row in [
+            item("harness-prompt", "agent/missing", None),
+            item("human-gate", "step-run/missing", Some("mission-run/missing")),
+            item("launch-approval", "planning-session/missing", None),
+            item("custom.unknown", "custom/unknown/missing", None),
+        ] {
+            assert!(store.attention_source_origin(&row).is_err());
+        }
     }
 }

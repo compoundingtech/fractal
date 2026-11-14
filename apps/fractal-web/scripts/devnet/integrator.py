@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 10: isolate host publication and reject executable candidate artifact types.
+Version 14: refuse host-capacity pressure before selection or candidate writes.
 """
-import datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, time
+import contextlib, datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, tempfile, time
 import sys
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -50,7 +50,7 @@ try:
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
 PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 10
+INTEGRATOR_VERSION = 14
 DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
 try:
     SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
@@ -90,7 +90,7 @@ def atomic_json(path, value):
 
 def candidate_key(private_hash):
     # Tree identity excludes ephemeral merge/stamp commit timestamps.
-    return hashlib.sha256((text('rev-parse', 'HEAD^{tree}') + private_hash).encode()).hexdigest()
+    return hashlib.sha256((str(INTEGRATOR_VERSION) + ':' + text('rev-parse', 'HEAD^{tree}') + private_hash).encode()).hexdigest()
 
 def publish_skips(row):
     if not DRY_RUN:
@@ -303,6 +303,7 @@ def prepare_clone():
     git('config', 'user.email', os.environ.get('FRACTAL_INTEGRATOR_GIT_USER_EMAIL',
                                              'live-r3@fractal-integrator.invalid'))
     if git('rev-parse', '--verify', 'MERGE_HEAD', capture=True, check=False).returncode == 0:
+        git('rerere', 'clear')
         git('merge', '--abort')
     git('checkout', '-f', '-B', 'live-r3', 'origin/main')
     git('clean', '-fd')  # keep ignored dependencies/private overlay, never -x
@@ -317,6 +318,38 @@ def prepare_clone():
     # Detached rerere gc held MERGE_RR.lock during the next commit.
     git('config', 'maintenance.autoDetach', 'false')
     git('config', 'gc.autoDetach', 'false')
+    # Keep fetch/commit from triggering full auto-GC repacks.
+    git('config', 'gc.auto', '0')
+    git('config', 'maintenance.auto', 'false')
+
+def maintain_clone(row):
+    """Best-effort daily maintenance, under the tick's existing clone lock."""
+    stamp = L/f'{C.name}-git-maintenance.json'
+    try:
+        now = time.time()
+        if stamp.exists() and now - json.loads(stamp.read_text())['attemptedAt'] < 86400:
+            return
+        # Record attempts, not successes: a broken maintenance command must not
+        # run every five minutes. The tick row preserves its failure.
+        atomic_json(stamp, {'attemptedAt': now})
+        commands = [('prune', '--expire=2.weeks.ago')]
+        full_stamp = L/f'{C.name}-git-full-gc.json'
+        if not full_stamp.exists() or now - json.loads(full_stamp.read_text())['attemptedAt'] >= 30 * 86400:
+            # Collect packed garbage before geometric repacking can refresh its
+            # pack age. This deliberately permits one full repack per month.
+            atomic_json(full_stamp, {'attemptedAt': now})
+            commands.append(('gc', '--cruft', '--prune=2.weeks.ago'))
+        commands.extend((
+            ('repack', '-d', '--geometric=2'),
+            ('-c', 'gc.rerereResolved=60', '-c', 'gc.rerereUnresolved=7', 'rerere', 'gc')))
+        for command in commands:
+            try:
+                git(*command, capture=True)
+            except (OSError, subprocess.SubprocessError) as error:
+                detail = (getattr(error, 'stderr', None) or str(error))[-4000:]
+                row.setdefault('maintenanceErrors', []).append({'command': list(command), 'detail': detail})
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        row.setdefault('maintenanceErrors', []).append({'detail': str(error)})
 
 def retain_main_registry():
     """Legacy PR registries cannot replace main's directory-derived implementation."""
@@ -394,22 +427,67 @@ def prepare_dependencies():
         inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
-        if cache.stat().st_size:
+        # Read even empty entries so cache I/O errors cannot become cache misses.
+        if not cache.read_bytes():
+            install()
+            return
+        # Outputs can change without changing generator inputs. Check without
+        # mutating the index/worktree; a stale patch is a miss, not a tick failure.
+        checked=git('apply','--check','--index',cache,capture=True,check=False,
+                    stable_messages=True)
+        if checked.returncode == 0:
             git('apply','--index',cache)
             git('commit','-m','live-r3: reuse generated dependency metadata')
-        install()
-        return
+            install()
+            return
+        # Git apply.c: apply_fragments emits "patch failed"; check_patch emits
+        # the summary and missing/existing index-path diagnostics. Everything
+        # else (including mixed corruption/I/O diagnostics) must remain fatal.
+        errors=[line for line in (checked.stderr or '').splitlines() if line]
+        applicability=re.compile(r'error: (?:patch failed: .+:[0-9]+|.+: (?:patch does not apply|does not exist in index|already exists in index))')
+        if (checked.returncode != 1 or checked.stdout or not errors or
+                not all(applicability.fullmatch(line) for line in errors)):
+            raise RuntimeError(f'metadata cache check failed ({checked.returncode}) for {cache}'
+                               f'\nstdout:\n{checked.stdout or ""}\nstderr:\n{checked.stderr or ""}')
     before=text('rev-parse','HEAD')
     regenerate()
     cache.parent.mkdir(exist_ok=True)
-    cache.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+    with tempfile.TemporaryDirectory(dir=cache.parent) as temporary:
+        replacement=pathlib.Path(temporary)/'patch'
+        replacement.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+        replacement.replace(cache)
 
 def probe_revision(revision):
     git('checkout','--detach',revision)
     prepare_dependencies()
-    return build('live-r3-probe').returncode == 0
+    # A raw receipt does not prove host validation completed, and a prior output
+    # for this commit may have used different ignored private/vendor overlays.
+    # Keep publication's immutable-output guard and build every probe afresh.
+    # The build helper runs with cwd=SCRIPT_DIR, including for relative roots.
+    build_root=SCRIPT_DIR/required_input('FRACTAL_BUILD_ROOT')
+    snapshot_root=SCRIPT_DIR/required_input('FRACTAL_BUILD_SNAPSHOT_ROOT')
+    with tempfile.TemporaryDirectory(prefix='live-r3-probe-',
+            dir=build_root) as output:
+        name=pathlib.Path(output).name
+        try:
+            return build(name).returncode == 0
+        finally:
+            # The helper removes its snapshots. Remove only an empty namespace;
+            # never delete a leftover snapshot that might still hold a lease.
+            with contextlib.suppress(OSError):
+                (snapshot_root/name).rmdir()
 
 def build_candidate(row, private_hash, checkpoints):
+    included, skipped = list(row['included']), list(row['skipped'])
+    try:
+        return build_candidate_attempt(row, private_hash, checkpoints)
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 75:
+            # Even a reduced-candidate refusal must not publish an ejection.
+            row.update(included=included, skipped=skipped)
+        raise
+
+def build_candidate_attempt(row, private_hash, checkpoints):
     cache=L/'live-r3-tree-cache.json'
     known=json.loads(cache.read_text()) if cache.exists() else {}
     key=candidate_key(private_hash)
@@ -433,17 +511,17 @@ def build_candidate(row, private_hash, checkpoints):
         known[key]={'outcome':'built','sha':row['sha']}
         atomic_json(cache,known)
         return True
-    known[key]={'outcome':'failed','sha':row['sha']}
-    atomic_json(cache,known)
     full=text('rev-parse','HEAD')
+    # A refused probe must abort without poisoning the tree cache or ejecting a PR.
     failed=first_break([c['sha'] for c in checkpoints],probe_revision)
+    known[key]={'outcome':'failed','sha':row['sha']}
     git('checkout','-B','live-r3',full)
     if failed is None:
+        atomic_json(cache,known)
         raise RuntimeError('integrated build failed; no attributable single PR; previous build retained')
     culprit=checkpoints[failed]['pr']
     row['skipped'].append({'pr':culprit,'reason':'build-break','files':[]})
     known[key]['ejected']=culprit
-    atomic_json(cache,known)
     # Reintegrate every later accepted head, rather than silently publishing a prefix.
     git('checkout','-B','live-r3',checkpoints[failed-1]['sha'])
     row['included']=[h for h in row['included'] if h['pr']!=culprit]
@@ -499,7 +577,7 @@ def regenerate():
         git('commit', '-m', 'live-r3: regenerate merged dependency metadata')
 
 def run(args, cwd=None, capture=False, check=True, timeout=None, *,
-        sandbox_shell=None, network=False, package=None):
+        sandbox_shell=None, network=False, package=None, stable_git_messages=False):
     started=time.monotonic()
     category = ('fetch' if 'fetch' in args else 'merge' if args[0]=='git' else
                 'install' if 'pnpm' in args else 'regenerate' if 'genie' in args or 'scripts/ci-fractal-web-licenses' in args else
@@ -524,11 +602,14 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
             host_git = command[0] == 'git'
             if command[0] == 'git':
                 command = ['python3', '-I', str(SCRIPT_DIR/'host-git.py'), *command[1:]]
+            host_env={**os.environ, 'CI':'1'}
+            if host_git and stable_git_messages:
+                host_env.update(LC_ALL='C', LANGUAGE='C')
             result=subprocess.run(command, cwd=SCRIPT_DIR, text=True,
                                   stdout=subprocess.PIPE if capture or log_capture else None,
                                   stderr=subprocess.PIPE if capture or log_capture or host_git else None,
                                   check=check and not log_capture and not host_git, timeout=timeout,
-                                  env={**os.environ, 'CI':'1'})
+                                  env=host_env)
             if host_git:
                 if not capture and result.stderr:
                     print(result.stderr, end='', file=sys.stderr, flush=True)
@@ -551,7 +632,9 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
     finally:
         if TIMINGS is not None:
             TIMINGS[category]=TIMINGS.get(category,0)+round((time.monotonic()-started)*1000)
-def git(*args, capture=False, check=True): return run(['git','-C',C,*args], capture=capture, check=check)
+def git(*args, capture=False, check=True, stable_messages=False):
+    return run(['git','-C',C,*args], capture=capture, check=check,
+               stable_git_messages=stable_messages)
 def text(*args): return git(*args,capture=True).stdout.strip()
 def digest(root):
     h=hashlib.sha256()
@@ -572,7 +655,11 @@ def install():
             cwd=C, timeout=900, sandbox_shell='web', network=True)
         state.write_text(lockhash)
 def build(name):
-    return run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    result=run(['bash',BUILD_SCRIPT,C,text('rev-parse','HEAD'),name],check=False)
+    # EX_TEMPFAIL is host capacity, never evidence about the candidate (or probe).
+    if result.returncode == 75:
+        result.check_returncode()
+    return result
 def recovery_select_build(sha):
     if not isinstance(sha,str) or not re.fullmatch(r'[0-9a-f]{40}',sha):
         raise ValueError('cached build has no full revision')
@@ -646,7 +733,7 @@ def registration_not_ready(cleanenv):
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return False
 
-def activate(previous):
+def activate(previous, row):
     current=os.path.realpath(P/'current')
     sha=json.loads(candidate_sandbox.read_regular(P/'current/build-receipt.json'))['buildIdentity']['rev']
     cleanenv={k:v for k,v in os.environ.items() if k not in ('PTY_SESSION','ST_AGENT')}
@@ -662,16 +749,22 @@ def activate(previous):
     try:
         if previous and registration_not_ready(cleanenv):
             swap_server(cleanenv)
-        subprocess.run(['devnet','up','--replace',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
+        subprocess.run(['devnet','up','--replace',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,text=True,stderr=subprocess.PIPE,check=True)
         replacement_completed=True
         subprocess.run(['devnet','url',purpose,'--remote','--wait'],cwd=C/'apps/fractal-web',env=cleanenv,check=True,timeout=120)
         url=current_server_url(cleanenv,sha)
         if not url:
             raise RuntimeError('published edge does not serve candidate build identity')
-    except Exception:
-        # Failed replacement may already have committed; reconcile before moving the pointer.
+    except Exception as error:
+        # Exit status cannot distinguish a failed switch from failed retirement.
+        # Only the published candidate identity confirms replacement success.
         if not replacement_completed:
-            if not current_server_url(cleanenv,sha) and previous and previous!=current:
+            url=current_server_url(cleanenv,sha)
+            if url and isinstance(error,subprocess.CalledProcessError):
+                row['replaceWarning']=(error.stderr or str(error))[-4000:]
+                recovery_retain_builds(previous)
+                return url
+            if not url and previous and previous!=current:
                 rollback_sha=json.loads(candidate_sandbox.read_regular(pathlib.Path(previous)/'build-receipt.json'))['buildIdentity']['rev']
                 if current_server_url(cleanenv,rollback_sha):
                     recovery_select_build(rollback_sha)
@@ -755,7 +848,6 @@ def compatible_recorded_stack(stack, heads, row):
 
 def tick():
     global TIMINGS, REGISTRY_BASE, SELECTION_DEADLINE
-    candidate_sandbox.validate_configuration()
     start=time.monotonic(); row={'ts':datetime.datetime.now(datetime.timezone.utc).isoformat(),'sha':None,'main':None,'included':[],'skipped':[],'selection':[],'build':'failed','ms':0}
     row['integratorVersion']=INTEGRATOR_VERSION
     TIMINGS=row['timingsMs']={}
@@ -763,9 +855,13 @@ def tick():
     pin=json.loads(pin_path.read_text()) if pin_path.exists() else None
     row['pinnedBase']=None
     lock=open(L/('live-r3-dry-run.lock' if DRY_RUN else 'live-r3.lock'),'a')
+    capacity_prechecked=False
     try:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: row.update(build='skipped',reason='lock-held'); return
+        candidate_sandbox.capacity_precheck()
+        capacity_prechecked=True
+        candidate_sandbox.validate_configuration()
         SELECTION_DEADLINE = time.monotonic() + SELECTION_BUDGET_SECONDS
         # Trust metadata is fetched before any PR files or executable content.
         permission_cache={}
@@ -806,6 +902,7 @@ def tick():
             if pattern not in exclude.read_text():
                 with exclude.open('a') as f: f.write('\n'+pattern+'\n')
         prepare_clone()
+        maintain_clone(row)
         git('fetch','origin','+refs/heads/main:refs/remotes/origin/main',*[f'+refs/pull/{p["number"]}/head:refs/remotes/origin/live-r3-pr-{p["number"]}' for p in ordered])
         row['main']=text('rev-parse','origin/main')
         for number, commit in LOCAL_HEAD_OVERRIDES.items():
@@ -845,7 +942,7 @@ def tick():
                 row.update(sha=old['sha'],included=old['included'],skipped=skipped,build='skipped',reason='unchanged',selectionComplete=True)
                 previous=recovery_previous()
                 recovery_select_build(row['sha'])
-                row['url']=activate(previous)
+                row['url']=activate(previous, row)
                 return
         git('checkout','-B','live-r3',base)
         overlay=C/'apps/fractal-web/private'
@@ -873,6 +970,7 @@ def tick():
                 conflicts=text('diff','--name-only','--diff-filter=U').splitlines()
                 if conflicts:
                     row['stackConflictFiles']=conflicts
+                    git('rerere','clear')
                     git('merge','--abort')
                     raise RuntimeError(f'recorded required-PR resolution conflicts with main: {conflicts}')
                 git('commit','--no-edit')
@@ -884,6 +982,9 @@ def tick():
                 resolved=resolve_additive()
                 conflicts=text('diff','--name-only','--diff-filter=U').splitlines()
                 if conflicts:
+                    # Abandoned conflicts have no reusable resolution. Without
+                    # clear, Git allocates another preimage variant next tick.
+                    git('rerere','clear')
                     git('merge','--abort',check=False)
                     if p['number'] in REQUIRED:
                         row['requiredConflict']={'pr':p['number'],'files':conflicts}
@@ -905,7 +1006,7 @@ def tick():
             atomic_json(state,{'signature':signature,'sha':row['sha'],'included':row['included'],'skipped':row['skipped'],'pinnedBase':row['pinnedBase']})
             return
         recovery_select_build(row['sha'])
-        row['url']=activate(previous)
+        row['url']=activate(previous, row)
         row['build']='built'
         atomic_json(state,{'signature':signature,'sha':row['sha'],'included':row['included'],'skipped':row['skipped'],'pinnedBase':row['pinnedBase']})
     except SelectionDeadline as error:
@@ -914,6 +1015,9 @@ def tick():
         print('selection deadline:', error, flush=True)
     except Exception as e:
         row['error']=str(e)
+        if isinstance(e,subprocess.CalledProcessError) and e.returncode == 75:
+            row.update(build='capacity-refused', reason='capacity-refused', retryable=True,
+                       error=f'capacity-refused: retryable host capacity refusal; previous build retained: {e}')
         if isinstance(e,subprocess.CalledProcessError):
             detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
             # Host Git refusals must name every rejected key, without truncation.
@@ -922,9 +1026,15 @@ def tick():
     finally:
         SELECTION_DEADLINE = None
         observe_served(row)
+        if not capacity_prechecked and row.get('reason') == 'capacity-refused':
+            # Served identity is known, but no candidate was selected to compare.
+            row['current']=None
         row['ms']=round((time.monotonic()-start)*1000)
         row['timingsMs']['other']=max(0,row['ms']-sum(row['timingsMs'].values()))
-        publish_skips(row)
+        # A refused precheck has no new selection to publish. Preserve the last
+        # selection/metadata state and append only the normal tick observation.
+        if capacity_prechecked or row.get('reason') != 'capacity-refused':
+            publish_skips(row)
         TIMINGS=None
         with (L/('live-r3-dry-run.jsonl' if DRY_RUN else 'live-r3.jsonl')).open('a') as f: f.write(json.dumps(row,separators=(',',':'))+'\n')
         print(json.dumps(row),flush=True)

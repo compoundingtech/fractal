@@ -21,10 +21,7 @@ pub async fn preview(
         if !effect.starts_with("drain") && !manual {
             continue;
         }
-        let actual = state
-            .store
-            .latest_actual_value(subject)
-            .map_err(ApiError::internal)?;
+        let actual = state.store.actual_for_generic_reads(subject, None).map_err(ApiError::internal)?;
         let incarnation = actual.as_ref().and_then(|a| a["incarnation_id"].as_str());
         let blocking = match incarnation {
             _ if manual => intent.subjects.get(subject)
@@ -56,13 +53,15 @@ pub async fn apply(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
+    store_program_bundles(&state, &intent, &request.program_bundles)?;
     let response = state
         .store
-        .apply_owned_set(
+        .apply_owned_set_mapped(
             &intent,
             &request.options,
             &request.idempotency_key,
             &request.actor,
+            request.source_map.as_ref(),
         )
         .map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -71,20 +70,32 @@ pub async fn apply(
     ))
 }
 
+#[derive(serde::Deserialize)]
+pub struct SourceStatusQuery {
+    #[serde(default)]
+    audit: bool,
+}
+
+/// `fractal source status`: each set's policy, open source debt, the debt each set's current
+/// revision closed and, with `?audit=true`, the newest audit records.
+pub async fn source_status(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<SourceStatusQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.source_status(query.audit).map_err(anyhow::Error::new))
+        .await
+        .map(Json)
+}
+
 pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
     let mut value = serde_json::to_value(&view)?;
     let mut statuses = Vec::new();
     for (subject, member, retired) in state.store.owned_set_effective_members(&view)? {
-        let status = state
-            .store
-            .status_at(Some(&subject), None, Some(state.store.index()?))?
-            .subjects
-            .into_iter()
-            .find(|s| s.subject == subject);
+        let actual_fields = state.store.actual_for_generic_reads(&subject, Some(state.store.index()?))?;
         let mut launched = None;
-        let incarnation = status
+        let incarnation = actual_fields
             .as_ref()
-            .and_then(|s| s.actual.as_ref())
             .and_then(|a| a.get("incarnation_id"))
             .and_then(Value::as_str);
         for claim in state
@@ -102,9 +113,8 @@ pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
                 break;
             }
         }
-        let actual = status
+        let actual = actual_fields
             .as_ref()
-            .and_then(|s| s.actual.as_ref())
             .and_then(|a| a.get("status"))
             .and_then(Value::as_str);
         let launch_current = launched.as_ref().is_some_and(|token| {
@@ -193,7 +203,7 @@ pub async fn get(
         state.store.read_snapshot(|index| {
             Ok((
                 client_snapshot_at(&state, index),
-                detail(&state, &id, query.sha),
+                state.store.with_owned_set_snapshot_reads(|| detail(&state, &id, query.sha)),
             ))
         })
     })

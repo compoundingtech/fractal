@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Daily releases retry transient GitHub publish failures, reconcile partial drafts, and accept an explicit verified main tag-release run via --run or workflow dispatch.",
+  "replay": {"status": "none", "detail": "Release tooling only; no replay or rebuild changes."},
+  "schema": {"status": "none", "detail": "No storage changes."},
+  "rules": {"status": "none", "detail": "No daemon rule changes."},
+  "compatibility": {"status": "none", "detail": "No wire or client changes; existing daily release invocations still select the newest successful main push run."},
+  "downtime": {"status": "none", "detail": "No restart-time work."},
+  "manual": {"status": "none", "detail": "No action required. Operators may optionally select a successful Fractal tag release push run on main using --run ID or the run workflow input."},
+  "recovery": {"status": "none", "detail": "No stored-state migration; failed release creates remove partial drafts before retrying."}
+}

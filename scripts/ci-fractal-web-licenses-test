@@ -10,6 +10,7 @@ import runpy
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 api = runpy.run_path(str(Path(__file__).with_name("ci-fractal-web-licenses")))
 lock_packages = api["lock_packages"]
@@ -72,6 +73,50 @@ class LicenseTests(unittest.TestCase):
         for manifest in ({}, {"license": "UNKNOWN"}, {"licenses": []}, {"license": {"url": "missing-type"}}):
             with self.subTest(manifest=manifest), self.assertRaises(ValueError):
                 manifest_license(manifest)
+
+    def test_missing_metadata_uses_only_recognized_license_files(self):
+        license_file = b"Recognized license fixture"
+        fingerprint = hashlib.sha256(license_file).hexdigest()
+        invalid_metadata = [{field: value} for field in ("license", "licenses") for value in (False, "", None, 0, [])]
+        with patch.dict(api["LICENSE_FILE_HASHES"], {fingerprint: "Apache-2.0"}):
+            self.assertEqual(manifest_license({}, license_file), "Apache-2.0")
+            self.assertEqual(manifest_license({"license": "MIT"}, license_file), "MIT")
+            for metadata in invalid_metadata:
+                with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                    manifest_license(metadata, license_file)
+            with self.assertRaises(ValueError):
+                manifest_license({}, license_file + b"changed")
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                package = root / "fixture"
+                package.mkdir()
+                (package / "package.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0"}))
+                (package / "LICENSE").write_bytes(license_file)
+                self.assertEqual(installed_manifests(root, {("fixture", "1.0.0")}), {("fixture", "1.0.0"): "Apache-2.0"})
+                for metadata in invalid_metadata:
+                    (package / "package.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0", **metadata}))
+                    with self.subTest(metadata=metadata), self.assertRaises(ValueError):
+                        installed_manifests(root, {("fixture", "1.0.0")})
+                (package / "package.json").write_text(json.dumps({"name": "fixture", "version": "1.0.0"}))
+                (package / "LICENSE").write_bytes(license_file + b"changed")
+                with self.assertRaises(ValueError):
+                    installed_manifests(root, {("fixture", "1.0.0")})
+            for body, metadata in [(license_file, {}), (license_file + b"changed", {})] + [(license_file, metadata) for metadata in invalid_metadata]:
+                data = io.BytesIO()
+                with tarfile.open(fileobj=data, mode="w:gz") as archive:
+                    for name, content in (("package.json", json.dumps({"name": "fixture", "version": "1.0.0", **metadata}).encode()), ("LICENSE", body)):
+                        member = tarfile.TarInfo(f"package/{name}")
+                        member.size = len(content)
+                        archive.addfile(member, io.BytesIO(content))
+                data = data.getvalue()
+                integrity = "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+                if body == license_file and not metadata:
+                    self.assertEqual(archive_manifest(data, integrity, ("fixture", "1.0.0"))["license"], "Apache-2.0")
+                    with self.assertRaisesRegex(ValueError, "integrity mismatch"):
+                        archive_manifest(data, INTEGRITY, ("fixture", "1.0.0"))
+                else:
+                    with self.assertRaises(ValueError):
+                        manifest_license(archive_manifest(data, integrity, ("fixture", "1.0.0")))
 
     def test_inventory_drift_and_duplicates(self):
         packages = lock_packages(LOCK)

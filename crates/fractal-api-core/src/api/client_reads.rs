@@ -90,6 +90,11 @@ pub async fn client_work(
     if query.history {
         return client_work_history(&state, snapshot, &query).await;
     }
+    if let Some(min_cut) = query.min_cut
+        && min_cut > state.store.index().map_err(ApiError::internal)?
+    {
+        return Err(client_v0::validation("min_cut must not exceed the current store index"));
+    }
     // While a refresher governs the work list (from when it holds the list's view, before it
     // starts), pages come from its publications and never fold the list on read. With none,
     // as with ST3_PUBLISHED_LISTS=off, they read directly, as before.
@@ -113,6 +118,89 @@ pub async fn client_work(
     .await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyWorkCohortQuery {
+    /// Explicit comma-separated canonical Factory seat references, at most 64.
+    cohort: String,
+}
+
+pub async fn client_ready_work(
+    State(state): State<AppState>,
+    Query(query): Query<ReadyWorkCohortQuery>,
+) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
+    use crate::AttentionListStore;
+    use crate::store::published_list::ListRead;
+
+    let cohort: Vec<String> = query.cohort.split(',').take(65).map(str::to_owned).collect();
+    if cohort.len() > 64
+        || cohort.iter().any(|agent| agent.strip_prefix("agent/").is_none_or(str::is_empty) || agent.len() > 128)
+    {
+        return Err(client_v0::validation("cohort must name 1 to 64 agents"));
+    }
+
+    let list = state.store.published_work_list();
+    let ListRead::Served(publication, publication_id) = list.current() else {
+        return Err(published_lists::work_list_not_ready());
+    };
+    let cut = publication.cut;
+    let published_at = publication.published_at_unix_ms;
+    let evaluated_at = publication.rows.time_unix_ms;
+    let frontier = publication.rows.frontier;
+    let valid_until = publication.valid_until_unix_ms;
+    let available = || ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "ready-work-unavailable".into(),
+        message: "a current work cut and all cohort declarations are required".into(),
+        details: Box::default(),
+    };
+    // No live refold: at most 5,000 published steps, each eligible step doing indexed
+    // subject/kind seeks through that subject's release/return/progress events.
+    // Latest handoff candidates also need canonical ordering; event history is not capped.
+    if publication.rows.rows.len() > 5_000 {
+        return Err(available());
+    }
+    let store = state.store.clone();
+    let count = blocking_store(move || {
+        store.read_snapshot(|head| {
+            // The frontier tracks projected replication. Local commits can advance head
+            // without advancing it, so match both fences independently.
+            if head != cut
+                || !store.attention_projection_frontier()?.is_some_and(|(status, at)| {
+                    status == "healthy" && at == frontier
+                })
+                || store.replication_catching_up()
+                || store.replication_diverged()
+                || valid_until.is_some_and(|until| until <= client_now_ms())
+            {
+                return Ok(None);
+            }
+            store.ready_work_cohort_count(
+                publication.rows.rows.values().map(|row| row.view.as_ref()),
+                &cohort,
+                evaluated_at,
+            )
+        })
+    })
+    .await?
+    .ok_or_else(available)?;
+    #[cfg(test)]
+    super::ready_work_tests::after_count(&state);
+    // The same generation fence as published work paging. This result has no continuation.
+    if valid_until.is_some_and(|until| until <= client_now_ms())
+        || !matches!(list.current(), ListRead::Served(_, id)
+            if id.list == publication_id.list && id.generation == publication_id.generation)
+    {
+        return Err(published_lists::work_list_not_ready());
+    }
+    Ok((Extension(roster_snapshot(&state, cut, published_at)), Json(json!({
+        "coverage": "local-graph-cut",
+        "evaluated_at": client_timestamp(evaluated_at),
+        "projection_frontier": frontier,
+        "ready_count": count,
+    }))))
+}
+
 /// A current work page from the work list's publications. A first page serves the newest
 /// current publication, or with `fresh=true` one at least as new as the request; a continuation
 /// serves the publication its first page did. Neither folds the list: with nothing current to
@@ -134,9 +222,9 @@ async fn client_work_published(
         return Ok((Extension(snapshot), Json(page)));
     }
     let list = state.store.published_work_list();
-    let (publication, id) = if query.fresh {
+    let (publication, id) = if query.fresh || query.min_cut.is_some() {
         let waited = Instant::now();
-        let fresh = wait_for_work_list(&state.store).await;
+        let fresh = wait_for_work_list(&state.store, query.min_cut).await;
         record_work_stage(request_latency::WorkStage::FreshWait, waited.elapsed());
         fresh?
     } else {
@@ -153,12 +241,13 @@ async fn client_work_published(
     blocking_store(move || Ok(client_work_published_page(&reader, &publication, id, &query))).await?
 }
 
-/// Wait up to [`WORK_LIST_FRESH_WAIT`] for a current publication at or after the store's index
-/// when the request arrived. Each way it can end answers differently: such a publication; not
-/// fresh, once the wait is over; not ready, if the list is withdrawn or forgotten meanwhile or
-/// its change channel closes; unavailable, if the refresher ends. Never stale rows as fresh.
+/// Wait up to [`WORK_LIST_FRESH_WAIT`] for a current publication at or after the pinned minimum,
+/// or the store's index when this request arrived. Each way it can end answers differently:
+/// such a publication; not fresh, once the wait is over; not ready, if the list is withdrawn or
+/// forgotten meanwhile or its change channel closes; unavailable, if the refresher ends.
 async fn wait_for_work_list(
     store: &Arc<Store>,
+    min_cut: Option<u64>,
 ) -> Result<
     (
         Arc<crate::store::published_list::Publication<crate::store::work_list::WorkRows>>,
@@ -168,7 +257,10 @@ async fn wait_for_work_list(
 > {
     use crate::store::published_list::ListRead;
     let list = store.published_work_list();
-    let wanted = store.index().map_err(ApiError::internal)?;
+    let wanted = match min_cut {
+        Some(cut) => cut,
+        None => store.index().map_err(ApiError::internal)?,
+    };
     let mut changes = list.subscribe();
     let deadline = tokio::time::Instant::now() + WORK_LIST_FRESH_WAIT;
     let mut asked = false;
@@ -375,6 +467,7 @@ async fn client_work_history(
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })
@@ -674,6 +767,7 @@ pub async fn client_agents_detail(
     let created_at = snapshot.created_at.clone();
     let snapshot_index = snapshot.store_index;
     let subject = identity.to_owned();
+    let node = state.node.clone();
     let mut items = blocking_store(move || {
         let selected = BTreeSet::from([subject]);
         let mut items = client_agent_resources_selected(
@@ -684,6 +778,16 @@ pub async fn client_agents_detail(
         )?;
         add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
+        for item in &mut items {
+            if let Some(subject) = item["id"].as_str()
+                && let Some((desired, _)) = store.desired_subject_with_writer(subject)?
+                && desired.member.as_ref().is_some_and(|member| member.host == node)
+            {
+                item["launch_contract"] = crate::contract::status(
+                    &store, &desired, item["incarnation_id"].as_str(),
+                );
+            }
+        }
         for item in &mut items {
             if let Some(subject) = item["id"].as_str()
                 && let Some(operation) = store.runtime_start_for(subject)?
@@ -770,7 +874,7 @@ pub async fn client_sessions_detail(
                     .as_ref()
                     .ok_or_else(|| remote_unavailable_for_owner(&state, &remote_host))?;
                 if !client_v0::acting_party(&session) {
-                    return Err(ApiError::bad(St3Error::new(
+                    return Err(ApiError::bad(FractalError::new(
                         "forbidden",
                         "remote session detail requires a concrete person or agent",
                     )));
@@ -815,7 +919,7 @@ pub async fn client_sessions_detail(
             let relay = state.client_relay.as_ref()
                 .ok_or_else(|| remote_unavailable_for_owner(&state, &remote_host))?;
             if !client_v0::acting_party(&session) {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "forbidden",
                     "remote session detail requires a concrete person or agent",
                 )));
@@ -878,7 +982,7 @@ pub async fn client_attention(
         &effective_query,
         move |state, _| {
             let mut items = client_attention_resources_with_previews(state, person.as_deref(), history)?;
-            client_attention_compatibility(&mut items, session.custom_forms);
+            client_attention_compatibility(&mut items, session.attention_compatibility());
             Ok(items)
         },
     )
@@ -905,7 +1009,7 @@ pub async fn client_attention_detail(
     let mut items =
         client_attention_resources_with_previews(&state, person.as_deref(), query.history)
             .map_err(ApiError::internal)?;
-    client_attention_compatibility(&mut items, session.custom_forms);
+    client_attention_compatibility(&mut items, session.attention_compatibility());
     let Json(item) = client_detail(items, "attention", &id)?;
     let mut items = [item];
     relay_attention_target_states(&state, &mut items)
@@ -1067,15 +1171,15 @@ pub(super) async fn client_messages_sql_page_with_envelope(
     } else {
         None
     };
-    let (limit, expires_at, through, after, offset, now, expected_epoch) = if let Some(cut) = &cut {
+    let (limit, expires_at, through, stream_through, after, offset, now, expected_epoch) = if let Some(cut) = &cut {
         (
-            cut.cursor.limit, cut.cursor.expires_at_unix_ms, cut.cursor.before_index,
+            cut.cursor.limit, cut.cursor.expires_at_unix_ms, cut.cursor.before_index, cut.cursor.before_stream_index,
             cut.cursor.after_key.clone(), cut.cursor.offset, cut.request_time, Some(cut.cut_epoch),
         )
     } else {
         (
             query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS).clamp(1, CLIENT_MAX_PAGE_ITEMS),
-            request_time.saturating_add(CLIENT_PAGE_TTL_MS), None, None, 0, request_time, None,
+            request_time.saturating_add(CLIENT_PAGE_TTL_MS), None, None, None, 0, request_time, None,
         )
     };
     let reader = state.clone();
@@ -1092,8 +1196,8 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             }
             let through = through.unwrap_or(reader.store.client_messages_page_cut(index)?);
             let snapshot = if continuing { snapshot } else { client_snapshot_at(&reader, through) };
-            let mut rows = reader.store.client_messages_page(
-                person.as_deref(), actor.as_deref(), history, through, after.as_ref(), limit,
+            let (mut rows, stream_through) = reader.store.client_messages_page_within(
+                person.as_deref(), actor.as_deref(), history, (through, stream_through), after.as_ref(), limit,
             )?;
             let selected_more = rows.len() > limit;
             rows.truncate(limit);
@@ -1109,7 +1213,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
                 let resource = client_message_resource(&reader.store, message, &metadata, current, now)?;
                 Ok((key, resource))
             }).collect::<anyhow::Result<Vec<_>>>()?;
-            Ok((cut_epoch, Some((snapshot, through, selected_more, resources, views))))
+            Ok((cut_epoch, Some((snapshot, through, stream_through, selected_more, resources, views))))
         })
     }).await?;
     // Retire every affected receipt for this store, not just the cursor that
@@ -1120,7 +1224,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             !cut.store.ptr_eq(&store) || cut.cut_epoch >= cut_epoch
         });
     }
-    let Some((snapshot, through, selected_more, mut resources, views)) = read else {
+    let Some((snapshot, through, stream_through, selected_more, mut resources, views)) = read else {
         return Err(client_page_expired("the message page cut was invalidated; restart pagination"));
     };
     // Mail to a seat on another host that keeps its receipts reads that host's answer. A page of
@@ -1183,7 +1287,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
                 owner_run: query.owner_run.clone(), status: query.status.clone(),
                 owner: query.owner.clone(), state: query.state.clone(), native_only: query.native_only,
                 items_digest: receipt.clone(), before_index: Some(through),
-                after_key, expires_at_unix_ms: expires_at,
+                before_stream_index: Some(stream_through), after_key, expires_at_unix_ms: expires_at,
             })
         } else { None };
         page.page.has_more = has_more;
@@ -1221,7 +1325,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
 }
 
 fn client_message_page_too_large() -> ApiError {
-    ApiError::bad(St3Error::new(
+    ApiError::bad(FractalError::new(
         "response-too-large",
         "a message and its page envelope cannot fit the advertised response byte limit; pagination cannot omit it",
     ))
@@ -1365,7 +1469,7 @@ pub async fn client_launches_detail(
     let (snapshot, value) = blocking_store(move || {
         state.store.read_snapshot(|index| {
             let value = client_launch_detail_at(&state, &id, query.history)?.ok_or_else(|| {
-                anyhow::anyhow!(St3Error::new(
+                anyhow::anyhow!(FractalError::new(
                     "not-found",
                     format!(
                         "launch `{}` does not exist",
@@ -1521,7 +1625,7 @@ pub async fn client_history(
     };
     let store = state.store.clone();
     let page =
-        blocking_store(move || store.claims_page(None, None, 0, Some(before_index), true, limit))
+        blocking_store(move || records::generic_claims_page(&store, Default::default(), None, 0, Some(before_index), true, limit, None))
             .await?;
     let has_more = page.next_cursor.is_some();
     let items = page
@@ -1547,6 +1651,7 @@ pub async fn client_history(
                 native_only: query.native_only,
                 items_digest: String::new(),
                 before_index: Some(next),
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })
@@ -1603,13 +1708,15 @@ pub async fn client_history_detail(
     let page =
         blocking_store(move || store.claims_page(None, None, index - 1, Some(upper), true, 1))
             .await?;
-    page.claims
+    let claim = page.claims
         .into_iter()
         .next()
         .filter(|claim| claim.store_index == index)
-        .map(client_history_resource)
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found(format!("history `{id}` does not exist")))
+        .ok_or_else(|| ApiError::not_found(format!("history `{id}` does not exist")))?;
+    if !records::generic_claim_visible(&claim) {
+        return Err(custom::notices_unavailable());
+    }
+    Ok(Json(client_history_resource(claim)))
 }
 
 /// [`blocking_store`] for an HTTP roster read: worker queue wait, then the attributed read.

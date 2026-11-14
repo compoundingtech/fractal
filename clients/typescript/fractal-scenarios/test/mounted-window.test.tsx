@@ -28,7 +28,7 @@ const Tail = ({ omit = false }: { readonly omit?: boolean }) => {
   })}</div>
 }
 
-// Transcript.tsx exports transcriptMountedWindow = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount } (6).
+// transcript-window.ts exports transcriptMountedWindow = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount } (6).
 const scenario = { _tag: 'slices', slices: ['conversation'], world: 'long-debug-rabbit-hole', window: { _tag: 'sourceRows', rows: 6 } } satisfies ScenarioStoryParameter
 const meta = { title: 'Mounted window proof', render: () => <Tail />, parameters: { scenario } } satisfies Meta
 

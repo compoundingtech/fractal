@@ -24,13 +24,87 @@ admission conditions below, not a coordinated host-rollout requirement.
 
 Read each release's **Upgrade impact** before restart. A patch tag is a publication
 label, not a promise of compatible databases or safe rollback. Check exact sources
-using `BUILD.json`, `RELEASE.json`, `st --version --json`, and the daemon's
-`machine_version` in `st doctor --json`. Downloading or installing an archive does
+using `BUILD.json`, `RELEASE.json`, `fractal --version --json`, and the daemon's
+`machine_version` in `fractal doctor --json`. Downloading or installing an archive does
 not restart or replace the running daemon **process**. It does replace installed
 command files and, on macOS, the app bundle. Until an explicit restart, the daemon
 keeps its current build while new CLI invocations use the installed build. Follow
 the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
 alone as a daemon upgrade.
+
+### Updating the deployed-main baseline
+
+The fleet deploys exact green main commits, not release branches or stable tags.
+`.github/fleet-compat-baseline.json` names the oldest exact source still deployed,
+including a transitional non-main pin until that deployment advances.
+`linux-fleet-compat` tests the candidate against that source. Stable-release
+publication advances the messaging baseline only; it never moves a main-source
+fleet baseline.
+
+Updating a deployment pin includes updating this file in the pin's rollout plan:
+
+1. Read the deployment configuration's locked source SHA. During a staggered
+   rollout, keep the oldest still-running source until every member has advanced.
+2. Build that exact source with the existing **Fractal tag release**
+   `workflow_dispatch` inputs `purpose=compatibility`, `sha` and a distinct
+   `request_id`. This read-only mode requires a full commit SHA reachable from an
+   origin ref and records those refs in its validation log. It grants no stable
+   or edge publication authority and leaves the candidate mode's first-parent
+   main gate unchanged. This reuses the
+   normal native archive builders; compatibility CI does not compile a second
+   historical workspace on every run.
+3. Download the run's assembled `fractal-release-attempt-N` artifact. Verify
+   `SHA256SUMS`, `RELEASE.json`'s exact source, and both native archives'
+   `BUILD.json` source and target. Publish these verified archives, `SHA256SUMS`,
+   and `RELEASE.json` once as the prerelease `fleet-SHA`, with a tag pointing at
+   that exact commit. Create the draft without assets, upload the verified files,
+   then publish. Never replace a published baseline's assets. A mutable `edge`
+   URL is not a pin: the next main publication replaces its bytes.
+4. Run `scripts/compat-baseline-release repin-fleet fleet-SHA`. It checks the
+   published manifest, dereferenced tag, archive checksums and embedded metadata,
+   and writes only the fleet baseline. Commit the result with the rollout's
+   compatibility change.
+5. Require green `linux-fleet-compat` at the candidate head and retain its
+   `compat-baseline: fleet source=SHA` log line with rollout evidence. A pin
+   change is not complete without this baseline update. Keep the rollout
+   canary proof separate from the mixed-version CI proof.
+
+The public workflow does not read private deployment configuration or poll for
+pin changes. The explicit rollout step owns synchronization. The pinned archive
+remains available independently of short-lived Actions artifacts and rolling
+edge publication.
+
+### Service-grant refusal on the pinned baseline
+
+The service downgrade fixtures target the exact source in
+`.github/fleet-compat-baseline.json`. Service credentials remain disabled
+in production. A service grant must use a `plugin/<host>/<name>` principal,
+never an assistant principal. The candidate refuses service-profile issuance
+and authentication, including the counterexample `assistant/chatgpt` plus
+`profile=service`; the closed assistant pairing grammar cannot issue that shape.
+
+The deployed baseline understands service profiles and requires plugin service
+principals. It refuses the offline-seeded `assistant/chatgpt` service-profile
+counterexample with `forbidden` / `invalid service principal`. Plugin service
+credentials cannot enter the assistant proposal route, and a service record with
+assistant scopes is also refused. Replicated grants additionally fail the
+authoritative-origin check. The ignored fleet tests exercise both issuer-origin
+roles and a candidate → baseline → candidate restart on the same database, with
+retained GRANTED/POLICY claims and live, expired, and revoked assistant controls.
+Fixtures are signed offline by the candidate store using the stopped node's own
+origin and existing node/principal keys: the public claims API refuses these
+authority kinds, and production service issuance remains disabled.
+A candidate-only test exercises the same offline seeding and refusal path.
+
+The rollback fixture also checks owner inspection: the baseline's legacy
+`assistant-grant` response kind preserves the actual plugin principal and service
+scopes instead of projecting an assistant identity. A live assistant owner-read
+control must still succeed. Neither a successful owner inspection nor this
+assistant-route refusal evidence establishes general rollback support or disabled
+service authentication on every historical binary. Any future service issuance
+must retain the plugin-principal invariant and revisit compatibility before
+enabling it.
+
 
 ### Additive claims and unknown-field retention
 
@@ -70,6 +144,60 @@ Design sketch (**open, [#4002](https://github.com/compoundingtech/fractal/issues
 The active-member definition, authenticated freshness/absence evidence, durable
 activation record, and re-sync completion/write fence are unresolved protocol
 details in #4002. A local timeout alone is not authority to remove a member.
+
+### Declared admission publication
+
+Publishing `declared-priority`, `declared-lane`, or `declared-budgets` (including an
+empty budgets block) requires every active fleet incarnation to advertise
+`features.declared_admission=1` in its latest own-origin, authenticated, signed
+`daemon.started` claim anchored to the admitted incarnation. Publications containing
+attention additionally require `features.declared_attention=1` from every active
+incarnation, including the local daemon, in that same advertisement. The publication
+gate requires signed, current, unambiguous membership and fails closed on missing,
+false, conflicted, unsigned, or unanchored capability evidence and unfenced legacy
+writers with `declared-admission-feature-barrier`. A refusal rejects the full
+publication before any declaration is written; an old member never receives a
+new-child publication through a refused write. Attention-free declarations continue
+publishing in mixed fleets with version-1 declared-admission support. Upgrade all
+active members or fence legacy peers before publishing attention.
+Keep every member on a supporting binary while populated metadata exists.
+This is an ongoing requirement. The gate checks support only at write time.
+It does not prevent a member from starting an old binary later.
+It does not prevent an old member from joining later.
+An old member drops agent metadata and fails mission revision validation.
+Remove attention with supporting readers before a mixed-version rollback; remove
+all declared-admission metadata before rolling back to readers that lack version-1
+declared-admission support.
+
+New agent authoring accepts only peak `memory-max` and `disk-max` budgets.
+`cpu-seconds` and `token-budget` are mission-run totals, including all retries,
+and refuse new agent publication through CLI and API paths. Historical agent
+readers and wire types retain those fields unchanged; replay is unchanged.
+The compatibility assessment found no published uses: the supplied search of
+`schickling/factory` at `origin/main` (`b2dacb7`) and dotfiles `nixpkgs/smalltalk`
+found zero matches for `declaredBudgets`, `tokenBudget`, `cpuSeconds`,
+`token-budget`, or `cpu-seconds`. This evidence is scoped to those sources,
+not a claim about every external declaration.
+
+This per-feature gate does not establish the general adjacent-release guarantee
+described above. See [declared admission](priority.md#declared-admission).
+
+### Agent charter publication
+
+An agent's `description`, its charter, holds up to 8,192 UTF-8 bytes. A member that
+does not advertise `features.agent_charter=1` bounds it at 1,000 bytes whenever it
+parses declaration KDL: when it publishes or previews, and when it materializes the
+agents a mission declares for a run it evaluates. It admits replicated desired claims
+and reconciles a top-level agent from its stored declaration without that check.
+Publishing an agent declaration, directly or inside a mission, whose charter exceeds
+1,000 bytes therefore requires every active fleet incarnation to advertise
+`features.agent_charter=1`, under the membership and evidence policy of declared
+admission publication. Like declared admission, the gate fails closed without signed,
+anchored fleet membership: a standalone member with no anchored fleet cannot publish a
+charter over 1,000 bytes. A refusal fails with `agent-charter-feature-barrier` before
+anything is written. A charter of at most 1,000 bytes needs no advertisement. The
+gate checks support only at write time: keep every member on a supporting binary
+while a longer charter exists.
 
 ### Checkpoints in a mixed fleet
 
@@ -134,6 +262,45 @@ fresh writer; it is not a downgrade or permission to overwrite a running member.
 | Client API | `st3.client.v0`, projection versions and capability versions are distinct from release tags and database schema. Discover capabilities first; unknown required capability versions stop the client, while unknown optional capabilities may be ignored. See the [client contract](client-v0/README.md#discovery-lists-and-details). |
 | Native harness and driver resume | Provider APIs, managed extensions and saved resume state have their own contracts. See [seats across deploys](seat-deploys.md); rolling back across the push-delivery boundary can require coordinated seat restarts. |
 
+### Additive assistant admission index
+
+Store initialization installs `claims_assistant_v1_principal_index` on
+`claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'))`
+with `CREATE INDEX IF NOT EXISTS`, including supported existing stores. This
+matches the parameterized kind/principal admission lookup; a missing principal
+continues to mean `assistant/chatgpt`. Existing claim rows and signed bodies are
+not rewritten, and no projection replay or manual SQL is required.
+
+This derived access path does not change `STORAGE_VERSION` (20),
+`RULES_VERSION` (26), the claim registry, or their storage, checkpoint and
+replication digests: row formats, vocabulary, shared projections and retention
+semantics are unchanged. It follows the schema-on-open index installation used
+for the assistant mission-run collection indexes. The first open builds the
+index synchronously over retained claims. On a 16-core x86_64 benchmark host
+(32 threads, Linux), exact index creation on a synthetic
+1,000,000-claim real Store schema took 1.525 seconds and grew the main database
+by 59,518,976 bytes. This measures index-build work, not complete daemon startup
+or cold-disk restart time; local history and hardware determine first-open delay.
+Subsequent opens reuse the index without changing the schema cookie. Older
+binaries can ignore the additional index; SQLite continues maintaining it on writes.
+
+Admission excludes revoked and effectively expired history in SQL while
+preserving the latest-policy and malformed-fields validation semantics. SQL work
+still scales with matching principal history, but inactive records no longer
+hydrate into Rust. With 10,000 expired grants per principal and concurrent pairing
+completions, real authenticated summary GET p95 on that benchmark host was 54.154 ms
+(approval-once) and 46.173 ms (caller-bound-allow), compared with 965.184 ms and
+933.049 ms on baseline `98e550cb75` (200 samples per mode). Both indexed modes
+meet q39's 100 ms budget. The opt-in `daemon_cost::assistant_admission` tests use
+production daemon routers over bound Unix/TCP sockets, real bearer middleware,
+and distinct build directories for the baseline and indexed worktrees.
+
+Subscription deferral counts keep their request-history index explicitly selected,
+following the existing plan-sensitive history-query convention. Without `ANALYZE`,
+SQLite's default estimates can select a subject/kind history scan after an unrelated
+kind-leading index is added; request filtering must remain an index seek rather
+than decoding every deferral for that subscription.
+
 Use CLI and the terminal UI from the same release source. Current client version scope is:
 
 | Client | Version/evidence boundary |
@@ -168,25 +335,56 @@ version. Native admission probes identify the exact installed build, and their e
 when the build identity changes. Follow [admission diagnosis](seat-deploys.md#harness-admission-at-the-next-launch)
 rather than bypassing a failed boundary without understanding it.
 
-### Rolling previous-release evidence
+### Rolling cross-build evidence
 
 Cross-build tests pin exact sources in
 [the fleet baseline](../../.github/fleet-compat-baseline.json) and
-[the messaging baseline](../../.github/messaging-compat-baseline.json). The ordinary window is
-the **previous published stable release → current candidate**, not a permanent historical
-source. Both pins record the release tag, its full source commit and native release archive
-URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published `bin/st3`;
-historical messaging uses the channel source from the same release commit.
+[the messaging baseline](../../.github/messaging-compat-baseline.json).
+Fleet compatibility compares the **oldest deployed main source → current candidate**;
+messaging compares the **previous published stable release → current candidate**.
+Both pins record a release tag, its full source commit and native release archive
+URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published
+binary; historical messaging uses the native archive from its pinned stable release.
+
+CI prepares each pinned native archive once per workflow. The Ubuntu producer uses an
+`actions/cache` entry keyed by target and the pin's SHA256 across runs, then uploads the
+verified bytes as an artifact retained for seven days. Artifact names include the producer's
+`github.run_attempt`, so reruns never overwrite bytes used by another attempt. The producer
+exports each artifact name as a job output; a consumer-only rerun uses that retained output,
+not its own attempt number. Fleet and messaging share artifacts when their pins match.
+Downstream jobs download the producer-selected numeric artifact ID to a private directory,
+using the bounded transfer implementation from `scripts/ci-test-archive`. They check the
+authenticated ZIP identity, size and digest before opening it, then reverify the pinned
+archive's SHA256 and `BUILD.json` source/target before atomically publishing consumer bytes.
+Artifact metadata must match the current run ID and its event's source identity: the PR head
+from the event payload on `pull_request`, or `GITHUB_SHA` on push and merge-group runs.
+The PR merge-checkout SHA is not the artifact API's workflow-run head.
+`COMPAT_BASELINE_ARCHIVE` supplies those bytes, never a live release download. Producer job
+IDs also namespace artifact names so ordinary and projected proof producers cannot collide.
+Artifacts bridge GitHub-hosted, Namespace and macOS runners without
+assuming their cache backends are shared. Missing or corrupt artifacts fail closed;
+producer cache hits are also reverified. Evidence-only gates do not depend on archives.
+
+On a preparation cache miss, `scripts/compat-baseline` first downloads the pinned browser
+URL. HTTP 502, 503 and 504 receive two retries after 1 and 3 seconds. Once exhausted,
+or on another HTTP 5xx or a timeout, it resolves the same release asset through GitHub's
+API, with at most two attempts per API request and a 60-second timeout per request.
+`GH_TOKEN` (or `GITHUB_TOKEN`) authenticates API requests without forwarding credentials
+on redirects. Diagnostics on stderr identify which path supplied the archive. Both paths
+must pass the same SHA256 and `BUILD.json` checks; `--save-archive` atomically retains the
+verified original bytes for caching. `COMPAT_BASELINE_ARCHIVE` bypasses network access
+and its digest is checked even when the extracted binary is already present.
 
 After each stable publication, release automation opens a baseline maintenance PR against
 `main`. It derives the source from `RELEASE.json`, verifies the dereferenced tag and the two
-archives, and advances both unheld pins. It does **not** change the already-published release
-commit: a release cannot contain its own source SHA. A human reviews and merges that PR before
+archives, and advances unheld stable pins while preserving the main-source fleet pin.
+It does not change the published release commit: a release cannot contain its own
+source SHA. A human reviews and merges that PR before
 the next stable candidate can be published. Baseline-only maintenance does not itself create
 another daily release.
 
-CI compares the pins with the actual published stable release list, excluding drafts,
-prereleases and unpublished tags. A pin more than one published stable release behind fails.
+CI compares the stable messaging pin with the actual published stable release list,
+excluding drafts, prereleases and unpublished tags. A stable pin more than one publication behind fails.
 `why` describes the rolling policy; it is not an exemption. `exception_reason` is normally
 `null`. A temporary older hold requires a nonempty explicit reason describing the compatibility
 boundary and when the hold can be removed. Automation preserves that hold; remove the reason

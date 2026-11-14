@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { FractalClient } from '../../clients/typescript/fractal-client/index.ts';
+import { FractalClient, plainError } from '../../clients/typescript/fractal-client/index.ts';
 import { collectionSocketFactory } from './collectionSocket.ts';
+import { Feed, OPEN_WAIT_MS } from './feed.ts';
+import { ForegroundGate } from './foreground.ts';
 
 const flush = async () => { for (let n = 0; n < 5; n++) await Promise.resolve(); };
 function bridge() {
@@ -61,4 +63,82 @@ test('native opening failure and remote close end once and release listeners', a
   const id = next.opened[0][0];
   next.emit({ id, kind: 'close', code: 1001 }); next.emit({ id, kind: 'close', code: 1001 });
   assert.equal(closes, 1); assert.equal(next.listeners.size, 0);
+});
+
+test('native NSError identity reaches the SDK and plain feed error without localized text', async () => {
+  const native = bridge(), ends = [];
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid' });
+  await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: collectionSocketFactory(native) });
+  await flush();
+  const id = native.opened[0][0];
+  native.emit({ id: id + 1, kind: 'error', domain: 'IgnoredDomain', code: 1 });
+  assert.deepEqual(ends, [], 'another socket cannot end this stream');
+  const failure = { id, kind: 'error', domain: 'NSURLErrorDomain', code: -1009,
+    message: 'private gateway and credential', localizedDescription: 'private localized description', userInfo: { url: 'https://private.invalid' } };
+  native.emit(failure);
+  native.emit(failure);
+  assert.equal(ends.length, 1);
+  assert.ok(ends[0] instanceof Error);
+  assert.equal(ends[0].message, 'The collections socket failed (NSURLErrorDomain -1009)');
+  assert.equal(plainError(ends[0]), ends[0].message, 'the feed plainError path retains domain/code');
+  assert.doesNotMatch(JSON.stringify({ issue: plainError(ends[0]) }), /private|localizedDescription|userInfo/);
+  assert.equal(native.listeners.size, 0);
+});
+
+test('the bridge forwards only NSError domain/code and keeps an untyped failure generic', async () => {
+  const native = bridge(), socket = collectionSocketFactory(native)('wss://gateway.invalid', [], {});
+  const errors = [];
+  socket.onerror = event => errors.push(event);
+  await flush();
+  native.emit({ id: native.opened[0][0], kind: 'error', domain: 'SRWebSocketErrorDomain', code: 2132,
+    message: 'private', localizedDescription: 'private', reason: 'private', data: 'private' });
+  assert.deepEqual(errors, [{ domain: 'SRWebSocketErrorDomain', code: 2132 }]);
+
+  const generic = bridge(), ends = [];
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid' });
+  await client.collectionStream({ onFrame() {}, onEnd: error => ends.push(error), socket: collectionSocketFactory(generic) });
+  await flush();
+  generic.emit({ id: generic.opened[0][0], kind: 'error', message: 'private' });
+  assert.equal(ends[0].message, 'The collections socket failed');
+});
+
+test('native opening and connected failures reach the real feed issue with domain/code only', async t => {
+  for (const opened of [false, true]) {
+    await t.test(opened ? 'after open' : 'during opening', async t => {
+      const native = bridge(), states = [];
+      const client = new FractalClient({ baseUrl: 'https://gateway.invalid' });
+      const feed = new Feed(client, { onWindow() {}, onConnection: (state, issue) => states.push([state, issue]) },
+        new ForegroundGate('active'), () => 'action/test', [1000], undefined, false, undefined, collectionSocketFactory(native));
+      t.after(() => feed.close());
+      await flush();
+      const id = native.opened[0][0];
+      if (opened) { native.emit({ id, kind: 'open' }); await flush(); }
+      native.emit({ id, kind: 'error', domain: 'NSURLErrorDomain', code: -1009,
+        message: 'private credential', localizedDescription: 'private gateway', userInfo: { url: 'https://private.invalid' } });
+      await flush();
+      assert.deepEqual(states.at(-1), ['reconnecting', 'The collections socket failed (NSURLErrorDomain -1009)']);
+      assert.doesNotMatch(JSON.stringify(states), /private|localizedDescription|userInfo/);
+      assert.equal(native.listeners.size, 0);
+    });
+  }
+});
+
+test('a real native bridge that never opens times out and releases its listener', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });
+  const native = bridge(), states = [];
+  const client = new FractalClient({ baseUrl: 'https://gateway.invalid' });
+  const feed = new Feed(client, { onWindow() {}, onConnection: (state, issue) => states.push([state, issue]) },
+    new ForegroundGate('active'), () => 'action/test', [1000], undefined, false, undefined, collectionSocketFactory(native));
+  t.after(() => feed.close());
+  await flush();
+  assert.equal(native.opened.length, 1);
+  t.mock.timers.tick(OPEN_WAIT_MS);
+  await flush();
+  assert.equal(states.at(-1)[0], 'reconnecting');
+  assert.match(states.at(-1)[1], /open|answer|long/i);
+  assert.equal(native.listeners.size, 0);
+  assert.equal(native.closed.length, 1);
+  native.emit({ id: native.opened[0][0], kind: 'open' });
+  await flush();
+  assert.equal(states.at(-1)[0], 'reconnecting', 'the late native open cannot revive the timed-out stream');
 });

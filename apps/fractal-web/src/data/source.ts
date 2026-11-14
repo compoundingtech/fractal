@@ -25,11 +25,13 @@ import type {
   ConversationSearch,
   SubagentSummary,
 } from '@fractal/client/schema'
-import type { ErrorEnvelope, SubagentDriver } from '@fractal/client'
+import { ClientError, type ErrorEnvelope, type SubagentDriver } from '@fractal/client'
 import type { Timestamp } from '@fractal/client/schema'
-import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
+import type { ConnectionState, DecodedAgent, DecodedUsageSummary, Undecodable } from '@fractal/sdk/read'
+import type { MessageSendInput } from '@fractal/sdk/mutations'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
+import { Option, Schema } from 'effect'
 
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ProposedMissionFields } from '../missions/model.ts'
@@ -44,10 +46,30 @@ import type { AgentControlPort } from '../agents/agent-control-port.ts'
 import type { PromptAnswerPort } from '../conversation/alerts/prompt-answer-port.ts'
 import type { AlertActionPort } from '../conversation/alerts/alert-action-port.ts'
 import type { DocumentPort } from '../documents/document-port.ts'
+import type { AvailabilityPort } from '../availability/availability-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { NativeDetailsSource } from './nativeDetailsSource.ts'
+import type { ObjectivesSource } from './objectivesSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
+
+/** Fixed recovery copy for a rejected browser credential; never expose the server's diagnostic. */
+export const credentialExpiredMessage = "This browser's access to the daemon has expired or was revoked. Pair the device again."
+
+const rejectedCredential = Schema.Struct({
+  status: Schema.Literal(403),
+  response: Schema.Struct({ code: Schema.Literal('forbidden'), details: Schema.Struct({ reason: Schema.Literal('credential-rejected') }) }),
+})
+/** Only the structured discriminator distinguishes re-pairing from a missing grant. */
+export const readAuthorization = (error: { readonly status: number; readonly response: unknown }): 'unauthorized' | 'ungranted' | undefined =>
+  Option.isSome(Schema.decodeUnknownOption(rejectedCredential)(error)) ? 'unauthorized'
+    : error.status === 403 || error.status === 401 ? 'ungranted' : undefined
+export const clientReadAuthorization = (error: unknown) => error instanceof ClientError ? readAuthorization(error) : undefined
+
+/** Recovery notices and controls agree, including refusals attached to retained values. */
+export const credentialNotice = (feed: Feed<unknown> | undefined): string | undefined =>
+  (feed?._tag === 'Unavailable' ? feed.reason : feed?._tag === 'Observed' ? feed.error?.reason : undefined) === 'unauthorized' ? credentialExpiredMessage : undefined
+
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
  * pins); live derives it from the SDK's `Observed<A>` (`value` + `freshness`) and follow errors.
@@ -66,14 +88,14 @@ export type Feed<A> =
       readonly coverage?: { readonly _tag: 'Partial' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
       readonly error?: {
-        readonly reason: 'ungranted' | 'unsupported' | 'failed'
+        readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
         readonly detail: string
       }
     }
   | {
       readonly _tag: 'Unavailable'
-      /** `ungranted`: the paired device lacks the scope (the read-only dev device); `unsupported`: the gateway lacks the capability. */
-      readonly reason: 'ungranted' | 'unsupported' | 'failed'
+      /** `unauthorized`: the browser credential expired or was revoked; `ungranted`: missing scope; `unsupported`: missing capability. */
+      readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
       /** Terminal feeds display this source-owned reason; other feeds treat it as diagnostic detail. */
       readonly detail: string
       /** The read error's machine code (for example `not-found`): classification and data-wf-* diagnostics only, never display copy. */
@@ -116,13 +138,14 @@ export interface AgentSubagent {
   readonly lease_expires_at: string
 }
 
-/** Retained native work identity; the title is optional and never synthesized from a goal. */
+/** Retained native work identity; the title is optional and never synthesized from the separately reported goal. */
 export interface AgentWork {
   readonly id: string
   readonly missionId: string
   readonly runId: string
   readonly path: string
   readonly title?: string
+  readonly goal?: string
   readonly state: string
 }
 
@@ -132,6 +155,8 @@ export interface Agent {
   readonly terminal: string
   /** An authoritative empty runtime list proves this agent has no terminal. */
   readonly terminalDisabledReason?: string
+  /** The roster's runtime ids, joined: a remembered failed attach holds only while this stays the same. */
+  readonly runtimeKey?: string
   readonly name: string
   readonly lifecycle: SeatLifecycle
   readonly host: string
@@ -157,6 +182,8 @@ export interface Agent {
   readonly ask: Known<string>
   /** Last observed activity, not the boundary of the current status. */
   readonly lastActivityAt: Known<number>
+  /** Newest conversation prose; omitted by daemons predating read-position support. */
+  readonly lastProseAt?: Known<number>
   /** Exact observed state boundary when supplied (currently suspension), not last activity. */
   readonly statusSince?: number
   readonly subagents?: readonly AgentSubagent[]
@@ -173,18 +200,20 @@ export interface Fleet {
 }
 
 /**
- * SDK decode evidence for the latest roster observation. `decodeStale`: every row in the latest
- * frame failed to decode, so the observed rows are the retained last-good roster.
+ * SDK decode evidence for the latest collection observation. `decodeStale`: every row in the latest
+ * frame failed to decode, so the observed rows are the retained last-good collection.
  */
 export interface RosterDecode {
   readonly undecodable: readonly Undecodable[]
   readonly decodeStale: boolean
+  /** The latest window said more rows exist than it carried. */
+  readonly hasMore?: boolean
 }
 
 /** A roster whose latest frame decoded completely. */
 export const decodedRoster: RosterDecode = { undecodable: [], decodeStale: false }
 
-/** The loaded conversation window; older history is a boundary, not an available fetch operation. */
+/** The loaded conversation window and its served older-history boundary. */
 export interface ConversationPage {
   readonly items: readonly ConversationItem[]
   /** OMP task-block summaries with addressable child transcripts, never roster session IDs. */
@@ -192,6 +221,8 @@ export interface ConversationPage {
   /** Header values include their native source and as_of; absence is not inferred. */
   readonly header?: Readonly<Record<string, unknown>>
   readonly hasOlder: boolean
+  readonly olderCursor?: string
+  readonly older?: { readonly _tag: 'Loading' } | { readonly _tag: 'Failed'; readonly detail: string }
   /** Native page provenance; filtered items cannot establish emptiness. */
   readonly observation?: { readonly empty: boolean }
   /** Incremental boundary relative to this exact preceding projection. */
@@ -293,6 +324,20 @@ export interface AttachmentPort {
   readonly send: (request: AttachmentSendRequest) => Promise<ConversationPortResult<ActionResult>>
 }
 
+export type BrowserPairingStatus = 'unpaired' | 'paired' | 'pending' | 'denied' | 'expired'
+/** `undefined` when this host does not offer browser pairing (HTTP 404). */
+export type BrowserPairingStatusReply = { readonly status: BrowserPairingStatus; readonly displayCode?: string | undefined; readonly credentialChanged?: boolean | undefined } | undefined
+
+/**
+ * Pairs this browser with the serving Fractal host (`/_fractal/pair/*`). The credential lives in a
+ * cookie the page cannot read; the port only reports status and starts or forgets a pairing.
+ */
+export interface BrowserPairingPort {
+  readonly status: () => Promise<BrowserPairingStatusReply>
+  readonly start: (deviceLabel: string) => Promise<{ readonly requestId: string; readonly displayCode: string }>
+  readonly forget: () => Promise<void>
+}
+
 export type NetworkReachability = { readonly _tag: 'Online' } | { readonly _tag: 'Offline' }
 
 /**
@@ -304,6 +349,12 @@ export interface DataSource {
   /** Status bar / live picker bar text, e.g. `fixtures` or `dev gateway · read-only`. */
   readonly label: string
   readonly gateway?: string
+  readonly pins?: Atom.Atom<{
+    readonly state: { readonly phase: string; readonly members: readonly { readonly member: string }[] }
+    readonly editable: boolean
+    readonly toggle: (ref: string) => void
+    readonly retry: () => void
+  }>
   /** Fixtures: the world's fixed base time. Live: `wallClock`. Every relative timestamp reads this. */
   readonly now: Atom.Atom<number>
   readonly grants: Atom.Atom<Grants>
@@ -314,6 +365,8 @@ export interface DataSource {
   readonly subjectReads: SubjectReads
   /** Visible Details uses shared native getter facts; no private harness decoding. */
   readonly nativeDetails?: NativeDetailsSource
+  /** Objectives, budgets and their history from this member's native served model. */
+  readonly objectives?: ObjectivesSource
   readonly connection: Atom.Atom<ConnectionState>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>
@@ -325,7 +378,11 @@ export interface DataSource {
   /** Explicit recovery for a failed or ended roster follow; a healthy follow is untouched. */
   readonly retryAgents?: () => void
   readonly missions: Atom.Atom<Feed<readonly Mission[]>>
+  /** Rows the SDK could not decode for the missions feed; absent sources decode every row. */
+  readonly missionsDecode?: Atom.Atom<RosterDecode>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
+  /** Rows the SDK could not decode for the attention feed; absent sources decode every row. */
+  readonly attentionDecode?: Atom.Atom<RosterDecode>
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>
   readonly events: Atom.Atom<Feed<readonly GatewayEvent[]>>
   /** Keyed by agent ref; retained data follows keep folding while invisible until evicted. */
@@ -334,6 +391,8 @@ export interface DataSource {
   readonly conversationInterest?: (agentRef: string) => Atom.Atom<void>
   /** Explicit pointer/focus intent; live admits it only after a visible thread's first-page frame. */
   readonly prefetchConversation?: (agentRef: string) => void
+  /** Fetch the served page before the loaded window; concurrent requests share one operation. */
+  readonly loadOlder?: (agentRef: string) => Promise<void>
   /** Explicit terminal-toggle pointer/focus intent; live retains a read-only viewer. */
   readonly prefetchTerminal?: (terminalRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
@@ -347,6 +406,8 @@ export interface DataSource {
   readonly agentControls?: AgentControlPort
   /** Fractal documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
+  /** The session person's own availability and directive note (`/v1/client/availability`, `/v1/client/notes`). */
+  readonly availability?: AvailabilityPort
   /** Explicit geometry action; never tied to the browser pane dimensions. The raw ATTACH path resizes on the socket instead. */
   readonly terminalResize?: TerminalResizePort
   /** Answers to native harness prompts (`prompt.respond`), one submission each. */
@@ -365,6 +426,8 @@ export interface DataSource {
   readonly resources?: AgentResourceSource
   /** The monitor's existing port, unchanged: fixtures declare a synthetic source, live the same-origin relay. */
   readonly usage: MonitorSource
+  /** Same-origin browser pairing; present only where the page itself is served, never in fixtures or replays. */
+  readonly pairing?: BrowserPairingPort
   /** Native default or injected trace provider, bound to the owning live runtime. */
   readonly sessionTrace?: (query: TraceQuery) => Promise<TraceSeries>
   /** Live client-observed state kept separate from the feature-facing feed projection. */
@@ -403,7 +466,7 @@ export const unavailable = ({
   code,
   retryable,
 }: {
-  readonly reason: 'ungranted' | 'unsupported' | 'failed'
+  readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
   readonly detail: string
   readonly code?: string | undefined
   readonly retryable?: boolean | undefined

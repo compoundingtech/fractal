@@ -65,9 +65,9 @@ pnpm --filter @fractal/client test
 pnpm --filter @fractal/client typecheck
 ```
 
-The root manifest pins pnpm 12.15.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.3 stable in its development dependencies. `pnpm --filter @fractal/client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
+The root manifest pins pnpm 12.17.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.1.0 stable in its development dependencies. `pnpm --filter @fractal/client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
 
-To verify generated files against the Rust generator, also run `cargo run -p fractal-client-codegen -- --check`. The sibling [`@fractal/views`](../fractal-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2.
+To verify generated files against the Rust generator, also run `cargo run -p fractal-client-codegen -- --check`. The sibling [`@fractal/views`](../fractal-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2.
 
 ## Native Fabric transport
 
@@ -151,6 +151,16 @@ Browser `WebSocket` cannot set headers. A browser socket factory must move the c
 ## Rich Effect schemas
 
 Import `@fractal/client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0` stable peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
+
+Use `@fractal/client/schema/read` for non-terminal read/query responses and collection streams.
+Its generated import graph constructs no mutation request/result/parameter or PTY screen/session
+validators, without relying on tree shaking. Terminal resource metadata remains available for
+roster/resource reads. Terminal screen/content and mutation codecs stay on `@fractal/client/schema`,
+which retains all existing exports and re-exports the same read validator instances. Shared codec
+support preserves strict decoding and unknown-case tracking across both entrypoints. Regeneration
+also writes `ReadSchema.generated.ts` and `SchemaSupport.generated.ts`; never edit them directly.
+`ReadCollectionCommand` and `ReadCollectionFrame` cover collection/conversation stream branches
+without terminal subscriptions/screens; the original complete unions remain on the full surface.
 
 ```ts
 import * as FractalSchema from '@fractal/client/schema'

@@ -5,7 +5,12 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod declarations;
 mod rich;
+mod notice;
+mod notice_schema;
+mod swift_notice;
+mod notice_descriptors;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
 const RUST_CLIENT_TEMPLATE: &str = include_str!("../templates/lib.rs.in");
@@ -56,7 +61,7 @@ fn main() -> Result<()> {
         &swift_operation_methods(reads, actions)?,
     )?;
     let typescript_models = typescript_models(&schema, &operations, &constants)?;
-    let typescript_schema = rich::models(&schema)?;
+    let typescript_schemas = rich::partitioned_models(&schema, &operations)?;
     let typescript_client = render_marker(
         TYPESCRIPT_CLIENT_TEMPLATE,
         "    // @st3-codegen:typescript-operation-methods",
@@ -69,6 +74,27 @@ fn main() -> Result<()> {
         &rust_client,
         &swift_models,
         &swift_client,
+    )?;
+    let (notice_models, notice_schema) = notice::models(&schema)?;
+    output(
+        &root.join("crates/fractal-client/src/notice_models.generated.rs"),
+        &format_rust(&notice_models)?,
+        check,
+    )?;
+    output(
+        &root.join("crates/fractal-client/src/notice_schema.generated.json"),
+        &notice_schema,
+        check,
+    )?;
+    output(
+        &root.join("clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift"),
+        &swift_notice::models(&schema)?,
+        check,
+    )?;
+    output(
+        &root.join("crates/fractal-client/src/notice_descriptors.generated.rs"),
+        &format_rust(&notice_descriptors::models(&schema)?)?,
+        check,
     )?;
     output(
         &root.join("crates/fractal-client/src/contract.rs"),
@@ -105,14 +131,21 @@ fn main() -> Result<()> {
         &typescript_models,
         check,
     )?;
-    output(
-        &root.join("clients/typescript/fractal-client/Schema.generated.ts"),
-        &typescript_schema,
-        check,
-    )?;
+    for (name, contents) in typescript_schemas {
+        output(
+            &root.join("clients/typescript/fractal-client").join(name),
+            &contents,
+            check,
+        )?;
+    }
     output(
         &root.join("clients/typescript/fractal-client/Client.generated.ts"),
         &typescript_client,
+        check,
+    )?;
+    output(
+        &root.join("clients/typescript/fractal-declarations/index.ts"),
+        &declarations::typescript(),
         check,
     )?;
     Ok(())
@@ -156,6 +189,21 @@ fn action_parameter<'a>(action: &str, definition: &'a Value) -> Result<&'a str> 
 
 fn action_method(action: &str) -> String {
     action.replace(['.', '-'], "_")
+}
+
+/// The client GitHub plugin reads, `github-plugin.*`: `(method suffix, id parameter, path)`. Their
+/// answers are typed in TypeScript only; Rust and Swift return the raw `GithubRead` JSON.
+fn github_plugin_read(read: &Value) -> Result<Option<(String, &'static str, String)>> {
+    let id = read["id"].as_str().context("read id")?;
+    let Some(name) = id.strip_prefix("github-plugin.") else {
+        return Ok(None);
+    };
+    let path = read["path"].as_str().context("read path")?;
+    let parameter = ["number", "comment_id", "run_id"]
+        .into_iter()
+        .find(|parameter| path.ends_with(&format!("{{{parameter}}}")) || path.contains(&format!("{{{parameter}}}/")))
+        .context("GitHub plugin read id parameter")?;
+    Ok(Some((name.to_owned(), parameter, path.to_owned())))
 }
 
 /// Assistant read operations: `(projection route suffix, query model, response model)`.
@@ -211,6 +259,16 @@ fn rust_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
+        if id == "attention-budget" {
+            writeln!(out, "    pub async fn attention_budget(&self, mission: &str, person: Option<&str>, at: Option<u128>) -> Result<Envelope<AttentionBudgetReport>, ClientError> {{ let mut path = format!(\"/v1/client/attention-budget?mission={{}}\", percent_encode(mission)); if let Some(person) = person {{ path.push_str(&format!(\"&person={{}}\", percent_encode(person))); }} if let Some(at) = at {{ path.push_str(&format!(\"&at={{at}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
+        if let Some((name, parameter, path)) = github_plugin_read(read)? {
+            let route = path.replace("{owner}", "{}").replace("{repo}", "{}");
+            let name = name.replace('-', "_");
+            writeln!(out, "    pub async fn github_plugin_{name}(&self, owner: &str, repo: &str, {parameter}: u64) -> Result<Envelope<serde_json::Value>, ClientError> {{ self.get(&format!(\"{route}\", percent_encode(owner), percent_encode(repo))).await }}")?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    pub async fn arrangements_memberships(&self, person_name: &str, uuid: &str, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<OrderedMembershipPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements/{{}}/{{}}/memberships?person={{}}\", percent_encode(person_name), percent_encode(uuid), percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
@@ -219,8 +277,16 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
         }
+        if id == "read-positions.list" {
+            writeln!(out, "    pub async fn read_positions_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ReadPositionPage>, ClientError> {{ let mut path = format!(\"/v1/client/read-positions?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
         if id == "arrangements.get" {
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
+            continue;
+        }
+        if id == "device-command.get" {
+            writeln!(out, "    pub async fn device_command_get(&self, id: &str, wait: bool) -> Result<Envelope<DeviceCommand>, ClientError> {{ self.get(&format!(\"/v1/client/device-commands/{{}}?wait={{wait}}\", percent_encode(id))).await }}")?;
             continue;
         }
         if id == "harness-questions.list" {
@@ -246,6 +312,12 @@ fn rust_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    pub async fn mission_declaration_get(&self, mission: &str, revision: Option<&str>) -> Result<Envelope<MissionDeclaration>, ClientError> {{ let mut path = format!(\"/v1/client/mission-declaration?mission={{}}\", percent_encode(mission)); if let Some(revision) = revision {{ path.push_str(&format!(\"&revision={{}}\", percent_encode(revision))); }} self.get(&path).await }}")?;
+        } else if id == "source-map.get" {
+            writeln!(out, "    pub async fn source_map_get(&self, subject: &str, revision: Option<&str>) -> Result<Envelope<SubjectSourceMap>, ClientError> {{ let mut path = format!(\"/v1/client/source-maps?subject={{}}\", percent_encode(subject)); if let Some(revision) = revision {{ path.push_str(&format!(\"&revision={{}}\", percent_encode(revision))); }} self.get(&path).await }}")?;
+        } else if id == "source-blob.get" {
+            writeln!(out, "    pub async fn source_blob_get(&self, hash: &str, subject: &str, revision: &str) -> Result<Envelope<SourceBlob>, ClientError> {{ self.get(&format!(\"/v1/client/source-blobs/{{}}?subject={{}}&revision={{}}\", percent_encode(hash), percent_encode(subject), percent_encode(revision))).await }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -253,6 +325,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -267,6 +341,8 @@ fn rust_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    pub async fn usage_hub_quota(&self) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {{ self.get(\"/v1/client/usage/quota\").await }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -332,6 +408,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}")?;
             // A relayed read of the GitHub plugin's mirror on its poller (docs/st3/plugins.md).
             out.push_str(GITHUB_PLUGIN_READ);
+        } else if id == "agent-related-runs.get" {
+            writeln!(out, "    pub async fn agent_related_runs_get(&self, id: &str) -> Result<Envelope<AgentRelatedRuns>, ClientError> {{ self.get(&format!(\"/v1/client/agent-related-runs/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "agent-queue.get" {
             writeln!(
                 out,
@@ -357,6 +435,10 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn resources_list(&self, filters: &ResourcesFilter, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ResourcesPage>, ClientError> {{ let values = [(\"opened_by\", filters.opened_by.as_deref()), (\"kind\", filters.kind.as_deref()), (\"subject_prefix\", filters.subject_prefix.as_deref())]; let mut filters = [(\"\", \"\"); 3]; let mut count = 0; for (name, value) in values {{ if let Some(value) = value {{ filters[count] = (name, value); count += 1; }} }} self.list_internal_with_filters(\"resources\", cursor, limit, false, &filters[..count]).await }}"
             )?;
+        } else if id == "missions.get" {
+            writeln!(out, "    pub async fn missions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {{ self.resource_internal(\"missions\", id).await }}")?;
+            writeln!(out, "    /// The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission.")?;
+            writeln!(out, "    pub async fn missions_get_run(&self, id: &str, run: &str) -> Result<Envelope<Resource>, ClientError> {{ self.get(&format!(\"/v1/client/missions/{{}}?run={{}}\", percent_encode_segment(id), percent_encode(run))).await }}")?;
         } else if id.ends_with(".get") {
             let collection = path
                 .trim_start_matches("/v1/client/")
@@ -414,6 +496,16 @@ fn swift_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
+        if let Some((_, parameter, path)) = github_plugin_read(read)? {
+            let swift_parameter = match parameter { "comment_id" => "commentID", "run_id" => "runID", other => other };
+            let route = path
+                .trim_start_matches('/')
+                .replace("{owner}", "\\(Self.routedSessionID(owner))")
+                .replace("{repo}", "\\(Self.routedSessionID(repo))")
+                .replace(&format!("{{{parameter}}}"), &format!("\\({swift_parameter})"));
+            writeln!(out, "    public func {method}(owner: String, repo: String, {swift_parameter}: UInt64) async throws -> Envelope<JSONValue> {{ try await get(\"{route}\") }}")?;
+            continue;
+        }
         if id == "arrangements.memberships" {
             writeln!(out, "    public func arrangementsMemberships(personName: String, uuid: String, person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<OrderedMembershipPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))/memberships\", query: query) }}")?;
             continue;
@@ -422,8 +514,16 @@ fn swift_operation_methods(
             writeln!(out, "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}")?;
             continue;
         }
+        if id == "read-positions.list" {
+            writeln!(out, "    public func readPositionsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ReadPositionPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/read-positions\", query: query) }}")?;
+            continue;
+        }
         if id == "arrangements.get" {
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
+            continue;
+        }
+        if id == "device-command.get" {
+            writeln!(out, "    public func deviceCommandGet(_ id: String, wait: Bool = false) async throws -> Envelope<DeviceCommand> {{ let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: \"/\"))) ?? id; return try await get(\"v1/client/device-commands/\\(escaped)\", query: [.init(name: \"wait\", value: String(wait))]) }}")?;
             continue;
         }
         if id == "harness-questions.list" {
@@ -432,6 +532,10 @@ fn swift_operation_methods(
         }
         if id == "harness-questions.get" {
             writeln!(out, "    public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> {{ try await get(\"v1/client/harness-questions/\\(Self.routedSessionID(id))\") }}")?;
+            continue;
+        }
+        if id == "agent-related-runs.get" {
+            writeln!(out, "    public func agentRelatedRunsGet(_ id: String) async throws -> Envelope<AgentRelatedRuns> {{ try await get(\"v1/client/agent-related-runs/\\(Self.routedSessionID(id))\") }}")?;
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
@@ -459,6 +563,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -473,6 +579,8 @@ fn swift_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    public func usageHubQuota() async throws -> Envelope<UsageHubQuota> {{ try await get(\"v1/client/usage/quota\") }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -521,6 +629,14 @@ fn swift_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}")?;
+        } else if id == "attention-budget" {
+            writeln!(out, "    public func attentionBudget(mission: String, person: String? = nil, at: UInt64? = nil) async throws -> Envelope<AttentionBudgetReport> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; if let at {{ query.append(.init(name: \"at\", value: String(at))) }}; return try await get(\"v1/client/attention-budget\", query: query) }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> {{ var query: [URLQueryItem] = [.init(name: \"mission\", value: mission)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/mission-declaration\", query: query) }}")?;
+        } else if id == "source-map.get" {
+            writeln!(out, "    public func sourceMapGet(subject: String, revision: String? = nil) async throws -> Envelope<SubjectSourceMap> {{ var query: [URLQueryItem] = [.init(name: \"subject\", value: subject)]; if let revision {{ query.append(.init(name: \"revision\", value: revision)) }}; return try await get(\"v1/client/source-maps\", query: query) }}")?;
+        } else if id == "source-blob.get" {
+            writeln!(out, "    public func sourceBlobGet(hash: String, subject: String, revision: String) async throws -> Envelope<SourceBlob> {{ try await get(\"v1/client/source-blobs/\\(hash)\", query: [.init(name: \"subject\", value: subject), .init(name: \"revision\", value: revision)]) }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -538,6 +654,10 @@ fn swift_operation_methods(
                 out,
                 "    public func resourcesList(filters: ResourcesFilter = .init(), cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcesPage> {{ var query: [URLQueryItem] = []; if let openedBy = filters.openedBy {{ query.append(.init(name: \"opened_by\", value: openedBy)) }}; if let kind = filters.kind {{ query.append(.init(name: \"kind\", value: kind)) }}; if let subjectPrefix = filters.subjectPrefix {{ query.append(.init(name: \"subject_prefix\", value: subjectPrefix)) }}; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/resources\", query: query) }}"
             )?;
+        } else if id == "missions.get" {
+            writeln!(out, "    public func missionsGet(id: String) async throws -> Envelope<Resource> {{ try await resource(\"missions\", id: id) }}")?;
+            writeln!(out, "    /// The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission.")?;
+            writeln!(out, "    public func missionsGetRun(id: String, run: String) async throws -> Envelope<Resource> {{ try await get(\"v1/client/missions/\\(id)\", query: [.init(name: \"run\", value: run)]) }}")?;
         } else if id.ends_with(".get") {
             let collection = path
                 .trim_start_matches("/v1/client/")
@@ -606,6 +726,7 @@ fn rust_field(name: &str) -> String {
         "final" => "is_final".into(),
         "loop" => "loop_spec".into(),
         "ref" => "reference".into(),
+        "kdlLines" => "kdl_lines".into(),
         other => other.into(),
     }
 }
@@ -684,14 +805,19 @@ fn validate_model(
             && (rust.contains("#[serde(tag = \"type\", content = \"body\"")
                 || (rust.contains("struct TaggedBody")
                     && rust.contains("#[serde(rename = \"type\")]")));
-        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline {
+        let command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && rust_block.contains("pub command: DeviceCommandBody")
+            && rust.contains("#[serde(tag = \"command_kind\", content = \"args\")]");
+        if !rust_block.contains(&format!("pub {rust_field}:")) && !rust_discriminated_timeline && !command_body {
             bail!("Rust `{rust_name}` does not model schema field `{property}`");
         }
         let swift_field = match property.as_str() {
             "final" => "isFinal".into(),
             other => lower_camel_snake(other),
         };
-        if !swift_block.contains(&swift_field) {
+        let swift_command_body = definition == "DeviceCommand" && matches!(property.as_str(), "command_kind" | "args")
+            && swift_block.contains("command: PhoneCommand");
+        if !swift_block.contains(&swift_field) && !swift_command_body {
             bail!("Swift `{swift_name}` does not model schema field `{property}`");
         }
     }
@@ -723,7 +849,7 @@ fn validate_surfaces(
             schema,
             definition,
             definition,
-            &format!("{definition}Resource"),
+            &if definition == "DeviceCommand" { definition.to_owned() } else { format!("{definition}Resource") },
             rust,
             swift,
         )?;
@@ -762,6 +888,16 @@ fn validate_surfaces(
         "Capability",
         "DirectiveNote",
         "DirectiveNotes",
+        "PersonAvailability",
+        "PersonAvailabilities",
+        "AvailabilityStatusChange",
+        "AvailabilityInterruptionsChange",
+        "AvailabilityDeadlineClockChange",
+        "AvailabilitySet",
+        "PresenceReport",
+        "PresenceReportResult",
+        "DirectiveNoteSet",
+        "DirectiveNoteSetResult",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
@@ -789,6 +925,18 @@ fn validate_surfaces(
         "CanonicalNode",
         "SubjectDefinition",
         "PublicationDefinition",
+        "AttentionBudgetReport",
+        "AttentionBudgetRequestRef",
+        "MissionDeclaration",
+        "SubjectSourceMap",
+        "SourceMapRevision",
+        "SourceMapClaim",
+        "SourceMapFile",
+        "SourceMapNode",
+        "SourceMapSpan",
+        "SourceMapPosition",
+        "SourceMapFrame",
+        "SourceBlob",
         "AgentsStatusWatermark",
         "Snapshot",
         "AgentsPublicationMetadata",
@@ -814,6 +962,9 @@ fn validate_surfaces(
         "MissionWake",
         "DeclaredResource",
         "AgentQueue",
+        "AgentRelatedRuns",
+        "AgentRelatedRun",
+        "RelatedRunWait",
         "AgentQueueRun",
         "AgentQueueMove",
         "LaneEntry",
@@ -882,6 +1033,7 @@ fn validate_surfaces(
         "PersonUpdate",
         "RequestSubject",
         "RequestAnswerOption",
+        "PersonOptionNote",
         "PersonAnswerInput",
         "PersonAnswer",
         "PersonAnswerRecord",
@@ -898,6 +1050,13 @@ fn validate_surfaces(
         "OrderedMembership",
         "OrderedMembershipPage",
         "OrderedMembershipState",
+        "ReadPosition",
+        "ReadPositionPage",
+        "ReadPositionAdvanceParameters",
+        "AttentionSeenParameters",
+        "AttentionSnoozeParameters",
+        "AttentionDismissParameters",
+        "AttentionControlState",
     ] {
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
@@ -976,6 +1135,9 @@ fn validate_surfaces(
         "pub async fn harness_questions(",
         "pub async fn harness_question(",
         "pub async fn push_register",
+        "pub async fn availability_set(",
+        "pub async fn presence_report(",
+        "pub async fn notes_set(",
         "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
@@ -1000,6 +1162,9 @@ fn validate_surfaces(
         "func events(",
         "func observationsReport(",
         "func pushRegister(",
+        "func availabilitySet(",
+        "func presenceReport(",
+        "func notesSet(",
         "func pushUnregister(",
         "func beginPairing(",
         "func completePairing(",
@@ -1217,9 +1382,7 @@ fn swift_contract<'a>(
     constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
-    let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n\nimport Foundation\n\n"
-    );
+    let mut out = "// @generated by st3-client-codegen; do not edit.\n\nimport Foundation\n\n".to_owned();
     writeln!(
         out,
         "public enum ActionType: String, Codable, CaseIterable, Sendable {{"
@@ -1379,6 +1542,10 @@ fn ts_object(value: &Value) -> Result<String> {
             fields.push(format!("  {name}{optional}: {};", ts_type(definition)?));
         }
     }
+    // `{}` accepts arbitrary properties in TypeScript; closed empty args must not.
+    if fields.is_empty() && value["additionalProperties"] == false {
+        return Ok("Record<string, never>".into());
+    }
     if let Some(extra) = value.get("additionalProperties")
         && extra.is_object()
     {
@@ -1471,9 +1638,7 @@ fn ts_closed_union(definition: &Value, defs: &serde_json::Map<String, Value>) ->
 fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-    let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n"
-    );
+    let mut out = "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n".to_owned();
     for constant in constants {
         writeln!(
             out,
@@ -1575,12 +1740,25 @@ fn typescript_operation_methods(
         let path = read["path"].as_str().context("read path")?;
         let response = read["response"].as_str().context("read response")?;
         let method = lower_camel(&pascal(id));
+        if let Some((_, parameter, path)) = github_plugin_read(read)? {
+            let ts_parameter = lower_camel(&pascal(parameter));
+            let route = path
+                .replace("{owner}", "${encodeURIComponent(owner)}")
+                .replace("{repo}", "${encodeURIComponent(repo)}")
+                .replace(&format!("{{{parameter}}}"), &format!("${{{ts_parameter}}}"));
+            writeln!(out, "    async {method}(owner: string, repo: string, {ts_parameter}: number, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}`, undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "capabilities.get" {
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
             let response = if response == "Value" { "unknown" } else { response };
             writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
+            continue;
+        }
+        if id == "device-command.get" {
+            writeln!(out, "    async deviceCommandGet(id: string, options: {{ wait?: boolean }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DeviceCommand>> {{ return this.get(`/v1/client/device-commands/${{encodeURIComponent(id)}}` + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         let route = if path.contains("{id}") {
@@ -1594,6 +1772,10 @@ fn typescript_operation_methods(
         }
         if id == "arrangements.list" {
             writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "read-positions.list" {
+            writeln!(out, "    async readPositionsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ReadPositionPage>> {{ return this.get('/v1/client/read-positions' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "arrangements.get" {
@@ -1620,6 +1802,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "notes.list" {
             writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
+        } else if id == "availability.list" {
+            writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -1634,6 +1818,8 @@ fn typescript_operation_methods(
             )?;
         } else if id == "mail-backlog.summary" {
             writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
+        } else if id == "usage-hub.quota" {
+            writeln!(out, "    async usageHubQuota(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<UsageHubQuota>> {{ return this.get('/v1/client/usage/quota', undefined, requestOptions) }}")?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -1685,6 +1871,14 @@ fn typescript_operation_methods(
             )?;
         } else if id == "publication.definition" {
             writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
+        } else if id == "attention-budget" {
+            writeln!(out, "    async attentionBudget(mission: string, person?: string, at?: number, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AttentionBudgetReport>> {{ return this.get('{route}' + query({{ mission, person, at }}), undefined, requestOptions); }}")?;
+        } else if id == "mission-declaration.get" {
+            writeln!(out, "    async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MissionDeclaration>> {{ return this.get('{route}' + query({{ mission, revision }}), undefined, requestOptions); }}")?;
+        } else if id == "source-map.get" {
+            writeln!(out, "    async sourceMapGet(subject: string, revision?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SubjectSourceMap>> {{ return this.get('{route}' + query({{ subject, revision }}), undefined, requestOptions); }}")?;
+        } else if id == "source-blob.get" {
+            writeln!(out, "    async sourceBlobGet(hash: string, subject: string, revision: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SourceBlob>> {{ return this.get(`/v1/client/source-blobs/${{encodeURIComponent(hash)}}` + query({{ subject, revision }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -1700,6 +1894,10 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(id: string, options: {{ after?: string; wait_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query(options), undefined, requestOptions); }}"
             )?;
+        } else if id == "missions.get" {
+            writeln!(out, "    async missionsGet(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}`, undefined, requestOptions); }}")?;
+            writeln!(out, "    /** The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission. */")?;
+            writeln!(out, "    async missionsGetRun(id: string, run: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query({{ run }}), undefined, requestOptions); }}")?;
         } else if id == "timeline.list" || id == "terminal.screen" || id.ends_with(".get") {
             let query_suffix = if id == "timeline.list" {
                 " + query(options)"
@@ -1759,6 +1957,35 @@ mod tests {
     use super::*;
     use anyhow::ensure;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn person_pins_identity_is_shared_by_generated_clients() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/person-pins-v2.json"
+        ))?;
+        let constants = contract_constants(&operations)?;
+        let uuid = operations["constants"]["pins_arrangement_uuid"]["value"].as_str().unwrap();
+        assert_eq!(uuid, "00000000-0000-7000-8000-000000000002");
+        assert_eq!(fixture["subject"], format!("arrangement/person/example/{uuid}"));
+        assert_eq!(fixture["create"]["version"], 2);
+        assert!(fixture["pin"]["operations"][0]["bucket"].is_null());
+        assert_eq!(fixture["unpin"]["operations"][0]["op"], "remove");
+        for (text, name) in [
+            (rust_contract(std::iter::empty(), &[], &constants)?, "PINS_ARRANGEMENT_UUID"),
+            (swift_contract(std::iter::empty(), &[], &constants)?, "st3PinsArrangementUuid"),
+            (typescript_models(&schema, &operations, &constants)?, "PINS_ARRANGEMENT_UUID"),
+        ] {
+            assert!(text.contains(name));
+            assert!(text.contains(uuid));
+        }
+        Ok(())
+    }
 
     #[test]
     fn wire_alias_types_keep_the_deployed_sender_constant() -> Result<()> {
@@ -2228,5 +2455,26 @@ public enum Next { case value } // {
         let fields = schema_properties(&model).flat_map(|properties| properties.keys())
             .map(String::as_str).collect::<std::collections::BTreeSet<_>>();
         assert_eq!(fields, std::collections::BTreeSet::from(["registered", "environment"]));
+    }
+
+    #[test]
+    fn mission_detail_run_read_is_a_separate_method_beside_unchanged_missions_get() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let reads = operations["reads"].as_array().unwrap();
+        let actions = operations["actions"].as_object().unwrap();
+        let rust = rust_operation_methods(reads, actions)?;
+        assert!(rust.contains("pub async fn missions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> { self.resource_internal(\"missions\", id).await }"));
+        assert!(rust.contains("pub async fn missions_get_run(&self, id: &str, run: &str) -> Result<Envelope<Resource>, ClientError>"));
+        assert!(rust.contains("/v1/client/missions/{}?run={}\", percent_encode_segment(id), percent_encode(run)"));
+        let swift = swift_operation_methods(reads, actions)?;
+        assert!(swift.contains("public func missionsGet(id: String) async throws -> Envelope<Resource> { try await resource(\"missions\", id: id) }"));
+        assert!(swift.contains("public func missionsGetRun(id: String, run: String) async throws -> Envelope<Resource>"));
+        assert!(swift.contains("query: [.init(name: \"run\", value: run)]"));
+        let typescript = typescript_operation_methods(reads, actions)?;
+        assert!(typescript.contains("async missionsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/missions/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }"));
+        assert!(typescript.contains("async missionsGetRun(id: string, run: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/missions/${encodeURIComponent(routedId(id))}` + query({ run }), undefined, requestOptions); }"));
+        Ok(())
     }
 }

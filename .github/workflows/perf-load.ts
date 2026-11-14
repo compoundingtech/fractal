@@ -106,7 +106,7 @@ python3 scripts/ci-perf-cache pack`,
         },
       ],
     },
-    // The same daemon beside a CPU and disk hog at seat priority, reported against slo/targets.toml. A missed
+    // The same daemon beside a CPU and disk hog at seat priority, reported against slo/objectives.kdl. A missed
     // target only reports (until ST_LOAD_HOG_STRICT=1); a failed request or a hog that never loaded the
     // machine fails the job, and a red daily lane alerts. It takes a second performance runner for up to 45
     // minutes, so it runs once a day, not on pull requests.

@@ -115,6 +115,16 @@ mod tests {
         assert_eq!(end["diagnostic"], "auth refused: exact provider text");
     }
     #[test]
+    fn a_provider_its_driver_stopped_ends_as_its_harness_exiting_with_that_diagnostic() {
+        // Not a crash on the stop's signal: the driver stopped the provider (#4743).
+        let mut seat = subject(Some("signal 15"));
+        seat.harness.as_mut().unwrap().reason = Some(fractal_drivers::provider_session::DRIVER_STOPPED.into());
+        let end = project(&seat, None, None, None, None, false, "2026-11-06T00:00:00Z").unwrap();
+        assert_eq!(end["kind"], "harness-exited");
+        assert_eq!(end["exit_signal"], "15");
+        assert_eq!(end["diagnostic"], "driver-stopped");
+    }
+    #[test]
     fn launch_diagnostic_with_clean_exit_is_not_host_lost() {
         let mut seat = subject(Some("exit 0"));
         seat.reachability = "unreachable".into();
@@ -266,7 +276,7 @@ mod tests {
         let mut options = Options {
             set: "garden".into(), source: Source { repository: "example/garden".into(), r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
             expected_set: "absent".into(), rollout: None, adopt: Default::default(),
-            allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+            allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
         };
         options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
         store.apply_owned_set(&intent, &options, "owned", "person/operator").unwrap();

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "commits": ["b07dc35ac2dbf805c2247d2f5fc09df1e077b1c1"],
+  "summary": "Pairing checks the gateway's public health node before creating a code, so an unconfigured URL for another member is refused immediately.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage or wire schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet coordination changes." },
+  "compatibility": { "status": "changed", "detail": "After the existing offline configured-member check, devices pair --gateway anonymously requests the existing /v1/health endpoint beneath the gateway base path. A different node is refused before begin; a matching node continues silently. Unreachable gateways or health responses without a node retain the local-member warning. The three-second timeout bounds reachability only." },
+  "downtime": { "status": "none", "detail": "No downtime or restart-time work." },
+  "manual": { "status": "changed", "detail": "If a different gateway member is reported, run the pair command on that member before completing through its gateway." },
+  "recovery": { "status": "changed", "detail": "Start pairing again on the intended gateway member. A pre-begin refusal creates no pairing code." }
+}

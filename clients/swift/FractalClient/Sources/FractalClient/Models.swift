@@ -22,6 +22,156 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+/// Set or clear the session person's own note. A nil `text` clears it and is sent as `null`.
+public struct DirectiveNoteSet: Codable, Sendable, Equatable {
+    public var text: String?
+    public var expiresAt: String?
+    enum CodingKeys: String, CodingKey { case text, expiresAt = "expires_at" }
+    public init(text: String?, expiresAt: String? = nil) { self.text = text; self.expiresAt = expiresAt }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        try container.encodeIfPresent(expiresAt, forKey: .expiresAt)
+    }
+}
+
+/// The person's current note after a write; nil once cleared or already expired.
+public struct DirectiveNoteSetResult: Codable, Sendable, Equatable {
+    public let note: DirectiveNote?
+}
+
+/// A person's effective status. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatus: Codable, Sendable, Equatable {
+    case available, away
+    case unknown(String)
+    public init(word: String) { self = switch word { case "available": .available; case "away": .away; default: .unknown(word) } }
+    public var word: String { switch self { case .available: "available"; case .away: "away"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Where a status comes from; `unreported` when no device's state has counted for 24 hours (status then reads available). Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityStatusSource: Codable, Sendable, Equatable {
+    case override, presence, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "override": .override; case "presence": .presence; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .override: "override"; case .presence: "presence"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Presence the daemon derives from the person's device states. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityPresence: Codable, Sendable, Equatable {
+    case present, idle, locked, unreported
+    case unknown(String)
+    public init(word: String) { self = switch word { case "present": .present; case "idle": .idle; case "locked": .locked; case "unreported": .unreported; default: .unknown(word) } }
+    public var word: String { switch self { case .present: "present"; case .idle: "idle"; case .locked: "locked"; case .unreported: "unreported"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// Which attention may interrupt: all, only rows with `urgent` true, or none. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityInterruptions: Codable, Sendable, Equatable {
+    case all, urgent, none
+    case unknown(String)
+    public init(word: String) { self = switch word { case "all": .all; case "urgent": .urgent; case "none": .none; default: .unknown(word) } }
+    public var word: String { switch self { case .all: "all"; case .urgent: "urgent"; case .none: "none"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// A hold pauses the deadline clock of asks that are not urgent, or of every ask. Unknown words are kept, so a newer daemon's values stay readable.
+public enum AvailabilityDeadlineClock: Codable, Sendable, Equatable {
+    case run, holdRoutine, holdAll
+    case unknown(String)
+    public init(word: String) { self = switch word { case "run": .run; case "hold-routine": .holdRoutine; case "hold-all": .holdAll; default: .unknown(word) } }
+    public var word: String { switch self { case .run: "run"; case .holdRoutine: "hold-routine"; case .holdAll: "hold-all"; case .unknown(let word): word } }
+    public init(from decoder: Decoder) throws { self.init(word: try decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(word) }
+}
+
+/// A person's effective availability. `presence` and `presenceObservedAt` are nil for anyone but the person.
+public struct PersonAvailability: Codable, Sendable, Equatable {
+    public let person: String
+    public let status: AvailabilityStatus
+    public let statusSource: AvailabilityStatusSource
+    public let statusUntil: String?
+    public let presence: AvailabilityPresence?
+    public let presenceObservedAt: String?
+    public let interruptions: AvailabilityInterruptions
+    public let interruptionsUntil: String?
+    public let deadlineClock: AvailabilityDeadlineClock
+    public let deadlineClockSince: String?
+    public let deadlineClockUntil: String?
+    enum CodingKeys: String, CodingKey {
+        case person, status, presence, interruptions
+        case statusSource = "status_source", statusUntil = "status_until", presenceObservedAt = "presence_observed_at"
+        case interruptionsUntil = "interruptions_until", deadlineClock = "deadline_clock"
+        case deadlineClockSince = "deadline_clock_since", deadlineClockUntil = "deadline_clock_until"
+    }
+}
+
+public struct PersonAvailabilities: Codable, Sendable, Equatable {
+    public let people: [PersonAvailability]
+}
+
+/// A nil `value` clears the status override and takes no `until`; it is sent as `null`.
+public struct AvailabilityStatusChange: Codable, Sendable, Equatable {
+    public var value: String?
+    public var until: String?
+    enum CodingKeys: String, CodingKey { case value, until }
+    public init(value: String?, until: String? = nil) { self.value = value; self.until = until }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(value, forKey: .value)
+        try container.encodeIfPresent(until, forKey: .until)
+    }
+}
+
+public struct AvailabilityInterruptionsChange: Codable, Sendable, Equatable {
+    public var value: String
+    public var until: String?
+    public init(value: String, until: String? = nil) { self.value = value; self.until = until }
+}
+
+public struct AvailabilityDeadlineClockChange: Codable, Sendable, Equatable {
+    public var value: String
+    public var until: String?
+    public init(value: String, until: String? = nil) { self.value = value; self.until = until }
+}
+
+/// Changes to the session person's own availability; a nil axis is unchanged.
+public struct AvailabilitySet: Codable, Sendable, Equatable {
+    public var status: AvailabilityStatusChange?
+    public var interruptions: AvailabilityInterruptionsChange?
+    public var deadlineClock: AvailabilityDeadlineClockChange?
+    public init(status: AvailabilityStatusChange? = nil, interruptions: AvailabilityInterruptionsChange? = nil, deadlineClock: AvailabilityDeadlineClockChange? = nil) {
+        self.status = status; self.interruptions = interruptions; self.deadlineClock = deadlineClock
+    }
+    enum CodingKeys: String, CodingKey { case status, interruptions, deadlineClock = "deadline_clock" }
+}
+
+/// One device's raw state: `active`, `inactive`, `locked` or `sleeping`, sent on every change,
+/// with its last input. The daemon derives presence and assigns the source.
+public struct PresenceReport: Codable, Sendable, Equatable {
+    public var state: String
+    public var lastInputAt: String?
+    public var observedAt: String
+    public init(state: String, lastInputAt: String? = nil, observedAt: String) {
+        self.state = state; self.lastInputAt = lastInputAt; self.observedAt = observedAt
+    }
+    enum CodingKeys: String, CodingKey { case state, lastInputAt = "last_input_at", observedAt = "observed_at" }
+}
+
+/// The person's availability after a report, and when the device reports again although its
+/// state has not changed: while present, the instant it turns idle without newer input. Nil:
+/// report on the next state change or the next input.
+public struct PresenceReportResult: Codable, Sendable, Equatable {
+    public let availability: PersonAvailability
+    public let reportAgainAt: String?
+    enum CodingKeys: String, CodingKey { case availability, reportAgainAt = "report_again_at" }
+}
+
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {
     public let apiVersion: String
     public let requestID: String
@@ -147,6 +297,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case retireIncarnationMismatch
     case invalidCustodySuccessor
     case custodyPending
+    case setManagedSubject
     case notFound
     case forbidden
     case unsupportedCapability
@@ -155,8 +306,10 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case idempotencyConflict
     case agentsPublicationRowTooLarge
     case attentionMigrated
-    case invalidAnswer, notAnswerable
+    case invalidAnswer, notAnswerable, attentionDismissUnsupported
     case issuerRequired
+    case pairingOriginRequired
+    case pairingRestartRequired
     case suspendAuthoredSessionSelection
     case legacyActionReceiptUntrusted
     case arrangementExists
@@ -190,6 +343,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case agentRosterNotReady
     case agentRosterCutNotReady
     case messageSelectorsNotReady
+    case databaseBusy
     case projectionDetailTooLarge
     case projectionDetailInvalidSource
     case runtimeNotLocal
@@ -235,6 +389,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "retire-incarnation-mismatch": .retireIncarnationMismatch
         case "invalid-custody-successor": .invalidCustodySuccessor
         case "custody-pending": .custodyPending
+        case "set-managed-subject": .setManagedSubject
         case "agents-publication-row-too-large": .agentsPublicationRowTooLarge
         case "attention-migrated": .attentionMigrated
         case "not-found": .notFound
@@ -245,7 +400,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "idempotency-conflict": .idempotencyConflict
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
-        case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
+        case "pairing-origin-required": .pairingOriginRequired
+        case "pairing-restart-required": .pairingRestartRequired
+        case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable; case "attention-dismiss-unsupported": .attentionDismissUnsupported
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
         case "arrangement-exists": .arrangementExists
@@ -280,6 +437,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "agent-roster-not-ready": .agentRosterNotReady
         case "agent-roster-cut-not-ready": .agentRosterCutNotReady
         case "message-selectors-not-ready": .messageSelectorsNotReady
+        case "database-busy": .databaseBusy
         case "runtime-not-local": .runtimeNotLocal
         case "timeline-history-incomplete": .timelineHistoryIncomplete
         case "conversation-content-invalidated": .conversationContentInvalidated
@@ -325,6 +483,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .retireIncarnationMismatch: "retire-incarnation-mismatch"
         case .invalidCustodySuccessor: "invalid-custody-successor"
         case .custodyPending: "custody-pending"
+        case .setManagedSubject: "set-managed-subject"
         case .agentsPublicationRowTooLarge: "agents-publication-row-too-large"
         case .attentionMigrated: "attention-migrated"
         case .notFound: "not-found"
@@ -335,7 +494,9 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .idempotencyConflict: "idempotency-conflict"
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
-        case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
+        case .pairingOriginRequired: "pairing-origin-required"
+        case .pairingRestartRequired: "pairing-restart-required"
+        case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"; case .attentionDismissUnsupported: "attention-dismiss-unsupported"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"
         case .arrangementExists: "arrangement-exists"
@@ -370,6 +531,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .agentRosterNotReady: "agent-roster-not-ready"
         case .agentRosterCutNotReady: "agent-roster-cut-not-ready"
         case .messageSelectorsNotReady: "message-selectors-not-ready"
+        case .databaseBusy: "database-busy"
         case .runtimeNotLocal: "runtime-not-local"
         case .timelineHistoryIncomplete: "timeline-history-incomplete"
         case .conversationContentInvalidated: "conversation-content-invalidated"
@@ -464,7 +626,7 @@ public struct UsageSummary: Codable, Sendable {
     public let cost: Double?; public let currency: String?; public let incarnationCount: Int; public let aggregation: String; public let context: UsageContext?
     enum CodingKeys: String, CodingKey { case totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens", cost, currency, incarnationCount = "incarnation_count", aggregation, context }
 }
-public struct AttentionResource: Codable, Sendable { public let customForm: JSONValue?; public let id, kind, revision, updatedAt, attentionKind, sourceID, personID, title, detail, priority, state, requestedAt: String; public let deadlineAt: String?; public let defaultAnswer: AskDefaultAnswer?; public let alert: Bool?; public let conversationIDs: [String]?; public let conversationID, requesterID, launchID, variantID, messageID, previewToken, what, because, reviewMode, missionID, missionRunID, stepRunID, episode, sourceKind: String?; public let actionParameters: JSONValue?; public let request: StructuredRequest?; public let update: PersonUpdate?; public let blocked: AttentionBlocked?; public let presentation: AttentionPresentation?; public let preview: LaunchPreview?; public let fix: JSONValue?; public let targets, actions: [String]; public let targetStates: [AttentionTargetState]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case customForm = "custom_form", id, kind, revision, updatedAt = "updated_at", attentionKind = "attention_kind", episode, sourceKind = "source_kind", actionParameters = "action_parameters", request, update, blocked, presentation, sourceID = "source_id", personID = "person_id", alert, conversationID = "conversation_id", conversationIDs = "conversation_ids", requesterID = "requester_id", launchID = "launch_id", variantID = "variant_id", messageID = "message_id", previewToken = "preview_token", preview, what, because, fix, reviewMode = "review_mode", missionID = "mission_id", missionRunID = "mission_run_id", stepRunID = "step_run_id", title, detail, priority, state, requestedAt = "requested_at", deadlineAt = "deadline_at", defaultAnswer = "default_answer", targets, targetStates = "target_states", actions, operational } }
+public struct AttentionResource: Codable, Sendable { public let customForm: JSONValue?; public let id, kind, revision, updatedAt, attentionKind, sourceID, personID, title, detail, priority, state, requestedAt: String; public let deadlineAt: String?; public let defaultAnswer: AskDefaultAnswer?; public let seenAt: String?; public let snoozedUntil: String?; public let alert: Bool?; public let urgent: Bool?; public let conversationIDs: [String]?; public let conversationID, requesterID, launchID, variantID, messageID, previewToken, what, because, reviewMode, missionID, missionRunID, stepRunID, episode, sourceKind: String?; public let actionParameters: JSONValue?; public let request: StructuredRequest?; public let update: PersonUpdate?; public let blocked: AttentionBlocked?; public let presentation: AttentionPresentation?; public let preview: LaunchPreview?; public let fix: JSONValue?; public let targets, actions: [String]; public let targetStates: [AttentionTargetState]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case customForm = "custom_form", id, kind, revision, updatedAt = "updated_at", attentionKind = "attention_kind", episode, sourceKind = "source_kind", actionParameters = "action_parameters", request, update, blocked, presentation, sourceID = "source_id", personID = "person_id", alert, urgent, conversationID = "conversation_id", conversationIDs = "conversation_ids", requesterID = "requester_id", launchID = "launch_id", variantID = "variant_id", messageID = "message_id", previewToken = "preview_token", preview, what, because, fix, reviewMode = "review_mode", missionID = "mission_id", missionRunID = "mission_run_id", stepRunID = "step_run_id", title, detail, priority, state, requestedAt = "requested_at", deadlineAt = "deadline_at", defaultAnswer = "default_answer", seenAt = "seen_at", snoozedUntil = "snoozed_until", targets, targetStates = "target_states", actions, operational } }
 /// st's presentation of an attention row; words are fixtures/clients/words.json ids.
 public struct AttentionPresentation: Codable, Sendable { public let tier, kind: String?; public let agent: AttentionActor?; public let raisedBy: AttentionActor?; public let waiting: AttentionWaiting?; public let revision: AttentionRevision?; public let launch: AttentionLaunch?; public let prompt: AttentionPrompt?; enum CodingKeys: String, CodingKey { case tier, kind, agent, raisedBy = "raised_by", waiting, revision, launch, prompt } }
 public struct AttentionRevision: Codable, Sendable { public let fromRevision, toRevision, reason: String; public let lines: [AttentionRevisionLine]; public let truncated: Bool; enum CodingKeys: String, CodingKey { case fromRevision = "from_revision", toRevision = "to_revision", reason, lines, truncated } }
@@ -492,16 +654,18 @@ public struct MessageBody: Codable, Sendable, Equatable { public let message, te
     public let complete: Bool? }
 public struct ClientConnections: Codable, Sendable { public let kind, member: String; public let items: [ClientConnection] }
 public struct ClientConnection: Codable, Sendable { public let actor, person, member, via, since, lastSeen: String; public let client, deviceID, deviceName: String?; public let connected: Bool; public let streams: UInt64; public let follows: [String]?; enum CodingKeys: String, CodingKey { case actor, person, member, via, since, client, connected, streams, follows, lastSeen = "last_seen", deviceID = "device_id", deviceName = "device_name" } }
+/// The operator's usage hub quota. `snapshot` is the hub's own document, relayed unchanged.
+public struct UsageHubQuota: Codable, Sendable { public let state: String; public let refreshSeconds: UInt64?; public let reason: String?; public let snapshot: JSONValue?; enum CodingKeys: String, CodingKey { case state, reason, snapshot, refreshSeconds = "refresh_seconds" } }
 public struct MailBacklog: Codable, Sendable { public let count, thresholdMS: UInt64; public let cleanupCommand: String; enum CodingKeys: String, CodingKey { case count, thresholdMS = "threshold_ms", cleanupCommand = "cleanup_command" } }
 public struct SloList: Codable, Sendable { public let asOfUnixMS: UInt64; public let otelUiURL: String?; public let rows: [SloRow]; enum CodingKeys: String, CodingKey { case rows, asOfUnixMS = "as_of_unix_ms", otelUiURL = "otel_ui_url" } }
 public struct SloRow: Codable, Sendable { public let id, kind, about, target, current, window, status, explain: String; public let account: String?; public let remainingPercent: Double?; public let resetsAtUnixMS, measuredAtUnixMS, runsOutAtUnixMS: UInt64?; public let tone: String?; public let forecastUsedPercent: Double?; public let forecastBasisMinutes: UInt64?; enum CodingKeys: String, CodingKey { case id, kind, account, about, target, current, window, status, explain, tone, remainingPercent = "remaining_percent", resetsAtUnixMS = "resets_at_unix_ms", measuredAtUnixMS = "measured_at_unix_ms", forecastUsedPercent = "forecast_used_percent", forecastBasisMinutes = "forecast_basis_minutes", runsOutAtUnixMS = "runs_out_at_unix_ms" } }
 public struct SloHistory: Codable, Sendable { public let id: String; public let sinceMS, untilMS, samples: UInt64; public let steps: [Double?]; enum CodingKeys: String, CodingKey { case id, samples, steps, sinceMS = "since_ms", untilMS = "until_ms" } }
 public struct UsagePeriod: Codable, Sendable { public let sinceMS, untilMS: UInt64; public let rows: [UsageRow]; public let limits: [UsageLimit]?; public let accounts: [UsageAccount]?; public let agentMessages: AgentMessageEstimate?; enum CodingKeys: String, CodingKey { case rows, limits, accounts, sinceMS = "since_ms", untilMS = "until_ms", agentMessages = "agent_messages" } }
 public struct AgentMessageEstimate: Codable, Sendable { public let calibration: String?; public let source, method: String; public let fallbackLowMicrousd, fallbackHighMicrousd: UInt64; public let days: [AgentMessageDay]; enum CodingKeys: String, CodingKey { case calibration, source, method, days, fallbackLowMicrousd = "fallback_low_microusd", fallbackHighMicrousd = "fallback_high_microusd" } }
-public struct AgentMessageDay: Codable, Sendable { public let dayStartMS, sinceMS, untilMS, messages, calibratedMessages, lowMicrousd, highMicrousd, usageCostMicrousd, unpricedTokens: UInt64; public let lowPercent, highPercent: Double?; enum CodingKeys: String, CodingKey { case messages, dayStartMS = "day_start_ms", sinceMS = "since_ms", untilMS = "until_ms", calibratedMessages = "calibrated_messages", lowMicrousd = "low_microusd", highMicrousd = "high_microusd", usageCostMicrousd = "usage_cost_microusd", unpricedTokens = "unpriced_tokens", lowPercent = "low_percent", highPercent = "high_percent" } }
+public struct AgentMessageDay: Codable, Sendable { public let dayStartMS, sinceMS, untilMS, messages, calibratedMessages, lowMicrousd, highMicrousd, usageCostMicrousd, unpricedTokens: UInt64; public let unpricedResponses: UInt64?; public let lowPercent, highPercent: Double?; enum CodingKeys: String, CodingKey { case messages, dayStartMS = "day_start_ms", sinceMS = "since_ms", untilMS = "until_ms", calibratedMessages = "calibrated_messages", lowMicrousd = "low_microusd", highMicrousd = "high_microusd", usageCostMicrousd = "usage_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses", lowPercent = "low_percent", highPercent = "high_percent" } }
 public struct UsageAccount: Codable, Sendable { public let name, provider: String; public let account, driver, plan: String?; public let kind: UsageAccountKind; public let credits: UsageCredits? }
 public enum UsageAccountKind: String, Codable, Sendable { case subscription; case apiKey = "api-key" }
-public struct UsageCredits: Codable, Sendable { public let budgetMicrousd, usedMicrousd, unpricedTokens, periodStartMS: UInt64; enum CodingKeys: String, CodingKey { case budgetMicrousd = "budget_microusd", usedMicrousd = "used_microusd", unpricedTokens = "unpriced_tokens", periodStartMS = "period_start_ms" } }
+public struct UsageCredits: Codable, Sendable { public let budgetMicrousd, usedMicrousd, unpricedTokens, periodStartMS: UInt64; public let unpricedResponses: UInt64?; enum CodingKeys: String, CodingKey { case budgetMicrousd = "budget_microusd", usedMicrousd = "used_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses", periodStartMS = "period_start_ms" } }
 public struct UsageLimit: Codable, Sendable { public let account, driver, measuredBy, host: String; public let identified: Bool?; public let accountRef, plan: String?; public let fiveHourPercent, weeklyPercent: Double?; public let fiveHourResetsAtUnixMS, weeklyResetsAtUnixMS: UInt64?; public let measuredAtUnixMS: UInt64; public let seats: [String]; enum CodingKeys: String, CodingKey { case account, driver, host, plan, seats, identified, accountRef = "account_ref", measuredBy = "measured_by", fiveHourPercent = "five_hour_percent", weeklyPercent = "weekly_percent", fiveHourResetsAtUnixMS = "five_hour_resets_at_unix_ms", weeklyResetsAtUnixMS = "weekly_resets_at_unix_ms", measuredAtUnixMS = "measured_at_unix_ms" } }
 public struct UsagePricingRates: Codable, Sendable {
     public let input, output, cacheRead, cacheWrite5m, cacheWrite1h: Double
@@ -512,12 +676,63 @@ public struct UsagePricing: Codable, Sendable {
     public let costSource: String
     public let ratesUsdPerMillionTokens: UsagePricingRates?
     public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64
-    enum CodingKeys: String, CodingKey { case priceTableID = "price_table_id", priceTableVersion = "price_table_version", costSource = "cost_source", ratesUsdPerMillionTokens = "rates_usd_per_million_tokens", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens" }
+    public let unpricedResponses: UInt64?
+    enum CodingKeys: String, CodingKey { case priceTableID = "price_table_id", priceTableVersion = "price_table_version", costSource = "cost_source", ratesUsdPerMillionTokens = "rates_usd_per_million_tokens", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses" }
 }
-public struct UsageRow: Codable, Sendable { public let agent: String; public let missionRun, step, model, account, host, pricing: String?; public let accountRef: String?; public let nativeSessionID: String?; public let pricingProvenance: [UsagePricing]?; public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64; enum CodingKeys: String, CodingKey { case agent, step, model, account, host, pricing, accountRef = "account_ref", nativeSessionID = "native_session_id", pricingProvenance = "pricing_provenance", missionRun = "mission_run", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens" } }
-public struct AgentDeclaration: Codable, Sendable { public let accountable: String?; public let id, revision, kdl: String; public let tree: [String: JSONValue]; public let revisions: [String] }
+public struct UsageRow: Codable, Sendable { public let agent: String; public let missionRun, step, model, account, host, pricing: String?; public let accountRef: String?; public let nativeSessionID: String?; public let pricingProvenance: [UsagePricing]?; public let totalTokens, inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64; public let unpricedResponses: UInt64?; enum CodingKeys: String, CodingKey { case agent, step, model, account, host, pricing, accountRef = "account_ref", nativeSessionID = "native_session_id", pricingProvenance = "pricing_provenance", missionRun = "mission_run", totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens", unpricedResponses = "unpriced_responses" } }
+/// Declared admission — declared, not enforced.
+public struct DeclaredAttentionBudget: Codable, Sendable { public let person: String; public let asks: UInt64 }
+public struct DeclaredBudgets: Codable, Sendable { public let cpuSeconds, tokenBudget: UInt64?; public let memoryMax, diskMax: String?; public let attention: [DeclaredAttentionBudget]?; enum CodingKeys: String, CodingKey { case attention, cpuSeconds = "cpu_seconds", memoryMax = "memory_max", diskMax = "disk_max", tokenBudget = "token_budget" } }
+public struct DeclaredAdmission: Codable, Sendable { public let priority, lane: String?; public let budgets: DeclaredBudgets? }
+public struct AgentDeclaration: Codable, Sendable { public let accountable: String?; public let declaredAdmission: DeclaredAdmission?; public let id, revision, kdl: String; public let tree: [String: JSONValue]; public let revisions: [String]; enum CodingKeys: String, CodingKey { case accountable, declaredAdmission = "declared_admission", id, revision, tree, kdl, revisions } }
 public struct CanonicalNode: Codable, Sendable { public let name: String; public let arguments: [JSONValue]?; public let properties: [String: JSONValue]?; public let children: [CanonicalNode]? }
 public struct PublicationDefinition: Codable, Sendable { public let kind, subject, revision, token: String; public let declaration: [String: JSONValue] }
+public struct AttentionBudgetReport: Codable, Sendable {
+    public let mission, person: String
+    public let windowStartExclusiveUnixMS, windowEndInclusiveUnixMS, localClaimIndex: UInt64
+    public let declared: AttentionBudgetDeclared
+    public let charged, inclusive, notCharged, unattributedForPerson: UInt64
+    public let fleetComplete, requestRefsComplete: Bool
+    public let requestRefs: [AttentionBudgetRequestRef]
+    enum CodingKeys: String, CodingKey {
+        case mission, person, declared, charged, inclusive
+        case windowStartExclusiveUnixMS = "window_start_exclusive_unix_ms", windowEndInclusiveUnixMS = "window_end_inclusive_unix_ms"
+        case localClaimIndex = "local_claim_index", notCharged = "not_charged", unattributedForPerson = "unattributed_for_person"
+        case fleetComplete = "fleet_complete", requestRefsComplete = "request_refs_complete", requestRefs = "request_refs"
+    }
+}
+public enum AttentionBudgetDeclared: Codable, Sendable {
+    case declared(asks: UInt64), undeclared
+    private enum CodingKeys: String, CodingKey { case state, asks }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .state) {
+        case "declared": self = .declared(asks: try c.decode(UInt64.self, forKey: .asks))
+        case "undeclared": self = .undeclared
+        default: throw DecodingError.dataCorruptedError(forKey: .state, in: c, debugDescription: "Unknown attention budget declaration state")
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .declared(asks): try c.encode("declared", forKey: .state); try c.encode(asks, forKey: .asks)
+        case .undeclared: try c.encode("undeclared", forKey: .state)
+        }
+    }
+}
+public struct AttentionBudgetRequestRef: Codable, Sendable { public let claimID, subject: String; enum CodingKeys: String, CodingKey { case claimID = "claim_id", subject } }
+public struct MissionDeclaration: Codable, Sendable { public let mission, revision, text: String; public let publishedAt: UInt64; public let legacy: Bool; public let provenance: MissionDeclarationProvenance?; enum CodingKeys: String, CodingKey { case mission, revision, text, legacy, publishedAt = "published_at", provenance } }
+/// Where a mission revision's source lives. Inert text; nothing is fetched.
+public struct MissionDeclarationProvenance: Codable, Sendable { public let repository, commit, path: String; public let renderer: String? }
+public struct SubjectSourceMap: Codable, Sendable { public let subject, revision: String; public let current: String?; public let map: SourceMapClaim; public let kdl: String; public let revisions: [SourceMapRevision] }
+public struct SourceMapRevision: Codable, Sendable { public let revision, setRevision, repository, ref, sha: String; public let sequence, recordedAtUnixMS: UInt64; enum CodingKeys: String, CodingKey { case revision, setRevision = "set_revision", repository, ref, sha, sequence, recordedAtUnixMS = "recorded_at_unix_ms" } }
+public struct SourceMapClaim: Codable, Sendable { public let subject, revision, setRevision, repository, ref, sha: String; public let sequence: UInt64; public let files: [SourceMapFile]; public let declaration: Int; public let inputs: [Int]; public let nodes: [SourceMapNode]; enum CodingKeys: String, CodingKey { case subject, revision, setRevision = "set_revision", repository, ref, sha, sequence, files, declaration, inputs, nodes } }
+public struct SourceMapFile: Codable, Sendable { public let repository, path, blob, blobHash: String; enum CodingKeys: String, CodingKey { case repository, path, blob, blobHash = "blob_hash" } }
+public struct SourceMapNode: Codable, Sendable { public let kdl: String; public let kdlLines: [Int]; public let span: SourceMapSpan; public let frames: [SourceMapFrame] }
+public struct SourceMapSpan: Codable, Sendable { public let file: Int; public let start, end: SourceMapPosition }
+public struct SourceMapPosition: Codable, Sendable { public let line, column: Int }
+public struct SourceMapFrame: Codable, Sendable { public let file: Int; public let start, end: SourceMapPosition; public let role, precision: String }
+public struct SourceBlob: Codable, Sendable { public let hash, text: String }
 public struct SubjectDefinition: Codable, Sendable { public let kind, subject, kdl, desiredRevision, desiredToken: String; public let desired: CanonicalNode; public let conflicts: [String]; enum CodingKeys: String, CodingKey { case kind, subject, desired, kdl, desiredRevision = "desired_revision", desiredToken = "desired_token", conflicts } }
 public struct AgentWorkspace: Codable, Sendable { public let kind, agentID, hostID, workspace, desiredToken, declarationToken: String; enum CodingKeys: String, CodingKey { case kind, workspace, agentID = "agent_id", hostID = "host_id", desiredToken = "desired_token", declarationToken = "declaration_token" } }
 public struct LaunchPreview: Codable, Sendable { public let goal: String; public let steps, agents: [JSONValue]; public let gates: JSONValue; public let diagnosticsCount: UInt64; public let requestExcerpt: String; enum CodingKeys: String, CodingKey { case goal, steps, agents, gates, diagnosticsCount = "diagnostics_count", requestExcerpt = "request_excerpt" } }
@@ -549,12 +764,44 @@ public enum DecisionResponse: Codable, Sendable, Equatable {
 }
 public struct LaunchDecisionResource: Codable, Sendable { public let id, kind, revision, updatedAt, launchID, question, state, requestedAt: String; public let decisionType: DecisionType; public let options: [DecisionOption]; public let response: DecisionResponse?; public let explanation: String?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", launchID = "launch_id", question, state, requestedAt = "requested_at", decisionType = "decision_type", options, response, explanation, operational } }
 public struct LaunchApprovalResource: Codable, Sendable { public let id, kind, revision, updatedAt, launchID, variantID, reviewer, state, previewToken, decidedAt: String; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", launchID = "launch_id", variantID = "variant_id", reviewer, state, previewToken = "preview_token", decidedAt = "decided_at", operational } }
-public struct MissionResource: Codable, Sendable { public let id, kind, revision, updatedAt, title, state, missionRevision: String; public let runs: [String]; public let runDetails: [MissionRunSummary]?; public let mustAct: String?; public let activeRuns, totalRuns: UInt64?; public let runCounts: [String: UInt64]?; public let runsTruncated, system: Bool?; public let presentation: JSONValue?; public let runGenerations: [String: String]; public let visualization: Visualization?; public let usage: UsageSummary?; public let resources: [DeclaredResource]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", title, state, missionRevision = "mission_revision", runs, runDetails = "run_details", mustAct = "must_act", activeRuns = "active_runs", totalRuns = "total_runs", runCounts = "run_counts", runsTruncated = "runs_truncated", system, presentation, runGenerations = "run_generations", visualization, usage, resources, operational } }
+public struct MissionResource: Codable, Sendable { public let id, kind, revision, updatedAt, title, state, missionRevision: String; public let declaredAdmission: DeclaredAdmission?; public let runs: [String]; public let runDetails: [MissionRunSummary]?; public let mustAct: String?; public let activeRuns, totalRuns: UInt64?; public let runCounts: [String: UInt64]?; public let runsTruncated, system: Bool?; public let presentation: JSONValue?; public let runGenerations: [String: String]; public let visualization: Visualization?; public let usage: UsageSummary?; public let resources: [DeclaredResource]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", title, state, missionRevision = "mission_revision", declaredAdmission = "declared_admission", runs, runDetails = "run_details", mustAct = "must_act", activeRuns = "active_runs", totalRuns = "total_runs", runCounts = "run_counts", runsTruncated = "runs_truncated", system, presentation, runGenerations = "run_generations", visualization, usage, resources, operational } }
 /// Current-step assignees and claimants are nullable ActorRef strings (agent, daemon, or person).
-public struct MissionRunSummary: Codable, Sendable { public let id, requester, status, phase, mustAct, stateSince: String; public let generationID, lastProgress, after, deadline: String?; public let progress: JSONValue; public let currentSteps: [JSONValue]; public let blocker: JSONValue?; public let outcome: MissionRunOutcome?; public let steps: [MissionStep]?; enum CodingKeys: String, CodingKey { case id, generationID = "generation_id", requester, status, phase, progress, currentSteps = "current_steps", mustAct = "must_act", stateSince = "state_since", outcome, lastProgress = "last_progress", blocker, after, deadline, steps } }
+public struct MissionRunSummary: Codable, Sendable { public let id, requester, status, phase, mustAct, stateSince: String; public let startedAt, completedAt: UInt64?; public let generationID, retryOf, supersedes, supersededBy, supersessionFault, revision, lastProgress, after, deadline: String?; public let retriedBy: [String]?; public let progress: JSONValue; public let currentSteps: [JSONValue]; public let blocker, eta: JSONValue?; public let outcome: MissionRunOutcome?; public let steps: [MissionStep]?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", generationID = "generation_id", retryOf = "retry_of", retriedBy = "retried_by", supersedes, supersededBy = "superseded_by", supersessionFault = "supersession_fault", revision, requester, status, phase, progress, currentSteps = "current_steps", mustAct = "must_act", stateSince = "state_since", outcome, lastProgress = "last_progress", blocker, eta, after, deadline, steps } }
 public struct MissionRunOutcome: Codable, Sendable { public let status, reason, actor, at: String; public let previousStatus: String?; enum CodingKeys: String, CodingKey { case status, previousStatus = "previous_status", reason, actor, at } }
 /// Assignees and claimants are nullable ActorRef strings (agent, daemon, or person).
-public struct MissionStep: Codable, Sendable { public let id, path, state, since: String; public let title, assignee, claimant, lastProgress, progressAt, blockedReason: String?; public let attempt: UInt; public let agentless, keepOpen: Bool?; public let blockers, goals, constraints: [String]?; public let loopRound, loopMaxRounds: UInt?; public let loopReason, nextWakeAt, wakeReason, claimExpiresAt, nudgedAt: String?; public let wake: MissionWake?; enum CodingKeys: String, CodingKey { case id, path, title, state, attempt, assignee, claimant, agentless, keepOpen = "keep_open", since, lastProgress = "last_progress", progressAt = "progress_at", blockedReason = "blocked_reason", blockers, goals, constraints, loopRound = "loop_round", loopMaxRounds = "loop_max_rounds", loopReason = "loop_reason", nextWakeAt = "next_wake_at", wakeReason = "wake_reason", claimExpiresAt = "claim_expires_at", nudgedAt = "nudged_at", wake } }
+public struct MissionStep: Codable, Sendable { public let id, path, state, since: String; public let startedAt, completedAt: UInt64?; public let title, assignee, claimant, lastProgress, progressAt, blockedReason: String?; public let attempt: UInt; public let agentless, keepOpen: Bool?; public let blockers, goals, constraints: [String]?; public let loopRound, loopMaxRounds: UInt?; public let loopReason, nextWakeAt, wakeReason, claimExpiresAt, nudgedAt: String?; public let wake: MissionWake?; enum CodingKeys: String, CodingKey { case id, startedAt = "started_at", completedAt = "completed_at", path, title, state, attempt, assignee, claimant, agentless, keepOpen = "keep_open", since, lastProgress = "last_progress", progressAt = "progress_at", blockedReason = "blocked_reason", blockers, goals, constraints, loopRound = "loop_round", loopMaxRounds = "loop_max_rounds", loopReason = "loop_reason", program, nextWakeAt = "next_wake_at", wakeReason = "wake_reason", claimExpiresAt = "claim_expires_at", nudgedAt = "nudged_at", wake, attempts, executions, waits, transitions, historyComplete = "history_complete", eta }; /// Mission detail only, on the runs it enriches; absent elsewhere.
+    public let program: MissionStepProgram?; public let attempts: [MissionStepAttempt]?; public let executions: [StepExecution]?; public let waits: [MissionStepWait]?; public let transitions: [MissionStepTransition]?; public let historyComplete: Bool?; public let eta: MissionStepEta? }
+public struct StepExecution: Codable, Sendable {
+    public let id, stepSubject, agent: String
+    public let attempt: UInt
+    public let incarnationID, declaredModel: String?
+    public let observedModels: [String]
+    public let fallback: Bool?
+    public let startedAtUnixMS: UInt64
+    public let endedAtUnixMS, durationMS: UInt64?
+    public let status, traceID, exitEvidence: String?
+    public let usage: StepExecutionUsage?
+    enum CodingKeys: String, CodingKey {
+        case id, stepSubject = "step_subject", attempt, agent, incarnationID = "incarnation_id", declaredModel = "declared_model", observedModels = "observed_models", fallback, startedAtUnixMS = "started_at_unix_ms", endedAtUnixMS = "ended_at_unix_ms", durationMS = "duration_ms", status, traceID = "trace_id", exitEvidence = "exit_evidence", usage
+    }
+}
+public struct StepExecutionUsage: Codable, Sendable {
+    public let inputTokens, outputTokens, cacheWriteTokens, cacheWrite1hTokens, cachedTokens, totalTokens, costMicrousd, reportedCostMicrousd, unpricedTokens: UInt64
+    public let unpricedResponses: UInt64?
+    enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens", outputTokens = "output_tokens", cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", cachedTokens = "cached_tokens", totalTokens = "total_tokens", costMicrousd = "cost_microusd", reportedCostMicrousd = "reported_cost_microusd", unpricedTokens = "unpriced_tokens"
+        case unpricedResponses = "unpriced_responses"
+    }
+}
+/// A program step's current attempt journal: each key's latest entry, its innermost open key and open fault.
+public struct MissionStepProgram: Codable, Sendable { public let openKey, lastEntryAt: String?; public let entries: [MissionStepProgramEntry]; public let truncated: Bool; public let stalledAfterMS: UInt64; public let fault: MissionStepProgramFault?; enum CodingKeys: String, CodingKey { case openKey = "open_key", entries, truncated, lastEntryAt = "last_entry_at", stalledAfterMS = "stalled_after_ms", fault } }
+public struct MissionStepProgramEntry: Codable, Sendable { public let key, status: String; public let startedAt, endedAt, error, child: String?; public let ms: UInt64?; enum CodingKeys: String, CodingKey { case key, status, startedAt = "started_at", endedAt = "ended_at", ms, error, child } }
+public struct MissionStepProgramFault: Codable, Sendable { public let scope, reason: String }
+/// Outcome, wait kind and event words are open: a later word decodes as a plain string.
+public struct MissionStepAttempt: Codable, Sendable { public let n: UInt; public let claimant: String?; public let startedAt, endedAt: UInt64?; public let outcome: String; public let reason: String?; enum CodingKeys: String, CodingKey { case n, claimant, startedAt = "started_at", endedAt = "ended_at", outcome, reason } }
+public struct MissionStepWait: Codable, Sendable { public let kind: String; public let attempt: UInt; public let start: UInt64; public let end, until: UInt64?; public let reason: String? }
+public struct MissionStepTransition: Codable, Sendable { public let at: UInt64; public let status: String; public let attempt: UInt; public let event: String; public let reason: String?; public let idleSince: UInt64?; enum CodingKeys: String, CodingKey { case at, status, attempt, event, reason, idleSince = "idle_since" } }
+public struct MissionStepEta: Codable, Sendable { public let lowMS, highMS: UInt64; public let samples: UInt64; enum CodingKeys: String, CodingKey { case lowMS = "low_ms", highMS = "high_ms", samples } }
 /// The assignee is an ActorRef string (agent, daemon, or person).
 public struct MissionWake: Codable, Sendable { public let assignee, assigneeState, incarnationID: String; public let attempts: UInt; public let lastAttemptAt, acknowledgedBy, failure: String?; enum CodingKeys: String, CodingKey { case assignee, assigneeState = "assignee_state", incarnationID = "incarnation_id", attempts, lastAttemptAt = "last_attempt_at", acknowledgedBy = "acknowledged_by", failure } }
 /// st's presentation of an agent; words are fixtures/clients/words.json ids.
@@ -562,14 +809,16 @@ public struct AgentPresentation: Codable, Sendable { public let state, group: St
 public struct AgentPresentationWork: Codable, Sendable { public let step, mission, path, label: String; public let title: String? }
 public struct AgentPresentationNow: Codable, Sendable { public let step, mission, path, label, since: String; public let title, goal, holderDownSince: String?; enum CodingKeys: String, CodingKey { case step, mission, path, label, since, title, goal, holderDownSince = "holder_down_since" } }
 public struct WorkLabel: Codable, Sendable { public let id, missionID, missionRunID, path, state, since: String; public let title, goal, holderDownSince: String?; enum CodingKeys: String, CodingKey { case id, missionID = "mission_id", missionRunID = "mission_run_id", path, title, goal, state, since, holderDownSince = "holder_down_since" } }
-public struct WorkResource: Codable, Sendable { public let missionID: String?; public let id, kind, revision, updatedAt, missionRunID, generationID, definitionID, path, state: String; public let gateKind, title, assignedTo, lastProgress, progressAt: String?; public let attempt: UInt; public let readinessEpoch: UInt64; public let claimant, claimIncarnation, submittedIncarnation, blockedReason: String?; public let agentless: Bool?; public let claimExpiresAtUnixMS, executionStartedAtUnixMS, nudgedAtUnixMS, executionElapsedMS, timeoutMS: UInt64?; public let blockers, goals, constraints: [String]; public let personAnswers: [PersonAnswerRecord]?; public let usage: UsageSummary?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", missionID = "mission_id", missionRunID = "mission_run_id", generationID = "generation_id", definitionID = "definition_id", path, state, gateKind = "gate_kind", title, assignedTo = "assigned_to", lastProgress = "last_progress", progressAt = "progress_at", attempt, readinessEpoch = "readiness_epoch", claimant, claimIncarnation = "claim_incarnation", submittedIncarnation = "submitted_incarnation", agentless, claimExpiresAtUnixMS = "claim_expires_at_unix_ms", executionStartedAtUnixMS = "execution_started_at_unix_ms", nudgedAtUnixMS = "nudged_at_unix_ms", executionElapsedMS = "execution_elapsed_ms", timeoutMS = "timeout_ms", blockedReason = "blocked_reason", blockers, goals, constraints, personAnswers = "person_answers", usage, operational } }
+public struct WorkResource: Codable, Sendable { public let missionID: String?; public let id, kind, revision, updatedAt, missionRunID, generationID, definitionID, path, state: String; public let gateKind, title, assignedTo, lastProgress, progressAt: String?; public let program: WorkProgram?; public let attempt: UInt; public let readinessEpoch: UInt64; public let claimant, claimIncarnation, submittedIncarnation, blockedReason: String?; public let agentless: Bool?; public let claimExpiresAtUnixMS, executionStartedAtUnixMS, nudgedAtUnixMS, executionElapsedMS, executionWaitedMS, timeoutMS: UInt64?; public let blockers, goals, constraints: [String]; public let personAnswers: [PersonAnswerRecord]?; public let usage: UsageSummary?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", missionID = "mission_id", missionRunID = "mission_run_id", generationID = "generation_id", definitionID = "definition_id", path, state, gateKind = "gate_kind", program, title, assignedTo = "assigned_to", lastProgress = "last_progress", progressAt = "progress_at", attempt, readinessEpoch = "readiness_epoch", claimant, claimIncarnation = "claim_incarnation", submittedIncarnation = "submitted_incarnation", agentless, claimExpiresAtUnixMS = "claim_expires_at_unix_ms", executionStartedAtUnixMS = "execution_started_at_unix_ms", nudgedAtUnixMS = "nudged_at_unix_ms", executionElapsedMS = "execution_elapsed_ms", executionWaitedMS = "execution_waited_ms", timeoutMS = "timeout_ms", blockedReason = "blocked_reason", blockers, goals, constraints, personAnswers = "person_answers", usage, operational } }
+/// A program step's innermost open journal key and journal timing.
+public struct WorkProgram: Codable, Sendable { public let openKey, child: String?; public let openSinceUnixMS, lastEntryAtUnixMS: UInt64?; public let stalledAfterMS: UInt64; enum CodingKeys: String, CodingKey { case openKey = "open_key", child, openSinceUnixMS = "open_since_unix_ms", lastEntryAtUnixMS = "last_entry_at_unix_ms", stalledAfterMS = "stalled_after_ms" } }
 public struct AgentRelationship: Codable, Sendable { public let agentID: String; public let reason: String?; enum CodingKeys: String, CodingKey { case agentID = "agent_id", reason } }
 public enum ResourceReferenceKind: String, Codable, Sendable { case uri, subject }
 public enum ResourceReferenceResolution: String, Codable, Sendable { case resolved, unresolved; case notApplicable = "not-applicable" }
 public struct DeclaredResource: Codable, Sendable { public let name, subject: String; public let kind: ResourceReferenceKind; public let resolution: ResourceReferenceResolution; public let uri, reason: String?; }
 public struct AgentMailCustody: Codable, Sendable { public let successor, state: String }
 public struct AgentEndReason: Codable, Sendable { public let kind, endedAt: String; public let actor, reason, exitSignal, diagnostic: String?; public let exitCode: Int64?; enum CodingKeys: String, CodingKey { case kind, endedAt = "ended_at", actor, reason, exitSignal = "exit_signal", diagnostic, exitCode = "exit_code" } }
-public struct AgentResource: Codable, Sendable { public let id, kind, revision, updatedAt, name, state, reachability: String; public let runtimeIDs: [String]; public let ownerRunID, driver, harnessState, harnessErrorState, since, observation, blockedOn, ask, reason, activity, hostID, lastActivityAt, silentSince, downSince, fault, incarnationID, currentSessionID: String?; public let backgroundJobs: UInt64?; public let endReason: AgentEndReason?; public let currentWorkIDs, upcomingWorkIDs: [String]?; public let activeWorkCount, queuedWorkCount: UInt64?; public let nextWorkID: String?; public let currentWork, upcomingWork: [WorkLabel]?; public let nextWork: WorkLabel?; public let usage: UsageSummary?; public let under: [AgentRelationship]; public let mailCustody: AgentMailCustody?; public let delivery: AgentDelivery?; public let subagents: [AgentSubagent]?; public let suspension: AgentSuspension?; public let checkout: AgentCheckout?; public let workspace: String?; public let lifecycle: AgentLifecycle?; public let handoff: AgentHandoff?; public let rollout: JSONValue?; public let todo: AgentTodo?; public let presentation: AgentPresentation?; public let resources: [DeclaredResource]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", name, state, reachability, runtimeIDs = "runtime_ids", ownerRunID = "owner_run_id", driver, harnessState = "harness_state", backgroundJobs = "background_jobs", harnessErrorState = "harness_error_state", endReason = "end_reason", since, observation, blockedOn = "blocked_on", ask, reason, activity, hostID = "host_id", lastActivityAt = "last_activity_at", silentSince = "silent_since", downSince = "down_since", fault, incarnationID = "incarnation_id", currentSessionID = "current_session_id", currentWorkIDs = "current_work_ids", activeWorkCount = "active_work_count", nextWorkID = "next_work_id", upcomingWorkIDs = "upcoming_work_ids", queuedWorkCount = "queued_work_count", currentWork = "current_work", nextWork = "next_work", upcomingWork = "upcoming_work", usage, under, mailCustody = "mail_custody", delivery, subagents, suspension, checkout, workspace, lifecycle, handoff, rollout, todo, presentation, resources, operational } }
+public struct AgentResource: Codable, Sendable { public let id, kind, revision, updatedAt, name, state, reachability: String; public let declaredAdmission: DeclaredAdmission?; public let runtimeIDs: [String]; public let ownerRunID, driver, harnessState, harnessErrorState, since, observation, blockedOn, ask, reason, activity, hostID, lastActivityAt, lastProseAt, silentSince, downSince, fault, incarnationID, currentSessionID, liveModel: String?; public let backgroundJobs: UInt64?; public let endReason: AgentEndReason?; public let currentWorkIDs, upcomingWorkIDs: [String]?; public let activeWorkCount, queuedWorkCount: UInt64?; public let nextWorkID: String?; public let currentWork, upcomingWork: [WorkLabel]?; public let nextWork: WorkLabel?; public let usage: UsageSummary?; public let under: [AgentRelationship]?; public let mailCustody: AgentMailCustody?; public let delivery: AgentDelivery?; public let subagents: [AgentSubagent]?; public let suspension: AgentSuspension?; public let checkout: AgentCheckout?; public let workspace: String?; public let lifecycle: AgentLifecycle?; public let handoff: AgentHandoff?; public let stopping: AgentStopping?; public let rollout: JSONValue?; public let launchContract: JSONValue?; public let todo: AgentTodo?; public let presentation: AgentPresentation?; public let resources: [DeclaredResource]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", name, state, reachability, declaredAdmission = "declared_admission", runtimeIDs = "runtime_ids", ownerRunID = "owner_run_id", driver, harnessState = "harness_state", backgroundJobs = "background_jobs", harnessErrorState = "harness_error_state", endReason = "end_reason", since, observation, blockedOn = "blocked_on", ask, reason, activity, hostID = "host_id", lastActivityAt = "last_activity_at", lastProseAt = "last_prose_at", silentSince = "silent_since", downSince = "down_since", fault, incarnationID = "incarnation_id", currentSessionID = "current_session_id", liveModel = "live_model", currentWorkIDs = "current_work_ids", activeWorkCount = "active_work_count", nextWorkID = "next_work_id", upcomingWorkIDs = "upcoming_work_ids", queuedWorkCount = "queued_work_count", currentWork = "current_work", nextWork = "next_work", upcomingWork = "upcoming_work", usage, under, mailCustody = "mail_custody", delivery, subagents, suspension, checkout, workspace, lifecycle, handoff, stopping, rollout, launchContract = "launch_contract", todo, presentation, resources, operational } }
 /// Unknown lifecycle strings are preserved so newer roster rows remain readable.
 public enum AgentLifecycle: Codable, Sendable, Equatable {
     case standing, owner, bounded
@@ -612,11 +861,15 @@ public struct HarnessTodoTotals: Codable, Sendable {
         abandoned = try values.decodeIfPresent(UInt64.self, forKey: .abandoned) ?? 0
     }
 }
+public struct AgentStopping: Codable, Sendable { public let held: String? }
 public struct AgentHandoff: Codable, Sendable { public let phase, destination, desiredToken: String; public let sources, pendingSources: [String]; public let overriddenSources: [String]?; enum CodingKeys: String, CodingKey { case phase, destination, desiredToken = "desired_token", sources, pendingSources = "pending_sources", overriddenSources = "overridden_sources" } }
 public struct AgentSuspension: Codable, Sendable { public let action, phase, operationID, updatedAt: String; public let harness, nativeSessionID, incarnationID, suspendedAt, code, reason, host, sourceHost: String?; public let blocking: [String]; enum CodingKeys: String, CodingKey { case action, phase, host, sourceHost = "source_host", operationID = "operation_id", updatedAt = "updated_at", harness, nativeSessionID = "native_session_id", incarnationID = "incarnation_id", suspendedAt = "suspended_at", code, reason, blocking } }
 public struct AgentSubagent: Codable, Sendable { public let id: String; public let subagentType, description: String?; public let driver: String; public let sessionID, workID, startedAt: String?; public let leaseExpiresAt: String; enum CodingKeys: String, CodingKey { case id, subagentType = "subagent_type", description, driver, sessionID = "session_id", workID = "work_id", startedAt = "started_at", leaseExpiresAt = "lease_expires_at" } }
 public struct AgentDelivery: Codable, Sendable { public let state: String; public let reason: String?; public let polledSecondsAgo: UInt64?; public let sinceUnixMs: UInt64?; public let transport: String?; enum CodingKeys: String, CodingKey { case state, reason, polledSecondsAgo = "polled_seconds_ago", sinceUnixMs = "since_unix_ms", transport } }
 public enum AgentQueuePlacement: String, Codable, Sendable { case top, bottom, before, after }
+public struct AgentRelatedRuns: Codable, Sendable { public let kind, agentID: String; public let asOf, workCut, missionsCut, totalRows: UInt64; public let truncated: Bool; public let rows: [AgentRelatedRun]; enum CodingKeys: String, CodingKey { case kind, agentID = "agent_id", asOf = "as_of", workCut = "work_cut", missionsCut = "missions_cut", totalRows = "total_rows", truncated, rows } }
+public struct AgentRelatedRun: Codable, Sendable { public let id, missionID, status, statusChip: String; public let progress: JSONValue; public let eta: JSONValue?; public let waitingOnYou, late, folded: Bool; public let deadlineAt, completedAt: UInt64?; public let currentStep: RelatedRunWait?; public let waitsOn: [RelatedRunWait]; public let urgencyRank: UInt64; enum CodingKeys: String, CodingKey { case id, missionID = "mission_id", status, statusChip = "status_chip", progress, eta, waitingOnYou = "waiting_on_you", late, folded, deadlineAt = "deadline_at", completedAt = "completed_at", currentStep = "current_step", waitsOn = "waits_on", urgencyRank = "urgency_rank" } }
+public struct RelatedRunWait: Codable, Sendable { public let step, path, state, kind: String; public let title, who, seatState, detail: String?; public let sinceUnixMS, leaseExpiresAtUnixMS, untilUnixMS: UInt64?; public let wakeAttempts: UInt32?; enum CodingKeys: String, CodingKey { case step, path, state, kind, title, who, seatState = "seat_state", detail, sinceUnixMS = "since_unix_ms", leaseExpiresAtUnixMS = "lease_expires_at_unix_ms", untilUnixMS = "until_unix_ms", wakeAttempts = "wake_attempts" } }
 public struct AgentQueue: Codable, Sendable { public let kind: String; public let agentID: String; public let currentWorkIDs: [String]; public let nextWorkID: String?; public let runs: [AgentQueueRun]; public let moves: [AgentQueueMove]; public let moveCount: UInt64; enum CodingKeys: String, CodingKey { case kind, agentID = "agent_id", currentWorkIDs = "current_work_ids", nextWorkID = "next_work_id", runs, moves, moveCount = "move_count" } }
 public struct AgentQueueRun: Codable, Sendable { public let missionRunID: String; public let position: UInt32; public let state: String; public let runState: String; public let joinedAt: String; public let claimedWorkIDs: [String]; public let readyWorkIDs: [String]; public let waitingWorkIDs: [String]; public let waitingForRunID: String?; enum CodingKeys: String, CodingKey { case missionRunID = "mission_run_id", position, state, runState = "run_state", joinedAt = "joined_at", claimedWorkIDs = "claimed_work_ids", readyWorkIDs = "ready_work_ids", waitingWorkIDs = "waiting_work_ids", waitingForRunID = "waiting_for_run_id" } }
 public struct AgentQueueMove: Codable, Sendable { public let claimID: String; public let missionRunID: String; public let placement: AgentQueuePlacement; public let anchorRunID: String?; public let actorID: String?; public let reason: String?; public let movedAt: String; enum CodingKeys: String, CodingKey { case claimID = "claim_id", missionRunID = "mission_run_id", placement, anchorRunID = "anchor_run_id", actorID = "actor_id", reason, movedAt = "moved_at" } }
@@ -638,6 +891,159 @@ public struct DeviceResource: Codable, Sendable {
     public let personID, name: String?; public let scopes: [String]; public let push: PushRegistrationStatus?; public let operational: Operational?
     public let principal: AssistantPrincipal?; public let senderClass: AssistantSenderClass?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?
     enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", personID = "person_id", name, sessionActor = "session_actor", state, scopes, expiresAt = "expires_at", push, operational, principal, senderClass = "sender_class", grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
+}
+public enum DeviceCommandOutcome: String, Codable, Sendable { case completed, notForeground = "not-foreground", expired, refused, failed }
+public enum DeviceCommandState: String, Codable, Sendable { case pending, delivered, completed, notForeground = "not-foreground", expired, refused, failed }
+/// Associated values prevent constructing navigation parameters for the wrong screen.
+public enum PhoneNavigateArgs: Codable, Sendable, Equatable {
+    case nowRoot, agents, missions, usage, history
+    case mission(id: String), attention(id: String), launch(id: String)
+    case conversation(target: String, sessionID: String? = nil), terminal(terminalID: String)
+    case documents(prefix: String? = nil), document(reference: String, trail: [String])
+    private enum Keys: String, CodingKey { case screen, params }
+    private struct IDParams: Codable { let id: String }
+    private struct ConversationParams: Codable { let target: String; let sessionId: String? }
+    private struct TerminalParams: Codable { let terminalId: String }
+    private struct DocumentsParams: Codable { let prefix: String? }
+    private struct DocumentParams: Codable { let reference: String; let trail: [String] }
+    public init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        let screen = try box.decode(String.self, forKey: .screen)
+        switch screen {
+        case "NowRoot": self = .nowRoot
+        case "Agents": self = .agents
+        case "Missions": self = .missions
+        case "Usage": self = .usage
+        case "History": self = .history
+        case "Mission": self = .mission(id: try box.decode(IDParams.self, forKey: .params).id)
+        case "Attention": self = .attention(id: try box.decode(IDParams.self, forKey: .params).id)
+        case "Launch": self = .launch(id: try box.decode(IDParams.self, forKey: .params).id)
+        case "Conversation":
+            let params = try box.decode(ConversationParams.self, forKey: .params)
+            self = .conversation(target: params.target, sessionID: params.sessionId)
+        case "Terminal": self = .terminal(terminalID: try box.decode(TerminalParams.self, forKey: .params).terminalId)
+        case "Documents": self = .documents(prefix: try box.decodeIfPresent(DocumentsParams.self, forKey: .params)?.prefix)
+        case "Document":
+            let params = try box.decode(DocumentParams.self, forKey: .params)
+            self = .document(reference: params.reference, trail: params.trail)
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .screen, in: box, debugDescription: "Unknown phone navigation screen")
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        switch self {
+        case .nowRoot: try box.encode("NowRoot", forKey: .screen)
+        case .agents: try box.encode("Agents", forKey: .screen)
+        case .missions: try box.encode("Missions", forKey: .screen)
+        case .usage: try box.encode("Usage", forKey: .screen)
+        case .history: try box.encode("History", forKey: .screen)
+        case .mission(let id):
+            try box.encode("Mission", forKey: .screen); try box.encode(IDParams(id: id), forKey: .params)
+        case .attention(let id):
+            try box.encode("Attention", forKey: .screen); try box.encode(IDParams(id: id), forKey: .params)
+        case .launch(let id):
+            try box.encode("Launch", forKey: .screen); try box.encode(IDParams(id: id), forKey: .params)
+        case .conversation(let target, let sessionID):
+            try box.encode("Conversation", forKey: .screen); try box.encode(ConversationParams(target: target, sessionId: sessionID), forKey: .params)
+        case .terminal(let terminalID):
+            try box.encode("Terminal", forKey: .screen); try box.encode(TerminalParams(terminalId: terminalID), forKey: .params)
+        case .documents(let prefix):
+            try box.encode("Documents", forKey: .screen)
+            if let prefix { try box.encode(DocumentsParams(prefix: prefix), forKey: .params) }
+        case .document(let reference, let trail):
+            try box.encode("Document", forKey: .screen); try box.encode(DocumentParams(reference: reference, trail: trail), forKey: .params)
+        }
+    }
+}
+public enum PhoneCommand: Codable, Sendable, Equatable {
+    case inspect, navigate(PhoneNavigateArgs), messageRead(messageID: String)
+    private enum Keys: String, CodingKey { case kind, commandKind = "command_kind", args }
+    private struct EmptyArgs: Codable {}
+    private struct MessageReadArgs: Codable { let messageID: String; enum CodingKeys: String, CodingKey { case messageID = "message_id" } }
+    public init(from decoder: Decoder) throws { try self.init(from: decoder, resource: false) }
+    fileprivate init(from decoder: Decoder, resource: Bool) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        let key: Keys = resource ? .commandKind : .kind
+        switch try box.decode(String.self, forKey: key) {
+        case "phone.inspect": _ = try box.decode(EmptyArgs.self, forKey: .args); self = .inspect
+        case "phone.navigate": self = .navigate(try box.decode(PhoneNavigateArgs.self, forKey: .args))
+        case "phone.message.read": self = .messageRead(messageID: try box.decode(MessageReadArgs.self, forKey: .args).messageID)
+        default: throw DecodingError.dataCorruptedError(forKey: key, in: box, debugDescription: "Unknown phone command")
+        }
+    }
+    public func encode(to encoder: Encoder) throws { try encode(to: encoder, resource: false) }
+    fileprivate func encode(to encoder: Encoder, resource: Bool) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        let key: Keys = resource ? .commandKind : .kind
+        switch self {
+        case .inspect: try box.encode("phone.inspect", forKey: key); try box.encode(EmptyArgs(), forKey: .args)
+        case .navigate(let args): try box.encode("phone.navigate", forKey: key); try box.encode(args, forKey: .args)
+        case .messageRead(let messageID): try box.encode("phone.message.read", forKey: key); try box.encode(MessageReadArgs(messageID: messageID), forKey: .args)
+        }
+    }
+}
+public struct DeviceCommandRequest: Codable, Sendable {
+    public let apiVersion, device: String
+    public let command: PhoneCommand
+    public let ttlMS: UInt64?
+    public init(device: String, command: PhoneCommand, ttlMS: UInt64? = nil, apiVersion: String = "st3.client.v0") {
+        self.apiVersion = apiVersion; self.device = device; self.command = command; self.ttlMS = ttlMS
+    }
+    private enum Keys: String, CodingKey { case apiVersion = "api_version", device, ttlMS = "ttl_ms" }
+    public init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        apiVersion = try box.decode(String.self, forKey: .apiVersion)
+        device = try box.decode(String.self, forKey: .device)
+        ttlMS = try box.decodeIfPresent(UInt64.self, forKey: .ttlMS)
+        command = try PhoneCommand(from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        try box.encode(apiVersion, forKey: .apiVersion); try box.encode(device, forKey: .device)
+        try box.encodeIfPresent(ttlMS, forKey: .ttlMS); try command.encode(to: encoder)
+    }
+}
+public struct DeviceResult: Codable, Sendable {
+    public let commandID: String
+    public let outcome: DeviceCommandOutcome
+    public let result: JSONValue?
+    public let errorCode: String?
+    public init(commandID: String, outcome: DeviceCommandOutcome, result: JSONValue? = nil, errorCode: String? = nil) {
+        self.commandID = commandID; self.outcome = outcome; self.result = result; self.errorCode = errorCode
+    }
+    enum CodingKeys: String, CodingKey { case commandID = "command_id", outcome, result, errorCode = "error_code" }
+}
+public struct DeviceCommand: Codable, Sendable, Identifiable {
+    public let id, kind, revision, updatedAt, deviceID, sessionActor, issuedBy, issuedAt, expiresAt: String
+    public let command: PhoneCommand
+    public let state: DeviceCommandState
+    public let result: JSONValue?
+    public let errorCode: String?
+    private enum Keys: String, CodingKey {
+        case id, kind, revision, updatedAt = "updated_at", deviceID = "device_id", sessionActor = "session_actor"
+        case issuedBy = "issued_by", issuedAt = "issued_at", expiresAt = "expires_at", state, result, errorCode = "error_code"
+    }
+    public init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        id = try box.decode(String.self, forKey: .id); kind = try box.decode(String.self, forKey: .kind)
+        revision = try box.decode(String.self, forKey: .revision); updatedAt = try box.decode(String.self, forKey: .updatedAt)
+        deviceID = try box.decode(String.self, forKey: .deviceID); sessionActor = try box.decode(String.self, forKey: .sessionActor)
+        issuedBy = try box.decode(String.self, forKey: .issuedBy); issuedAt = try box.decode(String.self, forKey: .issuedAt)
+        expiresAt = try box.decode(String.self, forKey: .expiresAt); state = try box.decode(DeviceCommandState.self, forKey: .state)
+        result = try box.decodeIfPresent(JSONValue.self, forKey: .result); errorCode = try box.decodeIfPresent(String.self, forKey: .errorCode)
+        command = try PhoneCommand(from: decoder, resource: true)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        try box.encode(id, forKey: .id); try box.encode(kind, forKey: .kind)
+        try box.encode(revision, forKey: .revision); try box.encode(updatedAt, forKey: .updatedAt)
+        try box.encode(deviceID, forKey: .deviceID); try box.encode(sessionActor, forKey: .sessionActor)
+        try box.encode(issuedBy, forKey: .issuedBy); try box.encode(issuedAt, forKey: .issuedAt)
+        try box.encode(expiresAt, forKey: .expiresAt); try box.encode(state, forKey: .state)
+        try box.encodeIfPresent(result, forKey: .result); try box.encodeIfPresent(errorCode, forKey: .errorCode)
+        try command.encode(to: encoder, resource: true)
+    }
 }
 public struct OperationResource: Codable, Sendable { public let id, kind, revision, updatedAt, component, severity, state, summary: String; public let targets: [String]; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", component, severity, state, summary, targets, operational } }
 public struct HistoryResource: Codable, Sendable { public let id, kind, revision, updatedAt, eventType, occurredAt, summary: String; public let storeIndex: UInt64; public let targets: [String]; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", eventType = "event_type", occurredAt = "occurred_at", storeIndex = "store_index", summary, targets, operational } }
@@ -788,6 +1194,7 @@ public enum Resource: Codable, Sendable, Identifiable {
     case harnessQuestion(HarnessQuestionResource)
     case connectedClient(ConnectedClientResource), usage(UsageResource)
     case summary(SummaryResource)
+    case deviceCommand(DeviceCommand)
     case attention(AttentionResource), message(MessageResource), launch(LaunchResource), launchVariant(LaunchVariantResource), launchDecision(LaunchDecisionResource), launchApproval(LaunchApprovalResource), mission(MissionResource), work(WorkResource), agent(AgentResource), runtime(RuntimeResource), observer(ObserverResource), subscription(SubscriptionResource), lane(LaneResource), machine(MachineResource), device(DeviceResource), operation(OperationResource), history(HistoryResource), session(SessionResource), glass(GlassResource), ownedSet(OwnedSetResource)
     /// A kind this client does not know, from a member newer than it: kept whole so an older
     /// client skips it or shows it plainly instead of failing the page it came in.
@@ -815,6 +1222,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case "lane": self = .lane(try LaneResource(from: decoder))
         case "machine": self = .machine(try MachineResource(from: decoder))
         case "device": self = .device(try DeviceResource(from: decoder))
+        case "device-command": self = .deviceCommand(try DeviceCommand(from: decoder))
         case "operation": self = .operation(try OperationResource(from: decoder))
         case "history": self = .history(try HistoryResource(from: decoder))
         case "session": self = .session(try SessionResource(from: decoder))
@@ -845,6 +1253,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .lane(let v): try v.encode(to: encoder)
         case .machine(let v): try v.encode(to: encoder)
         case .device(let v): try v.encode(to: encoder)
+        case .deviceCommand(let v): try v.encode(to: encoder)
         case .operation(let v): try v.encode(to: encoder)
         case .history(let v): try v.encode(to: encoder)
         case .session(let v): try v.encode(to: encoder)
@@ -854,7 +1263,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .unknown(let v): try v.encode(to: encoder)
         }
     }
-    public var id: String { switch self { case .harnessQuestion(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
+    public var id: String { switch self { case .harnessQuestion(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .deviceCommand(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
 }
 /// A resource of a kind this client does not model: its header, and every field as sent.
 public struct UnknownResource: Codable, Sendable, Identifiable {
@@ -922,7 +1331,42 @@ public struct TimelineToolResultBody: Codable, Sendable { public let blocks: [Ti
 public struct TimelineStatusBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let status: TimelineStatus; public let detail: String? }
 public struct TimelineErrorBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let code: String; public let message: String; public let retryable: Bool; public let details: [String: JSONValue] }
 public struct TimelineAttribution: Codable, Sendable { public let agentID: String; public let missionRunID: String?; public let generationID: String?; public let stepID: String?; enum CodingKeys: String, CodingKey { case agentID = "agent_id", missionRunID = "mission_run_id", generationID = "generation_id", stepID = "step_id" } }
-public struct TimelineUsageBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let semantics: TimelineUsageSemantics; public let driver: String; public let model: String?; public let inputTokens: UInt64?; public let outputTokens: UInt64?; public let cachedTokens: UInt64?; public let totalTokens: UInt64?; public let contextUsedTokens: UInt64?; public let contextWindowTokens: UInt64?; public let contextUsedPercent: Double?; public let compactions: UInt64?; public let lastCompactionMs: UInt64?; public let lastCompactionTrigger: String?; public let cost: Double?; public let currency: String?; public let attribution: TimelineAttribution; enum CodingKeys: String, CodingKey { case blocks; case semantics, driver, model, inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens", totalTokens = "total_tokens", contextUsedTokens = "context_used_tokens", contextWindowTokens = "context_window_tokens", contextUsedPercent = "context_used_percent", compactions, lastCompactionMs = "last_compaction_ms", lastCompactionTrigger = "last_compaction_trigger", cost, currency, attribution } }
+public struct TimelineUsageBody: Codable, Sendable {
+    public let blocks: [TimelineBlock]?
+    public let semantics: TimelineUsageSemantics
+    public let driver: String
+    public let model, provider, account, responseID, api, stopReason: String?
+    public let startedAtUnixMs, completedAtUnixMs: UInt64?
+    public let durationMs, ttftMs: Double?
+    public let inputTokens, outputTokens, cachedTokens, cacheWriteTokens, cacheWrite1hTokens, reasoningTokens, totalTokens: UInt64?
+    public let turnID: String?
+    public let contextUsedTokens, contextWindowTokens: UInt64?
+    public let contextUsedPercent: Double?
+    public let compactions, lastCompactionMs: UInt64?
+    public let lastCompactionTrigger: String?
+    public let cost: Double?
+    public let costComponents: TimelineResponseCostComponents?
+    public let currency: String?
+    public let providerQuota: TimelineProviderQuota?
+    public let attribution: TimelineAttribution
+    enum CodingKeys: String, CodingKey {
+        case blocks, semantics, driver, model, provider, account, api, cost, currency, compactions, attribution
+        case responseID = "response_id", stopReason = "stop_reason", startedAtUnixMs = "started_at_unix_ms", completedAtUnixMs = "completed_at_unix_ms"
+        case durationMs = "duration_ms", ttftMs = "ttft_ms", inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens"
+        case cacheWriteTokens = "cache_write_tokens", cacheWrite1hTokens = "cache_write_1h_tokens", reasoningTokens = "reasoning_tokens", totalTokens = "total_tokens", turnID = "turn_id"
+        case contextUsedTokens = "context_used_tokens", contextWindowTokens = "context_window_tokens", contextUsedPercent = "context_used_percent"
+        case lastCompactionMs = "last_compaction_ms", lastCompactionTrigger = "last_compaction_trigger", costComponents = "cost_components", providerQuota = "provider_quota"
+    }
+}
+public struct TimelineResponseCostComponents: Codable, Sendable {
+    public let input, output, cacheRead, cacheWrite: Double?
+    enum CodingKeys: String, CodingKey { case input, output, cacheRead = "cache_read", cacheWrite = "cache_write" }
+}
+public enum TimelineProviderQuotaUnit: String, Codable, Sendable { case premiumRequests = "premium_requests" }
+public struct TimelineProviderQuota: Codable, Sendable {
+    public let unit: TimelineProviderQuotaUnit
+    public let quantity: Double
+}
 public struct TimelineRedactionBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let reason: String; public let withheldBytes: UInt64; public let withheldItems: UInt64?; enum CodingKeys: String, CodingKey { case blocks; case reason, withheldBytes = "withheld_bytes", withheldItems = "withheld_items" } }
 public struct TimelineTruncationBody: Codable, Sendable { public let blocks: [TimelineBlock]?; public let reason: String; public let omittedFromSequence: UInt64; public let omittedToSequence: UInt64; public let continuationCursor: String?; enum CodingKeys: String, CodingKey { case blocks; case reason, omittedFromSequence = "omitted_from_sequence", omittedToSequence = "omitted_to_sequence", continuationCursor = "continuation_cursor" } }
 public enum TimelineBody: Sendable { case message(TimelineMessageBody), content(TimelineContentBody), toolCall(TimelineToolCallBody), toolResult(TimelineToolResultBody), status(TimelineStatusBody), error(TimelineErrorBody), usage(TimelineUsageBody), redaction(TimelineRedactionBody), truncation(TimelineTruncationBody) }
@@ -1000,7 +1444,10 @@ public struct ActionRequest: Codable, Sendable {
     public static func agentSuspend(id: String, idempotencyKey: String, fence: Fence, parameters: AgentSuspendParameters) throws -> Self { try .init(id: id, type: .agentSuspend, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func arrangementEdit(id: String, idempotencyKey: String, fence: Fence, parameters: ArrangementEditParameters) throws -> Self { try .init(id: id, type: .arrangementEdit, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func arrangementMembershipEdit(id: String, idempotencyKey: String, fence: Fence, parameters: ArrangementMembershipEditParameters) throws -> Self { try .init(id: id, type: .arrangementMembershipEdit, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func attentionDismiss(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionDismissParameters) throws -> Self { try .init(id: id, type: .attentionDismiss, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func attentionResolve(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionResolveParameters) throws -> Self { try .init(id: id, type: .attentionResolve, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func attentionSeen(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionSeenParameters) throws -> Self { try .init(id: id, type: .attentionSeen, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func attentionSnooze(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionSnoozeParameters) throws -> Self { try .init(id: id, type: .attentionSnooze, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func customReply(id: String, idempotencyKey: String, fence: Fence, parameters: CustomReplyParameters) throws -> Self { try .init(id: id, type: .customReply, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func harnessAnswer(id: String, idempotencyKey: String, fence: Fence, parameters: HarnessAnswerParameters) throws -> Self { try .init(id: id, type: .harnessAnswer, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func laneApprove(id: String, idempotencyKey: String, fence: Fence, parameters: LaneChangeParameters) throws -> Self { try .init(id: id, type: .laneApprove, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1024,6 +1471,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func pairingRevoke(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .pairingRevoke, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func privateNotesWrite(id: String, idempotencyKey: String, fence: Fence, parameters: PrivateNotesWriteParameters) throws -> Self { try .init(id: id, type: .privateNotesWrite, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func promptRespond(id: String, idempotencyKey: String, fence: Fence, parameters: PromptRespondParameters) throws -> Self { try .init(id: id, type: .promptRespond, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func readPositionAdvance(id: String, idempotencyKey: String, fence: Fence, parameters: ReadPositionAdvanceParameters) throws -> Self { try .init(id: id, type: .readPositionAdvance, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func reviewApprove(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .reviewApprove, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func reviewReject(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .reviewReject, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func reviewRequestChanges(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .reviewRequestChanges, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1056,13 +1504,48 @@ public struct ActionRequest: Codable, Sendable {
 public struct PersonAskParameters: Codable, Sendable { public var personID, title, reason: String; public var stepID, newRun: String?; public var request: StructuredRequest?; public var deadlineMS: UInt64?; public var defaultAnswer: String?; public init(personID: String, title: String, reason: String, stepID: String? = nil, newRun: String? = nil, request: StructuredRequest? = nil, deadlineMS: UInt64? = nil, defaultAnswer: String? = nil) { self.personID = personID; self.title = title; self.reason = reason; self.stepID = stepID; self.newRun = newRun; self.request = request; self.deadlineMS = deadlineMS; self.defaultAnswer = defaultAnswer }; enum CodingKeys: String, CodingKey { case personID = "person_id", title, reason, stepID = "step_id", newRun = "new_run", request, deadlineMS = "deadline_ms", defaultAnswer = "default_answer" } }
 public struct PersonStepParameters: Codable, Sendable { public var targetID, summary, episode: String; public var evidence: [String]; public var answer: PersonAnswerInput?; public init(targetID: String, summary: String, episode: String, evidence: [String] = [], answer: PersonAnswerInput? = nil) { self.targetID = targetID; self.summary = summary; self.episode = episode; self.evidence = evidence; self.answer = answer }; enum CodingKeys: String, CodingKey { case targetID = "target_id", summary, episode, evidence, answer } }
 public struct StructuredRequest: Codable, Sendable { public var version: Int; public var type, question, whyPerson: String; public var summary: String?; public var reasons: [String]?; public var recommendation: RequestRecommendation?; public var subjects: [RequestSubject]?; public var answers: [RequestAnswerOption]?; public var custom: Bool?; public var attachments: [Attachment]?; enum CodingKeys: String, CodingKey { case version, type, question, whyPerson = "why_person", summary, reasons, recommendation, subjects, answers, custom, attachments } }
-public struct PersonUpdate: Codable, Sendable { public var version: Int; public var type, about: String; public var summary: String?; public var subjects: [RequestSubject]? }
+public struct PersonUpdate: Codable, Sendable { public var version: Int; public var type, about: String; public var summary: String?; public var speech: String?; public var subjects: [RequestSubject]? }
 public struct RequestRecommendation: Codable, Sendable { public var answer, reason: String }
 public struct RequestSubject: Codable, Sendable { public var kind, label: String; public var ref, url, revision: String? }
 public struct RequestAnswerOption: Codable, Sendable { public var id, label, consequence: String; public var outcome: String?; public var conditions: [String]? }
-public struct PersonAnswerInput: Codable, Sendable { public var id, text: String?; public init(id: String? = nil, text: String? = nil) { self.id = id; self.text = text } }
+public struct PersonOptionNote: Codable, Sendable, Equatable {
+    public var id, text: String
+    public init(id: String, text: String) { self.id = id; self.text = text }
+}
+public struct PersonAnswerInput: Codable, Sendable {
+    public var id, text: String?
+    public var optionNotes: [PersonOptionNote] = []
+    public init(id: String? = nil, text: String? = nil, optionNotes: [PersonOptionNote] = []) { self.id = id; self.text = text; self.optionNotes = optionNotes }
+    enum CodingKeys: String, CodingKey { case id, text, optionNotes = "option_notes" }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(String.self, forKey: .id)
+        text = try values.decodeIfPresent(String.self, forKey: .text)
+        optionNotes = try values.decodeIfPresent([PersonOptionNote].self, forKey: .optionNotes) ?? []
+    }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(id, forKey: .id)
+        try values.encodeIfPresent(text, forKey: .text)
+        if !optionNotes.isEmpty { try values.encode(optionNotes, forKey: .optionNotes) }
+    }
+}
 public struct AskDefaultAnswer: Codable, Sendable { public let id, label: String }
-public struct PersonAnswer: Codable, Sendable { public let type, outcome: String; public let id, label, text: String? }
+public struct PersonAnswer: Codable, Sendable {
+    public let type, outcome: String
+    public let id, label, text: String?
+    public let optionNotes: [PersonOptionNote]?
+    enum CodingKeys: String, CodingKey { case type, outcome, id, label, text, optionNotes = "option_notes" }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(type, forKey: .type)
+        try values.encode(outcome, forKey: .outcome)
+        try values.encodeIfPresent(id, forKey: .id)
+        try values.encodeIfPresent(label, forKey: .label)
+        try values.encodeIfPresent(text, forKey: .text)
+        if let optionNotes, !optionNotes.isEmpty { try values.encode(optionNotes, forKey: .optionNotes) }
+    }
+}
 public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor, resolvedBy: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", resolvedBy = "resolved_by", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
 public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public var successor: String?; public var expectRevision: String?; public init(agent: String, reason: String, successor: String? = nil, expectRevision: String? = nil) { self.agent = agent; self.reason = reason; self.successor = successor; self.expectRevision = expectRevision }; enum CodingKeys: String, CodingKey { case agent, reason, successor; case expectRevision = "expect_revision" } }
@@ -1107,7 +1590,7 @@ public enum TerminalInputMode: String, Codable, Sendable { case line, raw, key }
 public struct TerminalInputParameters: Codable, Sendable { public var terminalID: String; public var mode: TerminalInputMode; public var value: String; public init(terminalID: String, mode: TerminalInputMode, value: String) { self.terminalID = terminalID; self.mode = mode; self.value = value }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", mode, value } }
 public struct TerminalResizeParameters: Codable, Sendable { public var terminalID: String; public var rows: UInt16; public var columns: UInt16; public init(terminalID: String, rows: UInt16, columns: UInt16) { self.terminalID = terminalID; self.rows = rows; self.columns = columns }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", rows, columns } }
 public struct TerminalAttachment: Codable, Sendable { public let attachmentID: String; public let terminalID: String; public let runtimeIncarnation: String; public let ownerHostID: String; public let streamURL: String; public let streamCapability: String?; public let state: String; public let expiresAt: String; public let reusable: Bool?; public let ttlS: UInt64?; public let retryHint: String?; enum CodingKeys: String, CodingKey { case attachmentID = "attachment_id", terminalID = "terminal_id", runtimeIncarnation = "runtime_incarnation", ownerHostID = "owner_host_id", streamURL = "stream_url", streamCapability = "stream_capability", state, expiresAt = "expires_at", reusable, ttlS = "ttl_s", retryHint = "retry_hint" } }
-public struct ActionResult: Codable, Sendable { public let kind: String; public let actionID: String; public let operationID: String; public let status: String; public let affectedIDs: [String]; public let snapshotID: String; public let terminalAttachment: TerminalAttachment?; public let privateNotes: PrivateNotesFence?; public let arrangementRevision: String?; public let harnessAnswer: HarnessAnswerResult?; public let membershipRevision: String?; enum CodingKeys: String, CodingKey { case kind, actionID = "action_id", operationID = "operation_id", status, affectedIDs = "affected_ids", snapshotID = "snapshot_id", terminalAttachment = "terminal_attachment", privateNotes = "private_notes", arrangementRevision = "arrangement_revision", harnessAnswer = "harness_answer", membershipRevision = "membership_revision" } }
+public struct ActionResult: Codable, Sendable { public let kind: String; public let actionID: String; public let operationID: String; public let status: String; public let affectedIDs: [String]; public let snapshotID: String; public let terminalAttachment: TerminalAttachment?; public let privateNotes: PrivateNotesFence?; public let arrangementRevision: String?; public let harnessAnswer: HarnessAnswerResult?; public let membershipRevision: String?; public let attentionControl: AttentionControlState?; public let readPositionAt: String?; enum CodingKeys: String, CodingKey { case kind, actionID = "action_id", operationID = "operation_id", status, affectedIDs = "affected_ids", snapshotID = "snapshot_id", terminalAttachment = "terminal_attachment", privateNotes = "private_notes", arrangementRevision = "arrangement_revision", harnessAnswer = "harness_answer", membershipRevision = "membership_revision", attentionControl = "attention_control", readPositionAt = "read_position_at" } }
 
 public typealias ClientDiagnosticUuid = String
 public typealias ClientDiagnosticMilliseconds = UInt64
@@ -1300,12 +1783,13 @@ public enum PairedSession: Codable, Sendable {
     private enum KindKeys: String, CodingKey { case kind }
 }
 public struct PersonPairedSession: Codable, Sendable { public let kind: String; public let deviceID: String; public let personID: String; public let sessionActor: String; public let credential: String; public let scopes: [String]; public let expiresAt: String; public let deviceKeyChain: [String]?; public let deviceKeyProofs: [JSONValue]?; public let personRootKeyProof: JSONValue?; public let fabricGrant: JSONValue?; enum CodingKeys: String, CodingKey { case kind, deviceID = "device_id", personID = "person_id", sessionActor = "session_actor", credential, scopes, expiresAt = "expires_at", deviceKeyChain = "device_key_chain", deviceKeyProofs = "device_key_proofs", personRootKeyProof = "person_root_key_proof", fabricGrant = "fabric_grant" } }
-public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assistant/chatgpt" }
+public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assistant/chatgpt"; case mcp = "assistant/mcp" }
 public enum AssistantSenderClass: String, Codable, Sendable { case externalAssistant = "external-assistant" }
 public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once", callerBoundAllow = "caller-bound-allow" }
 public enum AssistantScope: String, Codable, Sendable {
-    case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal"
+    case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal", slo = "read.assistant.slo"
     case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply", answers = "write.assistant.answers"
+    case availability = "read.assistant.availability"
 }
 public struct AssistantPairingBegin: Codable, Sendable {
     public let apiVersion, deviceName: String; public let assistantID: AssistantPrincipal; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let consentEvidence: String; public let minimalReadMode: AssistantMinimalReadMode?
@@ -1389,7 +1873,7 @@ public enum AssistantContentRequest: Codable, Sendable, Equatable {
     }
 }
 public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content", conversations, conversationDetail = "conversation-detail", conversationTimeline = "conversation-timeline", conversationSearch = "conversation-search" }
-public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt }
+public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt, mcp }
 /// Signed by the pinned attestor (Ed25519) over UTF-8 `st3.scg-read.v1\n` + canonical JSON of this payload.
 public struct ScgReadAuthorizationPayload: Codable, Sendable, Equatable {
     public let issuer, grantID, keyID, approvalID, executionID, requestDigest, nonce: String
@@ -1586,6 +2070,41 @@ public struct ArrangementResource: Codable, Sendable, Identifiable {
 }
 public typealias Arrangement = ArrangementResource
 public struct ArrangementPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [Arrangement]; public let page: PageInfo; public let sync: SyncNotice?; public let replicated: ReplicatedNotice? }
+/// One person's read position in one conversation: the newest prose they have seen there (forward-only).
+public struct ReadPosition: Codable, Sendable, Identifiable {
+    public let id, kind, owner, revision, updatedAt: String
+    public let conversation, at: String
+    enum CodingKeys: String, CodingKey { case id, kind, owner, revision, updatedAt = "updated_at", conversation, at }
+}
+public struct ReadPositionPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [ReadPosition]; public let page: PageInfo; public let sync: SyncNotice?; public let replicated: ReplicatedNotice? }
+public struct AttentionSeenParameters: Codable, Sendable {
+    public let attentionID: String
+    public init(attentionID: String) { self.attentionID = attentionID }
+    enum CodingKeys: String, CodingKey { case attentionID = "attention_id" }
+}
+/// `until` nil brings the row back now; it is always sent, as null.
+public struct AttentionSnoozeParameters: Codable, Sendable {
+    public let attentionID: String
+    public let until: String?
+    public init(attentionID: String, until: String?) { self.attentionID = attentionID; self.until = until }
+    enum CodingKeys: String, CodingKey { case attentionID = "attention_id", until }
+    public func encode(to encoder: Encoder) throws { var container = encoder.container(keyedBy: CodingKeys.self); try container.encode(attentionID, forKey: .attentionID); try container.encode(until, forKey: .until) }
+}
+public struct AttentionDismissParameters: Codable, Sendable {
+    public let attentionID: String
+    public let text: String?
+    public init(attentionID: String, text: String? = nil) { self.attentionID = attentionID; self.text = text }
+    enum CodingKeys: String, CodingKey { case attentionID = "attention_id", text }
+}
+public struct AttentionControlState: Codable, Sendable {
+    public let attentionID: String
+    public let seenAt, snoozedUntil: String?
+    enum CodingKeys: String, CodingKey { case attentionID = "attention_id", seenAt = "seen_at", snoozedUntil = "snoozed_until" }
+}
+public struct ReadPositionAdvanceParameters: Codable, Sendable {
+    public let owner, conversation, at: String
+    public init(owner: String, conversation: String, at: String) { self.owner = owner; self.conversation = conversation; self.at = at }
+}
 public struct ArrangementEditParameters: Codable, Sendable {
     public let subject, owner: String
     public let operations: [ArrangementOperation]
@@ -1675,6 +2194,7 @@ public enum ArrangementOperation: Codable, Sendable {
     case folderMove(id: String, parent: String?, key: String)
     case folderDelete(id: String)
     case subjectPlace(subject: String, folder: String?, key: String)
+    case membershipMigrate
     case retire
     enum CodingKeys: String, CodingKey { case op, id, name, parent, key, subject, folder }
     public init(from decoder: Decoder) throws {
@@ -1687,6 +2207,7 @@ public enum ArrangementOperation: Codable, Sendable {
         case "folder.move": self = .folderMove(id: try box.decode(String.self, forKey: .id), parent: try box.decode(String?.self, forKey: .parent), key: try box.decode(String.self, forKey: .key))
         case "folder.delete": self = .folderDelete(id: try box.decode(String.self, forKey: .id))
         case "subject.place": self = .subjectPlace(subject: try box.decode(String.self, forKey: .subject), folder: try box.decode(String?.self, forKey: .folder), key: try box.decode(String.self, forKey: .key))
+        case "membership.migrate": self = .membershipMigrate
         case "retire": self = .retire
         default: throw DecodingError.dataCorruptedError(forKey: .op, in: box, debugDescription: "Unknown arrangement operation")
         }
@@ -1701,6 +2222,7 @@ public enum ArrangementOperation: Codable, Sendable {
         case .folderMove(let id, let parent, let key): try box.encode("folder.move", forKey: .op); try box.encode(id, forKey: .id); try box.encode(parent, forKey: .parent); try box.encode(key, forKey: .key)
         case .folderDelete(let id): try box.encode("folder.delete", forKey: .op); try box.encode(id, forKey: .id)
         case .subjectPlace(let subject, let folder, let key): try box.encode("subject.place", forKey: .op); try box.encode(subject, forKey: .subject); try box.encode(folder, forKey: .folder); try box.encode(key, forKey: .key)
+        case .membershipMigrate: try box.encode("membership.migrate", forKey: .op)
         case .retire: try box.encode("retire", forKey: .op)
         }
     }
@@ -1711,6 +2233,19 @@ public struct ArrangementCollectionFrame: Codable, Sendable {
     public let collection: String?
     public let snapshot: Snapshot?
     public let items, upserts: [Arrangement]?
+    public let removes, order: [String]?
+    public let hasMore: Bool?
+    public let code, message: String?
+    public let retryable: Bool?
+    enum CodingKeys: String, CodingKey { case kind, id, collection, snapshot, items, upserts, removes, order, code, message, retryable, hasMore = "has_more" }
+}
+/// `read-positions` frames are invalidations: receivers re-list `readPositionsList`.
+public struct ReadPositionCollectionFrame: Codable, Sendable {
+    public let kind: String
+    public let id: String?
+    public let collection: String?
+    public let snapshot: Snapshot?
+    public let items, upserts: [ReadPosition]?
     public let removes, order: [String]?
     public let hasMore: Bool?
     public let code, message: String?

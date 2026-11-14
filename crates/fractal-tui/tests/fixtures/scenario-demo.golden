@@ -1,7 +1,7 @@
 === Now ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  Inbox ◆1   +
+ / Filter:                          +New│  ◆1 Inbox                                                                   +
  ▾ Everything else 7                    │   somebody is stopped on you  │ ╭─ UNPLACED · WAITING 1M ─────────────────╮
  ▾ Agents 4                             │ ▌ ? unplaced Worker typech…   │ │                                         │
    Atlas Builder                        │ ▌   waited 1m                 │ │ Worker typecheck fails after the rename │
@@ -33,9 +33,9 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Roster ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  list:agents   +
+ / Filter:                          +New│  list:agents                                                                +
  ▾ Everything else 7                    │   stopped ─────────────────────────────────────────────────────────────── 4
  ▾ Agents 4                             │ ▌ ? Atlas Builder                                                codex   1m
    Atlas Builder                        │ ▌   example/atlas/builder
@@ -59,17 +59,17 @@
                                         │
                                         │
                                         │
-                                        │
                                         │ ─────────────────────────────────────────────────────────────────────────────
                                         │  ◆ needs you ⠋ working   ● idle
                                         │  ✕ broken    ○ stopped   ? unmanaged
+                                        │  • new since you read
                                         │  This host's Fractal is older: agent states show as Fractal reports them.
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Mission ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  example/atlas · Rename fe… ◆   +
+ / Filter:                          +New│  ◆ example/atlas · Rename fe…                                               +
  ▾ Everything else 7                    │  ▲ stalled   example/atlas · Rename fetchUser to loadUser   1m              ┃
  ▾ Agents 4                             │  mission/example/atlas/load-user-rename  ·  a step has an owner who is not m┃
    Atlas Builder                        │                                                                             ┃
@@ -101,9 +101,9 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Fleet ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  list:fleet   +
+ / Filter:                          +New│  list:fleet                                                                 +
  ▾ Everything else 7                    │ ▌ ● meadow  you are here                                           2 agents
  ▾ Agents 4                             │ ▌   this machine
    Atlas Builder                        │   ● foundry                                                        2 agents
@@ -135,9 +135,9 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Worktrees unavailable ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  list:worktrees   +
+ / Filter:                          +New│  list:worktrees                                                             +
  ▾ Everything else 7                    │
  ▾ Agents 4                             │  Could not load: The scenario kit does not model worktrees
    Atlas Builder                        │
@@ -169,9 +169,9 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Machine and devices ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  meadow   +
+ / Filter:                          +New│  meadow                                                                     +
  ▾ Everything else 7                    │  ● meadow  this machine
  ▾ Agents 4                             │    2 running runtimes
    Atlas Builder                        │
@@ -203,9 +203,9 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Conversation ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  ~Atlas Builder   +
+ / Filter:                          +New│  ~ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ? Atlas Builder  running · older Fractal                    codex · meadow
  ▾ Agents 4                             │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-renam
    Atlas Builder                        │    mission example/atlas · Rename fetchUser to loadUser › step-3
@@ -237,9 +237,9 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Agent details ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                                                                 ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                                                       ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                              +New│  ~Atlas Builder   +
+ / Filter:                              +New│  ~ Atlas Builder                                                                                                +
  ▾ Everything else 7                        │  ? Atlas Builder  running · older Fractal                 codex · meadow   │ details                    × close
  ▾ Agents 4                                 │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-re  │ now ──────────────────────────────
    Atlas Builder                            │    mission example/atlas · Rename fetchUser to loadUser › step-3           │ example/atlas · Rename fetchUser to
@@ -271,9 +271,9 @@
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Terminal ===
- ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+ sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  ~Atlas Builder   +
+ / Filter:                          +New│  ~ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ← Return · Ctrl+\   Atlas Builder · demo terminal
  ▾ Agents 4                             │  Ctrl-C and Ctrl-D need a second press to reach the agent
    Atlas Builder                        │ scenario harness ready

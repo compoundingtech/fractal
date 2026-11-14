@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Each program attempt starts with a run credential in its effects' environment (`ST_RUN_CREDENTIAL`), so their requests act as `mission-run/RUN`, and the program journal (`program.step`) is written as that run. An effect publishes with `fractal apply` as its run: `apply` and `missions publish` accept `--as mission-run/RUN`, and `apply` without `--as` defaults to the run whose credential it holds",
+  "replay": {"status": "changed", "detail": "`program.step` claims carry actor `mission-run/RUN` instead of no actor. Their fields and idempotency keys are unchanged."},
+  "schema": {"status": "none", "detail": "No table or migration change. Each start or resume of an attempt adds one row to the local `capabilities` table (hashed secret)."},
+  "rules": {"status": "changed", "detail": "Program effects no longer act as an unbound local person: the engine mints one credential when an attempt starts or resumes (never on a refused, already running or host-down dispatch), with no expiry of its own, and the daemon binds its effects to their run while that attempt is the step's live attempt, however long it waits, and refuses their writes once it has ended."},
+  "compatibility": {"status": "none", "detail": "Program steps are new in this milestone; no earlier journal exists."},
+  "downtime": {"status": "none", "detail": "No restart or migration beyond a normal deploy."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "A resumed attempt is started with a fresh credential; an effect from an ended attempt cannot write."}
+}

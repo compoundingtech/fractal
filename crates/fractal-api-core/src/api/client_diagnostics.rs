@@ -175,7 +175,8 @@ mod tests {
     use tower::ServiceExt as _;
 
     fn state(root: &std::path::Path) -> AppState {
-        AppState {
+        AppState {api_socket: root.join("api.sock"),
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store:Arc::new(crate::store::Store::open(&root.join("graph.db"),"diagnostic-test").unwrap()),
             notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,
@@ -187,7 +188,7 @@ mod tests {
         }
     }
     fn pair(state: &AppState, credential: &str, actor: &str, scopes: Value, expires: u64) {
-        state.store.append_claim(&ClaimInput {
+        state.store.append_client_operation_claim(&ClaimInput {
             subject:format!("custom/client/{credential}"),kind:"custom.client.pairing-completed".into(),actor:Some("person/ada".into()),
             fields:BTreeMap::from([
                 ("credential_hash".into(),json!(hex::encode(Sha256::digest(credential.as_bytes())))),
@@ -274,7 +275,7 @@ mod tests {
             assert_eq!(post(app.clone(),credential,body.clone()).await.0,StatusCode::FORBIDDEN);
         }
         assert_eq!(post(app.clone(),Some("writer"),body.clone()).await.0,StatusCode::OK);
-        state.store.append_claim(&ClaimInput {subject:"custom/client/writer".into(),kind:"custom.client.pairing-revoked".into(),actor:None,fields:BTreeMap::new(),evidence:Vec::new(),expected_subject:None,idempotency_key:None}).unwrap();
+        state.store.append_client_operation_claim(&ClaimInput {subject:"custom/client/writer".into(),kind:"custom.client.pairing-revoked".into(),actor:Some("person/ada".into()),fields:BTreeMap::new(),evidence:Vec::new(),expected_subject:None,idempotency_key:None}).unwrap();
         assert_eq!(post(app,Some("writer"),body).await.0,StatusCode::FORBIDDEN);
     }
     #[tokio::test]

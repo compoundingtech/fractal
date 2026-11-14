@@ -839,6 +839,10 @@ async fn client_message_cursor_issued_during_projection_lag_pins_published_front
             evidence:Vec::new(),expected_subject:None,idempotency_key:None,
         }).unwrap();
     }
+    // Establish the seed publication before deliberately leaving a new backlog.
+    while state.store.maintain_client_message_selectors().unwrap() {}
+    assert!(!state.store.client_message_selectors_pending().unwrap());
+    assert_eq!(state.store.client_messages_page_cut(state.store.index().unwrap()).unwrap(), state.store.index().unwrap());
     let published = state.store.index().unwrap();
     let now = BASE_TIME + 100_000;
     let expected = client_message_resources_at(&state.store,None,true,None,now).unwrap();

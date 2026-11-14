@@ -12,6 +12,7 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import sys
 import secrets
 import tempfile
@@ -236,11 +237,18 @@ class Node:
         self.binary.parent.mkdir(parents=True)
         give_bytes(binary, self.binary)
         self.endpoint = self.root / "run/st3.sock"
+        # Managed harness launch resolves the provider through the runtime profile's
+        # wrapper directory; point it at this node's fixture omp, never an installed one.
+        runtime_profile = self.root / "runtime-profile.json"
+        runtime_profile.write_text(json.dumps({
+            "personas": {"launch": {"generalist": {"harnessBin": str(self.root / "bin")}}},
+        }))
         self.env = {**env, "HOME": str(self.root / "home"),
                     "XDG_STATE_HOME": str(self.root / "home/state"),
                     "XDG_CONFIG_HOME": str(self.root / "home/config"),
                     "ST3_ENDPOINT": str(self.endpoint), "ST3_DAEMON_WAIT": "0",
                     "ST3_TEST_ADMITTED_REPORTS": str(self.root / "admitted-reports.jsonl"),
+                    "AGENT_RUNTIME_PROFILE": str(runtime_profile), "AGENT_PERSONA": "generalist",
                     "PATH": f"{self.root / 'bin'}:{env['PATH']}"}
         # Only inherit an actual user manager. A synthetic runtime directory makes
         # systemd-run attempt scopes on runners that have no user bus.
@@ -389,6 +397,42 @@ def receipts(node):
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def graph_reads_of(node, claims, subject):
+    """The reads `node` holds of `subject`: its `message.read` claims and, since a seat's host
+    records its own seat's read as a local mark once marks are on (db break-up 4b-2), its read
+    marks, which never replicate and no trace shows. Each has an `id` (the claim, or the mark's
+    receipt) and an `accepted_at_unix_ms`."""
+    reads = [claim for claim in claims if claim.get("kind") == "message.read"]
+    path = node.root / "state/claims.sqlite3"
+    if path.exists():
+        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            rows = connection.execute(
+                "SELECT receipt, recorded_at_unix_ms FROM local_message_marks WHERE message=? AND kind='message.read'",
+                (subject,)).fetchall()
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                raise
+            rows = []  # a release before marks
+        finally:
+            connection.close()
+        reads += [{"kind": "message.read", "id": receipt, "accepted_at_unix_ms": at, "mark": True}
+                  for receipt, at in rows]
+    return reads
+
+
+def receipt_matches(read, receipts):
+    """Whether the one graph read is the reader's own receipt: the same claim, accepted when the
+    reader was told, or the same mark receipt."""
+    if not receipts:
+        return False
+    first = min(receipts, key=lambda row: row["accepted_at_unix_ms"])
+    if read.get("mark"):
+        return read["id"] == first.get("id")
+    ids = (first.get("id"), read.get("id"))
+    return read["accepted_at_unix_ms"] == first["accepted_at_unix_ms"] and (None in ids or ids[0] == ids[1])
 
 
 def provider_pids(rows):
@@ -540,7 +584,7 @@ def judge(proof):
         if not proof.get("previous_release_channel_observed"):
             failures.append("previous-release channel was not observed before the upgrade")
     if proof["graph_read_claims"] != 1:
-        failures.append(f"graph contains {proof['graph_read_claims']} read claims (expected 1)")
+        failures.append(f"graph contains {proof['graph_read_claims']} read claims or marks (expected 1)")
     elif not proof["read_receipt_matches_graph"]:
         failures.append("reader receipt and graph read time differ")
     if proof["sender_message_status"] not in ("read", "closed"):
@@ -824,13 +868,13 @@ agent "fault-probe" {{
             recovered_target = await target.api("/v1/messages/read/" + recovered_subject)
             recovery_reads = [row for row in recovered_rows if row["event"] == "read"]
             recovery_read_at = min((row["accepted_at_unix_ms"] for row in recovery_reads), default=None)
-            graph_recovery_reads = [row for row in recovered_claims if row.get("kind") == "message.read"]
+            graph_recovery_reads = graph_reads_of(target, recovered_claims, recovered_subject)
             result.update(recovered_read_after_clear_ms=recovery_read_at - recovery_cleared
                               if recovery_read_at is not None else None,
                           recovered_receipt_matches_graph=len(graph_recovery_reads) == 1
-                              and graph_recovery_reads[0]["accepted_at_unix_ms"] == recovery_read_at,
+                              and receipt_matches(graph_recovery_reads[0], recovery_reads),
                           recovered_received_copies=sum(row["event"] == "received" for row in recovered_rows),
-                          recovered_read_claims=sum(row.get("kind") == "message.read" for row in recovered_claims),
+                          recovered_read_claims=len(graph_recovery_reads),
                           recovered_sender_status=(recovered_source or {}).get("status"),
                           recovered_recipient_status=(recovered_target or {}).get("status"),
                           recovery_timing=recovery_timing(recovered_subject, recovery_cleared,
@@ -854,7 +898,7 @@ agent "fault-probe" {{
         expected_starts = 2 if case == "harness-restart" else 1
         trace_text = await target.cli("trace", "show", subject, "--json", "--limit", "100")
         claims = [json.loads(line) for line in trace_text.splitlines() if line]
-        graph_reads = [claim for claim in claims if claim.get("kind") == "message.read"]
+        graph_reads = graph_reads_of(target, claims, subject)
         # The read receipt reaches the sender on an exchange after the read itself. Wait for it
         # within the same read deadline, measured from this message's send, not one sample.
         async def sender_converged():
@@ -885,7 +929,7 @@ agent "fault-probe" {{
             daemon_image=str(target.binary),
             delivered_during_outage=case in ("daemon-restart", "receiver-down", "binary-swap", "path-deploy", "old-channel", "link-seconds", "link-minutes")
                 and any(row["at_unix_ms"] < cleared for row in received),
-            read_receipt_matches_graph=len(graph_reads) == 1 and graph_reads[0]["accepted_at_unix_ms"] == read_at)
+            read_receipt_matches_graph=len(graph_reads) == 1 and receipt_matches(graph_reads[0], reads))
         result["failures"] = judge(result)
         result["verdict"] = "fail" if result["failures"] else "pass"
         write_json(directory / "before.json", {"agent": before_card, "processes": before})

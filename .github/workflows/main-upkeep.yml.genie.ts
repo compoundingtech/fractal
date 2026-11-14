@@ -1,3 +1,4 @@
+import { withCompatArchives } from './compat-archive.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
@@ -27,6 +28,7 @@ import {
 
 const proofId = (id: string) => `proof-${id}`
 const proofSelected = "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'"
+// The fleet builder includes archive producers before projection, retaining the complete queue graph.
 const fleetWorkflow = buildFleetWorkflow({ topology: 'merge-group' })
 // Queue-ref cancellation and PR-only advice cannot apply to a landed main commit.
 const proofOmissions: Record<string, string> = {
@@ -75,7 +77,8 @@ const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => (
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
   steps: [
-    { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+    // Reuse setup's checkout before probing; a second checkout would clean downloaded compat archives.
+    ...setup.slice(0, 1),
     ...(nixOnly ? [genieNixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
       ...step,
       if: 'success()',
@@ -92,9 +95,12 @@ if ${nixOnly ? '[ \"$NIX_HIT\" != true ]' : '[ \"$CARGO_HIT\" != true ] || [ \"$
 fi`,
     },
     ...whenMissing([
-      ...(stage === 'genie' ? setup.filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup),
+      ...(stage === 'genie' ? setup.slice(1).filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup.slice(1)),
       ...(stage === 'genie' ? [megarepoApplyStep] : []),
-      nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
+      {
+        ...nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
+        ...(stage === 'fleet-compat' ? { env: { GH_TOKEN: '${{ github.token }}' } } : {}),
+      },
       { name: 'Save Nix outputs', run: 'bash scripts/ci-nix-cache save' },
       // PR/merge builds restore these entries and retain exact-source artifacts. Only
       // protected main fills the shared dependency quota, including after eviction.
@@ -109,7 +115,7 @@ fi`,
   ],
 })
 
-const upkeepWorkflow = scopeLinuxNixSandbox(auditCaches({
+const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
@@ -184,7 +190,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           name: 'Cache locked TypeScript dependencies', id: 'typescript-cache', uses: 'actions/cache@v5',
           with: {
             path: pnpmStoreEnv.pnpm_config_store_dir,
-            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}',
+            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-${{ steps.lockfiles.outputs.hash }}',
+            'restore-keys': 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-',
           },
         },
         {
@@ -221,7 +228,7 @@ fi`,
         },
         ...[
           { ...nixDevelopStep({ name: 'Fetch the locked packages', flake: '.#web', command: ['pnpm', 'fetch'] }), env: pnpmStoreEnv },
-          { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: fractalWebStoreCache },
+          { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: { path: fractalWebStoreCache.path, key: fractalWebStoreCache.key } },
         ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true'" })),
         ...[
           {
@@ -242,6 +249,6 @@ fi`,
       before: [perfStoresCache('cost')],
     }),
   },
-}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."}))
+}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
 
 export default githubWorkflow({ ...upkeepWorkflow, jobs: { ...upkeepWorkflow.jobs, ...proofJobs } })

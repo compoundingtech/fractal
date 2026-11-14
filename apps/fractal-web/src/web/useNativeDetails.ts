@@ -27,7 +27,7 @@ export const guardedSessionTiming = ({ input, source, agentRef }: { readonly inp
   const guards = sessions
   return Atom.make(get => {
     const feed = get(input)
-    if (feed._tag !== 'Observed' || feed.error?.reason === 'ungranted') return feed
+    if (feed._tag !== 'Observed' || feed.error?.reason === 'ungranted' || feed.error?.reason === 'unauthorized') return feed
     const session = feed.value
     if (session.owner_id !== agentRef) return feed
     const start = DateTime.toEpochMillis(session.started_at)
@@ -72,7 +72,7 @@ export const useNativeDetails = ({ agentRef }: { readonly agentRef: string }): N
   const queueAtom = source.subjectReads.agentQueue.feed(agentRef)
   const queue = useAtomValue(queueAtom)
   const subjects = useSubjectList()
-  const needsMe = agent._tag === 'Observed' && agent.error?.reason !== 'ungranted' && agent.value !== undefined
+  const needsMe = agent._tag === 'Observed' && agent.error?.reason !== 'ungranted' && agent.error?.reason !== 'unauthorized' && agent.value !== undefined
     ? agent.value.status === 'waiting' || subjects.some(subject => subject.ref === agentRef && subject.attention === true) : undefined
   // Each recovery re-reads only its own getter, and only after that getter failed.
   const retryFailed = (atom: Atom.Atom<Feed<unknown>>) => {

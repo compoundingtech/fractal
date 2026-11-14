@@ -4,11 +4,11 @@ import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentFoldersProps, SidebarNode } from '../folders/sidebarContract.ts'
 import { SidebarAgentRow, sidebarRowAccessibleName } from '@fractal/ui/assistant-ui/shell'
-import * as sidebarKit from '@fractal/ui/assistant-ui/shell'
+import * as sidebarKit from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTree.tsx'
 import { sidebarRow } from '../web/sidebarRow.ts'
 import { fleetFromAgents } from '../data/projections.ts'
 import { Agent, decodeUnknownSync } from '@fractal/client/schema'
-import { openAgent } from '@fractal/sdk/effect'
+import { openAgent } from '@fractal/sdk/read'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: Record<string, unknown>) => styles, defineVars: (vars: unknown) => vars, createTheme: () => ({}), keyframes: () => '', props: () => ({}) }))
 import { AgentFolders } from './AgentFolders.tsx'

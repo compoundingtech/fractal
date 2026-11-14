@@ -90,6 +90,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_work_lease_renewals",
         "local_git_change_records",
         "local_git_change_latest",
+        "local_harness_question_generations",
         "local_mailbox_owners",
         "local_mailbox_bindings",
         "local_mailbox_argv_bindings",
@@ -105,15 +106,30 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_fold_batches",
         "local_client_message_publications",
         "local_client_message_cut_epoch",
+        // Like message cut epochs, desired write generations invalidate local cursors.
+        "local_desired_write_witness",
         "local_idle_messages",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",
         "local_message_staged",
         "local_message_mark_events",
+        // Member-local messages a graph write queued for the messages shard.
+        "local_message_outbox",
+        // The messages shard's items and lifecycle, mirrored for the graph's mail indexes.
+        "local_stream_sent",
+        "local_stream_lifecycle",
+        // A seat's host's closes as it relayed them: never replicated, outside every digest.
+        "local_relayed_message_closes",
         "coordination_sends",
         "local_coordination_backfill",
         "stop_deferral_claims",
         "local_stop_deferral_backfill",
+        // Live gate runners, kept from the claims by triggers: member-local.
+        "local_gate_runners",
+        "local_gate_runners_backfill",
+        // Work-wake candidates and their resumable copy cursor: member-local.
+        "local_work_wake_tags",
+        "local_work_wake_backfill",
         "local_publication_claims",
         "local_publication_starts",
         "local_publication_pending",
@@ -133,20 +149,37 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
         "local_usage_spend",
+        "local_step_execution_spend",
         "local_usage_provenance",
         "local_usage_responses",
         "local_limit_stops",
         "local_seat_accounts",
         "account_limit_readings",
         "account_limit_seats",
+        "local_usage_credit_heads",
+        "local_usage_credit_pending",
+        "local_usage_credit_progress",
         "local_latest_slots",
         "local_resource_projection_pending",
+        // Member-local mission-head work, rebuilt from selected published revisions.
+        "local_mission_supersession_heads_v3",
+        // Rebuildable active-run capacity summaries; canonical headers/definitions are authority.
+        "mission_run_capacity_v1",
+        "mission_run_capacity_totals_v1",
+        // Member-local duration windows and dirty runs, rebuilt from canonical claims.
+        "local_run_eta_pending",
+        "local_run_eta_dirty",
+        "local_run_eta_samples",
+        "local_run_eta_terminal",
+        "local_run_eta_terminal_pending",
+        "local_run_eta_mission_changes",
         // Member-local preparation state and queues, rebuildable from canonical claims.
         "local_resource_preparation",
         "local_resource_preparation_claims",
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
         "local_resource_preparation_deferred",
+        "local_resource_preparation_rebuild",
         // Member-local completion-health candidates and hydration progress, rebuilt from claims.
         "local_completion_health_v1_claims",
         "local_completion_health_v1_fields",
@@ -156,6 +189,20 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
+        // Person read positions: an order-free max register refolded from replicated claims on
+        // open, repair and replay; the claims carry the shared digest coverage.
+        "read_positions",
+        // Host-authoritative admission state is local, not a replicated projection.
+        "local_host_holds",
+        // Host-local execution authority, immutable lane policies and membership custody;
+        // these are authoritative local records, not replicated claim projections.
+        "resource_authorities_v1",
+        "resource_lane_policies_v1",
+        "resource_memberships_v1",
+        // Person attention controls: order-free earliest-seen and newest-snooze registers
+        // refolded from replicated claims on open, repair and replay; the claims carry the
+        // shared digest coverage.
+        "person_attention_controls",
         "local_custom_dirty",
         "identity_dirty",
         "graph_generation",
@@ -181,6 +228,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "held_keys",
         "fleet_invite_tokens",
         "replica_envelope_holds",
+        "replica_restore_quarantine",
         "checkpoint_envelopes",
         "checkpoint_claims",
         "checkpoint_capture_epoch",
@@ -194,6 +242,8 @@ fn every_persistent_table_has_a_projection_scope() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let store = Store::open_memory("alder").unwrap();
+    // Exercise the lazily installed credit tables as well as the always-present schema.
+    store.wait_for_usage_credit_backfill().unwrap();
     let connection = store.readers.get();
     assert_eq!(
         SHARED_TABLES,
@@ -893,6 +943,7 @@ message "audit-declared" {
     source.replay_replication_graph().unwrap();
     source
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

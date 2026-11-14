@@ -1,6 +1,6 @@
 import type { Arrangement } from '@fractal/client'
 import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
-import { ActionRefused } from '@fractal/sdk/effect'
+import { ActionRefused } from '@fractal/sdk/mutations'
 import { Effect } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { arrangementSidebarDoc } from './client.ts'

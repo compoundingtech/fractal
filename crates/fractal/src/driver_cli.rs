@@ -1,7 +1,103 @@
 use super::*;
 
+fn managed_declaration_result(
+    result: std::result::Result<Value, GeneratedClientError>,
+) -> Result<Value> {
+    match result {
+        Ok(tree) => Ok(tree),
+        Err(GeneratedClientError::Api(ClientErrorCode::NotFound, _, _)) => Ok(Value::Null),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) async fn prepare_managed_provider(
+    client: &Client,
+    subject: &str,
+    harness: &str,
+    argv: &mut [String],
+) -> Result<()> {
+    let actor = client.person.as_deref().unwrap_or(subject);
+    let declaration = retry_while_daemon_unreachable(subject, || async {
+        let gateway = generated_client(&client.endpoint, Some(actor))?;
+        managed_declaration_result(
+            gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
+        )
+    }).await?;
+    fractal_drivers::managed_launch::resolve(harness, argv, &declaration, subject)
+}
+
+#[cfg(test)]
+mod managed_declaration_tests {
+    use super::*;
+
+    fn api_error(code: ClientErrorCode) -> GeneratedClientError {
+        let envelope = fractal_client::ErrorEnvelope {
+            api_version: "st3.client.v0".into(),
+            error_version: "st3.client.error.v0".into(),
+            request_id: "test".into(),
+            code: code.clone(),
+            message: "declaration read failed".into(),
+            retryable: false,
+            retry_after_ms: None,
+            details: BTreeMap::new(),
+        };
+        GeneratedClientError::Api(code, envelope.message.clone(), Box::new(envelope))
+    }
+
+    #[test]
+    fn confirmed_not_found_allows_persona_fallback() {
+        assert_eq!(managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap(), Value::Null);
+        let spec = json!({"children": [{"name": "name", "arguments": ["Managed seat"]}]});
+        assert_eq!(managed_declaration_result(Ok(spec.clone())).unwrap(), spec);
+    }
+
+    #[test]
+    fn declaration_failures_do_not_become_missing_specs() {
+        for code in [ClientErrorCode::Forbidden, ClientErrorCode::Internal] {
+            assert!(managed_declaration_result(Err(api_error(code))).is_err());
+        }
+        assert!(managed_declaration_result(Err(GeneratedClientError::Transport("unavailable".into()))).is_err());
+        assert!(managed_declaration_result(Err(GeneratedClientError::Protocol("invalid JSON".into()))).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_resume_and_flagless_agent_calls_select_the_managed_wrapper() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("codex");
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile = root.path().join("profile.json");
+        std::fs::write(&profile, serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        let environment = BTreeMap::from([
+            ("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string()),
+            ("PATH".into(), "/native/bin".into()),
+        ]);
+        for program in ["codex", "/native/bin/codex"] {
+            // Legacy re-exec preserves these flagless arguments from the previous image.
+            let Command::Driver(mut args) = Cli::try_parse_from([
+                "fractal", "driver", "codex", "--subject", "agent/example", "--", program,
+            ]).unwrap().command else { panic!("driver expected") };
+            let declaration = managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap();
+            fractal_drivers::managed_launch::resolve_with_environment(
+                &args.driver, &mut args.argv, &declaration, &environment, &|_| Ok(()),
+            ).unwrap();
+            assert_eq!(Path::new(&args.argv[0]), wrapper);
+        }
+    }
+}
+
 /// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
+    fractal_client::set_client_name(format!(
+        "fractal-driver-hook {}",
+        fractal_drivers::version::machine_version()
+    ));
     let arguments = std::env::args().skip(2).collect::<Vec<_>>();
     let Some((name, rest)) = arguments.split_first() else {
         eprintln!(
@@ -146,10 +242,21 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
-        if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
+        let resume = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV);
+        // Fresh drivers keep the existing runtime wait across daemon restarts. Adopting
+        // drivers cannot wait on a new incarnation, but their declaration read retries outages.
+        let incarnation = if resume.is_none() {
+            Some(wait_for_agent_incarnation(client, subject).await?)
+        } else {
+            None
+        };
+        if matches!(args.driver.as_str(), "omp" | "claude" | "codex") {
+            prepare_managed_provider(client, subject, &args.driver, &mut argv).await?;
+        }
+        if let Some(state) = resume {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;
         }
-        let incarnation = wait_for_agent_incarnation(client, subject).await?;
+        let incarnation = incarnation.context("fresh driver has no runtime incarnation")?;
         let paths = NativePaths::prepare(subject, &args.driver)?;
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(session) = fractal_daemon::native_seed::first_launch(
@@ -747,7 +854,7 @@ async fn drive_st2_native_loop(
             if completion_announced && crate::fixture()
                 && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
             {
-                fs::write(PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
+                fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
             }
         }
         tokio::select! {
@@ -757,8 +864,8 @@ async fn drive_st2_native_loop(
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
-                    fs::write(PathBuf::from(root).join("fence-received"),
-                        if task.is_finished() { "finished" } else { "pending" })?;
+                    fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("fence-received"),
+                        if task.is_finished() { "finished" } else { "pending" }.as_bytes())?;
                 }
                 // The subscription can reopen after the provider has ended, and the daemon then
                 // fences it as terminal. With the provider's task returned there is nothing left
@@ -1223,7 +1330,7 @@ async fn fixture_terminal_completion_barrier(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let deferred = observations.drain_live(client, subject, driver, ready).await?;
-    fs::write(root.join("observation-drained"), if deferred { "deferred" } else { "published" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("observation-drained"), if deferred { "deferred" } else { "published" }.as_bytes())?;
     let after = fs::read_to_string(root.join("order"))? == "after";
     if after {
         while !task.is_finished() {
@@ -1233,7 +1340,7 @@ async fn fixture_terminal_completion_barrier(
     } else {
         anyhow::ensure!(!task.is_finished(), "fixture must retain pending provider JoinHandle");
     }
-    fs::write(root.join("join-phase"), if after { "finished" } else { "pending" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("join-phase"), if after { "finished" } else { "pending" }.as_bytes())?;
     while !root.join("poll-driver").exists() {
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "fixture driver release timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1653,8 +1760,16 @@ async fn run_pi_channel(
     replacement_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut renewed_minute = None;
-    let mut work_retry = fractal_daemon::client::DriverRetry::default();
+    // A separate task keeps mailbox awaits and admission from starving the lease.
+    // JoinSet aborts it on every channel exit, including cancellation and re-exec.
+    let mut renewals = tokio::task::JoinSet::new();
+    let renewal_client = client.clone();
+    let renewal_subject = subject.to_owned();
+    let renewal_incarnation = incarnation.clone();
+    renewals.spawn(async move {
+        run_channel_renewals(&renewal_client, &renewal_subject, &renewal_incarnation,
+            || renewal_minute(&renewal_subject)).await
+    });
     let mut checked_todo_minute = None;
     let mut todo_end_seen = None;
     loop {
@@ -2006,7 +2121,11 @@ async fn run_pi_channel(
                     reader = Some(spawn_reader(input_tx.clone()));
                 }
             }
-            _ = work_retry.tick(&mut work_interval), if !binding => {
+            result = renewals.join_next() => {
+                result.context("channel renewal task disappeared")???;
+                anyhow::bail!("channel renewal task stopped");
+            }
+            _ = work_interval.tick(), if !binding => {
                 let minute = unix_minute()?;
                 if checked_todo_minute != Some(minute) {
                     checked_todo_minute = Some(minute);
@@ -2032,21 +2151,6 @@ async fn run_pi_channel(
                             Ok(true) => return Ok(()),
                             Ok(false) => {}
                             Err(error) => warn_pi_channel(subject, &error, &mut last_warning),
-                        }
-                    }
-                }
-                if let Some(renew_minute) = renewal_minute(subject)?
-                    && renewed_minute != Some(renew_minute)
-                    && work_retry.ready()
-                {
-                    match renew_claimed_work(client, subject, &incarnation, renew_minute, &mut work_retry).await {
-                        Ok(()) => {
-                            work_retry.succeeded();
-                            renewed_minute = Some(renew_minute);
-                        }
-                        Err(error) => {
-                            work_retry.failed(&error);
-                            warn_pi_channel(subject, &error, &mut last_warning);
                         }
                     }
                 }
@@ -2158,6 +2262,7 @@ fn legacy_delivery_hold(
         reason: "Unexpired delivery hold adopted from the previous native driver".into(),
         idempotency_key: format!("delivery-hold-adoption:{subject}:{until_unix_ms}"),
         legacy_adoption: true,
+        force: false,
     })
 }
 
@@ -2469,8 +2574,8 @@ async fn drive_codex_native_loop(
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
-                    fs::write(PathBuf::from(root).join("fence-received"),
-                        if task.is_finished() { "finished" } else { "pending" })?;
+                    fractal_daemon::test_support::publish_barrier(&PathBuf::from(root).join("fence-received"),
+                        if task.is_finished() { "finished" } else { "pending" }.as_bytes())?;
                 }
                 let mail_changed = matches!(&frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. }));
                 mailbox.accept(frame, &runtime_id)?;
@@ -2839,7 +2944,7 @@ async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "Codex fixture provider completion timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    fs::write(root.join("observation-drained"), b"deferred")?;
+    fractal_daemon::test_support::publish_barrier(&root.join("observation-drained"), b"deferred")?;
     let after = fs::read_to_string(root.join("order"))? == "after";
     if after {
         while !task.is_finished() {
@@ -2849,7 +2954,7 @@ async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()
     } else {
         anyhow::ensure!(!task.is_finished(), "Codex fixture must retain pending provider JoinHandle");
     }
-    fs::write(root.join("join-phase"), if after { "finished" } else { "pending" })?;
+    fractal_daemon::test_support::publish_barrier(&root.join("join-phase"), if after { "finished" } else { "pending" }.as_bytes())?;
     while !root.join("poll-driver").exists() {
         anyhow::ensure!(tokio::time::Instant::now() < deadline, "Codex fixture driver release timed out");
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2945,15 +3050,127 @@ fn renewal_minute(subject: &str) -> Result<Option<u64>> {
     Ok(renewal_minute_at(subject, seconds))
 }
 
+async fn run_channel_renewals(
+    client: &Client,
+    subject: &str,
+    incarnation: &str,
+    minute_now: impl Fn() -> Result<Option<u64>>,
+) -> Result<()> {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut retry = fractal_daemon::client::DriverRetry::default();
+    let mut renewed_minute = None;
+    let mut warnings = PiChannelWarnings::default();
+    loop {
+        retry.tick(&mut interval).await;
+        if let Some(minute) = minute_now()?
+            && renewed_minute != Some(minute) && retry.ready()
+        {
+            match renew_claimed_work(client, subject, incarnation, minute, &mut retry).await {
+                Ok(()) => {
+                    retry.succeeded();
+                    renewed_minute = Some(minute);
+                }
+                Err(error) => {
+                    retry.failed(&error);
+                    warn_pi_channel(subject, &error, &mut warnings);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn binding_longer_than_a_lease_keeps_renewing() {
+        binding_renewal_case(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn binding_renewal_recovers_after_one_failure() {
+        binding_renewal_case(true).await;
+    }
+
+    async fn binding_renewal_case(fail_once: bool) {
+        use axum::{Json, Router, routing::{get, post}};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        let start = tokio::time::Instant::now();
+        let clock = Arc::new(AtomicU64::new(0));
+        let deadline = Arc::new(AtomicU64::new(600));
+        let failed = Arc::new(AtomicBool::new(false));
+        // macOS TMPDIR can exceed the Unix socket path limit.
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let socket = root.path().join("renew.sock");
+        let step = json!({
+            "subject":"step-run/test/work", "run":"mission-run/test",
+            "generation":"run-generation/test", "step":"work", "definition_hash":"test",
+            "status":"working", "attempt":1, "agentless":false, "worker_reported":false,
+            "claimant":"agent/test", "claim_incarnation":"live", "readiness_epoch":1,
+            "claim_expires_at_unix_ms":600000, "created_at_unix_ms":0, "updated_at_unix_ms":0
+        });
+        let listed = step.clone();
+        let renew_clock = clock.clone();
+        let renew_deadline = deadline.clone();
+        let renew_failed = failed.clone();
+        let app = Router::new()
+            .route("/v1/work", get(move || {
+                let mut other = listed.clone();
+                other["subject"] = json!("step-run/test/other");
+                other["claim_incarnation"] = json!("other");
+                let value = json!([listed, other]);
+                async move { Json(json!({"api_version":"st3.v1", "value":value})) }
+            }))
+            .route("/v1/work/renew/{*subject}", post(move |axum::extract::Path(subject): axum::extract::Path<String>| {
+                assert_eq!(subject, "step-run/test/work", "only the driver's incarnation");
+                let now = renew_clock.load(Ordering::SeqCst);
+                assert!(now < renew_deadline.load(Ordering::SeqCst), "lease expired");
+                let fail = fail_once && !renew_failed.swap(true, Ordering::SeqCst);
+                if !fail { renew_deadline.store(now + 600, Ordering::SeqCst); }
+                let value = step.clone();
+                async move {
+                    if fail {
+                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"retry"})))
+                    } else {
+                        (axum::http::StatusCode::OK, Json(json!({"api_version":"st3.v1", "value":value})))
+                    }
+                }
+            }));
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move { serve_unix(&server_socket, app).await.unwrap() });
+        while !socket.exists() { tokio::task::yield_now().await; }
+        let client = Client::unix(&socket);
+        let mut renewals = tokio::task::JoinSet::new();
+        renewals.spawn(async move {
+            run_channel_renewals(&client, "agent/test", "live",
+                || Ok(Some(start.elapsed().as_secs() / 60))).await
+        });
+        // Admission never completes, and the mailbox handler is itself blocked.
+        let binding = std::future::pending::<()>();
+        tokio::pin!(binding);
+        for second in 0..=1_200 {
+            clock.store(second, Ordering::SeqCst);
+            tokio::select! {
+                () = &mut binding => panic!("binding unexpectedly completed"),
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            for _ in 0..50 { tokio::task::yield_now().await; }
+            assert!(second < deadline.load(Ordering::SeqCst));
+            assert!(!renewals.is_empty());
+        }
+        assert!(deadline.load(Ordering::SeqCst) > 1_200);
+        assert_eq!(failed.load(Ordering::SeqCst), fail_once);
+        drop(renewals);
+        server.abort();
+    }
+
 
     /// A daemon that is stopping first answers with an error, then stops answering. Each kind of
     /// note keeps its own 10 s limit, so the outage note still follows the error's (#4733).
     #[tokio::test]
     async fn a_stopping_daemons_error_does_not_hide_the_outage_note_after_it() {
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let unreachable = Client::unix(root.path().join("absent.sock"))
             .get::<serde_json::Value>("/v1/health")
             .await
@@ -2984,7 +3201,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let subject = "agent/eval/gated";
-        let root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("control.sock");
         let reads = Arc::new(AtomicUsize::new(0));
         let count = reads.clone();
