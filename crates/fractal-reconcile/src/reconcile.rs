@@ -22376,6 +22376,7 @@ pub mod tests {
     mod revision_seat_tests;
     mod rollout_tests;
     mod run_report_tests;
+    mod scheduled_child_wake;
     mod start_spacing_loop;
     mod start_preemption;
     mod seat_admission_queue;
