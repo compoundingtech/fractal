@@ -3140,6 +3140,8 @@ export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | strin
 
 export type NoticeActor = string;
 
+export type NoticeAgent = string;
+
 export type NoticeClaimId = string;
 
 export type NoticeCreated = {
@@ -3219,8 +3221,6 @@ export type NoticePolicy = {
   revision: Revision;
 };
 
-export type NoticeRuntime = string;
-
 export type NoticeSeenParameters = {
   notice_id: NoticeId;
 };
@@ -3238,7 +3238,7 @@ export type NoticeSnapshot = {
   policy: NoticePolicy;
   producer: NoticeActor;
   revision: Revision;
-  runtime: NoticeRuntime;
+  runtime: string;
   schema_version: 1;
   seen_at: (NoticeTimestamp | null);
   snoozed_until: (NoticeTimestamp | null);
@@ -3253,7 +3253,7 @@ export type NoticeSnoozeParameters = {
 };
 
 export type NoticeSource = {
-  agent?: NoticeRuntime;
+  agent?: NoticeAgent;
   cwd?: string;
   host: string;
   pty?: string;
