@@ -115,6 +115,8 @@ const elsewhere = (alert: Native.Attention, step: string | undefined): React.Rea
 }
 
 const READ_ONLY = <>This device is read-only, so it can't answer here. Answer it from a device with control access, or with <Command>fractal alerts</Command>.</>
+/** While disconnected, or before this device's grants are read: the same "Updates paused" the threads show. */
+export const ANSWERS_PAUSED = 'Updates paused. Answer once Fractal reconnects.'
 
 type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
 
@@ -122,6 +124,7 @@ type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertAction
 export const AnswerAlert = ({
   alert,
   onAct,
+  paused = false,
   now = Date.now(),
   density = 'docked',
   pager,
@@ -135,6 +138,8 @@ export const AnswerAlert = ({
 }: {
   readonly alert: Native.Attention
   readonly onAct?: Act
+  /** Answers wait for the connection: controls show disabled with `ANSWERS_PAUSED`, never the read-only notice. */
+  readonly paused?: boolean
   readonly now?: number
   readonly density?: DecisionDensity
   readonly pager?: DecisionPosition
@@ -235,7 +240,7 @@ export const AnswerAlert = ({
     {...(parts.dismiss === undefined ? {} : {
       dismiss: { label: armed ? `Confirm ${parts.dismiss.label.toLowerCase()}` : parts.dismiss.label, onPress: () => { if (armed) send(parts.dismiss!); else arm() } },
     })}
-    {...(unavailable !== undefined ? { unavailable } : choices !== null && onAct === undefined ? { unavailable: READ_ONLY } : {})}
+    {...(unavailable !== undefined ? { unavailable } : choices === null ? {} : paused ? { unavailable: ANSWERS_PAUSED } : onAct === undefined ? { unavailable: READ_ONLY } : {})}
     {...(status === undefined ? {} : { status })}
     {...(pager === undefined ? {} : { pager })}
     {...(onFold === undefined ? {} : { onFold })}

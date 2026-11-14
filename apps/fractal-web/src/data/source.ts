@@ -54,7 +54,9 @@ import type { ObjectivesSource } from './objectivesSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 
 /** Fixed recovery copy for a rejected browser credential; never expose the server's diagnostic. */
-export const credentialExpiredMessage = "This browser's access to the daemon has expired or was revoked. Pair the device again."
+export const credentialExpiredMessage = "This browser's access to Fractal expired or was revoked. Pair it again."
+/** Headline beside `credentialExpiredMessage` wherever a surface gives the refusal a title. */
+export const credentialExpiredTitle = 'Access revoked'
 
 const rejectedCredential = Schema.Struct({
   status: Schema.Literal(403),
@@ -165,6 +167,11 @@ export interface Agent {
   /** Actual wire driver and reporting capability; unlike harness, unknown and non-observing values are retained. */
   readonly driver?: SubagentDriver
   readonly activity: 'working' | 'waiting' | 'idle' | 'errored'
+  /**
+   * The seat's own report of its turn: `inactive` when it says it is idle, waiting or not running,
+   * `active` when its harness reports work. Absent when the row does not say.
+   */
+  readonly turn?: 'active' | 'inactive'
   readonly status: string
   readonly state?: string
   readonly description?: string
@@ -241,6 +248,8 @@ export interface Grants {
   readonly terminalInput: 'granted' | 'ungranted'
   /** `terminal.control`: a raw PTY ATTACH that types on the socket and votes the shared size. */
   readonly terminalControl: 'granted' | 'ungranted'
+  /** No capabilities answer has been read yet: every grant above is a default, not a refusal. */
+  readonly unread?: true
 }
 
 /** One gateway activity line (`at` is ISO-8601) for the events feed. */
@@ -369,6 +378,8 @@ export interface DataSource {
   /** Objectives, budgets and their history from this member's native served model. */
   readonly objectives?: ObjectivesSource
   readonly connection: Atom.Atom<ConnectionState>
+  /** The gateway rejected this browser's credential; absent sources never observe a rejection. */
+  readonly credentialRevoked?: Atom.Atom<boolean>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>
   /** One explicit reconnect attempt, bypassing the current countdown. */
