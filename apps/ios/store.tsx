@@ -569,11 +569,12 @@ function useAppStore(proof?: FabricProfile) {
     const reporter = new PresenceReporter({
       report: async report => {
         const generation = availabilityRead.current;
+        const startedBetweenWrites = !availabilityWriting.current;
         const result = (await client.presenceReport(report)).value;
         // A presence answer carries the person as the server sees it, which may predate an edit in
-        // flight or just finished: it applies only between writes, at the same read generation, on
-        // the same connection, so it never overwrites what an editor write is applying or applied.
-        if (capsRef.current === caps && !availabilityWriting.current && availabilityRead.current === generation) setAvailability(previous => ({ ...previous, person: result.availability }));
+        // flight or just finished: it applies only if both request and answer fall between writes,
+        // at the same read generation, on the same connection, so an editor's answer always wins.
+        if (startedBetweenWrites && capsRef.current === caps && !availabilityWriting.current && availabilityRead.current === generation) setAvailability(previous => ({ ...previous, person: result.availability }));
         return result;
       },
       lastInput: () => lastInput.current,

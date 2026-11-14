@@ -284,7 +284,11 @@ test('presence answers apply only between writes at the same read generation on 
   finish();
   await duringWrite;
   assert.equal(value.person.status, 'available', 'an edit in flight keeps its own answer the last word');
+  const finishesAfterWrite = report({ state: 'active' });
   availabilityWriting.current = null;
+  finish();
+  await finishesAfterWrite;
+  assert.equal(value.person.status, 'available', 'a report started during a write stays stale even when the write finishes before its reply');
   const betweenWrites = report({ state: 'active' });
   finish();
   await betweenWrites;
