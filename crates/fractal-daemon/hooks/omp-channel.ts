@@ -989,24 +989,42 @@ export default function (pi: ExtensionAPI) {
     const usage = message.usage && typeof message.usage === "object"
       ? message.usage as Record<string, unknown>
       : undefined;
-    // Per-response spend: the provider's disjoint token buckets, its model, and the cost the
-    // harness itself computed. Nothing else about the request leaves the harness.
+    // Only observed response metadata and numeric usage leave the harness, never raw requests.
     const cost = usage?.cost && typeof usage.cost === "object"
       ? usage.cost as Record<string, unknown>
       : undefined;
+    const cttl = usage?.cttl && typeof usage.cttl === "object"
+      ? usage.cttl as Record<string, unknown>
+      : undefined;
     return { message: {
       id: boundedTimelineString(message.id, 256),
+      responseId: boundedTimelineString(message.responseId, 256),
       role: boundedTimelineString(message.role, 32),
       content,
       model: boundedTimelineString(message.model, 128),
       provider: boundedTimelineString(message.provider, 64),
+      api: boundedTimelineString(message.api, 128),
+      stopReason: boundedTimelineString(message.stopReason, 64),
+      timestamp: finiteOrNull(message.timestamp),
+      completedAt: finiteOrNull(message.completedAt),
+      duration: finiteOrNull(message.duration),
+      ttft: finiteOrNull(message.ttft),
       usage: usage ? {
         input: finiteOrNull(usage.input ?? usage.inputTokens),
         output: finiteOrNull(usage.output ?? usage.outputTokens),
         cacheRead: finiteOrNull(usage.cacheRead),
         cacheWrite: finiteOrNull(usage.cacheWrite),
         totalTokens: finiteOrNull(usage.totalTokens),
-        cost: cost ? finiteOrNull(cost.total) : null,
+        reasoningTokens: finiteOrNull(usage.reasoningTokens),
+        cttl: cttl ? { ephemeral1h: finiteOrNull(cttl.ephemeral1h) } : undefined,
+        cost: cost ? {
+          input: finiteOrNull(cost.input),
+          output: finiteOrNull(cost.output),
+          cacheRead: finiteOrNull(cost.cacheRead),
+          cacheWrite: finiteOrNull(cost.cacheWrite),
+          total: finiteOrNull(cost.total),
+        } : finiteOrNull(usage.cost),
+        premiumRequests: finiteOrNull(usage.premiumRequests),
       } : undefined,
     } };
   };

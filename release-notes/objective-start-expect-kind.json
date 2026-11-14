@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declared interval objectives may start a sample at the claim that names its expected members",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "changed", "detail": "An interval objective whose `start` and `expect` name the same claim kind is now admitted (it was refused as two roles); every other kind keeps one role."},
+  "compatibility": {"status": "none", "detail": "Existing declarations read and evaluate unchanged. A declaration using the shared kind is refused by older builds, so publish it after every member runs this build."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Retire the declaration to stop its evaluation."}
+}

@@ -12,6 +12,25 @@ Every first locally produced `message.sent` checks lifecycle inside the serializ
 
 Exact retries of accepted sends return the original receipt after retirement. Changing an accepted request under its key retains the idempotency mismatch error. A lost transport reply remains unconfirmed: retirement cannot turn a potentially accepted send into a confirmed refusal. Replicated sends are accepted history, so import and replay do not perform first-send admission.
 
+## One-shot process completion
+
+One-shot completion selects a reversible stop, not terminal identity retirement. The exact
+incarnation's retained PTY exit evidence is written to `runtime.observed.fields.exit_evidence`
+(incarnation, exit code, signal, bounded redacted output tail), with `exit_code` and `exit_signal`
+also available as observed fields. Later stop observations preserve this evidence for the same
+incarnation; a replacement incarnation never inherits it. Existing observations without retained
+evidence remain readable.
+
+The one-shot retirement decision records the exit summary. If the stopped seat leaves a mission
+without an eligible agent, the waiting step, mission run reason and operational failure include
+the exit code/signal and safe output tail. Subject inspection retains the structured evidence
+after stop. Output that cannot be safely redacted is omitted by the runtime evidence boundary.
+Automatic one-shot stops retain run/generation/step ownership and do not suppress the missing-agent
+fault as a deliberate root stop would. A blocked run durably refreshes a changed failure reason
+even when its status and phase do not change; an identical reason remains deduplicated.
+The optional claim field changes the registry digest; peers must upgrade together to interpret it.
+
+
 ## Replication and rollout
 
 Upgrade fleet members together before enabling retirement. The action checks the configured peers and active fleet member incarnations against their last advertised registry digests. It returns `retirement-upgrade-required` with `applied: "none"` until every such peer advertises this build's registry. The gate requires exact digest equality, including after any later registry change: retirement refuses again until all configured/active members match that registry. A host removed from the membership and configuration is outside that gate; an offline member with no matching advertisement keeps retirement disabled. Operators must prevent downgrading a member after it advertises the new registry and upgrade new members before admitting them to a fleet with retired identities. This advertisement guard complements coordinated rollout; it cannot prove the currently running software of an unreachable member. A downgraded or rejoining old binary continues to operate without enforcing retirement; this slice has no mechanism to block that binary.

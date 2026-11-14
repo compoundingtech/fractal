@@ -202,12 +202,25 @@ export const OmpResumeSchema = Schema.Union([
   Schema.Struct({ transcript: Text }),
 ]).annotate({ identifier: 'Fractal.OmpResume' })
 
+/** One-shot first-turn message, identified within the agent subject. */
+export const HarnessMessageSchema = Schema.Struct({
+  text: Text.pipe(
+    Schema.refine(
+      (text): text is string =>
+        /\P{White_Space}/u.test(text) && utf8ByteLength(text) <= 65536 && text.includes('\0') === false,
+      { message: 'message text must be nonblank, at most 65536 UTF-8 bytes and contain no NUL' },
+    ),
+  ),
+  id: Text.pipe(Schema.refine((id): id is string => utf8ByteLength(id) <= 256)),
+}).annotate({ identifier: 'Fractal.HarnessMessage' })
+
 /** OMP harness selection for a seat. */
 export const OmpSchema = Schema.Struct({
   kind: Schema.Literal('omp'),
   model: Text,
   effort: Schema.optionalKey(Schema.Literals(['low', 'medium', 'high', 'xhigh'])),
   resume: Schema.optionalKey(OmpResumeSchema),
+  message: Schema.optionalKey(HarnessMessageSchema),
 }).annotate({ identifier: 'Fractal.Omp' })
 
 /** Codex harness selection with explicit model and effort routing. */
@@ -217,6 +230,7 @@ export const CodexSchema = Schema.Struct({
   effort: Text,
   args: Schema.optionalKey(Schema.Array(Text)),
   resume: Schema.optionalKey(Schema.Struct({ session: Text })),
+  message: Schema.optionalKey(HarnessMessageSchema),
 }).annotate({ identifier: 'Fractal.Codex' })
 
 /** Claude Code harness selection; effort is the native driver's optional effort level. */
@@ -224,6 +238,7 @@ export const ClaudeSchema = Schema.Struct({
   kind: Schema.Literal('claude'),
   model: Text,
   effort: Schema.optionalKey(Text),
+  message: Schema.optionalKey(HarnessMessageSchema),
 }).annotate({ identifier: 'Fractal.Claude' })
 
 /**
@@ -319,6 +334,9 @@ const AgentSchemaFields = Schema.Struct({
   name: Schema.optionalKey(Text),
   description: Schema.optionalKey(Text),
   principal: Schema.optionalKey(PersonReferenceSchema),
+  lifecycle: Schema.optionalKey(
+    Schema.Union([Schema.Literal('standing'), Schema.Literal('owner'), Schema.Literal('bounded')]),
+  ),
   ...DeclaredAdmissionFields,
   host: Schema.optionalKey(Text),
   workspace: Schema.optionalKey(Text),
@@ -1044,10 +1062,12 @@ export const omp = ({
   model,
   effort,
   resume,
+  message,
 }: {
   readonly model: string
   readonly effort?: (typeof OmpSchema.Encoded)['effort']
   readonly resume?: typeof OmpResumeSchema.Encoded
+  readonly message?: typeof HarnessMessageSchema.Encoded
 }): typeof OmpSchema.Type =>
   snapshotComposition(
     decode({
@@ -1057,6 +1077,7 @@ export const omp = ({
         model,
         ...(effort === undefined ? {} : { effort }),
         ...(resume === undefined ? {} : { resume }),
+        ...(message === undefined ? {} : { message }),
       },
     }),
   )
@@ -2521,6 +2542,7 @@ export const agent = (input: typeof AgentSchema.Encoded): Node => {
     ...optionalChild({ name: 'name', value: a.name }),
     ...optionalChild({ name: 'description', value: a.description }),
     ...optionalChild({ name: 'principal', value: a.principal?.subject }),
+    ...optionalChild({ name: 'lifecycle', value: a.lifecycle }),
     ...declaredAdmissionNodes(a),
     ...optionalChild({ name: 'host', value: a.host }),
   ]
@@ -2609,6 +2631,15 @@ export const agent = (input: typeof AgentSchema.Encoded): Node => {
                     a.harness.resume === 'latest'
                       ? ['--continue']
                       : ['--resume', a.harness.resume.transcript],
+                }),
+              ]),
+          ...(a.harness.message === undefined
+            ? []
+            : [
+                node({
+                  name: 'message',
+                  args: [a.harness.message.text],
+                  props: { id: a.harness.message.id },
                 }),
               ]),
         ],

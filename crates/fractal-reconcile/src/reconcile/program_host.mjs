@@ -45,6 +45,9 @@ const main = () => {
   const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`)
   /** By step-run subject: the attempt this host runs. */
   const runs = new Map()
+  /** Attempts awaiting actual worker exit, including attempts replaced for the same step. */
+  const ending = new Map()
+  const attemptKey = (step, attempt) => JSON.stringify([step, attempt])
 
   const record = (run, pid) => {
     const path = join(groupsDir, `${pid}.json`)
@@ -55,17 +58,29 @@ const main = () => {
   const killGroup = (pid) => {
     try {
       process.kill(-pid, 'SIGKILL')
-    } catch {}
+    } catch (error) {
+      if (error.code !== 'ESRCH') throw error
+    }
     rmSync(join(groupsDir, `${pid}.json`), { force: true })
   }
   /** End an attempt: its worker and every effect group it started. */
   const end = (run) => {
+    if (run.termination !== undefined) return run.termination
     run.ended = true
-    if (runs.get(run.step) === run) runs.delete(run.step)
     clearInterval(run.ping)
-    void run.worker.terminate()
+    const key = attemptKey(run.step, run.attempt)
+    ending.set(key, run)
+    send({ t: 'ending', step: run.step, attempt: run.attempt })
+    // Native I/O can delay termination. Keep this exact attempt addressable without
+    // blocking the host or letting a replacement overwrite its exit proof.
+    run.termination = run.worker.terminate().then(() => {
+      if (runs.get(run.step) === run) runs.delete(run.step)
+      ending.delete(key)
+      send({ t: 'cancelled', step: run.step, attempt: run.attempt })
+    })
     for (const pid of run.groups) killGroup(pid)
     run.groups.clear()
+    return run.termination
   }
 
   const spawnEffect = (run, { id, argv: requested, options = {} }) => {
@@ -111,7 +126,11 @@ const main = () => {
   const start = (message) => {
     const previous = runs.get(message.step)
     if (previous !== undefined) end(previous)
-    const worker = new Worker(fileURLToPath(import.meta.url), { workerData: message })
+    // Context is per attempt, never a mutation of the shared host's environment.
+    const worker = new Worker(fileURLToPath(import.meta.url), {
+      workerData: message,
+      env: { ...process.env, ...message.env },
+    })
     const run = {
       step: message.step,
       attempt: message.attempt,
@@ -134,22 +153,26 @@ const main = () => {
         case 'spawn':
           return spawnEffect(run, message)
         case 'done':
-          send({ t: 'done', ...ids, exit: message.exit })
-          return end(run)
-        default:
-          // journal, run, ask: the daemon decides; the worker waits for its answer.
+          end(run)
+          return send({ t: 'done', ...ids, exit: message.exit })
+        case 'journal':
+        case 'run':
+        case 'ask':
+          // The daemon decides; the worker waits for its answer.
           return send({ ...message, ...ids })
+        default:
+          return // Host-control messages must never be forwarded from a worker.
       }
     })
     worker.on('error', (error) => {
       if (run.ended) return
-      send({ t: 'done', ...ids, exit: defect(error) })
       end(run)
+      send({ t: 'done', ...ids, exit: defect(error) })
     })
     worker.on('exit', () => {
       if (run.ended) return
-      send({ t: 'done', ...ids, exit: defect('the program worker exited without a result') })
       end(run)
+      send({ t: 'done', ...ids, exit: defect('the program worker exited without a result') })
     })
     run.ping = setInterval(() => {
       if (run.ended) return
@@ -168,13 +191,18 @@ const main = () => {
     if (message.t === 'ping') return send({ t: 'pong', seq: message.seq })
     if (message.t === 'start') return start(message)
     const run = runs.get(message.step)
-    if (run === undefined || run.attempt !== message.attempt) return // another attempt's message
-    if (message.t === 'cancel') return end(run)
+    if (message.t === 'cancel') {
+      const attempt = ending.get(attemptKey(message.step, message.attempt))
+        ?? (run?.attempt === message.attempt ? run : undefined)
+      if (attempt !== undefined) return end(attempt)
+      return send({ t: 'cancelled', step: message.step, attempt: message.attempt })
+    }
+    if (run === undefined || run.attempt !== message.attempt || run.ended) return // another or ended attempt
     run.worker.postMessage(message) // ack, nack, resolved
   })
   // The daemon is gone: its replacement resumes every program from the journal. End all effects now.
   lines.on('close', () => {
-    for (const run of [...runs.values()]) end(run)
+    for (const run of new Set([...runs.values(), ...ending.values()])) end(run)
     process.exit(0)
   })
 }

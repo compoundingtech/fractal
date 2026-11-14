@@ -41,7 +41,8 @@
     "check:details": "node scripts/details-run-gates.mjs",
     "check:sidebar-fitting": "node scripts/check-sidebar-fitting.mjs",
     "check:transcript-skeleton-imports": "node scripts/check-transcript-skeleton-imports.mjs",
-    "test:declaration": "node --test --test-force-exit src/assistant-ui/declaration/declaration-tint.unit.test.mjs"
+    "test:declaration": "node --test --test-force-exit src/assistant-ui/declaration/declaration-tint.unit.test.mjs src/assistant-ui/declaration/source-map-view.unit.test.mjs",
+    "test:entity": "node --experimental-strip-types src/assistant-ui/entity/entity.unit.test.ts"
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.25",

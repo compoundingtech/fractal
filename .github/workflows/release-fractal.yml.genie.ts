@@ -26,6 +26,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "**",
         "!edge",
         "!embed-*",
+        "!fleet-*",
         // Evidence records may live under refs/tags/evidence/ (one immutable tag per signed note); pushing one must never release.
         "!evidence/**"
       ]
@@ -34,6 +35,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       inputs: {
         sha: { description: 'Exact first-parent main source SHA for an isolated candidate build', required: false, type: 'string' },
         request_id: { description: 'Caller correlation ID for this candidate build', required: false, type: 'string' },
+        purpose: { description: 'Candidate requires main first-parent history; compatibility builds any deployed source without publication', required: false, type: 'choice', default: 'candidate', options: ['candidate', 'compatibility'] },
       },
     },
     "pull_request": {
@@ -98,13 +100,17 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
           "github.event_name == 'workflow_dispatch'",
         ),
         {
-          name: 'Require main dispatch and a full first-parent main SHA',
+          name: 'Validate exact source and preserve the stable candidate main gate',
           if: "github.event_name == 'workflow_dispatch'",
           shell: 'bash',
-          env: { REQUESTED_SHA: '${{ inputs.sha }}', DISPATCH_REF: '${{ github.ref }}' },
+          env: { REQUESTED_SHA: '${{ inputs.sha }}', DISPATCH_REF: '${{ github.ref }}', PURPOSE: '${{ inputs.purpose }}' },
           run: `set -euo pipefail
-if [[ "$DISPATCH_REF" != refs/heads/main ]]; then
+if [[ "$PURPOSE" != compatibility && "$DISPATCH_REF" != refs/heads/main ]]; then
   echo "::error::Release builds must be dispatched from main."
+  exit 1
+fi
+if [[ "$PURPOSE" == compatibility && -z "$REQUESTED_SHA" ]]; then
+  echo "::error::Compatibility archives require an exact source SHA."
   exit 1
 fi
 if [[ -n "$REQUESTED_SHA" ]]; then
@@ -112,10 +118,21 @@ if [[ -n "$REQUESTED_SHA" ]]; then
     echo "::error::The candidate source must be a full lowercase 40-character SHA."
     exit 1
   fi
-  # Read the whole stream: pipefail must not mistake an early reader exit for invalid history.
-  if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$REQUESTED_SHA"; then
-    echo "::error::The candidate source must belong to origin/main first-parent history."
-    exit 1
+  if [[ "$PURPOSE" == compatibility ]]; then
+    # Full history is fetched from origin before inspecting this exact commit.
+    git cat-file -e "$REQUESTED_SHA^{commit}"
+    refs=$(git for-each-ref --contains "$REQUESTED_SHA" --format='%(refname)' refs/remotes/origin refs/tags)
+    if [[ -z "$refs" ]]; then
+      echo "::error::Compatibility source must be reachable from an origin ref."
+      exit 1
+    fi
+    printf 'Compatibility archive source=%s reachable-from:\\n%s\\n' "$REQUESTED_SHA" "$refs"
+  else
+    # Read the whole stream: pipefail must not mistake an early reader exit for invalid history.
+    if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$REQUESTED_SHA"; then
+      echo "::error::The candidate source must belong to origin/main first-parent history."
+      exit 1
+    fi
   fi
 fi`,
         },

@@ -15,6 +15,85 @@ fn fixture(name: &str) -> Vec<u8> {
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
 }
+#[test]
+fn availability_fixtures_decode_coarse_and_full_views_and_encode_a_status_clear_as_null() {
+    let read: Envelope<PersonAvailabilities> = decode("person-availability.json");
+    let [ada, avery, blair] = &read.value.people[..] else { panic!("three people") };
+    assert_eq!((ada.status.as_str(), ada.status_source.as_str(), ada.interruptions.as_str()), ("away", "override", "urgent"));
+    assert!(ada.presence.is_none() && ada.presence_observed_at.is_none());
+    assert_eq!((avery.deadline_clock, avery.deadline_clock_until.as_deref()), (AvailabilityDeadlineClock::HoldRoutine, Some("2026-11-12T17:00:00Z")));
+    assert_eq!((blair.status, blair.status_source), (AvailabilityStatus::Available, AvailabilityStatusSource::Unreported));
+    let own: Envelope<PersonAvailability> = decode("availability-set-result.json");
+    assert_eq!(own.value.presence, Some(AvailabilityPresence::Present));
+    let set: AvailabilitySet = decode("availability-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("availability-set.json")).unwrap());
+    let clear = AvailabilitySet { status: Some(AvailabilityStatusChange { value: None, until: None }), ..AvailabilitySet::default() };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"status": {"value": null}}));
+    let report: PresenceReport = decode("presence-report.json");
+    assert_eq!((report.state.as_str(), report.last_input_at.as_deref(), report.observed_at.as_str()), ("active", Some("2026-11-12T09:57:30Z"), "2026-11-12T09:58:00Z"));
+    let reported: Envelope<PresenceReportResult> = decode("presence-report-result.json");
+    assert_eq!((reported.value.availability.presence, reported.value.report_again_at.as_deref()), (Some(AvailabilityPresence::Present), Some("2026-11-12T10:07:30Z")));
+    let bare = PresenceReport { state: "locked".into(), last_input_at: None, observed_at: "2026-11-12T09:58:00Z".into() };
+    assert_eq!(serde_json::to_value(&bare).unwrap(), serde_json::json!({"state": "locked", "observed_at": "2026-11-12T09:58:00Z"}));
+}
+
+#[test]
+fn availability_words_a_newer_daemon_adds_read_as_unknown() {
+    let mut row = serde_json::from_slice::<serde_json::Value>(&fixture("person-availability.json")).unwrap()["value"]["people"][0].clone();
+    for (field, word) in [("status", "busy"), ("status_source", "calendar"), ("presence", "in-call"), ("interruptions", "priority"), ("deadline_clock", "hold-weekend")] {
+        row[field] = serde_json::json!(word);
+    }
+    let future: PersonAvailability = serde_json::from_value(row).unwrap();
+    assert_eq!((future.status, future.status_source), (AvailabilityStatus::Unknown, AvailabilityStatusSource::Unknown));
+    assert_eq!(future.presence, Some(AvailabilityPresence::Unknown));
+    assert_eq!((future.interruptions, future.deadline_clock), (AvailabilityInterruptions::Unknown, AvailabilityDeadlineClock::Unknown));
+    assert_eq!((AvailabilityDeadlineClock::HoldAll.as_str(), AvailabilityStatus::Unknown.to_string()), ("hold-all", "unknown".to_owned()));
+}
+
+#[test]
+fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
+    let set: DirectiveNoteSet = decode("directive-note-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("directive-note-set.json")).unwrap());
+    let written: Envelope<DirectiveNoteSetResult> = decode("directive-note-set-result.json");
+    assert_eq!(written.value.note.as_ref().map(|note| note.text.as_str()), set.text.as_deref());
+    let clear = DirectiveNoteSet { text: None, expires_at: None };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"text": null}));
+}
+
+
+#[test]
+fn response_evidence_schema_and_typed_models_preserve_observations() {
+    let bodies: Vec<serde_json::Value> = decode("response-evidence.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/TimelineUsageBody"
+    })).unwrap();
+    for raw in bodies {
+        assert!(validator.is_valid(&raw));
+        let body: TimelineUsageBody = serde_json::from_value(raw.clone()).unwrap();
+        let encoded = serde_json::to_value(&body).unwrap();
+        for (key, value) in raw.as_object().unwrap() {
+            assert_eq!(&encoded[key], value, "{key}");
+        }
+        assert_eq!(body.response_id.as_deref(), raw["response_id"].as_str());
+    }
+    let unknown = serde_json::json!({
+        "semantics":"response", "driver":"omp", "attribution":{"agent_id":"agent/example"}
+    });
+    assert!(validator.is_valid(&unknown));
+    let body: TimelineUsageBody = serde_json::from_value(unknown.clone()).unwrap();
+    assert!(body.total_tokens.is_none());
+    assert!(body.cost.is_none());
+    assert!(body.provider_quota.is_none());
+    assert!(body.reasoning_tokens.is_none());
+    assert!(body.cache_write_1h_tokens.is_none());
+    let mut invalid = unknown;
+    invalid["provider_quota"] = serde_json::json!({"unit":"tokens","quantity":1});
+    assert!(!validator.is_valid(&invalid));
+    invalid["provider_quota"] = serde_json::json!({"unit":"premium_requests","quantity":-1});
+    assert!(!validator.is_valid(&invalid));
+}
 
 #[test]
 fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {

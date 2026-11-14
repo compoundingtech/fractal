@@ -149,6 +149,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
         "local_usage_spend",
+        "local_step_execution_spend",
         "local_usage_provenance",
         "local_usage_responses",
         "local_limit_stops",
@@ -160,6 +161,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_usage_credit_progress",
         "local_latest_slots",
         "local_resource_projection_pending",
+        // Member-local mission-head work, rebuilt from selected published revisions.
+        "local_mission_supersession_heads_v3",
+        // Rebuildable active-run capacity summaries; canonical headers/definitions are authority.
+        "mission_run_capacity_v1",
+        "mission_run_capacity_totals_v1",
         // Member-local duration windows and dirty runs, rebuilt from canonical claims.
         "local_run_eta_pending",
         "local_run_eta_dirty",
@@ -186,6 +192,17 @@ fn every_persistent_table_has_a_projection_scope() {
         // Person read positions: an order-free max register refolded from replicated claims on
         // open, repair and replay; the claims carry the shared digest coverage.
         "read_positions",
+        // Host-authoritative admission state is local, not a replicated projection.
+        "local_host_holds",
+        // Host-local execution authority, immutable lane policies and membership custody;
+        // these are authoritative local records, not replicated claim projections.
+        "resource_authorities_v1",
+        "resource_lane_policies_v1",
+        "resource_memberships_v1",
+        // Person attention controls: order-free earliest-seen and newest-snooze registers
+        // refolded from replicated claims on open, repair and replay; the claims carry the
+        // shared digest coverage.
+        "person_attention_controls",
         "local_custom_dirty",
         "identity_dirty",
         "graph_generation",
@@ -926,6 +943,7 @@ message "audit-declared" {
     source.replay_replication_graph().unwrap();
     source
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,

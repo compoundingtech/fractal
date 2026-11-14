@@ -171,11 +171,11 @@ const depthIndent = (depth: number) => `calc(${s.lg} * ${depth})`
  * The touch disclosure for a `trailing` parent, rendered by the host in its own trailing column when `renderRow` gets
  * `trailingDisclosure`: a `g.touchTarget` square in the row's chevron slot whose chevron turns as the row expands.
  */
-export function SidebarTreeDisclosure({ expanded }: { readonly expanded: boolean }) {
+export function SidebarTreeDisclosure({ expanded, noun = 'subagents' }: { readonly expanded: boolean; readonly noun?: string }) {
   const { direction } = useLocale()
   const id = React.useId()
   // RAC labels the chevron slot "Expand <row>"; naming the button by its own label says what it reveals.
-  return <Button slot="chevron" id={id} aria-labelledby={id} aria-label={expanded ? 'Hide subagents' : 'Show subagents'} aria-expanded={expanded} data-sidebar-disclosure="trailing" {...stylex.props(styles.trailing)}>
+  return <Button slot="chevron" id={id} aria-labelledby={id} aria-label={`${expanded ? 'Hide' : 'Show'} ${noun}`} aria-expanded={expanded} data-sidebar-disclosure="trailing" {...stylex.props(styles.trailing)}>
     <span aria-hidden {...stylex.props(styles.trailingGlyph, direction === 'rtl' && styles.mirrored, expanded && (direction === 'rtl' ? styles.turnedRtl : styles.turned))}><Icon name="chevron-right" size={12} /></span>
   </Button>
 }

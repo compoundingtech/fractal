@@ -15,6 +15,64 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[test]
+fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
+    assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
+    assert!(wire_names::api_version("st3.client.v0"));
+    assert!(wire_names::api_version(CLIENT_API_VERSION));
+    let error = client_error_envelope(StatusCode::BAD_REQUEST, &json!({}), "request/test");
+    assert_eq!(error["api_version"], "fractal.client.v0");
+    assert_eq!(error["error_version"], "fractal.client.error.v0");
+}
+
+#[test]
+fn launch_hash_inputs_keep_base_golden_bytes() {
+    assert_eq!(launch_preview_token_values("fixed", "default", 7, Some("generation/fixed"),
+        &json!({"title":"Versions","steps":[]}), &[]).unwrap(),
+        "lpv0:b7b6e7a32a9fb0a0fed198d3b6f3deadae46a5200abeb3f92c4df7d19afff357");
+    let old = json!({"visualization":{"version":"st3.visualization.v0"}});
+    let new = json!({"visualization":{"version":"fractal.visualization.v0"}});
+    for collection in ["launches", "launches/fixed/variants"] {
+        assert_eq!(client_items_digest(collection, std::slice::from_ref(&new)).unwrap(),
+            hex::encode(Sha256::digest(serde_json::to_vec(&vec![old.clone()]).unwrap())));
+    }
+    assert_eq!(new["visualization"]["version"], "fractal.visualization.v0");
+}
+
+#[test]
+fn launch_visualizations_emit_fractal_for_drafts_and_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let kdl = "version 2\nmission \"example/versions\" state=\"ready\" { goal \"Check versions\"; }";
+    let intent = crate::graph::parse_test_intent(kdl, &state.node).unwrap();
+    let mut session: PlanningSessionView = serde_json::from_value(json!({
+        "subject": "planning/versions", "id": "versions", "mission": "example/versions",
+        "request": "Check versions", "workspace": root.path(), "requester": "person/ada",
+        "planner": "agent/planner", "status": "draft", "created_at_unix_ms": 0,
+        "updated_at_unix_ms": 0, "variants": [{
+            "name": "default", "candidate": {
+                "variant": "default", "revision": 1, "markdown": "", "kdl": kdl,
+                "mission": "example/versions", "mission_revision": "", "submitted_at_unix_ms": 0
+            }
+        }]
+    })).unwrap();
+    let drafts = client_launch_variant_resources(&state, &session).unwrap();
+    assert_eq!(drafts[0]["visualization"]["version"], "fractal.visualization.v0");
+    let mission = state.store.mission(&intent, crate::model::IntentInput {
+        kdl: kdl.into(), source_name: None,
+    }).unwrap();
+    let preview = crate::model::PlanningPreviewView {
+        variant: "default".into(), hash: "preview".into(), candidate_revision: 1,
+        store_index: 0, graph: String::new(), diff: String::new(), mission,
+        created_at_unix_ms: 0,
+    };
+    session.variants[0].preview = Some(preview.clone());
+    let visualization = launch_visualization(
+        &intent.missions["example/versions"], &session, &preview, &[],
+    );
+    assert_eq!(visualization["version"], "fractal.visualization.v0");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn incomplete_linux_environment_is_unavailable() {
@@ -400,6 +458,77 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     server.abort();
 }
 
+// Re-executed by the transport test below, so the socket connector has a real exec-time
+// environment rather than process-global test mutations.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scratch_attributed_client_probe() {
+    let Ok(socket) = std::env::var("FRACTAL_SCRATCH_PROBE_SOCKET") else { return; };
+    let body: Value = serde_json::from_str(&std::env::var("FRACTAL_SCRATCH_PROBE_BODY").unwrap()).unwrap();
+    let result: anyhow::Result<Value> = crate::client::Client::unix(Path::new(&socket))
+        .post("/v1/intent/apply", &body).await;
+    if std::env::var("FRACTAL_SCRATCH_PROBE_ALLOWED").unwrap() == "yes" {
+        assert!(result.is_ok(), "{result:?}");
+    } else {
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("foreign-agent-actor"), "{error}");
+    }
+}
+
+/// A private instance cannot resolve its creator's outer mission credential. Its clients
+/// use an explicit agent identity instead of claiming that the exec is a person.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scratch_clients_under_program_ancestry_publish_only_as_their_explicit_agent() {
+    use std::os::unix::process::CommandExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let socket = root.path().join("scratch.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        reserved, router(state.clone()), Some(store.clone()), None, harness_ancestor,
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    for (index, marker, actor, allowed) in [
+        (0, false, "person/operator", false),
+        (1, true, "person/operator", false),
+        (2, true, "agent/fixture/foreign", false),
+        (3, true, "agent/fixture/scratch", true),
+    ] {
+        let source = format!("version 2\nmission \"fixture/scratch-{index}\" state=\"ready\" {{\n  goal \"Exercise scratch attribution.\"\n  step \"work\" {{ }}\n}}\n");
+        let body = apply_request(&state, &source, actor, &format!("scratch-{index}"));
+        let before = store.index().unwrap();
+        // The shell models an outer mission exec, in a different process group with no TTY.
+        // The leaf exec removes the foreign credential; without its own identity the walk
+        // still finds that credential in the parent. With one it binds to that agent.
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "env -u ST_RUN_CREDENTIAL \"$@\"; result=$?; exit \"$result\"", "scratch-probe"]);
+        if marker { command.arg("ST_AGENT=agent/fixture/scratch"); }
+        command.arg(std::env::current_exe().unwrap())
+            .args(["--exact", "api::tests::scratch_attributed_client_probe", "--nocapture"])
+            .env("ST_RUN_CREDENTIAL", "foreign-instance-credential")
+            .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            .env("FRACTAL_SCRATCH_PROBE_SOCKET", &socket)
+            .env("FRACTAL_SCRATCH_PROBE_BODY", serde_json::to_string(&body).unwrap())
+            .env("FRACTAL_SCRATCH_PROBE_ALLOWED", if allowed { "yes" } else { "no" })
+            .stdin(std::process::Stdio::null()).process_group(0);
+        let output = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "probe did not execute: {}", String::from_utf8_lossy(&output.stdout));
+        let claim = store.latest_claim(&format!("mission/fixture/scratch-{index}"), Some("mission.published")).unwrap();
+        if allowed {
+            assert_eq!(claim.unwrap().actor.as_deref(), Some(actor));
+        } else {
+            assert!(claim.is_none());
+            assert_eq!(store.index().unwrap(), before);
+        }
+    }
+    server.abort();
+}
+
 #[tokio::test]
 async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
     use http_body_util::BodyExt as _;
@@ -622,7 +751,7 @@ async fn fleet_leave_state_proxies_live_worker_snapshot_and_rejects_another_inca
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     ).unwrap();
     let app = Router::new().route("/v1/internal/fleet/leave-state", get(move || {
         let fleet = fleet.clone();
@@ -652,7 +781,7 @@ async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
     let directory = state.state_dir.join("fleet");
     std::fs::create_dir_all(&directory).unwrap();
     let listener = tokio::net::UnixListener::bind(
-        smallclaims::sync::leave_state_socket(&state.state_dir),
+        smallclaims::sync::leave_state_socket(&state.api_socket).unwrap(),
     )
     .unwrap();
     let expected_public = public.clone();
@@ -8152,8 +8281,16 @@ mission "targeted" state="ready" revisions="human-only" {
     .await;
     assert_eq!(status, StatusCode::OK, "{approved}");
     assert_eq!(approved["status"], "approved");
-    let revised = store.mission_run(&run.id).unwrap().unwrap();
+    let source = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(source.generation, run.generation);
+    assert_eq!(source.revision, run.revision);
+    let revised = store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+    assert_ne!(revised.subject, run.subject);
+    assert_eq!(revised.supersedes.as_deref(), Some(run.subject.as_str()));
     assert_ne!(revised.generation, run.generation);
+    assert_eq!(revised.revision, approved["published_revision"].as_str().unwrap());
+    assert_eq!(approved["target_mission_run"], run.subject);
+    assert_eq!(approved["source_generation"], run.generation);
 
     let approvals = store
         .events_after(0, None)
@@ -12163,6 +12300,132 @@ mission "agent-human" state="ready" {
 }
 
 #[test]
+fn a_run_seats_drift_item_resolves_its_person_without_rebuilding_the_run() {
+    use crate::store::model_drift::{MODEL_DRIFT_CONDITION, MODEL_DRIFT_TITLE, ModelDrift, model_drift_episode};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = "version 2\nmission \"drift-owner\" state=\"ready\" {\n  goal \"Exercise drift ownership.\"\n  agent \"worker\" { workspace \"/tmp\"; harness \"omp\" { model \"anthropic/claude-opus-5-5\" } }\n  step \"queued\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\" }\n}\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &planned.subject_tokens, "drift-owner-source").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "drift-owner".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "drift-owner-run".into(),
+        })
+        .unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    store.append_claim(&ClaimInput {
+        subject: subject.clone(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "one"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let reason = ModelDrift { declared: "anthropic/claude-opus-5-5".into(), live: "gpt-6.1-sol".into(), since_ms: 1 }.reason();
+    store.record_failure(&model_drift_episode(&subject), &crate::model::AttentionRequest {
+        reviewer: subject.clone(), title: MODEL_DRIFT_TITLE.into(), reason, severity: "error".into(),
+        targets: vec![subject.clone()], actor: "agent/st3/reconciler".into(),
+        idempotency_key: "drift-owner:attention".into(),
+    }, MODEL_DRIFT_CONDITION).unwrap();
+    // The person comes from the run's requester header: no step of the run is enriched.
+    crate::store::STEPS_ENRICHED.with(|enriched| enriched.set(0));
+    let items = store.model_drift_attention_items(Some("person/test"), u128::MAX).unwrap();
+    assert_eq!(crate::store::STEPS_ENRICHED.with(std::cell::Cell::get), 0);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].person, "person/test");
+    assert_eq!(items[0].targets, [subject]);
+}
+
+#[test]
+fn only_a_client_that_negotiated_model_drift_reads_the_kind_as_it_is() {
+    let row = json!({"kind": "attention", "attention_kind": "model-drift", "source_kind": "model-drift",
+        "actions": [], "title": "2 agents declared a run b since 09:14Z (oldest agent/example.a)"});
+    let negotiated = AttentionCompatibility { custom_forms: true, model_drift: true };
+    let mut current = vec![row.clone()];
+    client_attention_compatibility(&mut current, negotiated);
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0], row);
+    // A client with custom forms but without the model-drift feature (an existing TypeScript
+    // client) and a client with neither both read a request without actions.
+    for custom_forms in [true, false] {
+        let mut older = vec![row.clone()];
+        client_attention_compatibility(&mut older, AttentionCompatibility { custom_forms, model_drift: false });
+        assert_eq!(older[0]["attention_kind"], "agent-request", "custom_forms={custom_forms}");
+        assert_eq!(older[0]["actions"], json!([]));
+        assert_eq!(older[0]["title"], "2 agents declared a run b since 09:14Z (oldest agent/example.a)");
+    }
+}
+
+#[test]
+fn agent_card_reports_the_model_its_incarnation_actually_runs_on() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = "version 2\nmission \"live-model\" state=\"ready\" {\n  goal \"Exercise live model projection.\"\n  agent \"worker\" { workspace \"/tmp\"; harness \"omp\" { model \"anthropic/claude-opus-5-5\" } }\n  step \"queued\" { assigned-to \"agent/${ST_MISSION_RUN}/worker\" }\n}\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &planned.subject_tokens, "live-model-source").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "live-model".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "live-model-run".into(),
+        })
+        .unwrap();
+    materialize_run_agents(&state, &run);
+    let subject = format!("agent/{}/worker", run.id);
+    let append = |kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "one"}));
+    append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "one"}));
+    let card = || {
+        checked_agent_cache(&store, true, store.index().unwrap())
+            .into_iter()
+            .find(|agent| agent["id"] == subject.as_str())
+            .unwrap()
+    };
+    // No usage yet: null, and the typed client still decodes.
+    assert!(card()["live_model"].is_null());
+    let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
+    assert!(typed.live_model.is_none());
+    // Usage on another incarnation does not leak into this card.
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "zero", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
+    assert!(card()["live_model"].is_null());
+    // The session's reading on this incarnation reports live, and survives a typed decode.
+    append("harness.usage", json!({"semantics": "context_occupancy", "driver": "omp", "incarnation_id": "one", "model": "gpt-6.1-sol", "context_used_tokens": 1}));
+    assert_eq!(card()["live_model"], "gpt-6.1-sol");
+    let typed: fractal_client::Agent = serde_json::from_value(card()).unwrap();
+    assert_eq!(typed.live_model.as_deref(), Some("gpt-6.1-sol"));
+    // Response spend on another model (a subagent's, rolled up on the parent) is not what
+    // the seat runs on: the card keeps the session's model.
+    append("harness.usage", json!({"semantics": "response", "driver": "omp", "incarnation_id": "one", "model": "claude-haiku-4-5", "total_tokens": 1}));
+    assert_eq!(card()["live_model"], "gpt-6.1-sol");
+    // A stale incarnation keeps its own live model after the seat moves on.
+    append("runtime.observed", json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": "two"}));
+    append("harness.observed", json!({"state": "working", "driver": "omp", "incarnation_id": "two"}));
+    assert!(card()["live_model"].is_null());
+}
+
+#[test]
 fn an_unauthenticated_harness_is_waiting_not_starting() {
     // This unpolled seat is assessed during the daemon's startup grace.
     let _uptime = crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5));
@@ -12340,6 +12603,13 @@ version 2
     assert_ne!(revised["mission_run"]["revision"], run.revision);
     assert_eq!(revised["mission_run"]["root_revision"], run.root_revision);
     assert_eq!(revised["mission_run"]["steps"][0]["status"], "pending");
+    assert_eq!(revised["mission_run"]["subject"], run.subject);
+    assert_eq!(revised["mission_run"]["phase"], "normal");
+    assert!(revised["mission_run"].get("superseded_by").is_none_or(Value::is_null));
+    assert_eq!(
+        state.store.run_generations(&run.subject).unwrap().first().unwrap().revision,
+        run.revision
+    );
     let published = state.store.mission_spec("revision", None).unwrap().unwrap();
     let uris = state.store.declared_resource_uris(&published.resources).unwrap();
     assert_eq!(uris[&published.resources[0].subject], "urn:example:revision");
@@ -12395,6 +12665,107 @@ mission "revision" state="ready" {
         "{error}"
     );
     assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn mission_run_json_carries_execution_projection_without_inventing_unclaimed_work() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = r#"version 2
+mission "execution-read" state="ready" {
+  goal "Read execution evidence."
+  step "work" { agentless }
+}"#;
+    state.store.apply_internal(&parse_intent(source, "node").unwrap(), "execution-read-publish").unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: "execution-read".into(), revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/operator".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "execution-read-run".into(),
+    }).unwrap();
+    let Json(detail) = super::runs::get_mission_run(
+        State(state), AxumPath(run.id),
+    ).await.unwrap();
+    assert_eq!(detail.steps.len(), 1);
+    let value = serde_json::to_value(detail).unwrap();
+    assert_eq!(value["steps"][0]["executions"], json!([]));
+    // The CLI's native typed read must retain this detail-only field.
+    let decoded: MissionRunView = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.steps[0].executions.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn mission_run_retry_preserves_typed_refusals_and_returns_the_new_run() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = r#"version 2
+mission "native-retry" state="ready" {
+  goal "Retry a failed run."
+  step "work" { agentless }
+}"#;
+    state.store.apply_internal(&parse_intent(source, "node").unwrap(), "native-retry-publish").unwrap();
+    let run = state.store.create_mission_run(&MissionRunRequest {
+        mission: "native-retry".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "native-retry-source".into(),
+    }).unwrap();
+    let path = format!("/v1/mission-runs/{}/retry", urlencoding::encode(&run.subject));
+    let request = json!({
+        "actor":"person/operator", "reason":"the failure is resolved",
+        "idempotency_key":"native-retry-new"
+    });
+    let before = state.store.index().unwrap();
+    let (status, refused) = json_request(router(state.clone()), &path, request.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "mission-run-not-retryable");
+    assert_eq!(state.store.index().unwrap(), before);
+
+    state.store.set_mission_run_state(&run.id, "failed", "terminal", Some("a gate failed")).unwrap();
+    let (status, retried) = json_request(router(state.clone()), &path, request).await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_ne!(retried["subject"], run.subject);
+    assert_eq!(retried["retry_of"], run.subject);
+    assert_eq!(retried["workspace"], run.workspace);
+    assert_eq!(retried["revision"], run.revision);
+    assert_eq!(retried["requester"], "person/operator");
+    let new_subject = retried["subject"].as_str().unwrap();
+    let stored = state.store.mission_run(new_subject).unwrap().unwrap();
+    assert_eq!(stored.subject, new_subject);
+    assert_eq!(stored.retry_of.as_deref(), Some(run.subject.as_str()));
+}
+
+#[tokio::test]
+async fn mission_run_retry_binds_the_actor_without_special_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (actor, code) in [
+        ("person/operator", "foreign-agent-actor"),
+        ("agent/other", "foreign-agent-actor"),
+        ("agent/helper", "missing-mission-run"),
+    ] {
+        let before = state.store.index().unwrap();
+        let response = app.clone().oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mission-runs/absent/retry")
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/helper".into()))
+                .body(Body::from(json!({
+                    "actor":actor, "idempotency_key":"native-retry-authority"
+                }).to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let refused: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refused["code"], code, "{refused}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
 }
 
 #[tokio::test]

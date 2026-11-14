@@ -37,10 +37,12 @@ const entryCheck = (bundle: string) =>
 
 /**
  * Bundles `module` with `bun build --target=bun` and writes it to `<bundleDir>/<sha256>.mjs`.
- * Bun names inlined modules by their path relative to `cwd`, so building from the tree root keeps
- * the bytes, and the hash, independent of where the tree is checked out. Only a bundle that is a
- * program reaches `bundleDir`, and it appears there whole: it is renamed into place, and a bundle
- * already present under its hash is never rewritten.
+ * Unminified, Bun heads each inlined module with a comment naming its path relative to `cwd`; a
+ * dependency outside the tree (a loader's linked node_modules) then names a different path from
+ * every checkout. `--minify-whitespace` drops those comments, so the bytes, and the hash, are the
+ * same wherever the tree and its dependencies are checked out. Only a bundle that is a program
+ * reaches `bundleDir`, and it appears there whole: it is renamed into place, and a bundle already
+ * present under its hash is never rewritten.
  */
 export const bundleProgram = Effect.fnUntraced(function* ({
   module,
@@ -63,7 +65,14 @@ export const bundleProgram = Effect.fnUntraced(function* ({
   const build = yield* run({
     bun,
     cwd,
-    args: ['build', module, '--target=bun', '--format=esm', `--outfile=${built}`],
+    args: [
+      'build',
+      module,
+      '--target=bun',
+      '--format=esm',
+      '--minify-whitespace',
+      `--outfile=${built}`,
+    ],
   })
   if (build.status !== 0)
     return yield* new ProgramBundleError({ message: `bun build failed:\n${build.output.trim()}` })

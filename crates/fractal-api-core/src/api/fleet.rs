@@ -290,6 +290,51 @@ pub async fn fleet_membership_view(
         .map(Json)
 }
 
+
+// One-release upgrade bridge: the daemon and worker are separately supervised.
+// Only a missing/refused new socket permits legacy routing, never an HTTP failure
+// or an error after a request may have reached the worker.
+async fn leave_authority_request(
+    api_socket: &Path,
+    state_dir: &Path,
+    timeout: Duration,
+    request: impl Fn(reqwest::Client) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, ApiError> {
+    let current = smallclaims::sync::leave_state_socket(api_socket).map_err(ApiError::internal)?;
+    let send = async |path: &Path| {
+        tracing::debug!(socket = %path.display(), "requesting leave authority");
+        let http = reqwest::Client::builder()
+            .unix_socket(path)
+            .timeout(timeout)
+            .build()?;
+        request(http).send().await
+    };
+    match send(&current).await {
+        Err(error) if leave_socket_absent(&error) => {
+            send(&state_dir.join("fleet/leave-state.sock"))
+                .await
+                .map_err(ApiError::internal)
+        }
+        result => result.map_err(ApiError::internal),
+    }
+}
+
+fn leave_socket_absent(error: &reqwest::Error) -> bool {
+    if !error.is_connect() {
+        return false;
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(error) = source {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            );
+        }
+        source = error.source();
+    }
+    false
+}
 /// Read the live replication authority; a journal cannot report failed persistence.
 pub async fn fleet_leave_state(
     State(state): State<AppState>,
@@ -303,16 +348,14 @@ pub async fn fleet_leave_state(
             persistence_error: None,
         }));
     }
-    let http = reqwest::Client::builder()
-        .unix_socket(smallclaims::sync::leave_state_socket(&state.state_dir))
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(ApiError::internal)?;
-    let snapshot = http
-        .get("http://localhost/v1/internal/fleet/leave-state")
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
+    let snapshot = leave_authority_request(
+        &state.api_socket,
+        &state.state_dir,
+        Duration::from_secs(5),
+        |http| http.get("http://localhost/v1/internal/fleet/leave-state"),
+    )
+        .await?
+        .error_for_status()
         .map_err(ApiError::internal)?
         .json::<smallclaims::sync::FleetLeaveSnapshot>()
         .await
@@ -345,22 +388,20 @@ pub async fn fleet_pairing_admission(
     let sponsor_key = state.store.member_public_key().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("this fleet has no member signing key"))
     })?;
-    let http = reqwest::Client::builder()
-        .unix_socket(smallclaims::sync::leave_state_socket(&state.state_dir))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(ApiError::internal)?;
-    let response = http
-        .post("http://localhost/v1/internal/fleet/pairing-admission")
-        .json(&json!({
-            "request": request.request,
-            "node_id": request.node_id,
-            "expected_fleet_id": fleet_id,
-            "expected_sponsor_key": sponsor_key,
-        }))
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
+    let response = leave_authority_request(
+        &state.api_socket,
+        &state.state_dir,
+        Duration::from_secs(30),
+        |http| http.post("http://localhost/v1/internal/fleet/pairing-admission")
+            .json(&json!({
+                "request": request.request,
+                "node_id": request.node_id,
+                "expected_fleet_id": fleet_id,
+                "expected_sponsor_key": sponsor_key,
+            })),
+    )
+        .await?
+        .error_for_status()
         .map_err(ApiError::internal)?
         .json::<smallclaims::fleet::handshake::JoinResponse>()
         .await
@@ -414,4 +455,59 @@ pub async fn admission_override(
         signal_claim_changed(&state, crate::reconcile::member_admission::OVERRIDE_KIND);
     }
     Ok(Json(claim))
+}
+
+#[cfg(test)]
+mod leave_socket_tests {
+    use super::*;
+
+    async fn serve(path: &Path, status: StatusCode) -> tokio::task::JoinHandle<()> {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        let app = Router::new().route("/", axum::routing::get(move || async move { status }));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() })
+    }
+
+    #[tokio::test]
+    async fn leave_state_socket_falls_back_when_new_socket_is_missing_or_refused() {
+        for refused in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let runtime = root.path().join("run");
+            std::fs::create_dir_all(&runtime).unwrap();
+            if refused {
+                // Leave a stale socket inode, as after an old worker exits.
+                drop(tokio::net::UnixListener::bind(
+                    smallclaims::sync::leave_state_socket(&runtime.join("api.sock")).unwrap(),
+                ).unwrap());
+            }
+            let legacy = root.path().join("fleet/leave-state.sock");
+            let server = serve(&legacy, StatusCode::OK).await;
+            let response = leave_authority_request(
+                &runtime.join("api.sock"), root.path(), Duration::from_secs(5),
+                |http| http.get("http://localhost/"),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn leave_state_socket_prefers_runtime_and_does_not_fallback_on_http_error() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("run");
+        let current = serve(
+            &smallclaims::sync::leave_state_socket(&runtime.join("api.sock")).unwrap(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ).await;
+        let legacy = serve(
+            &root.path().join("fleet/leave-state.sock"), StatusCode::OK,
+        ).await;
+        let response = leave_authority_request(
+            &runtime.join("api.sock"), root.path(), Duration::from_secs(5),
+            |http| http.get("http://localhost/"),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        current.abort();
+        legacy.abort();
+    }
 }

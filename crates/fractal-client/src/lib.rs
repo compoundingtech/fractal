@@ -1286,6 +1286,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::ValidationFailed
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
+        | ErrorCode::AttentionDismissUnsupported
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -1432,9 +1433,9 @@ impl Client {
 
     fn features(&self) -> &'static str {
         if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2"
         } else {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1"
         }
     }
 
@@ -1875,10 +1876,13 @@ impl Client {
         Ok(response)
     }
     /// The current work list's first page as of this request: the daemon waits briefly for a
-    /// publication at least as new as the request. While the list is not ready, or not yet that
-    /// fresh, and while the daemon is unreachable, it asks again within the client's daemon
-    /// wait, measured once from the first attempt across every attempt and pause. A zero wait
-    /// asks once. Only these answers are asked again; any other error returns at once.
+    /// publication at least as new as the request. The first not-fresh answer's wanted cut,
+    /// when supplied, is pinned as min_cut on every retry; later answers cannot advance it.
+    /// Older daemons that omit the cut retain unpinned retries. While the list is not ready,
+    /// or not yet that fresh, and while the daemon is unreachable, it asks again within the
+    /// client's daemon wait, measured once from the first attempt across every attempt and
+    /// pause. A zero wait asks once. Only these answers are asked again; any other error
+    /// returns at once.
     pub async fn work_list_fresh(
         &self,
         actor: Option<&str>,
@@ -1891,7 +1895,8 @@ impl Client {
         if let Some(actor) = actor {
             query.push(format!("actor={}", percent_encode(actor)));
         }
-        let path = format!("/v1/client/work?{}", query.join("&"));
+        let mut path = format!("/v1/client/work?{}", query.join("&"));
+        let mut wanted_cut = None;
         let started = tokio::time::Instant::now();
         let deadline = started + self.outage_wait;
         let mut pause = Duration::from_millis(100);
@@ -1942,6 +1947,17 @@ impl Client {
                     }
                     outcome => outcome,
                 };
+            }
+            if wanted_cut.is_none()
+                && let Err(ClientError::Api(_, _, envelope)) = &outcome
+                && let Some(reason) = envelope.details.get("reason")
+                && reason.as_str() == Some("work-list-not-fresh")
+                && let Some(cut) = envelope.details.get("wanted_cut")
+                && let Some(cut) = cut.as_u64()
+            {
+                use std::fmt::Write as _;
+                write!(&mut path, "&min_cut={cut}").expect("writing to a String cannot fail");
+                wanted_cut = Some(cut);
             }
             // An unreachable daemon is announced once, as for every other request.
             if let Err(ClientError::Unreachable(outage)) = &outcome
@@ -2218,6 +2234,21 @@ impl Client {
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
+    pub async fn availability_list(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Envelope<PersonAvailabilities>, ClientError> {
+        match person {
+            Some(person) => {
+                self.get(&format!(
+                    "/v1/client/availability?person={}",
+                    percent_encode(person)
+                ))
+                .await
+            }
+            None => self.get("/v1/client/availability").await,
+        }
+    }
     pub async fn custom_subjects_list(
         &self,
         kind: Option<&str>,
@@ -2346,6 +2377,31 @@ impl Client {
         }
         self.get(&path).await
     }
+    pub async fn source_map_get(
+        &self,
+        subject: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<SubjectSourceMap>, ClientError> {
+        let mut path = format!("/v1/client/source-maps?subject={}", percent_encode(subject));
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
+    }
+    pub async fn source_blob_get(
+        &self,
+        hash: &str,
+        subject: &str,
+        revision: &str,
+    ) -> Result<Envelope<SourceBlob>, ClientError> {
+        self.get(&format!(
+            "/v1/client/source-blobs/{}?subject={}&revision={}",
+            percent_encode(hash),
+            percent_encode(subject),
+            percent_encode(revision)
+        ))
+        .await
+    }
     pub async fn subject_definition(
         &self,
         subject: &str,
@@ -2405,6 +2461,97 @@ impl Client {
         &self,
     ) -> Result<Envelope<crate::quota::UsageHubQuota>, ClientError> {
         self.get("/v1/client/usage/quota").await
+    }
+    pub async fn github_plugin_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/issues/{number}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_conversation(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/conversation",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_checks(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/checks",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/pulls/{number}/files",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/comments/{comment_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
+    }
+    pub async fn github_plugin_run(
+        &self,
+        owner: &str,
+        repo: &str,
+        run_id: u64,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.get(&format!(
+            "/v1/client/plugins/github/{}/{}/runs/{run_id}",
+            percent_encode(owner),
+            percent_encode(repo)
+        ))
+        .await
     }
     pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {
         self.get("/v1/client/clients").await
@@ -3124,6 +3271,17 @@ impl Client {
                 .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn attention_dismiss(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionDismissParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_dismiss(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -3132,6 +3290,28 @@ impl Client {
         parameters: AttentionResolveParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::attention_resolve(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_seen(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSeenParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_seen(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_snooze(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSnoozeParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_snooze(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3711,6 +3891,40 @@ impl Client {
         report: &ObservationReport,
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Set or clear the session person's own availability. Requires `write.availability`;
+    /// agent sessions are refused.
+    pub async fn availability_set(
+        &self,
+        request: &AvailabilitySet,
+    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/availability", Some(body))
+            .await
+    }
+
+    /// Report one device's raw state for the session person, on every state change and again at
+    /// the result's `report_again_at`; the daemon derives presence and assigns the source.
+    /// Requires `write.presence`; agent sessions are refused.
+    pub async fn presence_report(
+        &self,
+        report: &PresenceReport,
+    ) -> Result<Envelope<PresenceReportResult>, ClientError> {
+        self.post("/v1/client/presence", report).await
+    }
+
+    /// Set or clear the session person's own directive note. Requires `write.notes`;
+    /// agent sessions are refused.
+    pub async fn notes_set(
+        &self,
+        request: &DirectiveNoteSet,
+    ) -> Result<Envelope<DirectiveNoteSetResult>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/notes", Some(body))
+            .await
     }
 
     /// Replace this paired device's local-only push registration. No graph receipt.
@@ -5111,7 +5325,7 @@ mod wire_receiver_tests {
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
         // WebSocket sender cutover does not change the HTTP API/error versions.
-        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1").unwrap();
+        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1").unwrap();
         assert_eq!(
             request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
             TERMINAL_SUBPROTOCOL
@@ -5736,6 +5950,7 @@ mod tests {
         for code in [
             ErrorCode::InvalidAnswer,
             ErrorCode::NotAnswerable,
+            ErrorCode::AttentionDismissUnsupported,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
@@ -5799,8 +6014,8 @@ mod tests {
 
     #[test]
     fn messages_paging_is_explicit_for_every_constructor_and_websocket_request() {
-        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1";
-        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2";
+        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1";
+        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2";
         for client in [
             Client::unix("/unused"),
             Client::unix_as("/unused", "person/test"),
@@ -6497,11 +6712,40 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_work_list_pins_the_first_wanted_cut_across_retries() {
+        runtime().block_on(async {
+            let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("pinned.sock");
+            let not_fresh = |cut: u64| {
+                let mut error: serde_json::Value =
+                    serde_json::from_str(&work_list_error("work-list-not-fresh", true)).unwrap();
+                error["details"]["wanted_cut"] = serde_json::json!(cut);
+                error.to_string()
+            };
+            let server = scripted_server(&socket, vec![
+                (0, 503, not_fresh(7)),
+                (0, 503, not_fresh(11)),
+                (0, 503, work_list_error("work-list-not-ready", true)),
+                (0, 200, page),
+            ]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(5), false);
+            client.work_list_fresh(Some("agent/garden/ash"), Some(5)).await.unwrap();
+            assert_eq!(server.await.unwrap(), vec![
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+                "GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash&min_cut=7 HTTP/1.1",
+            ]);
+        });
+    }
+
+    #[test]
     fn a_fresh_work_list_retries_only_not_ready_and_not_fresh_within_one_daemon_wait() {
         runtime().block_on(async {
             let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
             let directory = tempfile::tempdir().unwrap();
-            // Not ready, then not fresh, then rows: three requests, one answer.
+            // Legacy errors omit wanted_cut: not ready, then not fresh, then rows stay unpinned.
             let socket = directory.path().join("ready.sock");
             let server = scripted_server(&socket, vec![
                 (0, 503, work_list_error("work-list-not-ready", true)),

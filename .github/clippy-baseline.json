@@ -8,7 +8,7 @@
       "clippy::needless_borrow": 2,
       "clippy::needless_borrows_for_generic_args": 1,
       "clippy::needless_return": 1,
-      "clippy::too_many_arguments": 2,
+      "clippy::too_many_arguments": 1,
       "clippy::unnecessary_get_then_check": 1
     },
     "fractal-api-core": {
@@ -19,7 +19,6 @@
       "clippy::manual_is_multiple_of": 1
     },
     "fractal-drivers": {
-      "clippy::cloned_ref_to_slice_refs": 1,
       "clippy::collapsible_if": 5,
       "clippy::items_after_test_module": 2,
       "clippy::needless_borrow": 2,
@@ -36,7 +35,7 @@
     },
     "fractal-missions": {
       "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 3
+      "clippy::collapsible_if": 1
     },
     "fractal-reconcile": {
       "clippy::collapsible_if": 3,
@@ -53,8 +52,7 @@
     "fractal-store": {
       "clippy::collapsible_if": 10,
       "clippy::double_ended_iterator_last": 1,
-      "clippy::redundant_closure": 1,
-      "clippy::too_many_arguments": 1
+      "clippy::redundant_closure": 1
     },
     "fractal-tui": {
       "clippy::cloned_ref_to_slice_refs": 2,

@@ -26,6 +26,8 @@
 #           local observation log of the node that made them, whatever `log` says
 
 [kinds]
+"harness.invocation" = { class = "durable" }
+"harness.invocation-artifact" = { class = "durable" }
 "deploy.go" = { class = "durable" }
 "deploy.go-revoked" = { class = "durable" }
 "deploy.go-consumed" = { class = "durable" }
@@ -83,6 +85,9 @@
 # The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
 # repository's poller from step 3b of the plugin store; readers take the newest state per item.
 "github.event" = { class = "transition", window = "30d", pending = "no reader audit yet" }
+# One claim per completed Workspace CI run, written once by a repository's poller; CI's declared
+# objectives read the last day of them.
+"github.workflow-run" = { class = "transition", window = "30d", pending = "no reader audit yet" }
 "glass.deleted" = { class = "durable" }
 "glass.upserted" = { class = "durable" }
 # Compact question identity, shape, status, positions and receipt stay indefinitely.
@@ -127,6 +132,8 @@
 "message.staged" = { class = "transition", window = "7d", pending = "delivery state reads it until the message closes" }
 "mission-run.created" = { class = "durable" }
 "mission-run.report-to" = { class = "durable" }
+"mission-run.retry-linked" = { class = "durable" }
+"mission-run.supersede-linked" = { class = "durable" }
 "mission-run.state" = { class = "durable" }
 "mission.produced" = { class = "durable" }
 "mission.provenance" = { class = "durable" }
@@ -139,8 +146,16 @@
 "operational.recovered" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "ordered-membership.edited" = { class = "durable" }
 "owned-set.revised" = { class = "durable" }
+# A person's controls over one attention row matter only while it is open; claims stay whole until
+# a per-row slot rule exists (seen keeps the earliest, snooze the newest).
+"person.attention-seen" = { class = "current", pending = "needs a per-row keep-earliest rule; newest-per-slot would move seen_at later" }
+"person.attention-snoozed" = { class = "current", pending = "needs a per-row newest-per-slot rule keyed by attention_id" }
 "person.delegation-set" = { class = "durable" }
 "person.directive-note-set" = { class = "durable" }
+"person.status-set" = { class = "durable" }
+"person.interruptions-set" = { class = "durable" }
+"person.deadline-clock-set" = { class = "durable" }
+"person.presence-observed" = { class = "current", pending = "the presence fold reads each source's newest report; no per-source checkpoint slot yet" }
 "person.rename.completed" = { class = "durable" }
 "planning-session.approved" = { class = "durable" }
 "planning-session.cancelled" = { class = "durable" }
@@ -154,6 +169,9 @@
 "principal.key-revoked" = { class = "durable" }
 # A program run's journal: replay reads every completed and failed entry of its step run.
 "program.step" = { class = "durable" }
+# Invocation correlation must outlive collector sampling and trace-backend retention.
+"mission.run.trace" = { class = "durable" }
+"program.attempt.trace" = { class = "durable" }
 "publication.operation" = { class = "durable" }
 # Only each person's largest position per conversation matters, but a newest-per-slot rule could
 # drop a larger concurrent advance; claims stay whole until a keep-largest planner exists.
@@ -201,6 +219,7 @@
 "source.audited" = { class = "durable" }
 "source.debt.closed" = { class = "durable" }
 "source.debt.recorded" = { class = "durable" }
+"source.mapped" = { class = "durable" }
 "step-run.carried" = { class = "durable" }
 "step-run.retried" = { class = "durable" }
 "step-run.state" = { class = "durable" }
@@ -352,7 +371,7 @@ min_age = "5d"
 [[rules]]
 kind = "harness.usage"
 when = ["semantics=response_rollup"]
-slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host"]
+slot = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host", "execution_id"]
 keep = "newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that"
 
 [[rules]]

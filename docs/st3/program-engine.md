@@ -54,8 +54,13 @@ Taken by the owner on 2026-11-10:
 ### Versioned
 
 - **R04 Pinned code:** a run executes exactly the bytes its mission revision pins.
-- **R05 Old runs finish on old code:** publishing new program code never changes a running
-  generation; a run moves to new code only by a new generation.
+- **R05 Generations pin code; publication replaces active stale runs:** dispatch and resume
+  execute the code pinned by their generation. New-revision publication preflights a fresh
+  replacement before ordinary source cancellation and cleanup; the replacement waits for
+  terminal cleanup, confirmed owned-runtime quiescence, and effective program-effect fencing,
+  then restarts on the new code without adopting the source journal.
+  Admission refusal leaves the source active with a visible fault. Explicit run revision
+  remains a distinct generation transition; replay never substitutes code in a journal.
 - **R06 No divergent replay:** replay never feeds a journal to different code.
 
 ### Accountable
@@ -140,11 +145,13 @@ can run an effect to its end but can never journal it.
 | daemon → host | `ack` | `step`, `attempt`, `seq` | the completed/failed entry is durable (R01) |
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
 | daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
+| host → daemon | `ending` | `step`, `attempt` | this attempt began termination for any reason; precedes its terminal notification and is not proof of worker exit |
+| host → daemon | `cancelled` | `step`, `attempt` | this host awaited the worker's termination/exit and fenced its effect groups after explicit or host-initiated termination; matched to the host incarnation and attempt, not another host's acknowledgement |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
 | host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
 | host → daemon | `done` | `step`, `attempt`, `exit` (`{_tag: Success, value}` or `{_tag: Failure, error}`) | the program ended |
-| host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and was terminated (DQ8) |
+| host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and began termination; the failure is visible before actual worker exit (DQ8) |
 | daemon → host / host → daemon | `ping` / `pong` | `seq` | host liveness (DQ8) |
 
 Both sides drop a message for another attempt than the one running, and the daemon drops messages
@@ -167,6 +174,36 @@ without either cannot run program steps. Cancellation is eager: every evaluation
 engine which of the run's program attempts left their step (ended, failed, timed out, retried,
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
+
+For publication supersession, sending `cancel` is not sufficient to admit the replacement.
+The engine waits for that host's matching `cancelled` acknowledgement (or host exit), then
+fences recorded leftover effect groups by verified boot/process-start identity. A failed
+kill or unprovable identity remains visible as `supersession-effect-fence`; it cannot be
+converted into success by a cleanup deadline. Owned runtimes of all predecessor generations
+and descendants must likewise be confirmed quiescent. Acknowledgements and runtime observations
+wake reconciliation; no polling or replacement execution timeout is introduced. New program
+credentials are minted inside the run writer fence only for the current live attempt and
+after checking that it does not await automatic publication cutover.
+
+The host does not acknowledge a merely requested `Worker.terminate()`: it awaits that
+worker's exit promise, including native I/O still in progress, while continuing to serve
+other programs. An ended attempt remains addressable until exit, so a late cancellation
+cannot confuse removal from the run map with quiescence.
+
+This lifecycle applies to normal completion, defects, unexpected worker exit, liveness
+failure, explicit cancellation, and same-step replacement. The host sends `ending` before
+`done` or `unresponsive`, then `cancelled` only after actual exit. The daemon retains
+every exact host-incarnation/step/attempt termination independently of its outcome:
+removing an attempt from the running map or failing its step cannot erase that fence.
+Daemon-initiated failure registers its cancellation proof under the same mutex that
+removes the running entry, before persisting failure. The worker-message forwarding
+path accepts only `journal`, `run`, and `ask`, not host lifecycle notifications.
+
+A replacement fences only its own supersession lineage: itself, every superseded
+predecessor, and their descendants across all generations. Both pending worker
+terminations and recorded effect groups use this scope. A cancellation belonging to an
+unrelated mission does not hold this replacement or its finalizers, even while that
+unrelated native worker is still terminating.
 
 ### 3. Declaration and authority
 
@@ -242,6 +279,39 @@ name. The CLI defaults its actor to the run when the credential is present and n
 trusted Unix client, which the daemon accepts only from a request its credential binds to that
 same run. The same-UID boundary is cooperative, as for agents.
 
+**Private integration instances.** A test running inside a mission exec is not a person,
+even when it creates a private daemon. Socket or state-directory ownership does not grant
+person attribution. A run credential belongs to the issuing store: a scratch store cannot
+resolve the enclosing fleet run's credential. Clearing a leaf client's environment alone
+does not erase that credential from its ancestors.
+
+Use the existing explicit agent caller contract for isolated integration tests:
+
+1. Create a fresh private directory (mode `0700`), config, state, runtime paths and Unix
+   sockets. Do not join a fleet, configure peers, or select an ambient daemon endpoint.
+   Start the daemon outside an agent harness tree (for example a separate user service),
+   without `ST_AGENT`, `FRACTAL_AGENT` or `ST_RUN_CREDENTIAL` in its startup environment.
+   Keep it in the caller's user namespace so native peer/process inspection remains possible.
+2. For **each scratch client exec**, supply `ST_AGENT=agent/fixture/scratch`, omit
+   `FRACTAL_AGENT` and `ST_RUN_CREDENTIAL`, and pass the explicit scratch endpoint.
+   Use `--as agent/fixture/scratch` on `apply` and `missions start`. A test helper should
+   expose that actor directly rather than infer a person from an absent ambient agent marker.
+   This identity is a test author, not a configured seat that the daemon must launch.
+3. Keep default free-mode authorization on that isolated store, or explicitly grant the
+   fixture agent the required publish/start authority when testing enforced rules. This
+   does not grant it authority on another daemon. Never change fleet rules for a test.
+4. Stop the private daemon and remove only its test-owned directory when the test ends.
+
+The closest verified exec-time agent marker binds the scratch request before the walk
+reaches the enclosing mission credential. Publication claims and run requesters remain
+attributed to `agent/fixture/scratch`, never a person. A process carrying both agent and
+run markers is invalid; a scratch agent naming a person or another agent is refused.
+This is the ordinary cooperative same-UID agent boundary, not a new instance-owner
+credential or a private-instance bypass: peer generation checks, ancestry failures,
+foreign-actor checks and enforced authorization remain identical on every daemon.
+Environment isolation and explicit endpoints are requirements of the test harness, not
+capabilities that authenticate it to a fleet.
+
 **Publication.** A run publishes with `fractal apply` like any other author: `apply` and
 `fractal missions publish` take `--as mission-run/RUN`, and `apply` without `--as` publishes as
 the harness's own seat, else as the run whose credential it holds. Its `publish` rules decide
@@ -265,11 +335,29 @@ needs `write SUBJECT`. A refusal reaches its caller as `run-authority-denied`. T
 discover the grants it needs. Each decision reads only each revision's `authority` member along
 the starter chain.
 
+**Reach.** Whatever it is granted, and in either mode, a run touches only itself and the runs it
+started, transitively: a run's parent is the run of the step it was started under, the tree a
+cancellation cascades down (§6). A claim on a run, its generations, step runs or revision
+proposals, a `mission-run` declaration a run applies (creation, revision, reset or cancellation),
+and a cancellation requested as the run, are refused as
+`run-authority-denied` for any other run, so `write "mission-run/*"` reaches no sibling, parent or
+unrelated run. A run starts runs only as the children its program starts, never by declaring one.
+
 ### 4. Versioning
 
 A program's revision is its bundle hash: `sha256` is part of the step definition, so it enters the
 step's `definition_hash` and the mission revision. A run generation binds one revision, hence one
 bundle.
+
+For a policy-less mission, publishing a new revision automatically supersedes already-active
+stale runs, subject to [replacement admission and cleanup](mission-graph-runtime.md#automatic-publication-supersession).
+Existing human-only review and when-idle cutover policies take precedence: publication does not
+bypass review or cancel work before its declared idle boundary. Approved proposal cutover uses
+a new linked run at the exact approved revision. Neither path rewrites a generation's bundle or
+journal. The fresh replacement restarts all programs and steps, and effects must be idempotent
+against prior workspace and external effects. Republish of the same revision does nothing; a
+same-revision retry begun after publication remains selected until a later new-revision
+publication. No journal is adopted and no new data-DSL syntax is introduced.
 
 1. `fractal apply` of a mission with a `program` reads the declared path, checks its sha256 and
    sends the bytes with the publication (`program_bundles`, base64 by sha256, on the apply and
@@ -358,8 +446,30 @@ again and the start is retried then. When the child ends, the program receives:
 A worker turn, `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission,
 input, product })))`, is a child run of `mission` with `input`. Its value is the child's product
 `resource/RUN/PRODUCT`, decoded with `success`; the worker mission declares the agent, goal and
-product (for example a run-scoped one-shot reviewer `agent/${ST_MISSION_RUN}/reviewer`, so
-independence holds as in LandingMission).
+product. For an independent turn, use a distinct run-owned subject such as
+`agent/${ST_MISSION_RUN}/worker` and `fresh-context` on its assigned step; optionally use `one-shot`
+to retire it on exit. `Fractal.Worker.layer` does not fork the program caller's conversation,
+mailbox or handoff into the child. A standing worker selected by the child retains its own
+mailbox, and `one-shot` alone does not request a fresh session. See
+[step context isolation](mission-graph-runtime.md#step-syntax).
+
+Worker turns can request `Fractal.step({ id, success, execution: true })` to return
+`{ value, executions }` instead of the decoded product alone. `value` remains domain data;
+`executions` contains the child's claim-backed agent invocations, across its steps and attempts.
+The child result and `ChildFailed` also carry `executions`, so failed execution can still report
+spend. Older journal entries omit it: `undefined` means unknown, not zero. Mission output
+schemas must allow an absent `executions` key when replaying those entries. Replay returns the
+journaled execution snapshot without consulting a seat's current model or running the child again.
+Each execution identifies its work claim, step, attempt, actor and harness incarnation, with the
+declared model captured at claim time, observed models, nullable fallback evidence, response token
+and micro-USD totals, timing, trace correlation and an incarnation-matched runtime exit receipt.
+No usage observation is `usage: null`, not a zero-token observation. Either `unpriced_tokens`
+or `unpriced_responses` distinguishes unknown price from free execution: responses without a
+reported total still carry the response counter without inventing tokens. Exit evidence recorded after the child result was journaled is
+available on mission detail reads, not retroactively inserted into the replayed snapshot.
+An effect-form step is not an agent invocation; it retains its ordinary typed result and journal
+duration. A process that fails before claiming work has runtime evidence but no claim-backed
+execution record. These generic records do not contain domain decisions, review bindings or consent.
 
 **Asks.** `Fractal.ask({ id, for, title, request, deadline, default })` opens a native person ask on
 the program step, with `work ask --step` semantics: the same structured requests, deadlines and
@@ -375,6 +485,14 @@ receives:
 | answered by a person | Success `{ answer?: { type, outcome?, id?, label?, text? }, summary?, resolved_by }`, `resolved_by` the person |
 | resolved at its deadline | the same, with the default answer (none for a free-text ask) and `resolved_by: 'deadline'` |
 | withdrawn while the run goes on | Failure `{ _tag: 'AskCancelled', ask }` |
+
+Withdrawal is a typed failure, not a successful empty answer. A program may handle
+`AskCancelled` (for example with `Effect.catchTag`) and continue. If it leaves that failure
+uncaught, its waiting program step fails and the run follows ordinary failure handling,
+including declared native `finally` steps; the attempt's other open children and asks are
+cancelled. Native Data-DSL steps have no typed program handler: cancelling their ask fails
+the waiting step with reason `ask cancelled by ACTOR`, using ordinary retries and `finally`
+handling rather than resuming the step as ready.
 
 An ask that ends with its run is never resolved: the program ended with it.
 
@@ -482,8 +600,9 @@ A program waiting on an ask or a child run stays loaded in the host. A replaced 
 program to the same wait.
 
 **Publication.** The `fractal` package's tree loader (`loadSubjectTree({ root, bundleDir })`)
-bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun`, from the tree
-root so the bytes do not depend on where the tree is checked out, and writes it to
+bundles each `<id>/mission.ts` that declares a program with `bun build --target=bun
+--minify-whitespace`, which drops Bun's per-module path comments so the bytes do not depend on where
+the tree or its dependencies are checked out, and writes it to
 `<bundleDir>/<sha256>.mjs` after checking that its default export carries the entry. The mission
 loads as its declaration: the header from the intent (`timeout`, `concurrentRuns`, `authority`),
 one text `input` per field of `intent.input`, and one step `program` pinning the bundle by path and

@@ -644,6 +644,102 @@ mission "example/check" state="ready" {
 }
 
 #[test]
+fn owned_set_publication_checks_only_the_gates_of_unpublished_mission_revisions() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    // `kept`'s gate cannot answer; only a check that reruns a held revision would see it.
+    let kept = r#"version 2
+mission "example/kept" state="ready" {
+  goal "Keep."
+  step "work" {
+    agentless
+    gate "check" { exec "touch kept-ran; exit 2"; host "orchid"; workspace "."; }
+  }
+}
+"#;
+    let bundle = |goal: &str| {
+        format!(
+            r#"{kept}mission "example/edited" state="ready" {{
+  goal "{goal}"
+  step "work" {{
+    agentless
+    gate "check" {{ exec "touch edited-ran"; host "orchid"; workspace "."; }}
+  }}
+}}
+"#
+        )
+    };
+    let file = root.path().join("garden.kdl");
+    let publish = |sequence: &str, expect: &str, extra: &[&str]| {
+        let sha = format!("{sequence:0>40}");
+        let mut args = vec![
+            "apply",
+            file.to_str().unwrap(),
+            "--as",
+            PUBLISHER,
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--set",
+            "garden",
+            "--repository",
+            "acme/garden",
+            "--ref",
+            "refs/heads/main",
+            "--sha",
+            &sha,
+            "--source-sequence",
+            sequence,
+            "--expect-set",
+            expect,
+        ];
+        args.extend(extra);
+        let output = daemon.run_cli(&args);
+        assert!(output.status.success(), "{output:?}");
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        (
+            response["set"]["revision"].as_str().unwrap().to_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let ran = |name: &str| {
+        let path = workspace.join(format!("{name}-ran"));
+        let ran = path.exists();
+        let _ = std::fs::remove_file(path);
+        ran
+    };
+
+    // Published on its own first, as a host does before it publishes a set.
+    std::fs::write(&file, kept).unwrap();
+    daemon.command(&["apply", file.to_str().unwrap(), "--as", PUBLISHER, "--no-gate-check"]);
+
+    // The set's first publication adopts `kept` at the revision already published.
+    std::fs::write(&file, bundle("First.")).unwrap();
+    let (revision, stderr) = publish("1", "absent", &["--adopt", "mission/example/kept"]);
+    assert!(stderr.contains("Checking 1 exec gate"), "{stderr}");
+    assert!(ran("edited") && !ran("kept"));
+
+    std::fs::write(&file, bundle("Second.")).unwrap();
+    let (revision, stderr) = publish("2", &revision, &[]);
+    assert!(stderr.contains("Checking 1 exec gate"), "{stderr}");
+    assert!(ran("edited") && !ran("kept"));
+
+    let (revision, stderr) = publish("3", &revision, &[]);
+    assert!(!stderr.contains("exec gate"), "{stderr}");
+    assert!(!ran("edited") && !ran("kept"));
+
+    // A revision this daemon already holds is not checked again.
+    std::fs::write(&file, bundle("First.")).unwrap();
+    let (_, stderr) = publish("4", &revision, &[]);
+    assert!(!stderr.contains("exec gate"), "{stderr}");
+    assert!(!ran("edited") && !ran("kept"));
+}
+
+#[test]
 fn a_terminal_exec_fails_its_unsatisfied_field_gate() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -1486,4 +1582,360 @@ mission "orchid/round-output" state="ready" {
     );
     let run = daemon.command(&["missions", "show", run_id]);
     assert_eq!(run["loops"][0]["round"], 2, "{run:#}");
+}
+
+// Publication supersession must run in this CLI-backed fixture: a libtest executable cannot
+// serve as the native runtime's `driver exec` launcher. The final gate is a real cleanup barrier,
+// keeping admission observable without racing the daemon or slowing its reconciliation loop.
+struct SupersessionFixture {
+    daemon: Daemon,
+    root: tempfile::TempDir,
+}
+
+impl SupersessionFixture {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(root.path());
+        Self { daemon, root }
+    }
+
+    fn publish(&self, source: &str, key: &str) -> Value {
+        let file = self.root.path().join(format!("{key}.kdl"));
+        std::fs::write(&file, source).unwrap();
+        self.daemon.command(&[
+            "apply", file.to_str().unwrap(), "--as", PUBLISHER, "--no-gate-check",
+        ])
+    }
+
+    fn start(&self, mission: &str, id: &str, input: Option<&str>) -> Value {
+        let mut args = vec![
+            "missions", "start", mission, "--id", id, "--workspace",
+            self.root.path().to_str().unwrap(), "--as", PUBLISHER,
+        ];
+        if let Some(input) = input {
+            args.extend(["--input", input]);
+        }
+        let started = self.daemon.command(&args);
+        self.view(started["mission_run"]["subject"].as_str().expect("started run subject"))
+    }
+
+    fn view(&self, run: &str) -> Value {
+        let subject = if run.starts_with("mission-run/") {
+            std::borrow::Cow::Borrowed(run)
+        } else {
+            std::borrow::Cow::Owned(format!("mission-run/{run}"))
+        };
+        self.daemon.command(&["missions", "show", &subject])
+    }
+
+    fn until(&self, label: &str, done: impl FnMut() -> bool) {
+        wait_for_explained(label, done, || {
+            format!("{}\n{:#?}", self.daemon.log(), self.daemon.trace())
+        });
+    }
+
+    fn review(&self, run: &str) -> Value {
+        self.daemon.attention().into_iter()
+            .find(|item| item["mission_run_id"] == run)
+            .unwrap_or(Value::Null)
+    }
+
+    fn wait_for_review(&self, run: &str) -> Value {
+        self.until("the human admission gate", || !self.review(run).is_null());
+        self.review(run)
+    }
+
+    fn release_cleanup(&self) {
+        std::fs::write(self.root.path().join("cleanup-release"), "").unwrap();
+    }
+
+    fn assert_cleanup_wait(&self, run: &str) {
+        let waiting = self.view(run);
+        assert_eq!(waiting["phase"], "supersession-waiting", "{waiting}");
+        assert!(waiting["timeout_ms"].as_u64().is_some(), "{waiting}");
+        assert!(waiting["deadline_at_unix_ms"].is_null(), "{waiting}");
+        assert!(waiting["steps"].as_array().unwrap().iter()
+            .all(|step| step["status"] == "pending"), "{waiting}");
+    }
+
+    fn complete(&self, run: &str) -> Value {
+        self.until("the real replacement exec to complete", || {
+            self.view(run)["status"] == "completed"
+        });
+        let completed = self.view(run);
+        assert!(completed["deadline_at_unix_ms"].as_u64().is_some(), "{completed}");
+        completed
+    }
+}
+
+fn supersession_parked_source(extra: &str, work: &str) -> String {
+    format!(r#"version 2
+mission "supersession" state="ready" {{
+  goal "Finish only the published work."
+  {extra}
+  step "admit" {{
+    agentless
+    gate "approve" type="human" {{ reviewer "{PUBLISHER}" }}
+  }}
+  step "broken" {{
+    depends-on {{ step "admit" completed }}
+    agentless
+    gate "work" {{ exec {work:?}; host "orchid"; workspace "."; time-limit "1m" }}
+  }}
+  finally {{
+    step "cleanup" {{
+      agentless
+      gate "cleanup released" {{
+        exec "while [ ! -e cleanup-release ]; do sleep 0.05; done"
+        host "orchid"
+        workspace "."
+        time-limit "1m"
+      }}
+    }}
+  }}
+}}"#)
+}
+
+const SUPERSESSION_FIXED: &str = r#"version 2
+mission "supersession" state="ready" timeout="5m" {
+  goal "Finish the corrected revision."
+  completion { when "all-steps-exhausted" }
+  step "fixed" {
+    agentless
+    gate "correct" { exec "echo executed >> replacement-executions"; host "orchid"; workspace "."; time-limit "1m" }
+  }
+}"#;
+
+#[test]
+fn publishing_fixed_or_removed_steps_never_runs_the_parked_broken_step() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for remove in [false, true] {
+        let fixture = SupersessionFixture::new();
+        fixture.publish(&supersession_parked_source("", "touch broken-ran; exit 1"), "old");
+        let old = fixture.start("supersession", "old-run", None);
+        let old_subject = old["subject"].as_str().unwrap();
+        let review = fixture.wait_for_review(old_subject);
+        let fixed = SUPERSESSION_FIXED.replace("fixed", if remove { "replacement" } else { "broken" });
+        fixture.publish(&fixed, "fixed");
+        let source = fixture.view(old_subject);
+        let successor = source["superseded_by"].as_str().unwrap();
+        fixture.assert_cleanup_wait(successor);
+        assert!(!fixture.root.path().join("replacement-executions").exists());
+        // The person's old approval cannot resurrect work from the retired revision.
+        let approved = fixture.daemon.run_cli(&[
+            "attention", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
+        ]);
+        assert!(!approved.status.success(), "{approved:?}");
+        fixture.release_cleanup();
+        let replacement = fixture.complete(successor);
+        let retired = fixture.view(old_subject);
+        assert_eq!(retired["phase"], "terminal", "{retired}");
+        assert_eq!(retired["status"], "cancelled", "{retired}");
+        assert!(!fixture.root.path().join("broken-ran").exists());
+        assert_ne!(replacement["generation"], old["generation"]);
+        assert_eq!(replacement["supersedes"], old["subject"]);
+        assert_eq!(replacement["inputs"], old["inputs"]);
+        assert_eq!(replacement["workspace"], old["workspace"]);
+        for step in replacement["steps"].as_array().unwrap() {
+            assert!(!old["steps"].as_array().unwrap().iter()
+                .any(|old_step| old_step["subject"] == step["subject"]), "{replacement}");
+        }
+    }
+}
+
+#[test]
+fn incompatible_publication_leaves_the_parked_source_active_with_a_visible_fault() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = SupersessionFixture::new();
+    let source = supersession_parked_source("input \"head\" kind=\"text\"", "exit 1");
+    fixture.publish(&source, "old");
+    let old = fixture.start("supersession", "old-run", Some("head=candidate"));
+    let old_subject = old["subject"].as_str().unwrap();
+    let review = fixture.wait_for_review(old_subject);
+    let publication = fixture.publish(
+        &source.replace("kind=\"text\"", "kind=\"resource\""), "incompatible",
+    );
+    let current = fixture.view(old_subject);
+    assert!(matches!(current["status"].as_str(), Some("running" | "blocked")), "{current}");
+    assert_eq!(current["phase"], "normal");
+    assert!(current["superseded_by"].is_null());
+    let fault = current["supersession_fault"].as_str().unwrap();
+    assert!(fault.contains(old["revision"].as_str().unwrap()), "{fault}");
+    assert!(fault.contains(publication["published_missions"][0]["revision"].as_str().unwrap()), "{fault}");
+    assert!(fault.contains("head"), "{fault}");
+    assert_eq!(fixture.review(old_subject)["id"], review["id"]);
+    assert_eq!(current["inputs"], old["inputs"]);
+}
+
+#[test]
+fn publication_boundaries_are_idempotent() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = SupersessionFixture::new();
+    fixture.publish(&supersession_parked_source("", "exit 1"), "old");
+    let old = fixture.start("supersession", "old-run", None);
+    let old_subject = old["subject"].as_str().unwrap();
+    fixture.wait_for_review(old_subject);
+    fixture.publish(SUPERSESSION_FIXED, "fixed");
+    let source = fixture.view(old_subject);
+    let replacement = source["superseded_by"].as_str().unwrap();
+    fixture.assert_cleanup_wait(replacement);
+    fixture.publish(SUPERSESSION_FIXED, "same-publication");
+    assert_eq!(fixture.view(old_subject)["superseded_by"], replacement);
+    assert!(fixture.view(replacement)["superseded_by"].is_null());
+    fixture.release_cleanup();
+    fixture.complete(replacement);
+    assert_eq!(fixture.view(old_subject)["status"], "cancelled");
+    assert_eq!(std::fs::read_to_string(fixture.root.path().join("replacement-executions")).unwrap(), "executed\n");
+}
+
+#[test]
+fn repeated_publications_converge_to_one_fresh_replacement_chain() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = SupersessionFixture::new();
+    fixture.publish(&supersession_parked_source("", "exit 1"), "old");
+    let old = fixture.start("supersession", "old-run", None);
+    let old_subject = old["subject"].as_str().unwrap();
+    fixture.wait_for_review(old_subject);
+    fixture.publish(&SUPERSESSION_FIXED.replace("corrected revision", "intermediate revision"), "intermediate");
+    let source = fixture.view(old_subject);
+    let intermediate = source["superseded_by"].as_str().unwrap();
+    fixture.assert_cleanup_wait(intermediate);
+    fixture.publish(SUPERSESSION_FIXED, "newest");
+    let middle = fixture.view(intermediate);
+    let newest = middle["superseded_by"].as_str().unwrap();
+    fixture.assert_cleanup_wait(newest);
+    fixture.until("the unadmitted intermediate revision to retire", || {
+        fixture.view(intermediate)["phase"] == "terminal"
+    });
+    // Immediate predecessor cleanup is insufficient: A still owns live final cleanup.
+    fixture.assert_cleanup_wait(newest);
+    assert_ne!(fixture.view(old_subject)["phase"], "terminal");
+    assert!(!fixture.root.path().join("replacement-executions").exists());
+    fixture.release_cleanup();
+    let latest = fixture.complete(newest);
+    for ancestor in [old_subject, intermediate] {
+        let retired = fixture.view(ancestor);
+        assert_eq!(retired["status"], "cancelled", "{retired}");
+        assert_eq!(retired["phase"], "terminal", "{retired}");
+    }
+    assert!(latest["superseded_by"].is_null());
+    assert_eq!(latest["supersedes"], middle["subject"]);
+    assert_eq!(std::fs::read_to_string(fixture.root.path().join("replacement-executions")).unwrap(), "executed\n");
+}
+
+#[test]
+fn a_replacement_preserves_after_and_follows_the_dependency_supersession() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = SupersessionFixture::new();
+    let dependency_source = format!(r#"version 2
+mission "dependency" state="ready" {{
+  goal "Wait for the dependency release."
+  completion {{ when "all-steps-exhausted" }}
+  step "release" {{ agentless; gate "approve" type="human" {{ reviewer "{PUBLISHER}" }} }}
+}}"#);
+    fixture.publish(&dependency_source, "dependency");
+    let dependency = fixture.start("dependency", "dependency-run", None);
+    let dependency_subject = dependency["subject"].as_str().unwrap();
+    fixture.wait_for_review(dependency_subject);
+    let publication = fixture.publish(&supersession_parked_source("", "exit 1"), "old");
+    let revision = publication["published_missions"][0]["revision"].as_str().unwrap();
+    fixture.publish(&format!(r#"version 2
+mission-run "dependent" {{
+  mission "mission/supersession@{revision}"
+  workspace {:?}
+  requester "{PUBLISHER}"
+  after {dependency_subject:?}
+}}"#, fixture.root.path().to_str().unwrap()), "dependent-run");
+    fixture.publish(SUPERSESSION_FIXED, "fixed");
+    let source = fixture.view("dependent");
+    let replacement = source["superseded_by"].as_str().unwrap();
+    assert_eq!(fixture.view(replacement)["after"], dependency["subject"]);
+    // The predecessor may itself still be waiting on `after`; its final cleanup, if admitted,
+    // uses the same explicit release barrier as the other publication tests.
+    fixture.release_cleanup();
+    fixture.publish(&dependency_source.replace("dependency release", "corrected dependency release"), "dependency-fixed");
+    let retired_dependency = fixture.view(dependency_subject);
+    let dependency_replacement = retired_dependency["superseded_by"].as_str().unwrap();
+    fixture.until("the replacement's retained after-run dependency", || {
+        fixture.view(replacement)["steps"].as_array().unwrap().iter()
+            .any(|step| step["step"] == "after-run" && step["status"] == "working")
+            && fixture.view(dependency_replacement)["phase"] == "normal"
+    });
+    let waiting = fixture.view(replacement);
+    assert!(waiting["deadline_at_unix_ms"].is_null(), "{waiting}");
+    assert!(waiting["steps"].as_array().unwrap().iter()
+        .filter(|step| step["step"] != "after-run" && step["phase"] != "finally")
+        .all(|step| step["status"] == "pending"), "{waiting}");
+    assert!(!fixture.root.path().join("replacement-executions").exists());
+    assert_eq!(fixture.view(dependency_subject)["status"], "cancelled");
+    let review = fixture.wait_for_review(dependency_replacement);
+    fixture.daemon.command(&[
+        "attention", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
+    ]);
+    fixture.complete(replacement);
+    assert_eq!(fixture.view(dependency_replacement)["status"], "completed");
+}
+
+#[test]
+fn publication_supersedes_immediately_even_with_more_than_two_pages_of_head_backlog() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = SupersessionFixture::new();
+    fixture.publish(&supersession_parked_source("", "touch broken-ran; exit 1"), "old");
+    let old = fixture.start("supersession", "old-run", None);
+    let old_subject = old["subject"].as_str().unwrap();
+    let review = fixture.wait_for_review(old_subject);
+    let mut unrelated = String::from("version 2\n");
+    for index in 0..131 {
+        unrelated.push_str(&format!(
+            "mission \"unrelated-{index}\" state=\"ready\" {{ goal \"An unrelated publication.\"; step \"wait\" {{ agentless }} }}\n",
+        ));
+    }
+    fixture.publish(&unrelated, "publication-backlog");
+    let mut connection = rusqlite::Connection::open(fixture.root.path().join("state/st3/claims.sqlite3")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    // Disposable local head work can be rebuilt behind arbitrarily many unrelated heads.
+    // Re-enqueue the published definitions even if the daemon already drained their first pass.
+    let transaction = connection.transaction().unwrap();
+    transaction.execute(
+        "INSERT OR IGNORE INTO local_mission_supersession_heads_v3(mission_id)
+         SELECT mission_id FROM mission_definitions WHERE mission_id LIKE 'unrelated-%'", [],
+    ).unwrap();
+    transaction.execute(
+        "UPDATE meta SET value=MAX(CAST(value AS INTEGER),(SELECT COALESCE(MAX(seq),0) FROM local_mission_supersession_heads_v3))
+         WHERE key='local_mission_supersession_heads_v3_sequence'", [],
+    ).unwrap();
+    let queued: u64 = transaction.query_row(
+        "SELECT COUNT(*) FROM local_mission_supersession_heads_v3 WHERE mission_id LIKE 'unrelated-%'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(queued, 131);
+    transaction.commit().unwrap();
+    fixture.publish(SUPERSESSION_FIXED, "fixed-after-backlog");
+    let source = fixture.view(old_subject);
+    let replacement = source["superseded_by"].as_str().unwrap_or_else(|| {
+        panic!("publication was deferred behind the dirty head backlog: {source}")
+    });
+    assert_ne!(source["phase"], "normal", "{source}");
+    fixture.assert_cleanup_wait(replacement);
+    assert!(!fixture.root.path().join("broken-ran").exists());
+    let approved = fixture.daemon.run_cli(&[
+        "attention", "approve", review["id"].as_str().unwrap(), "--as", PUBLISHER,
+    ]);
+    assert!(!approved.status.success(), "{approved:?}");
+    fixture.release_cleanup();
+    fixture.complete(replacement);
+    assert_eq!(fixture.view(old_subject)["status"], "cancelled");
+    assert!(!fixture.root.path().join("broken-ran").exists());
 }

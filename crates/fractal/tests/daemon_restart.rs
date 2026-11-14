@@ -81,6 +81,7 @@ impl Daemon {
             notify: Arc::new(Notify::new()),
             event_notify: self.event_notify.clone(),
             node: "restart-node".into(),
+            api_socket: self.root.join("daemon").join("api.sock"),
             state_dir: self.root.join("daemon"),
             pty_root: self.root.join("pty"),
             pty_binary: PathBuf::from("pty"),

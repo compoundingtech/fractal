@@ -26,6 +26,8 @@ mod huge_part_rebuild_bench;
 mod run_projection_fence_cost;
 mod run_mutation_writer_guard;
 use fractal_delivery::store::shared_missions::*;
+mod run_retry;
+mod mission_supersession;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_delivery::store::shared_seats_shared_missions::*;
 use fractal_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, RUN_PART_RUNS, STATUS_AFTER_DESIRED_READ, STEPS_ENRICHED, SUBJECT_REDUCTIONS};
@@ -123,20 +125,27 @@ fn pending_revision_fixture(protected: bool) -> (Store, MissionRunView, MissionR
         "version 2\nmission \"carry\" state=\"ready\" {} {{ goal \"Exercise pending revisions.\"; step \"work\" {{ goal {goal:?}; }} }}",
         if protected { "revisions=\"human-only\" revision-reviewer=\"person/reviewer\"" } else { "" },
     );
-    publish_carry(&store, &source("First goal."), "pending-revision-first");
+    let initial = publish_carry(&store, &source("First goal."), "pending-revision-first");
+    // Unprotected fixtures exercise explicit adoption, not publication supersession.
+    let published = (!protected).then(|| (
+        publish_carry(&store, &source("Second goal."), "pending-revision-second"),
+        publish_carry(&store, &source("Third goal."), "pending-revision-third"),
+    ));
     let first = store.create_mission_run(&MissionRunRequest {
-        mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+        mission: "carry".into(), revision: if protected { None } else { Some(initial.revision) }, workspace: "/tmp".into(),
         requester: Some("person/requester".into()), mode: Some("run".into()),
         inputs: BTreeMap::new(), idempotency_key: "pending-revision-run".into(),
     }).unwrap();
-    let second_spec = publish_carry(&store, &source("Second goal."), "pending-revision-second");
-    let candidate = publish_carry(&store, &source("Third goal."), "pending-revision-third");
+    let (second_spec, candidate) = published.unwrap_or_else(|| (
+        publish_carry(&store, &source("Second goal."), "pending-revision-second"),
+        publish_carry(&store, &source("Third goal."), "pending-revision-third"),
+    ));
     let proposal = protected.then(|| store.create_revision_proposal(
         &first.subject, &candidate, "person/requester", "review current work", "pending-proposal",
     ).unwrap());
     let second = store.adopt_mission_revision_inner(
         &first.subject, &second_spec, "person/requester", "independent cutover",
-        "pending-revision-cutover", Some(&first.generation), true, None, false,
+        "pending-revision-cutover", Some(&first.generation), true, false,
     ).unwrap();
     (store, first, second, candidate, proposal)
 }
@@ -180,13 +189,13 @@ fn cancellation_drains_current_generation_and_unprojected_descendants() {
     restore_pending_generation(&store, &first);
     let before = store.index().unwrap();
     let stale = store.request_mission_run_cancellation_at_generation(
-        &first.subject, "cancel current tree", Some(&first.generation),
+        &first.subject, "cancel current tree", Some(&first.generation), None,
     ).unwrap_err();
     assert_eq!(stale.code, "stale-fence");
     assert_eq!(store.index().unwrap(), before, "refusal writes no claims");
     assert!(!store.run_projection_pending(&first.subject).unwrap());
     assert!(store.request_mission_run_cancellation_at_generation(
-        &first.subject, "cancel current tree", Some(&second.generation),
+        &first.subject, "cancel current tree", Some(&second.generation), None,
     ).unwrap());
     assert!(!store.run_projection_pending(&first.subject).unwrap());
     let current = store.mission_run(&first.subject).unwrap().unwrap();
@@ -196,6 +205,36 @@ fn cancellation_drains_current_generation_and_unprojected_descendants() {
         assert!(run.steps.iter().all(|step| matches!(step.status.as_str(), "completed" | "failed" | "cancelled")));
     }
     assert!(store.work(None, false).unwrap().is_empty());
+}
+
+/// A run requests the cancellation only of itself and the runs it started.
+#[test]
+fn a_run_requests_cancellation_only_within_its_subtree() {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(&store, "version 2\nmission \"tree\" state=\"ready\" { goal \"Grow a tree.\"; concurrent-runs max=4; step \"work\" { goal \"Grow.\" } }", "reach-tree");
+    let request = |key: &str| MissionRunRequest {
+        mission: "tree".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/requester".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: key.into(),
+    };
+    let root = store.create_mission_run(&request("reach-root")).unwrap();
+    let child = store.create_child_mission_run(&request("reach-child"), &root, &root.steps[0].subject, None).unwrap();
+    let unrelated = store.create_mission_run(&request("reach-unrelated")).unwrap();
+    let before = store.index().unwrap();
+    for (actor, target) in [(&root, &unrelated), (&child, &root)] {
+        let refused = store.request_mission_run_cancellation_at_generation(
+            &target.subject, "out of reach", Some(&target.generation), Some(&actor.subject),
+        ).unwrap_err();
+        assert_eq!(refused.code, "run-authority-denied", "{} cancelling {}", actor.subject, target.subject);
+    }
+    assert_eq!(store.index().unwrap(), before, "a refusal writes nothing");
+    assert!(store.request_mission_run_cancellation_at_generation(
+        &child.subject, "its own child", Some(&child.generation), Some(&root.subject),
+    ).unwrap());
+    assert_ne!(store.mission_run(&child.subject).unwrap().unwrap().phase, "normal");
+    for run in [&root, &unrelated] {
+        assert_eq!(store.mission_run(&run.subject).unwrap().unwrap().phase, "normal");
+    }
 }
 
 #[test]
@@ -362,14 +401,14 @@ fn revision_adoption_revalidates_generation_after_pending_drain() {
     let before = store.index().unwrap();
     let stale = store.adopt_mission_revision_inner(
         &first.subject, &candidate, "person/requester", "replace current work",
-        "pending-adopt", Some(&first.generation), true, None, false,
+        "pending-adopt", Some(&first.generation), true, false,
     ).unwrap_err();
     assert_eq!(stale.code, "stale-revision-proposal");
     assert_eq!(store.index().unwrap(), before, "refusal writes no claims");
     assert!(!store.run_projection_pending(&first.subject).unwrap());
     let adopted = store.adopt_mission_revision_inner(
         &first.subject, &candidate, "person/requester", "replace current work",
-        "pending-adopt", Some(&second.generation), true, None, false,
+        "pending-adopt", Some(&second.generation), true, false,
     ).unwrap();
     assert_eq!(adopted.revision, candidate.revision);
     assert_ne!(adopted.generation, second.generation);
@@ -1934,6 +1973,12 @@ mission "reviewed" state="ready" revisions="human-only" {
     assert_eq!(approved.status, "applied");
     assert_eq!(approved.mission_run.revision, candidate.revision);
     assert_ne!(approved.mission_run.generation, run.generation);
+    assert_ne!(approved.mission_run.subject, run.subject);
+    assert_eq!(approved.mission_run.supersedes.as_deref(), Some(run.subject.as_str()));
+    let original = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(original.generation, run.generation);
+    assert_eq!(original.revision, run.revision);
+    assert_eq!(original.superseded_by.as_deref(), Some(approved.mission_run.subject.as_str()));
     assert!(
         store
             .attention_items(Some("person/operator"))
@@ -3995,6 +4040,7 @@ fn standalone_person_ask(store: &Store) -> StepRunView {
     use crate::store::person_work::PersonWorkStore;
 
     store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -4216,11 +4262,12 @@ fn a_rebuilt_run_tree_keeps_an_adopted_revision() {
             .unwrap();
         intent
     };
-    publish(1);
+    let initial = publish(1);
+    let intent = publish(2);
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: "adopt".into(),
-            revision: None,
+            revision: Some(initial.missions["adopt"].revision.clone()),
             workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -4228,7 +4275,6 @@ fn a_rebuilt_run_tree_keeps_an_adopted_revision() {
             idempotency_key: "adopt-run".into(),
         })
         .unwrap();
-    let intent = publish(2);
     store
         .adopt_mission_revision(
             &run.id,
@@ -4752,9 +4798,43 @@ fn each_part_of_a_standing_tree_rebuilt_alone_matches_a_replay() {
 fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
     use crate::store::person_work::PersonWorkStore;
 
-    let (store, _worker, root, children) = replicated_run_tree(2);
-    // As in tree_shapes, asking from live work requires a declared claimant, not
-    // merely the assigned-to reference supplied by replicated_run_tree.
+    let store = Store::open_memory("controller").unwrap();
+    publish_mission(
+        &store,
+        "version 2\nmission \"front-desk\" state=\"ready\" { goal \"Take requests.\"; step \"take\" { assigned-to \"agent/desk.one\" } }",
+        "part-root-definition",
+    );
+    let initial = publish_mission(
+        &store,
+        "version 2\nmission \"request\" state=\"ready\" { goal \"Answer one request.\"; concurrent-runs; step \"answer\" { assigned-to \"agent/worker.one\" } }",
+        "part-initial-definition",
+    );
+    let revised = publish_mission(
+        &store,
+        "version 2\nmission \"request\" state=\"ready\" { goal \"Answer the revised request.\"; concurrent-runs; step \"answer\" { assigned-to \"agent/worker.one\" } }",
+        "part-revision",
+    );
+    // Pin the children after publication so only explicit adoption changes generations.
+    let request = |mission: &str, revision: Option<String>, key: String| MissionRunRequest {
+        mission: mission.into(), revision, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: key,
+    };
+    let root = store.create_mission_run(
+        &request("front-desk", None, "front-desk-run".into()),
+    ).unwrap();
+    let children = (0..2).map(|index| {
+        store.create_child_mission_run(
+            &request("request", Some(initial.revision.clone()), format!("request-{index}")),
+            &root, &root.steps[0].subject, None,
+        ).unwrap()
+    }).collect::<Vec<_>>();
+    for child in &children {
+        store.set_step_state(&child.steps[0].subject, "ready", None).unwrap();
+    }
+    let worker = Store::open_memory("worker").unwrap();
+    replicate_fully(&store, &worker);
+    // Asking from live work requires a declared claimant, not merely its assigned-to reference.
     let agents_source = "version 2\nagent \"worker.one\" { workspace \"/tmp\"; command \"true\"; restart always; }\n";
     let agents = crate::graph::parse_internal_intent(agents_source, "controller").unwrap();
     let planned = store.mission(&agents, IntentInput {
@@ -4763,11 +4843,6 @@ fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
     }).unwrap();
     store.apply(&agents, &planned.subject_tokens, "part-ask-agent").unwrap();
     let child = &children[0];
-    let revised = publish_mission(
-        &store,
-        "version 2\nmission \"request\" state=\"ready\" { goal \"Answer the revised request.\"; concurrent-runs; step \"answer\" { assigned-to \"agent/worker.one\" } }",
-        "part-revision",
-    );
     store
         .adopt_mission_revision(&child.id, &revised, "person/test", "new generation", "part-adopt")
         .unwrap();
@@ -4785,6 +4860,7 @@ fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
         idempotency_key: "part-work-claim".into(),
     }).unwrap();
     let ask = store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -4999,6 +5075,12 @@ fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() 
         .unwrap();
     assert_eq!(run_report_fields(&latest.body), None);
     assert_eq!(reports(), 3);
+    // Clearing it again writes nothing.
+    let again = store
+        .set_mission_run_report(run, "agent/ops/owner", None, None, None, false, "owner-clears-again")
+        .unwrap();
+    assert!(!again.changed);
+    assert_eq!(reports(), 3);
 
     // The creation claim is what the run started with, so declaring the run again exactly
     // as it was started is still a retry.
@@ -5176,10 +5258,11 @@ version 2
         intent.missions["lineage"].clone()
     };
     let first = publish("Use the first goal for ${ST_STEP_RUN}.", "lineage-one");
+    let second = publish("Use the second goal for ${ST_STEP_RUN}.", "lineage-two");
     let run = source
         .create_mission_run(&MissionRunRequest {
             mission: first.id,
-            revision: None,
+            revision: Some(first.revision),
             workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -5192,7 +5275,6 @@ version 2
     source
         .set_step_state(&stable.subject, "completed", None)
         .unwrap();
-    let second = publish("Use the second goal for ${ST_STEP_RUN}.", "lineage-two");
     let revised = source
         .adopt_mission_revision(
             &run.id,
@@ -5369,7 +5451,7 @@ version 2
         "pending-approval"
     );
 
-    source
+    let approved = source
         .approve_revision_proposal(
             &proposal.id,
             "person/reviewer",
@@ -5390,8 +5472,11 @@ version 2
     assert!(replicated.approvals.contains(&"person/reviewer".into()));
     assert_eq!(
         replicated.successor_generation,
-        Some(target.mission_run(&run.id).unwrap().unwrap().generation)
+        Some(target.mission_run(&approved.mission_run.id).unwrap().unwrap().generation)
     );
+    let original = target.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(original.generation, run.generation);
+    assert_eq!(original.superseded_by, Some(approved.mission_run.subject));
 }
 
 #[test]
@@ -5434,7 +5519,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             "proposal-replay-create-a",
         )
         .unwrap();
-    source
+    let successor = source
         .approve_revision_proposal(
             &applied.id,
             "person/reviewer",
@@ -5452,11 +5537,13 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
     );
 
     let third = publish("Use the third goal.", "proposal-replay-three");
+    source.set_mission_run_state(&run.id, "cancelled", "terminal", None).unwrap();
+    assert!(source.resume_superseding_mission_run(&successor.mission_run.id).unwrap());
     let pending = source
         .create_revision_proposal(
-            &run.id,
+            &successor.mission_run.id,
             &third,
-            &owner,
+            "person/requester",
             "leave the next revision pending",
             "proposal-replay-create-b",
         )
@@ -9665,23 +9752,6 @@ version 2
 "#,
         "revision-one",
     );
-    let run = store
-        .create_mission_run(&MissionRunRequest {
-            mission: first.id,
-            revision: None,
-            workspace: "/tmp".into(),
-            requester: Some("person/test".into()),
-            mode: Some("run".into()),
-            inputs: BTreeMap::new(),
-            idempotency_key: "revision-run".into(),
-        })
-        .unwrap();
-    let worker = format!("agent/{}/worker", run.id);
-    for step in &run.steps {
-        store
-            .set_step_state(&step.subject, "completed", None)
-            .unwrap();
-    }
     let second = publish(
         r#"
 version 2
@@ -9701,6 +9771,23 @@ version 2
 "#,
         "revision-two",
     );
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: first.id,
+            revision: Some(first.revision),
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "revision-run".into(),
+        })
+        .unwrap();
+    let worker = format!("agent/{}/worker", run.id);
+    for step in &run.steps {
+        store
+            .set_step_state(&step.subject, "completed", None)
+            .unwrap();
+    }
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -9763,10 +9850,14 @@ version 2
         intent.missions["revision-delivery"].clone()
     };
     let first = publish("Use the first mission constraint.", "delivery-one");
+    let second = publish(
+        "Use the revised mission constraint without redoing delivered work.",
+        "delivery-two",
+    );
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: first.id,
-            revision: None,
+            revision: Some(first.revision),
             workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -9807,10 +9898,6 @@ version 2
         .work_action(&submitted, "complete", &request("delivery-submit"))
         .unwrap();
 
-    let second = publish(
-        "Use the revised mission constraint without redoing delivered work.",
-        "delivery-two",
-    );
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -9874,10 +9961,29 @@ version 2
 "#,
         "generation-one",
     );
+    let second = publish(
+        r#"
+version 2
+
+  mission "generation" state="ready" {
+    goal "Test immutable generations."
+    agent "worker" { workspace "."; command "true" }
+    step "active" { assigned-to "agent/${ST_MISSION_RUN}/worker"; goal "Keep this definition." }
+    step "stable" { goal "Carry this result." }
+    step "changed" { goal "Use the second definition." }
+    step "dependent" {
+      depends-on { step "changed" completed }
+      goal "Depend on the changed step."
+    }
+  }
+
+"#,
+        "generation-two",
+    );
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: first.id,
-            revision: None,
+            revision: Some(first.revision),
             workspace: "/tmp".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -9918,25 +10024,6 @@ version 2
             .subject;
         store.set_step_state(subject, "completed", None).unwrap();
     }
-    let second = publish(
-        r#"
-version 2
-
-  mission "generation" state="ready" {
-    goal "Test immutable generations."
-    agent "worker" { workspace "."; command "true" }
-    step "active" { assigned-to "agent/${ST_MISSION_RUN}/worker"; goal "Keep this definition." }
-    step "stable" { goal "Carry this result." }
-    step "changed" { goal "Use the second definition." }
-    step "dependent" {
-      depends-on { step "changed" completed }
-      goal "Depend on the changed step."
-    }
-  }
-
-"#,
-        "generation-two",
-    );
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -10063,18 +10150,6 @@ version 2
 "#,
         "authority-one",
     );
-    let run = store
-        .create_mission_run(&MissionRunRequest {
-            mission: first.id,
-            revision: None,
-            workspace: "/tmp".into(),
-            requester: Some("person/test".into()),
-            mode: Some("run".into()),
-            inputs: BTreeMap::new(),
-            idempotency_key: "authority-run".into(),
-        })
-        .unwrap();
-    let worker = format!("agent/{}/worker", run.id);
     let escalated = publish(
         r#"
 version 2
@@ -10091,6 +10166,18 @@ version 2
 "#,
         "authority-two",
     );
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: first.id,
+            revision: Some(first.revision),
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "authority-run".into(),
+        })
+        .unwrap();
+    let worker = format!("agent/{}/worker", run.id);
     // Free mode: an agent revises any part of a run, and the revision records it as actor.
     let revised = store
         .adopt_mission_revision(
@@ -10113,11 +10200,22 @@ fn revise_notes_carry_progress_for_active_and_completed_steps() {
         "step \"other\"",
         "step \"done\" { assigned-to \"agent/node.worker\"; goal \"Finish the work.\" }\n    step \"other\"",
     );
-    publish_carry(&store, &source, "notes-one");
+    let first = publish_carry(&store, &source, "notes-one");
+    // Publish all candidates before starting the explicitly old-pinned legacy run.
+    let candidates = (2..=3)
+        .map(|revision| {
+            let next = publish_carry(
+                &store,
+                &source.replace("Use the first goal.", &format!("Use goal {revision}.")),
+                &format!("notes-publish-{revision}"),
+            );
+            (revision, next)
+        })
+        .collect::<Vec<_>>();
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: "carry".into(),
-            revision: None,
+            revision: Some(first.revision),
             workspace: "/tmp".into(),
             requester: Some("person/requester".into()),
             mode: Some("run".into()),
@@ -10149,12 +10247,7 @@ fn revise_notes_carry_progress_for_active_and_completed_steps() {
     report(&work, "progress", "notes-work", "Checking the result");
     let original = store.mission_run(&run.subject).unwrap().unwrap();
     let mut current = original.clone();
-    for revision in 2..=3 {
-        let next = publish_carry(
-            &store,
-            &source.replace("Use the first goal.", &format!("Use goal {revision}.")),
-            &format!("notes-publish-{revision}"),
-        );
+    for (revision, next) in candidates {
         current = store
             .adopt_mission_revision(
                 &run.id,
@@ -10435,11 +10528,13 @@ version 2
 "#
         )
     };
-    publish_carry(&store, &source("exit 2", "Do the work."), "regate-one");
+    let initial = publish_carry(&store, &source("exit 2", "Do the work."), "regate-one");
+    let regated = publish_carry(&store, &source("exit 0", "Do the work."), "regate-two");
+    let rewritten = publish_carry(&store, &source("exit 0", "Do other work."), "regate-three");
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: "carry".into(),
-            revision: None,
+            revision: Some(initial.revision),
             workspace: "/tmp".into(),
             requester: Some("person/requester".into()),
             mode: Some("run".into()),
@@ -10464,7 +10559,6 @@ version 2
         .unwrap();
     assert_eq!(submitted.status, "verifying");
 
-    let regated = publish_carry(&store, &source("exit 0", "Do the work."), "regate-two");
     let adopted = store
         .adopt_mission_revision(
             &run.id,
@@ -10485,7 +10579,6 @@ version 2
         ("verifying", true, 1)
     );
 
-    let rewritten = publish_carry(&store, &source("exit 0", "Do other work."), "regate-three");
     let adopted = store
         .adopt_mission_revision(
             &run.id,
@@ -10505,11 +10598,16 @@ version 2
 #[test]
 fn a_person_revises_a_run_from_outside_its_graph_location() {
     let store = Store::open_memory("node").unwrap();
-    publish_carry(&store, CARRY_SOURCE, "carry-one");
+    let initial = publish_carry(&store, CARRY_SOURCE, "carry-one");
+    let revised = publish_carry(
+        &store,
+        &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+        "carry-two",
+    );
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: "carry".into(),
-            revision: None,
+            revision: Some(initial.revision),
             workspace: "/tmp".into(),
             requester: Some("person/requester".into()),
             mode: Some("run".into()),
@@ -10517,11 +10615,6 @@ fn a_person_revises_a_run_from_outside_its_graph_location() {
             idempotency_key: "carry-run".into(),
         })
         .unwrap();
-    let revised = publish_carry(
-        &store,
-        &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
-        "carry-two",
-    );
 
     let adopted = store
         .adopt_mission_revision(
@@ -10538,11 +10631,16 @@ fn a_person_revises_a_run_from_outside_its_graph_location() {
 #[test]
 fn a_revision_keeps_the_claim_on_a_carried_step() {
     let store = Store::open_memory("node").unwrap();
-    publish_carry(&store, CARRY_SOURCE, "carry-one");
+    let initial = publish_carry(&store, CARRY_SOURCE, "carry-one");
+    let revised = publish_carry(
+        &store,
+        &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+        "carry-two",
+    );
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: "carry".into(),
-            revision: None,
+            revision: Some(initial.revision),
             workspace: "/tmp".into(),
             requester: Some("person/requester".into()),
             mode: Some("run".into()),
@@ -10562,11 +10660,6 @@ fn a_revision_keeps_the_claim_on_a_carried_step() {
     store
         .work_action(&old, "claim", &carry_request("one", "carry-claim"))
         .unwrap();
-    let revised = publish_carry(
-        &store,
-        &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
-        "carry-two",
-    );
 
     let adopted = store
         .adopt_mission_revision(
@@ -10631,20 +10724,20 @@ fn carried_claim_successor_requires_literal_ownership() {
     for actor in ["node/worker", "agent/node/worker"] {
         for holder in ["node/worker", "agent/node/worker"] {
             let store = Store::open_memory("node").unwrap();
-            publish_carry(&store, CARRY_SOURCE, "alias-carry-one");
+            let initial = publish_carry(&store, CARRY_SOURCE, "alias-carry-one");
+            let revised = publish_carry(
+                &store,
+                &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+                "alias-carry-two",
+            );
             let run = store.create_mission_run(&MissionRunRequest {
-                mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+                mission: "carry".into(), revision: Some(initial.revision), workspace: "/tmp".into(),
                 requester: Some("person/requester".into()), mode: Some("run".into()),
                 inputs: BTreeMap::new(), idempotency_key: "alias-carry-run".into(),
             }).unwrap();
             let old = &run.steps.iter().find(|step| step.step == "work").unwrap().subject;
             store.set_step_state(old, "ready", None).unwrap();
             store.work_action(old, "claim", &carry_request("one", "alias-carry-claim")).unwrap();
-            let revised = publish_carry(
-                &store,
-                &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
-                "alias-carry-two",
-            );
             let adopted = store.adopt_mission_revision(
                 &run.id, &revised, "person/requester", "revise other work", "alias-carry-revision",
             ).unwrap();
@@ -10740,6 +10833,11 @@ version 2
         .unwrap();
     let worker = format!("agent/{}/worker", run.id);
     let second = publish("Use the second goal.", "protected-two");
+    // Publication is not authority to replace a protected running revision.
+    let published = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(published.generation, run.generation);
+    assert_eq!(published.revision, run.revision);
+    assert!(published.superseded_by.is_none());
     let proposal = store
         .create_revision_proposal(
             &run.id,
@@ -10749,6 +10847,8 @@ version 2
             "protected-proposal",
         )
         .unwrap();
+    let newer = publish("Use a later unreviewed goal.", "protected-three");
+    assert_ne!(newer.revision, second.revision);
     assert_eq!(proposal.status, "pending-approval");
     assert_eq!(
         proposal.reviewers,
@@ -10785,6 +10885,13 @@ version 2
         )
         .unwrap_err();
     assert_eq!(error.code, "stale-revision-preview");
+    let unauthorized = store.approve_revision_proposal(
+        &proposal.id,
+        &worker,
+        proposal.preview_hash.as_deref().unwrap(),
+        "protected-agent-approval",
+    ).unwrap_err();
+    assert_eq!(unauthorized.code, "revision-approval-not-authorized");
     let first_approval = store
         .approve_revision_proposal(
             &proposal.id,
@@ -10818,6 +10925,15 @@ version 2
         .unwrap();
     assert_eq!(applied.status, "applied");
     assert_ne!(applied.mission_run.generation, run.generation);
+    assert_ne!(applied.mission_run.subject, run.subject);
+    assert_eq!(applied.mission_run.revision, second.revision);
+    assert_eq!(applied.mission_run.supersedes.as_deref(), Some(run.subject.as_str()));
+    let original = store.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(original.generation, run.generation);
+    assert_eq!(original.revision, run.revision);
+    assert_eq!(original.superseded_by.as_deref(), Some(applied.mission_run.subject.as_str()));
+    assert_eq!(original.steps.len(), run.steps.len());
+    assert!(original.steps.iter().zip(&run.steps).all(|(after, before)| after.subject == before.subject));
     assert_eq!(
         applied
             .proposal
@@ -10871,11 +10987,16 @@ fn revision_approval_retries_after_projection_gate_blocks_its_response() {
             ).unwrap();
             (store, run, proposal)
         };
-        let (normal_store, _, normal_proposal) = fixture();
+        let (normal_store, run, proposal) = fixture();
+        // Both executions must share publication claims: linked successor identities
+        // include the publication claim, not just the approval's idempotency key.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("approval.sqlite3");
+        normal_store.copy_store_to(&path).unwrap();
         let normal = normal_store.approve_revision_proposal(
-            &normal_proposal.id, "person/reviewer", normal_proposal.preview_hash.as_deref().unwrap(), "approval-race-approve",
+            &proposal.id, "person/reviewer", proposal.preview_hash.as_deref().unwrap(), "approval-race-approve",
         ).unwrap();
-        let (store, run, proposal) = fixture();
+        let store = Arc::new(Store::open(&path, "node").unwrap());
         let preview = proposal.preview_hash.as_deref().unwrap();
         let (start_tx, start_rx) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -10913,16 +11034,40 @@ fn revision_approval_retries_after_projection_gate_blocks_its_response() {
         assert_eq!(error.code, "database-busy");
         assert_eq!(error.details.get("reason").and_then(serde_json::Value::as_str), Some("run-projection-drain"));
         assert_eq!(committed.approvals, vec!["person/reviewer"]);
+        // The committed approval and exact applied successor must survive losing
+        // the process before its response has been cached.
+        drop(store);
+        let store = Store::open(&path, "node").unwrap();
         let retried = store.approve_revision_proposal(
             &proposal.id, "person/reviewer", preview, "approval-race-approve",
         ).unwrap();
         let expected_status = if cutover == "when-idle" { "draining" } else { "applied" };
         assert_eq!(retried.status, expected_status);
         assert_eq!(retried.proposal.as_ref().unwrap().status, expected_status);
+        if cutover == "when-idle" {
+            assert_eq!(retried.mission_run.subject, run.subject);
+        } else {
+            assert_ne!(retried.mission_run.subject, run.subject);
+            assert_eq!(retried.mission_run.supersedes.as_deref(), Some(run.subject.as_str()));
+            assert_eq!(retried.mission_run.revision, normal.mission_run.revision);
+            assert_eq!(retried.mission_run.subject, normal.mission_run.subject);
+            assert_eq!(retried.mission_run.generation, normal.mission_run.generation);
+            let original = store.mission_run(&run.id).unwrap().unwrap();
+            assert_eq!(original.generation, run.generation);
+            assert_eq!(original.revision, run.revision);
+            assert_eq!(original.superseded_by.as_deref(), Some(retried.mission_run.subject.as_str()));
+            assert!(original.steps.iter().zip(&run.steps).all(|(after, before)| after.subject == before.subject));
+            assert_eq!(original.steps.len(), run.steps.len());
+            assert_eq!(store.run_generations(&run.id).unwrap().len(), 1);
+            assert_eq!(
+                retried.proposal.as_ref().unwrap().successor_generation.as_deref(),
+                Some(retried.mission_run.generation.as_str()),
+            );
+        }
         assert_eq!(retried.status, normal.status);
         let actual_proposal = retried.proposal.as_ref().unwrap();
         let mut normal_proposal = normal.proposal.unwrap();
-        // Separate executions have separate clocks, but identical operation-derived identities.
+        // The cutover clocks may differ, but the shared publication fixes its identity.
         normal_proposal.created_at_unix_ms = actual_proposal.created_at_unix_ms;
         normal_proposal.updated_at_unix_ms = actual_proposal.updated_at_unix_ms;
         assert_eq!(serde_json::to_value(actual_proposal).unwrap(), serde_json::to_value(normal_proposal).unwrap());
@@ -10942,6 +11087,16 @@ fn revision_approval_retries_after_projection_gate_blocks_its_response() {
             [&proposal.subject], |row| row.get(0),
         ).unwrap();
         assert_eq!(approvals, 1, "recovery must not approve twice");
+        let applications: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE subject=?1 AND kind='revision-proposal.applied'",
+            [&proposal.subject], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(applications, usize::from(cutover != "when-idle"), "recovery must not apply twice");
+        let runs: usize = store.readers.get().query_row(
+            "SELECT COUNT(*) FROM mission_runs",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(runs, if cutover == "when-idle" { 1 } else { 2 }, "recovery must not create duplicate runs");
     }
 }
 
@@ -11235,8 +11390,11 @@ version 2
         .unwrap()
         .expect("the completion event permits cutover");
     assert_eq!(applied.status, "applied");
-    assert_eq!(applied.mission_run.phase, "normal");
+    assert_eq!(applied.mission_run.phase, "supersession-waiting");
     assert_ne!(applied.mission_run.generation, run.generation);
+    assert_ne!(applied.mission_run.subject, run.subject);
+    assert_eq!(applied.mission_run.supersedes.as_deref(), Some(run.subject.as_str()));
+    assert_eq!(store.mission_run(&run.id).unwrap().unwrap().generation, run.generation);
 
     // A late replica can project the draining proposal after the successor
     // generation. It must not put an already cut-over run back into drain.
@@ -11252,7 +11410,8 @@ version 2
         project_revision_proposal(&transaction, &created, fields).unwrap();
         transaction.commit().unwrap();
     }
-    assert_eq!(store.mission_run(&run.id).unwrap().unwrap().phase, "normal");
+    assert_eq!(store.mission_run(&applied.mission_run.id).unwrap().unwrap().phase, "supersession-waiting");
+    assert_eq!(store.mission_run(&run.id).unwrap().unwrap().generation, run.generation);
 }
 
 #[test]
@@ -11972,10 +12131,11 @@ mission "queue-revision" state="ready" {{
     };
 
     let initial = publish(&["one", "two", "three"], "queue-revision-one");
+    let reordered = publish(&["one", "three", "two"], "queue-revision-two");
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: initial.id,
-            revision: None,
+            revision: Some(initial.revision),
             workspace: ".".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -12011,7 +12171,6 @@ mission "queue-revision" state="ready" {{
         assert_eq!(direct.queue.as_deref(), Some("investigations"));
     }
 
-    let reordered = publish(&["one", "three", "two"], "queue-revision-two");
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -12060,10 +12219,11 @@ mission "review-current" state="ready" revision-cutover="restart-active" {{
         )
     };
     let first = publish("Review the first revision.", "review-current-first");
+    let second = publish("Review the second revision.", "review-current-second");
     let run = store
         .create_mission_run(&MissionRunRequest {
             mission: first.id.clone(),
-            revision: None,
+            revision: Some(first.revision),
             workspace: ".".into(),
             requester: Some("person/test".into()),
             mode: Some("run".into()),
@@ -12116,7 +12276,6 @@ mission "review-current" state="ready" revision-cutover="restart-active" {{
     );
     assert_eq!(store.pending_human_reviews(None).unwrap().len(), 1);
 
-    let second = publish("Review the second revision.", "review-current-second");
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -12589,9 +12748,10 @@ mission "snapshot-cutover" state="ready" {{
         )
     };
     let first = publish("First revision work.", "snapshot-first");
+    let second = publish("Replacement revision work.", "snapshot-second");
     let original = store.create_mission_run(&MissionRunRequest {
         mission: first.id.clone(),
-        revision: None,
+        revision: Some(first.revision),
         workspace: scratch.path().to_str().unwrap().into(),
         requester: Some("person/test".into()),
         mode: None,
@@ -12600,7 +12760,6 @@ mission "snapshot-cutover" state="ready" {{
     }).unwrap();
     let subject = original.steps[0].subject.clone();
     assert!(store.set_step_state(&subject, "ready", None).unwrap());
-    let second = publish("Replacement revision work.", "snapshot-second");
     let (reached, at_steps) = mpsc::sync_channel(1);
     let (resume, continue_steps) = mpsc::sync_channel(1);
     let pause = Arc::new(Pause {

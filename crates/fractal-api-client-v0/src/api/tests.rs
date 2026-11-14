@@ -62,7 +62,7 @@ async fn bound_actor_refusals_decode_as_client_api_errors() {
     assert!(message.contains("cannot act as"));
     let value = serde_json::to_value(envelope).unwrap();
     assert_eq!(value["api_version"], CLIENT_API_VERSION);
-    assert_eq!(value["error_version"], "st3.client.error.v0");
+    assert_eq!(value["error_version"], "fractal.client.error.v0");
     assert!(
         value["request_id"]
             .as_str()

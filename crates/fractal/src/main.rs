@@ -79,6 +79,7 @@ mod demo;
 mod setup;
 mod onboarding;
 mod change_cli;
+mod availability;
 mod directive_note;
 mod completion;
 mod doctor_cli;
@@ -95,6 +96,7 @@ mod pairing_qr;
 mod agents_cli;
 mod attention_cli;
 mod claims_cli;
+mod hosts_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -108,6 +110,7 @@ mod uninstall_cli;
 mod program_bundles;
 mod validate_cli;
 mod work_cli;
+mod source_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
@@ -318,7 +321,7 @@ enum Command {
         #[command(subcommand)]
         command: OwnedSetsCommand,
     },
-    /// Inspect source enforcement: each owned set's policy and open ad hoc source debt.
+    /// Inspect source: owned sets' policy and debt, and where declarations come from in source.
     Source {
         #[command(subcommand)]
         command: SourceCommand,
@@ -329,6 +332,8 @@ enum Command {
     Now(NowArgs),
     /// Read current person notes; notes inform but never assign work or grant authority.
     Note(directive_note::NoteArgs),
+    /// Read or set a person's status, interruptions and deadline clock; it informs, never grants.
+    Availability(availability::AvailabilityArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
     /// List every objective and budget with its target, current value and what is left, and
@@ -442,6 +447,11 @@ enum Command {
     Fleet {
         #[command(subcommand)]
         command: FleetCommand,
+    },
+    /// Inspect and resolve durable execution-host admission holds.
+    Hosts {
+        #[command(subcommand)]
+        command: hosts_cli::HostsCommand,
     },
     /// Save or restore the signed claim log.
     Backup {
@@ -1269,7 +1279,7 @@ enum MissionViewCommand {
     /// List current missions; use --all for historical terminal missions.
     Ls {
         /// Follow current collection changes.
-        #[arg(long, conflicts_with_all = ["all", "cursor", "since", "until", "status"])]
+        #[arg(long, conflicts_with_all = ["all", "cursor", "since", "until", "status", "mission"])]
         watch: bool,
         #[arg(long)]
         all: bool,
@@ -1286,6 +1296,11 @@ enum MissionViewCommand {
         /// Terminal state: failed, cancelled, timed-out, or completed. Includes reasons.
         #[arg(long, value_parser = ["failed", "cancelled", "timed-out", "completed"])]
         status: Option<String>,
+        /// Only this mission's terminal transitions (history across missions otherwise).
+        /// Reaches every run of the mission with paging; running and waiting runs
+        /// stay on `/v1/mission-runs?mission=`.
+        #[arg(long, add = ArgValueCompleter::new(Complete(Entity::Mission)))]
+        mission: Option<String>,
     },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
@@ -1340,6 +1355,11 @@ enum MissionViewCommand {
     /// Publication and preview do not start a run. Claim its ready steps, verify the result
     /// and record evidence before review. Recording work does not widen its authorization.
     Start(MissionRunStartArgs),
+    /// Start a new run from a failed terminal run's exact inputs and workspace.
+    ///
+    /// Uses the latest published revision unless --same-revision is set. The source run
+    /// and its history remain unchanged; incompatible latest inputs are refused.
+    Retry(MissionRunRetryArgs),
     /// Cancel one exact running mission and stop its owned work and runtimes.
     Cancel(MissionCancelArgs),
     /// Change who a running run tells when it fails, is cancelled or stalls, or clear it.
@@ -1493,8 +1513,10 @@ struct MissionRunStartArgs {
     /// are used as given. Defaults to MISSION/UUIDv7.
     #[arg(long)]
     id: Option<String>,
-    #[arg(long, default_value = ".")]
-    workspace: PathBuf,
+    /// Workspace on the execution members. Required for remote execution; must be absolute there.
+    /// Local execution defaults to the current directory.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
     /// Start no work until this mission run completes; fail if it fails or is cancelled.
@@ -1519,6 +1541,22 @@ struct MissionRunStartArgs {
     /// Print the exact mission-run KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
+}
+
+#[derive(Args)]
+struct MissionRunRetryArgs {
+    /// Exact failed terminal mission run to retry.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: false })))]
+    run: String,
+    /// Use the source run's current revision instead of the latest published revision.
+    #[arg(long)]
+    same_revision: bool,
+    /// Why a new run is needed.
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
 }
 
 #[derive(Args)]
@@ -1720,8 +1758,9 @@ struct LaunchApproveAndStartArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Launch)))]
     session: String,
     preview_hash: String,
-    #[arg(long, default_value = ".")]
-    workspace: PathBuf,
+    /// Workspace on the execution members; required and absolute for remote execution.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -1733,8 +1772,9 @@ struct LaunchApproveAndStartArgs {
 struct LaunchRunArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Launch)))]
     session: String,
-    #[arg(long, default_value = ".")]
-    workspace: PathBuf,
+    /// Workspace on the execution members; required and absolute for remote execution.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -2439,6 +2479,16 @@ struct SubjectShowArgs {
     /// Include literal environment values in the KDL output.
     #[arg(long, requires = "kdl")]
     show_env_values: bool,
+    /// Where this agent or mission revision was authored, from its recorded source map. A
+    /// `step-run/…` subject resolves through the revision its run pinned.
+    #[arg(long, conflicts_with_all = ["kdl", "references"])]
+    source: bool,
+    /// The revision to show the source of; defaults to the current one.
+    #[arg(long, requires = "source")]
+    revision: Option<String>,
+    /// One node and its frames: a KDL node path or `step:ID[/gate:NAME|/goal]`.
+    #[arg(long, requires = "source")]
+    node: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -3381,8 +3431,9 @@ struct ApplyArgs {
     /// Print the resolved preview without publishing or running exec gates (unless --check).
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
-    /// Check mission and step exec gates during a dry run, as `fractal missions check` does.
-    /// Loop until scripts are not checked; they run after each round.
+    /// Check mission and step exec gates during a dry run, as `fractal missions check` does; with
+    /// --set only the missions whose revision the daemon does not hold yet. Loop until scripts are
+    /// not checked; they run after each round.
     #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
     /// The workspace a run would use, for exec gate checks.
@@ -3438,6 +3489,9 @@ struct ApplyArgs {
     /// Why this ad hoc change is forced; recorded with its actor in `fractal source status`.
     #[arg(long, requires = "force", value_parser = clap::builder::NonEmptyStringValueParser::new())]
     reason: Option<String>,
+    /// fractal.source-map/v1 JSON recorded beside each mapped member revision.
+    #[arg(long, requires = "set")]
+    source_map: Option<PathBuf>,
     /// Complete person, agent or run subject authoring the publication; defaults to the
     /// harness's own agent, else to the run a program effect acts as.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -3470,6 +3524,10 @@ enum SourceCommand {
         #[arg(long)]
         audit: bool,
     },
+    /// Which live agents and missions a file, or one line of it, declares or feeds.
+    Where(source_cli::SourceWhereArgs),
+    /// What changed between two mapped revisions of a subject: source files, KDL, and why.
+    Diff(source_cli::SourceDiffArgs),
 }
 
 /// Bundle each versioned file into one intent so references may cross file boundaries.
@@ -3613,12 +3671,24 @@ async fn run_owned_set_apply(
     };
     // Read and check the bundles first, so a dry run refuses a stale bundle too.
     let program_bundles = program_bundles::program_bundles(&intent.kdl)?;
+    let source_map = args
+        .source_map
+        .as_deref()
+        .map(|path| -> Result<fractal_schema::source_map::SourceMap> {
+            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            let map: fractal_schema::source_map::SourceMap = serde_json::from_slice(&bytes)
+                .with_context(|| format!("{} is not a fractal.source-map/v1 document", path.display()))?;
+            map.validate(bytes.len()).map_err(|e| anyhow::anyhow!("{}: {}", e.code, e.message))?;
+            Ok(map)
+        })
+        .transpose()?;
     let mut request = Request {
         intent,
         options,
         actor,
         idempotency_key: uuid::Uuid::now_v7().to_string(),
         program_bundles: BTreeMap::new(),
+        source_map: None,
     };
     let preview: Preview = client.post("/v1/sets/preview", &request).await?;
     if args.dry_run {
@@ -3629,11 +3699,16 @@ async fn run_owned_set_apply(
         "owned set refused: {}",
         preview.blockers.join("; ")
     );
-    // Empty owned membership has no gates and is not a valid plain gate-check intent.
-    if !preview.empty && (args.check || (!args.dry_run && !args.no_gate_check)) {
+    // Check only the missions whose revision this daemon does not hold yet: an unchanged or
+    // adopted member is not checked again. An older daemon names none, so every mission is
+    // checked. Empty membership has no gates and is not a valid gate-check intent.
+    let missions = preview.gate_check.clone();
+    let any = !preview.empty && missions.as_ref().is_none_or(|missions| !missions.is_empty());
+    if any && (args.check || (!args.dry_run && !args.no_gate_check)) {
         check_before_publish(
             client,
             &request.intent,
+            missions,
             &args.workspace,
             &args.inputs,
             args.check,
@@ -3645,6 +3720,7 @@ async fn run_owned_set_apply(
     }
     request.options.expected_subjects = preview.expected_subjects;
     request.program_bundles = program_bundles;
+    request.source_map = source_map;
     let response: Value = client.post("/v1/sets/apply", &request).await?;
     print_value(&response, json_output)
 }
@@ -3697,7 +3773,9 @@ struct AgentStartArgs {
     /// Record permission to start this placement before unreachable source hosts acknowledge exit.
     #[arg(long, conflicts_with = "print_kdl")]
     source_offline: bool,
-    /// Override the workspace; new agents default to the current directory.
+    /// Override the declaration's workspace with an absolute path on its member. A kept
+    /// declaration without it stays on its own workspace; starting a new agent here
+    /// defaults to the current directory.
     #[arg(long)]
     workspace: Option<PathBuf>,
     /// Set the typed-harness model; refused for existing command/argv agents.
@@ -3906,16 +3984,20 @@ struct AgentRestartArgs {
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
-    /// Restart at once. By default an agent that is up and ready is first asked for its handoff and
-    /// restarted at its acknowledgement or after two minutes; use this for an agent that cannot answer.
-    /// Also interrupts immediately when restarting yourself during a turn.
+    /// Restart at once, skipping the usual handoff acknowledgement or two-minute wait.
+    /// Also interrupts immediately when restarting yourself during a turn. With --fresh-session,
+    /// still waits for a current handoff unless --from-stale-handoff is given by a person.
     #[arg(long)]
     now: bool,
-    /// Start a new native session instead of continuing the last one. The agent must have a
-    /// handoff written or marked ready (`fractal agents handoff ready`) since its last turn; the new
-    /// session is given it first. Without this the restart continues the last session.
+    /// Start a new native session instead of continuing the last one. If the handoff has not been
+    /// written or marked ready since the last turn, return pending until the agent acknowledges
+    /// preparation; no deadline forces the restart. The new session is given the handoff first.
     #[arg(long)]
     fresh_session: bool,
+    /// Accept the existing handoff without waiting for the agent to acknowledge preparation.
+    /// Only a person may use this override; the request records who accepted the stale handoff.
+    #[arg(long, requires = "fresh_session")]
+    from_stale_handoff: bool,
     /// Start the agent now even if its lane does not fit the host's free room, for when a stale
     /// measurement holds an agent that must run. Needs --reason; who asked and why are recorded.
     #[arg(long, requires = "reason")]
@@ -4185,6 +4267,49 @@ enum AttentionCommand {
     Reject(ReviewArgs),
     /// Ask a feedback-mode step to change its work and rerun.
     RequestChanges(FeedbackReviewArgs),
+    /// Mark one of your alerts seen, on every client of yours.
+    Seen(AttentionControlArgs),
+    /// Put one of your alerts off until later, on every client of yours. It stays open, and an
+    /// ask's deadline does not move: hold the deadline clock for that.
+    Snooze(AttentionSnoozeArgs),
+    /// Set an ask aside without answering it: the asker is told you dismissed it. An update is
+    /// read. Other alerts keep their own actions.
+    Dismiss(AttentionDismissArgs),
+}
+
+#[derive(Args)]
+struct AttentionControlArgs {
+    /// The alert: its `attention/...` ID from `fractal alerts ls`.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Attention)))]
+    subject: String,
+    /// The person whose alert it is: only that person may control it.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
+    #[arg(long = "as", value_parser = parse_person_subject)]
+    actor: Option<String>,
+}
+
+#[derive(Args)]
+struct AttentionSnoozeArgs {
+    #[command(flatten)]
+    target: AttentionControlArgs,
+    /// How long to put it off, such as `30m`, `4h` or `1d`.
+    #[arg(long = "for", conflicts_with_all = ["until", "clear"], required_unless_present_any = ["until", "clear"])]
+    duration: Option<String>,
+    /// Put it off until this RFC 3339 instant.
+    #[arg(long, conflicts_with = "clear")]
+    until: Option<String>,
+    /// Bring it back now.
+    #[arg(long)]
+    clear: bool,
+}
+
+#[derive(Args)]
+struct AttentionDismissArgs {
+    #[command(flatten)]
+    target: AttentionControlArgs,
+    /// Why, sent to the asker with the dismissal.
+    #[arg(long)]
+    text: Option<String>,
 }
 
 #[derive(Args)]
@@ -4463,6 +4588,11 @@ struct WorkAskArgs {
     /// ask resolves as timed out, with no answer.
     #[arg(long = "default", value_name = "ANSWER", requires = "request")]
     default_answer: Option<String>,
+    /// How pressing the ask is. Only `critical` is urgent: keep it for an answer that is
+    /// time-sensitive or guards an irreversible step. An urgent ask keeps its deadline running
+    /// while the person holds routine asks and may interrupt them.
+    #[arg(long, value_parser = ["critical", "high", "normal", "low"], default_value = "normal")]
+    priority: String,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
@@ -4486,6 +4616,10 @@ struct WorkUpdateArgs {
     /// The information itself.
     #[arg(long)]
     body: String,
+    /// Words to speak aloud to the person, at most 300 characters. Set it only when the person
+    /// asked to be told this outcome.
+    #[arg(long, value_name = "TEXT")]
+    speech: Option<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
@@ -6142,6 +6276,8 @@ async fn run(cli: Cli) -> Result<()> {
                 .await?;
             print_value(&status, cli.json)
         }
+        Command::Source { command: SourceCommand::Where(args) } => source_cli::run_where(&client, args, cli.json).await,
+        Command::Source { command: SourceCommand::Diff(args) } => source_cli::run_diff(&client, args, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Web { .. } => unreachable!("the browser opens before the CLI runtime"),
         Command::Demo { .. } => unreachable!("a demo runs before the CLI runtime"),
@@ -6155,6 +6291,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Now(args) => run_now(&endpoint, config.person.as_deref(), args, cli.json).await,
         Command::Note(args) => {
             directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
+        }
+        Command::Availability(args) => {
+            availability::run(&endpoint, config.person.as_deref(), args, cli.json).await
         }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Slo(args) => run_slo(&immediate, args, cli.json).await,
@@ -6350,6 +6489,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Claims { command } => run_claims(&client, command, cli.json).await,
+        Command::Hosts { command } => hosts_cli::run(&client, config.person.as_deref(), command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,
@@ -6456,6 +6596,9 @@ fn guard_mutating_cli_actor(
     }
     let actor = match command {
         Command::Apply(args) => args.actor.as_deref(),
+        Command::Hosts { command: hosts_cli::HostsCommand::Hold { actor, .. }
+            | hosts_cli::HostsCommand::Release { actor, .. }
+            | hosts_cli::HostsCommand::Recover { actor, .. } } => actor.as_deref(),
         Command::Changes(change_cli::ChangesArgs {
             command: change_cli::ChangesCommand::Sync { actor, .. },
         }) | Command::Gate {
@@ -6475,6 +6618,7 @@ fn guard_mutating_cli_actor(
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
+            MissionViewCommand::Retry(args) => Some(args.actor.as_str()),
             MissionViewCommand::Check(args) => args.actor.as_deref(),
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
@@ -7671,6 +7815,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("startup.isolation", || fractal_runtime::initialize_isolation(&isolation_environment)))
         .await
         .context("probe task isolation during daemon startup")?;
+    let producer_root = pty_root.clone();
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("startup.pty_producers", || {
+        if let Err(error) = fractal_runtime::PtyRuntime::new(producer_root).reconcile_producers_at_daemon_startup() {
+            tracing::warn!(error = %error, "PTY producer startup reconciliation incomplete");
+        }
+    })).await.context("reconcile PTY producers during daemon startup")?;
     let pty_binary = match args.pty_binary.clone() {
         Some(pty_binary) => pty_binary,
         None => fractal_runtime::resolve_executable("pty", &login_environment)?,
@@ -7699,6 +7849,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify: notify.clone(),
         event_notify: event_notify.clone(),
         node: config.node.clone(),
+        api_socket: config.socket.clone(),
         state_dir: config.state_dir.clone(),
         pty_root: pty_root.clone(),
         pty_binary: pty_binary.clone(),
@@ -7736,6 +7887,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.install_launch_contract_reader();
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
+    reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
     fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
@@ -7779,13 +7931,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
+    // The shipped CI objectives are retired: end any fault one left open, once per start.
+    if let Err(error) = fractal_daemon::objective_faults::end_retired_ci_objectives(&store) {
+        eprintln!("st3: ending the retired CI objectives' open faults failed: {error:?}");
+    }
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
                 let mut rows = fractal_daemon::api::slo_rows(&store)?;
-                fractal_daemon::objective_faults::check_and_report(&store, &rows);
                 fractal_daemon::declared_objectives::check_and_report(&store, &rows);
                 rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
@@ -8006,6 +8161,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
             slo.stop();
         }
     };
+    let (relayed_closes_stop, relayed_closes_stopped) = tokio::sync::watch::channel(false);
+    let mut relayed_closes_worker = tokio::spawn(
+        fractal_daemon::api::relayed_close_maintenance::run(state.clone(), relayed_closes_stopped),
+    );
     let serving = async {
         let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
@@ -8044,6 +8203,21 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let stopped = fractal_daemon::api::stop_before_listener_drop(
         serving, shutdown, stop_agents_request_slo,
     ).await;
+    relayed_closes_stop.send_replace(true);
+    match finish_relayed_close_maintenance(&mut relayed_closes_worker, async {
+        tokio::select! {
+            _ = terminate.recv() => libc::SIGTERM,
+            _ = interrupt.recv() => libc::SIGINT,
+        }
+    }).await {
+        Ok(Some(signal)) => {
+            stderr_message("fractal", format_args!("forced stop before relayed close writes committed"));
+            // Do not enter another drain stage: its writer may be the one blocking this stage.
+            return end_by_signal(signal);
+        }
+        Ok(None) => {}
+        Err(error) => stderr_message("fractal", format_args!("relayed close maintenance stopped: {error}")),
+    }
     drop(agents_request_slo);
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
@@ -8077,6 +8251,40 @@ async fn run_up(args: UpArgs) -> Result<()> {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
     }
+}
+
+/// Normal shutdown drains admitted close writes. A second signal aborts the waiter and
+/// returns immediately so the caller can terminate even while the database writer is held.
+async fn finish_relayed_close_maintenance(
+    worker: &mut tokio::task::JoinHandle<()>,
+    forced: impl std::future::Future<Output = libc::c_int>,
+) -> std::result::Result<Option<libc::c_int>, tokio::task::JoinError> {
+    tokio::select! {
+        biased;
+        signal = forced => {
+            worker.abort();
+            Ok(Some(signal))
+        }
+        result = &mut *worker => result.map(|()| None),
+    }
+}
+
+#[tokio::test]
+async fn normal_relayed_close_shutdown_waits_for_the_worker() {
+    let mut worker = tokio::spawn(async {});
+    assert_eq!(finish_relayed_close_maintenance(
+        &mut worker, std::future::pending(),
+    ).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_second_signal_bypasses_a_pending_relayed_close_drain() {
+    let mut worker = tokio::spawn(std::future::pending::<()>());
+    let stopped = tokio::time::timeout(Duration::from_secs(1),
+        finish_relayed_close_maintenance(&mut worker, async { libc::SIGTERM }),
+    ).await.expect("forced stop waited for the close writer").unwrap();
+    assert_eq!(stopped, Some(libc::SIGTERM));
+    assert!(worker.await.unwrap_err().is_cancelled());
 }
 
 /// Save the graph's replication inventory and its messages shard's, each when nothing but
@@ -8197,6 +8405,7 @@ async fn publish_mission_intent(
         check_before_publish(
             client,
             &mission.resolved_intent,
+            None,
             &args.workspace,
             &args.inputs,
             args.check,
@@ -8235,12 +8444,13 @@ async fn publish_mission_intent(
 async fn check_before_publish(
     client: &Client,
     intent: &IntentInput,
+    missions: Option<BTreeSet<String>>,
     workspace: &Path,
     inputs: &[(String, String)],
     required: bool,
 ) -> Result<()> {
     let mut announced = false;
-    let checked = run_gate_check(client, intent, workspace, inputs, |view, item| {
+    let checked = run_gate_check(client, intent, missions, workspace, inputs, |view, item| {
         if !announced {
             eprintln!("{}", gate_check_heading(view));
             announced = true;
@@ -8281,10 +8491,12 @@ async fn check_before_publish(
 }
 
 /// Check the exec gates of `intent` on the daemon and wait for every answer, including deferred
-/// loop until scripts, handing each one to `report` as it arrives. `None` for older daemons.
+/// loop until scripts, handing each one to `report` as it arrives. `missions` limits the check to
+/// those mission subjects. `None` for older daemons.
 async fn run_gate_check(
     client: &Client,
     intent: &IntentInput,
+    missions: Option<BTreeSet<String>>,
     workspace: &Path,
     inputs: &[(String, String)],
     mut report: impl FnMut(&fractal_daemon::model::GateCheckView, &fractal_daemon::model::GateCheckItemView),
@@ -8295,6 +8507,7 @@ async fn run_gate_check(
         intent: intent.clone(),
         workspace: workspace.display().to_string(),
         inputs: inputs.iter().cloned().collect(),
+        missions,
     };
     let mut view: fractal_daemon::model::GateCheckView = match client.post("/v1/gate-checks", &request).await {
         Ok(view) => view,
@@ -8371,6 +8584,129 @@ fn whole_duration(ms: u64) -> String {
     }
 }
 
+/// A run has no single placement: its declarations and executable gates may span members.
+/// Never turn the caller's cwd into a default path for those other members.
+fn resolve_mission_workspace(
+    mission: &MissionSpec,
+    workspace: Option<&Path>,
+    local: &str,
+    inputs: &BTreeMap<String, String>,
+) -> Result<PathBuf> {
+    let mut hosts = BTreeSet::new();
+    let unknown_placement = mission_workspace_hosts(mission, inputs, &mut hosts)?;
+    if unknown_placement || hosts.iter().any(|host| host != local && host != "local") {
+        let workspace = workspace.context(
+            "this mission is not provably local; pass --workspace with an absolute path on the execution members",
+        )?;
+        anyhow::ensure!(
+            workspace.is_absolute(),
+            "a workspace for execution that is not provably local must be an absolute path on the execution members"
+        );
+        return Ok(workspace.to_path_buf());
+    }
+    let workspace = workspace.unwrap_or_else(|| Path::new("."));
+    workspace
+        .canonicalize()
+        .with_context(|| format!("resolve workspace {}", workspace.display()))
+}
+
+fn mission_workspace_hosts(
+    mission: &MissionSpec,
+    inputs: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> Result<bool> {
+    // A referenced mission can be selected by a prior step's output, so its placement is
+    // not necessarily knowable before the run. Do not publish a local default for it.
+    let mut unknown_placement = mission.steps.values().any(|step| step.uses_mission.is_some());
+    // Only values already known for actual execution belong here. Proof variables are not
+    // execution context: substituting one could make a remote placement look local.
+    let mut variables = BTreeMap::new();
+    variables.extend(inputs.iter().map(|(name, value)| (format!("input.{name}"), value.clone())));
+    if let Some(source) = &mission.declarations_kdl {
+        unknown_placement |= declaration_workspace_hosts(source, &variables, hosts)?;
+    }
+    for gate in &mission.gates {
+        unknown_placement |= gate_workspace_host(gate, &variables, hosts);
+    }
+    for step in mission.steps.values() {
+        variables.insert("ST_STEP".into(), step.path.clone());
+        if let Some(source) = &step.declarations_kdl {
+            unknown_placement |= declaration_workspace_hosts(source, &variables, hosts)?;
+        }
+        for gate in &step.gates {
+            unknown_placement |= gate_workspace_host(gate, &variables, hosts);
+        }
+    }
+    for step in mission.steps.values() {
+        if let Some(nested) = &step.nested_mission {
+            unknown_placement |= mission_workspace_hosts(nested, inputs, hosts)?;
+        }
+        if let Some(loop_spec) = &step.loop_spec {
+            for nested in [
+                Some(&loop_spec.round),
+                loop_spec.on_keep.as_ref(),
+                loop_spec.on_discard.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                unknown_placement |= mission_workspace_hosts(nested, inputs, hosts)?;
+            }
+        }
+    }
+    Ok(unknown_placement)
+}
+
+/// Collect an over-approximation of placement expressions without interpolating unrelated
+/// runtime fields (workspace, IDs, commands). Unknown placement requires an explicit path.
+fn declaration_workspace_hosts(
+    source: &str,
+    variables: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> Result<bool> {
+    fn visit(document: &KdlDocument, variables: &BTreeMap<String, String>, hosts: &mut BTreeSet<String>) -> bool {
+        let mut unknown = false;
+        for node in document.nodes() {
+            unknown |= node.name().value().contains("${");
+            if node.name().value() == "host" {
+                unknown |= node.entries().first()
+                    .and_then(|entry| entry.value().as_string())
+                    .is_none_or(|host| record_workspace_host(host, variables, hosts));
+            }
+            for entry in node.entries() {
+                if entry.name().is_some_and(|name| name.value() == "host") {
+                    unknown |= entry.value().as_string()
+                        .is_none_or(|host| record_workspace_host(host, variables, hosts));
+                }
+            }
+            if let Some(children) = node.children() {
+                unknown |= visit(children, variables, hosts);
+            }
+        }
+        unknown
+    }
+    Ok(visit(&source.parse::<KdlDocument>()?, variables, hosts))
+}
+
+fn gate_workspace_host(
+    gate: &fractal_daemon::model::GateSpec,
+    variables: &BTreeMap<String, String>,
+    hosts: &mut BTreeSet<String>,
+) -> bool {
+    match gate {
+        fractal_daemon::model::GateSpec::Mechanical { host, .. }
+        | fractal_daemon::model::GateSpec::Llm { host, .. } => record_workspace_host(host, variables, hosts),
+        _ => false,
+    }
+}
+
+fn record_workspace_host(host: &str, variables: &BTreeMap<String, String>, hosts: &mut BTreeSet<String>) -> bool {
+    match fractal_daemon::mission::interpolate(host, variables) {
+        Ok(host) => { hosts.insert(host); false }
+        Err(_) => true,
+    }
+}
+
 async fn start_mission_run(
     client: &Client,
     args: MissionRunStartArgs,
@@ -8396,11 +8732,12 @@ async fn start_mission_run(
         "mission `mission/{mission_id}` is not ready"
     );
     let run_id = mission_start_run_id(mission_id, args.id.as_deref());
-    let workspace = args
-        .workspace
-        .canonicalize()
-        .with_context(|| format!("resolve workspace {}", args.workspace.display()))?;
     let inputs = unique_pairs(args.inputs, "input")?;
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let workspace = resolve_mission_workspace(&mission, args.workspace.as_deref(), local, &inputs)?;
     let actor = args.actor;
     let requester = normalize_requester_subject(&actor);
     let after = args
@@ -9495,16 +9832,38 @@ async fn run_now(
     if args.all {
         command.push_str(" --all");
     }
+    // A separate read: a person reader sees their own availability, an agent reader (the harness
+    // running `now` for its person) the people it works for. Its failure leaves Now intact.
+    let availability = match fractal_drivers::contracts::env("ST_AGENT").filter(|own| own.starts_with("agent/")) {
+        Some(agent) => match generated_client(endpoint, Some(&agent)) {
+            Ok(reader) => reader.availability_list(None).await.map_err(anyhow::Error::from),
+            Err(error) => Err(error),
+        },
+        None => client.availability_list(None).await.map_err(anyhow::Error::from),
+    }
+    .map(|read| read.value);
+    if let Err(error) = &availability {
+        stderr_message("st", format_args!("could not read availability: {error:#}"));
+    }
     if json_output {
-        print_value(&response, true)?;
+        let mut value = serde_json::to_value(&response)?;
+        if let Ok(availability) = &availability {
+            value["availability"] = serde_json::to_value(availability)?;
+        }
+        print_value(&value, true)?;
     } else {
-        print!("{}", render_now_page(&response.value, &command));
+        let people = availability.map(|read| read.people).unwrap_or_default();
+        print!("{}", render_now_page(&response.value, &people, &command));
     }
     note_partial_page(&response.value);
     Ok(())
 }
 
-fn render_now_page(page: &ClientPage, continuation_command: &str) -> String {
+fn render_now_page(
+    page: &ClientPage,
+    people: &[fractal_client::PersonAvailability],
+    continuation_command: &str,
+) -> String {
     let mut needs_you = page.clone();
     needs_you
         .items
@@ -9537,12 +9896,20 @@ fn render_now_page(page: &ClientPage, continuation_command: &str) -> String {
     if let Some(sync) = &page.sync {
         output.push_str(&render_sync_notice(sync, now_ms()));
     }
+    // Who the reader may wait on, before what waits on the reader.
+    // Only availability that departs from the default; `work ask` always names it.
+    let mut named = false;
+    for person in people.iter().filter(|person| availability::worth_showing(person)) {
+        output.push_str(&availability::summary_line(person));
+        output.push('\n');
+        named = true;
+    }
     // `N alerts` and the alerts, then updates; nothing at all when nothing waits.
-    output.push_str(&render_alert_sections(
-        &needs_you,
-        None,
-        continuation_command,
-    ));
+    let alerts = render_alert_sections(&needs_you, None, continuation_command);
+    if named && !alerts.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&alerts);
     // The server fills Now with attention, and adds work only for an explicit work
     // filter. Print a section only when the page holds its items, so a section the
     // server never filled does not read as zero.
@@ -10805,6 +11172,8 @@ fn render_product_page_headed(
                     render_declared_admission(&mut output, admission);
                 }
                 if item.runs_truncated {
+                    let _ = writeln!(output, "  preview: {} of {} runs shown", item.runs.len(), item.total_runs.unwrap_or(item.runs.len()));
+                    let _ = writeln!(output, "  history: fractal missions ls --all --mission {}", item.header.id);
                     let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
                 } else if let Some(run) = item.runs.last() {
                     let _ = writeln!(output, "  inspect: fractal missions show {run}");
@@ -11230,7 +11599,7 @@ fn account_name(label: &Value, declared: &Value) -> String {
 fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> String {
     use std::fmt::Write as _;
 
-    const COLUMNS: [&str; 7] = [
+    const COLUMNS: [&str; 8] = [
         "cost_microusd",
         "total_tokens",
         "input_tokens",
@@ -11238,6 +11607,7 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         "cache_write_tokens",
         "cached_tokens",
         "unpriced_tokens",
+        "unpriced_responses",
     ];
     let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     let sum = |rows: &mut dyn Iterator<Item = &Value>| {
@@ -11250,12 +11620,12 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         values
     };
     // Cost is API-equivalent: what the tokens would cost at list price. A trailing `+` marks a
-    // figure that leaves out tokens on models without a price.
+    // figure that leaves out responses without a known price.
     let dollars = |values: &[u64; COLUMNS.len()]| {
         format!(
             "${:.2}{}",
             values[0] as f64 / 1_000_000.0,
-            if values[6] > 0 { "+" } else { "" }
+            if values[6] > 0 || values[7] > 0 { "+" } else { "" }
         )
     };
     let mut output = String::new();
@@ -11272,6 +11642,9 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             "UNPRICED  {} tokens on models without a price",
             total[6]
         );
+    }
+    if total[7] > 0 {
+        let _ = writeln!(output, "UNPRICED  {} responses without a known price", total[7]);
     }
     if let Some(counts) = report.get("coordination").filter(|counts| counts.is_object()) {
         let _ = write!(
@@ -11322,7 +11695,7 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             let share = match (day["low_percent"].as_f64(), day["high_percent"].as_f64()) {
                 (Some(low), Some(high)) => format!(
                     "{low:.1}–{high:.1}%{}",
-                    if day["unpriced_tokens"].as_u64().unwrap_or(0) > 0 {
+                    if day["unpriced_tokens"].as_u64().unwrap_or(0) > 0 || day["unpriced_responses"].as_u64().unwrap_or(0) > 0 {
                         "*"
                     } else {
                         ""
@@ -11372,7 +11745,7 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 format!(
                     "credits {}{} of {} this month",
                     dollars(&credits["used_microusd"]),
-                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
+                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 || credits["unpriced_responses"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
                     dollars(&credits["budget_microusd"])
                 )
             } else if let Some(limit) = limit {
@@ -11953,6 +12326,9 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
+            if args.source {
+                return source_cli::show(client, &args.subject, args.revision.as_deref(), args.node.as_deref(), json_output).await;
+            }
             if args.references {
                 let references: Vec<Value> = client
                     .get(&format!("/v1/resource-references/{}", args.subject))
@@ -12278,10 +12654,12 @@ struct OutcomeCursor {
     until: u128,
     status: Option<String>,
     actor: Option<String>,
+    mission: Option<String>,
     before: u64,
     limit: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_outcomes(
     client: &Client,
     collection: &str,
@@ -12289,6 +12667,7 @@ async fn list_outcomes(
     until: Option<String>,
     status: Option<String>,
     actor: Option<String>,
+    mission: Option<String>,
     cursor: Option<String>,
     limit: usize,
     json_output: bool,
@@ -12304,6 +12683,7 @@ async fn list_outcomes(
             saved.collection == collection
                 && saved.limit == limit
                 && saved.actor == actor
+                && saved.mission == mission
                 && status
                     .as_deref()
                     .is_none_or(|s| saved.status.as_deref() == Some(s)),
@@ -12329,6 +12709,7 @@ async fn list_outcomes(
                 .unwrap_or(now),
             status,
             actor,
+            mission,
             before: i64::MAX as u64,
             limit,
         }
@@ -12347,7 +12728,11 @@ async fn list_outcomes(
     if let Some(actor) = &filter.actor {
         path.push_str(&format!("&actor={}", urlencoding::encode(actor)));
     }
+    if let Some(mission) = &filter.mission {
+        path.push_str(&format!("&mission={}", urlencoding::encode(mission)));
+    }
     let mut page: Value = client.get(&path).await?;
+    require_mission_echo(&page, filter.mission.as_deref())?;
     if let Some(before) = page["next_before"].as_u64() {
         filter.before = before;
         let next = format!(
@@ -12366,7 +12751,13 @@ async fn list_outcomes(
         return Ok(());
     }
     let items = page["items"].as_array().context("invalid outcome page")?;
-    println!("{} OUTCOMES  {}", collection.to_uppercase(), items.len());
+    let scope = filter
+        .mission
+        .as_deref()
+        .map(|m| format!("  mission {m}"))
+        .unwrap_or_default();
+    println!("{} OUTCOMES  {}{scope}", collection.to_uppercase(), items.len());
+    println!("Terminal transitions only; running and waiting runs stay on `/v1/mission-runs?mission=`.");
     for item in items {
         println!(
             "{}  {}  {}",
@@ -12387,11 +12778,26 @@ async fn list_outcomes(
             .as_deref()
             .map(|a| format!(" --as {a}"))
             .unwrap_or_default();
-        println!("Next: fractal {collection} ls{actor} --limit {limit} --cursor '{cursor}'");
+        let mission = filter
+            .mission
+            .as_deref()
+            .map(|m| format!(" --mission {m}"))
+            .unwrap_or_default();
+        println!("Next: fractal {collection} ls{actor}{mission} --limit {limit} --cursor '{cursor}'");
     }
     if partial {
         fractal_daemon::gate_report::note_partial_listing(shown);
     }
+    Ok(())
+}
+
+/// Daemons that predate `--mission` ignore the parameter and answer the fleet-wide page, so a
+/// mission-filtered request is trusted only when the page echoes the mission back.
+fn require_mission_echo(page: &Value, mission: Option<&str>) -> Result<()> {
+    anyhow::ensure!(
+        mission.is_none() || page["mission"].is_string(),
+        "this daemon does not support --mission; upgrade the daemon"
+    );
     Ok(())
 }
 
@@ -14011,10 +14417,23 @@ fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
     }
 }
 
+/// How `agents start` resolves the agent's workspace. A declared agent started without
+/// `--workspace` keeps its declaration's workspace, resolved on the placement host when the
+/// declaration was published. Anything else is an exact path for the placement host: the caller
+/// never canonicalizes it, so a path that only exists on another member stays valid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartWorkspace {
+    /// Keep the declaration's workspace child untouched.
+    Keep,
+    /// Publish this exact path, asking the placement host to create it when it is missing.
+    Set(String, bool),
+}
+
 fn agent_start_document(
     args: &AgentStartArgs,
     existing: Option<&fractal_daemon::model::DesiredSubject>,
     uris: &BTreeMap<String, String>,
+    workspace: &StartWorkspace,
 ) -> Result<String> {
     let mut agent = match existing {
         Some(existing) => fractal_daemon::graph::render_agent_node(&existing.desired, uris)?,
@@ -14039,13 +14458,24 @@ fn agent_start_document(
     }) {
         replace_declaration_child(&mut body, kdl_node("host", [host]));
     }
-    if args.workspace.is_some() || existing.is_none() {
-        let path = args.workspace.as_deref().unwrap_or_else(|| Path::new("."));
-        let workspace = fs::canonicalize(path)
-            .with_context(|| format!("resolve workspace {}", path.display()))?
-            .display()
-            .to_string();
-        replace_declaration_child(&mut body, kdl_node("workspace", [workspace.as_str()]));
+    match workspace {
+        StartWorkspace::Keep => {}
+        StartWorkspace::Set(path, create) => {
+            let mut node = kdl_node("workspace", [path.as_str()]);
+            // An override swaps the path but keeps the declaration's own create policy: a
+            // declared `create` still applies to the new path, and callers never add one.
+            let create = *create
+                || body.get("workspace").is_some_and(|current| {
+                    current.entries().iter().any(|entry| {
+                        entry.name().is_some_and(|name| name.value() == "create")
+                            && matches!(entry.value(), kdl::KdlValue::Bool(true))
+                    })
+                });
+            if create {
+                node.entries_mut().push(KdlEntry::new_prop("create", true));
+            }
+            replace_declaration_child(&mut body, node);
+        }
     }
     if existing.is_none() {
         body.nodes_mut().push(kdl_node("restart", ["always"]));
@@ -14775,6 +15205,9 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
+    if let Some(live) = agent.live_model.as_deref() {
+        let _ = writeln!(output, "LIVE MODEL   {live}");
+    }
     if agent.blocked_on.as_deref() == Some("human")
         && agent.ask.as_deref() == Some("permission")
     {
@@ -19093,7 +19526,8 @@ fn admission_diagnostic(
         subject: subject.into(),
         kind: "harness.diagnostic".into(),
         actor: Some(subject.into()),
-        fields: BTreeMap::from([
+        fields: {
+            let mut fields = BTreeMap::from([
             (
                 "severity".into(),
                 json!(if failure.driver == Driver::Omp {
@@ -19113,7 +19547,16 @@ fn admission_diagnostic(
             ("code".into(), json!("harness-admission-failed")),
             ("reason".into(), json!(reason)),
             ("incarnation_id".into(), json!(incarnation)),
-        ]),
+            ]);
+            fields.insert("driver".into(), json!(failure.driver.as_str()));
+            if let Some(version) = &failure.producer_version {
+                fields.insert("producer_version".into(), json!(version));
+            }
+            if let Ok(invocation) = std::env::var(fractal_schema::invocation::ENV) {
+                fields.insert("invocation_id".into(), json!(invocation));
+            }
+            fields
+        },
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: Some(format!(
@@ -20733,6 +21176,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
+                reconciler.set_default_stall_reports(reconcile.default_stall_reports);
                 if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }

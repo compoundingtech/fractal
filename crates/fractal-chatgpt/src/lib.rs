@@ -94,12 +94,15 @@ pub const ALERT_GET: &str = "fractal_alert_get";
 pub const ALERT_ANSWER: &str = "fractal_alert_answer";
 pub const MISSIONS_LIST: &str = "fractal_missions_list";
 pub const AGENTS_LIST: &str = "fractal_agents_list";
+pub const AVAILABILITY_GET: &str = "fractal_availability_get";
 pub const CONVERSATIONS_LIST: &str = "fractal_conversations_list";
 pub const CONVERSATION_DETAIL: &str = "fractal_conversation_detail";
 pub const CONVERSATION_TIMELINE: &str = "fractal_conversation_timeline";
 pub const CONVERSATION_SEARCH: &str = "fractal_conversation_search";
 pub const CONVERSATION_READ: &str = "fractal_conversation_read";
 pub const MESSAGE_SEND: &str = "fractal_message_send";
+pub const SLO_LIST: &str = "fractal_slo_list";
+pub const SLO_HISTORY: &str = "fractal_slo_history";
 
 // Deprecated for the 0.1.0 adapter release; remove in fractal-chatgpt 0.2.0.
 // Johannes's ChatGPT connector caches tools/list. Keep old calls working without
@@ -117,12 +120,15 @@ const TOOLS: &[(&str, &str, bool)] = &[
     (ALERT_ANSWER, "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
     (MISSIONS_LIST, "List mission metadata.", true),
     (AGENTS_LIST, "List agent metadata. For a known canonical agent ID, set agent_id to avoid paging through the fleet. This does not read priorities or conversation content.", true),
+    (AVAILABILITY_GET, "Read the grant person's own availability and current directive note. availability.status is the effective status (available or away; status_source says whether a manual override, valid until status_until, or device presence set it, or is unreported when no device has reported within 24 hours, which means available); raw device presence is never shown to assistants, so presence and presence_observed_at are always null; interruptions is all, urgent or none; deadline_clock is run, hold-routine or hold-all and says whether ask deadlines are paused. directive_note is the person's current standing instruction, or null. Its text is cut on a character boundary to fit max_response_bytes and directive_note_truncated is then true; read again with a larger max_response_bytes (up to 16384) for the whole note. The availability fields are never cut. While the person is away or interruptions is none, park blocking asks instead of interrupting them.", true),
     (CONVERSATIONS_LIST, "Discover source-bounded conversation metadata and read handles without conversation content. Each value.items entry supplies agent_id and session_id for fractal_conversation_timeline and a read object containing all fractal_conversation_read arguments (null when the bounded current timeline page has no readable text handle; use timeline to continue). Pass read unchanged to fractal_conversation_read; use value.page.next_cursor to page this list. Pages fit max_response_bytes; an item that cannot fit alone is named in the error.", true),
     (CONVERSATION_DETAIL, "Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. Use agent_id from fractal_conversations_list; pass each non-null timeline item's read object unchanged to fractal_conversation_read. Content may be sensitive.", true),
     (CONVERSATION_TIMELINE, "Page bounded chat excerpts and revision-pinned read handles. Copy agent_id and session_id from fractal_conversations_list to select the discovered session; omit session_id only to select the current session. Pass each non-null value.items[].read object unchanged to fractal_conversation_read, and use value.page.next_cursor only to continue this timeline. Content may be sensitive.", true),
     (CONVERSATION_SEARCH, "Search bounded plain conversation text snippets. Content may be sensitive.", true),
     (CONVERSATION_READ, "Read one bounded revision-pinned conversation content range. Pass a non-null value.items[].read object from fractal_conversations_list or fractal_conversation_timeline unchanged; conversation detail also supplies timeline read handles. Each read object contains agent_id, session_id, reference, revision, start and end. Never invent handles or substitute a pagination cursor for a content reference. Content may contain sensitive material.", true),
     (MESSAGE_SEND, "Send one exact message to any existing agent, authorized by write.assistant.messages and the ChatGPT confirmation card. Person recipients are refused.", false),
+    (SLO_LIST, "List every Fractal objective and budget row the daemon reports. An objective row (kind objective) states a service-level target, its current measurement, the window it is measured over, and remaining_percent: how much of its error budget is left. A budget row (kind budget, with an account) states an allowance, current use, the window until it resets, and how much remains, with a forecast when one is known. status and tone say whether the row is met and how urgent it is. Rows arrive in pages that fit max_response_bytes; while value.page.next_cursor is non-null, call again with that cursor to read the next rows.", true),
+    (SLO_HISTORY, "Chart what was left (remaining_percent) of one objective or budget row across a period. Copy id exactly from fractal_slo_list. since_ms and until_ms are Unix milliseconds (default: the last 24 hours, at most 7 days); steps (1 to 1000, default 120) is how many equal steps to answer in; each step holds its lowest reading and is null when nothing was read.", true),
 ];
 
 // Discovery and local admission share these rules; ASCII keys also satisfy daemon byte bounds.
@@ -155,6 +161,7 @@ fn schema(name: &str) -> Value {
     let props = match name {
         ALERT_ANSWER => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"alert_id":{"type":"string"},"episode":{"type":"string"},"option":{"type":"string"},"summary":{"type":"string"}}),
         MESSAGE_SEND => json!({"action_id":action_id_schema(),"idempotency_key":idempotency_key_schema(),"fence":fence_schema(),"to":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"}}),
+        AVAILABILITY_GET => json!({"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         ALERT_GET => json!({"alert_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         CONVERSATION_DETAIL => json!({"agent_id":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         CONVERSATION_TIMELINE => json!({"agent_id":{"type":"string","description":"Copy value.items[].agent_id from fractal_conversations_list."},"session_id":{"type":"string","description":"Copy the same conversation item's session_id to pin the discovered session; omitted selects the current session."},"cursor":{"type":"string","description":"Copy value.page.next_cursor from the preceding timeline page; omit for the first page."},"limit":{"type":"integer","minimum":1},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
@@ -162,6 +169,7 @@ fn schema(name: &str) -> Value {
         CONVERSATION_READ => json!({"agent_id":{"type":"string","description":"Copy read.agent_id from a discovered conversation or timeline item."},"session_id":{"type":"string","description":"Copy read.session_id from the same handle; do not infer from agent_id."},"reference":{"type":"string","description":"Copy read.reference, an opaque content reference, not a pagination cursor."},"revision":{"type":"string","description":"Copy read.revision paired with this content reference to pin the source version."},"start":{"type":"integer","minimum":0,"description":"Copy read.start, the inclusive range start."},"end":{"type":"integer","minimum":0,"description":"Copy read.end, the exclusive range end."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         ALERTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         AGENTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        SLO_HISTORY => json!({"id":{"type":"string","pattern":"^[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact objective or budget id from fractal_slo_list."},"since_ms":{"type":"integer","minimum":0,"description":"Period start in Unix milliseconds; defaults to 24 hours before until_ms."},"until_ms":{"type":"integer","minimum":0,"description":"Period end in Unix milliseconds; defaults to now."},"steps":{"type":"integer","minimum":1,"maximum":1000,"description":"Equal steps to answer in; defaults to 120."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
     };
     let required = match name {
@@ -171,6 +179,7 @@ fn schema(name: &str) -> Value {
         CONVERSATION_DETAIL | CONVERSATION_TIMELINE => vec!["agent_id"],
         CONVERSATION_SEARCH => vec!["text"],
         CONVERSATION_READ => vec!["agent_id","session_id","reference","revision","start","end"],
+        SLO_HISTORY => vec!["id"],
         _ => vec![],
     };
     json!({"type":"object","properties":props,"required":required,"additionalProperties":false})
@@ -260,6 +269,26 @@ fn output_schema(name: &str) -> Value {
             "operation_id":{"type":"string"},"status":{"type":"string"},
             "affected_ids":{"type":"array","items":{"type":"string"}},"snapshot_id":{"type":"string"}
         },"required":["kind","action_id","status"]}),
+        AVAILABILITY_GET => {
+            let at = json!({"type":["string","null"],"format":"date-time"});
+            json!({"type":"object","properties":{
+                "kind":{"const":"person-availability"},
+                "availability":{"type":"object","properties":{
+                    "person":{"type":"string","pattern":"^person/[^/\\s]+$"},
+                    "status":{"enum":["available","away"]},"status_source":{"enum":["override","presence","unreported"]},
+                    "status_until":at,"presence":{"type":"null"},
+                    "presence_observed_at":{"type":"null"},"interruptions":{"enum":["all","urgent","none"]},
+                    "interruptions_until":at,"deadline_clock":{"enum":["run","hold-routine","hold-all"]},
+                    "deadline_clock_since":at,"deadline_clock_until":at
+                },"required":["person","status","status_source","status_until","presence","presence_observed_at",
+                    "interruptions","interruptions_until","deadline_clock","deadline_clock_since","deadline_clock_until"]},
+                "directive_note":{"type":["object","null"],"properties":{
+                    "person":{"type":"string"},"author":{"type":"string"},"time":{"type":"string"},
+                    "text":{"type":"string"},"expires_at":at,"revision":{"type":"string"}
+                },"required":["person","author","time","text","expires_at","revision"]},
+                "directive_note_truncated":{"type":"boolean"}
+            },"required":["kind","availability","directive_note","directive_note_truncated"]})
+        }
         CONVERSATION_READ => json!({"type":"object","properties":{
             "kind":{"const":"assistant-conversation-content"},"agent_id":{"type":"string"},
             "session_id":{"type":"string"},"reference":{"type":"string"},"revision":{"type":"string"},
@@ -267,6 +296,11 @@ fn output_schema(name: &str) -> Value {
             "text":{"type":"string"},"returned_bytes":{"type":"integer","minimum":0},
             "truncated":{"type":"boolean"},"next_range":{"type":["object","null"]}
         },"required":["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]}),
+        SLO_HISTORY => json!({"type":"object","properties":{
+            "kind":{"const":"slo-history"},"id":{"type":"string"},
+            "since_ms":{"type":"integer","minimum":0},"until_ms":{"type":"integer","minimum":0},
+            "samples":{"type":"integer","minimum":0},"steps":{"type":"array","items":{"type":["number","null"]}}
+        },"required":["kind","id","since_ms","until_ms","samples","steps"]}),
         _ => {
             let mut result = json!({"type":"object","properties":{
                 "kind":{"type":"string"},"items":{"type":"array","items":{"type":"object"}},"page":page
@@ -382,11 +416,14 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         ALERT_GET => "attention-content",
         MISSIONS_LIST => "missions-rich",
         AGENTS_LIST => "agents-rich",
+        AVAILABILITY_GET => "availability",
         CONVERSATIONS_LIST => "conversations",
         CONVERSATION_DETAIL => "conversation-detail",
         CONVERSATION_TIMELINE => "conversation-timeline",
         CONVERSATION_SEARCH => "conversation-search",
         CONVERSATION_READ => "conversation-content",
+        SLO_LIST => "slo",
+        SLO_HISTORY => "slo-history",
         _ => "propose",
     };
     let url = format!("http://localhost/v1/client/assistant/{route}");

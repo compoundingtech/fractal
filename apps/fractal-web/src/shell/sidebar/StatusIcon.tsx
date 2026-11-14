@@ -88,7 +88,6 @@ const paths: Record<Exclude<AgentStatus, 'working'>, ReactNode> = {
 const styles = stylex.create({
   icon: { display: 'inline-flex', flexShrink: 0, color: tokens['--ds-gray-900'] },
   green: { color: tokens['--ds-green-900'] },
-  amber: { color: tokens['--ds-amber-900'] },
   red: { color: tokens['--ds-red-900'] },
   ringSlot: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '16px', height: '16px' },
 })
@@ -107,7 +106,6 @@ export const StatusIcon = ({
     {...stylex.props(
       styles.icon,
       statuses[status].tone === 'green' && styles.green,
-      statuses[status].tone === 'amber' && styles.amber,
       statuses[status].tone === 'red' && styles.red,
     )}
   >

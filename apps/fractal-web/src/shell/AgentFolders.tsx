@@ -592,6 +592,13 @@ const sameElements = (
   left.length === right.length && left.every((element, index) => element === right[index])
 
 // Presentation changes (query highlights, spend and selection) must not replace RAC items.
+/** What the row's disclosure reveals, in its accessible name. */
+const disclosureNoun = (node: SidebarNode): string => {
+  const children = node.children ?? []
+  const missions = children.some(child => child._tag === 'Agent' && child.missionId !== undefined)
+  const subagents = children.some(child => child._tag === 'Agent' && child.missionId === undefined)
+  return missions ? subagents ? 'missions and subagents' : 'missions' : 'subagents'
+}
 const BoundFolderPresentation = React.createContext<AgentFoldersProps | null>(null)
 const BoundFolderRow = ({ node, touchDisclosure }: { readonly node: SidebarNode; readonly touchDisclosure?: React.ReactNode }) => {
   const props = React.useContext(BoundFolderPresentation)
@@ -682,7 +689,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     return { ...nativeDragHooks, useDraggableItem: useSidebarDraggableItem }
   }, [nativeDragHooks, foldersById])
   // Status names replace only their owning RAC item, retaining sibling measurement keys.
-  const elements = React.useMemo(() => new Map<string, CachedBoundElement>(), [props.onSelect])
+  const elements = React.useMemo(() => new Map<string, CachedBoundElement>(), [props.onSelect, props.onOpenMission])
   const items = React.useMemo(() => {
     const retained = new Set<string>()
     const render = (node: SidebarNode, depth: number): AgentFolderTreeItem => {
@@ -700,10 +707,12 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
         cached.node.collapsed === node.collapsed) return cached.element
       const element: AgentFolderTreeItem = {
         id: node.id, depth, textValue: node.label, accessibleName, agentRef, children, rowHeight,
-        isDisabled: node._tag === 'Agent' && node.parent !== undefined,
+        isDisabled: node._tag === 'Agent' && node.parent !== undefined && node.missionId === undefined,
         disclosurePlacement: node._tag === 'Agent' ? 'trailing' : 'leading',
-        onAction: node._tag === 'Agent' && node.parent === undefined ? () => props.onSelect?.(node.id) : undefined,
-        render: state => <BoundFolderRow node={node} touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined} />,
+        onAction: node._tag !== 'Agent' ? undefined
+          : node.missionId !== undefined ? () => props.onOpenMission?.(node.missionId!)
+          : node.parent === undefined ? () => props.onSelect?.(node.id) : undefined,
+        render: state => <BoundFolderRow node={node} touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} noun={disclosureNoun(node)} /> : undefined} />,
       }
       elements.set(node.id, { node, element })
       return element
@@ -711,7 +720,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     const next = props.tree.map(node => render(node, 0))
     for (const key of elements.keys()) if (!retained.has(key)) elements.delete(key)
     return next
-  }, [props.tree, props.onSelect, props.accessibleNames, props.agentRowHeight, props.rowStatus, elements])
+  }, [props.tree, props.onSelect, props.onOpenMission, props.accessibleNames, props.agentRowHeight, props.rowStatus, elements])
   const expandAncestors = (selected: string) => {
     const path: SidebarNode[] = []
     const find = (nodes: readonly SidebarNode[]): boolean => {

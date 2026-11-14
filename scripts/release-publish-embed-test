@@ -58,6 +58,9 @@ elif args[:2] == ['release', 'create']:
     if release is not None: fail('HTTP 422: Validation Failed: tag_name already_exists')
     assert '--draft' in args and '--clobber' not in args, args
     assert '--verify-tag' in args and state['ref'] == os.environ['EMBED_SOURCE'], args
+    # GitHub's Actions token times out when create redundantly supplies target_commitish.
+    # The exact-source ref must be verified before POST, not recreated by the release endpoint.
+    if '--target' in args: fail('HTTP 504: target_commitish resolution timed out')
     state['tag'] = args[2]
     release = state['release'] = {'draft': True, 'assets': {}}
     files = [a for a in args if a.startswith('/')]

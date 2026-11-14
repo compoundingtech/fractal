@@ -529,6 +529,9 @@ pub struct ReconcileConfig {
     /// How long a watched thread may stay still and its watch still count as something that will
     /// wake the seat.
     pub idle_nudge_quiet_watch: String,
+    /// Whether a run that names no `report-to` reports its stalls to its requesting agent or to
+    /// an agent its stuck agent is `under`. On by default.
+    pub default_stall_reports: bool,
 }
 
 impl Default for ReconcileConfig {
@@ -537,6 +540,7 @@ impl Default for ReconcileConfig {
             max_passes_per_minute: None,
             idle_nudge_after: "30m".into(),
             idle_nudge_quiet_watch: "2h".into(),
+            default_stall_reports: true,
         }
     }
 }
@@ -2053,6 +2057,9 @@ sekrets_profile = "nathan/daemon-gh"
 
         let off: Config = toml::from_str("[reconcile]\nidle_nudge_after = \"off\"\n").unwrap();
         assert_eq!(off.reconcile.idle_nudge().unwrap().after_ms, None);
+        assert!(config.reconcile.default_stall_reports);
+        let quiet: Config = toml::from_str("[reconcile]\ndefault_stall_reports = false\n").unwrap();
+        assert!(!quiet.reconcile.default_stall_reports);
 
         for (field, value) in [
             ("idle_nudge_after", "30s"),

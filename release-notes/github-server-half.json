@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "summary": "Expose the GitHub plugin's seven read-only client routes and regenerated clients",
+  "commits": [
+    "d4cd430c116ade830b9c8874dd63bc209893a93e",
+    "904415860d6c5dbef1e94ea2194bb6f81c092c8d",
+    "3a5b351fba0277f728594a29636e2ddb73dd18c2",
+    "fdfd3ac916948ae01362f3b5ae70ac66c0c60a9d",
+    "50ca7054f9eddedf188f14cba4a9cfecdbaee296",
+    "979625ff56ee5dc4482cef4a1bdc73bbedc89f20",
+    "6c182463130ea5bb3d7d72c4001f638e4fdf1974",
+    "bb2af1743328d9c4dcea742884c30c21198d5b53"
+  ],
+  "replay": {"status": "none", "detail": "Read-only requests do not write claims or change replay behavior."},
+  "schema": {"status": "none", "detail": "No persistent store, claims, tables or schema-version changes. The bounded cache is process-local and is discarded on restart."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or coordinated fleet upgrade requirement."},
+  "compatibility": {"status": "changed", "detail": "Adds seven client-v0 read.projections routes for pull requests, issues, comments, conversation, checks, files and runs under /v1/client/plugins/github. Existing routes remain unchanged. The new generated client methods require a daemon containing these routes; older daemons do not serve them. TypeScript answers are typed and Rust/Swift answers use raw JSON inside the existing Envelope. Repository-id redirects are resolved through a fixed-host repository lookup and returned as moved, not followed to the item."},
+  "downtime": {"status": "unknown", "detail": "Activation requires the ordinary daemon binary rollout and restart. No migration or additional startup work is introduced; restart interruption duration was not measured."},
+  "manual": {"status": "none", "detail": "No store migration, claim conversion or new credentials are required. Reads use existing daemon GitHub credentials and admission accounting. A daemon rollout from merged main is requested immediately after merge."},
+  "recovery": {"status": "none", "detail": "No new persistent-state rollback restriction. Rolling back removes the added routes; new clients must stop using them until the updated daemon is restored."}
+}

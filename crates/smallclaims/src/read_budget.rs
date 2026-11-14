@@ -29,6 +29,7 @@ struct State {
     read_site: OnceLock<&'static Location<'static>>,
     cancelled: AtomicBool,
     reported: AtomicBool,
+    diagnostic: bool,
     cancellation_waiters: Mutex<Vec<Weak<CancellationWaker>>>,
 }
 
@@ -71,8 +72,18 @@ impl ReadBudget {
             read_site: OnceLock::new(),
             cancelled: AtomicBool::new(false),
             reported: AtomicBool::new(false),
+            diagnostic: true,
             cancellation_waiters: Mutex::new(Vec::new()),
         }))
+    }
+
+    /// Let the operation owner report its failure once, rather than also emitting the
+    /// budget's unconditional diagnostic. Cancellation and SQLite interruption are unchanged.
+    #[track_caller]
+    pub fn new_quiet(route: impl Into<Arc<str>>, duration: Duration) -> Self {
+        let mut budget = Self::new(route, duration);
+        Arc::get_mut(&mut budget.0).expect("a new budget has one owner").diagnostic = false;
+        budget
     }
 
     /// Inject a monotonic clock for synchronous deadline tests. Advancing this clock
@@ -114,6 +125,7 @@ impl ReadBudget {
             read_site: OnceLock::new(),
             cancelled: AtomicBool::new(false),
             reported: AtomicBool::new(false),
+            diagnostic: true,
             cancellation_waiters: Mutex::new(Vec::new()),
         }))
     }
@@ -136,6 +148,7 @@ impl ReadBudget {
             read_site: OnceLock::new(),
             cancelled: AtomicBool::new(false),
             reported: AtomicBool::new(false),
+            diagnostic: self.0.diagnostic,
             cancellation_waiters: Mutex::new(Vec::new()),
         }))
     }
@@ -163,6 +176,7 @@ impl ReadBudget {
             read_site: OnceLock::new(),
             cancelled: AtomicBool::new(false),
             reported: AtomicBool::new(false),
+            diagnostic: self.0.diagnostic,
             cancellation_waiters: Mutex::new(Vec::new()),
         })))
     }
@@ -193,7 +207,7 @@ impl ReadBudget {
         if !self.expired() {
             return Ok(());
         }
-        if !self.0.reported.swap(true, Ordering::AcqRel) {
+        if self.0.diagnostic && !self.0.reported.swap(true, Ordering::AcqRel) {
             eprintln!(
                 "st3: read cancelled route={:?} callsite={} deadline_elapsed={} work_elapsed={}",
                 self.0.route,
@@ -400,6 +414,25 @@ pub(crate) fn lock<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_owned_diagnostics_leave_cancellation_and_child_budgets_active() {
+        let budget = ReadBudget::new_quiet("/maintenance", Duration::from_secs(15));
+        let child = budget.child(Duration::from_secs(10));
+        let work = budget.child_work(Duration::from_secs(1)).unwrap();
+        for current in [&budget, &child, &work] {
+            assert!(!current.0.diagnostic);
+            assert!(current.check().is_ok());
+        }
+        budget.cancel();
+        for current in [&budget, &child, &work] {
+            assert_eq!(current.check().unwrap_err().code, "read-deadline");
+            assert!(!current.0.reported.load(Ordering::Acquire));
+        }
+        let expired = ReadBudget::new_quiet("/maintenance", Duration::ZERO);
+        assert_eq!(expired.check().unwrap_err().code, "read-deadline");
+        assert!(!expired.0.reported.load(Ordering::Acquire));
+    }
 
     #[test]
     fn stream_cancellation_has_no_request_deadline_but_bounds_its_children() {

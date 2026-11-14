@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Agents, missions, resources and folders share one hover card with the sidebar card as its baseline; resource diff previews retain readable addition and removal contrast in both themes",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Web read path only; no runtime, wire or client changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the per-surface hover cards."
+  }
+}

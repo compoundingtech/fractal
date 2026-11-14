@@ -48,6 +48,11 @@ daemon holds its writer for the entire replay, delaying other writes. The daemon
 start and completion and keeps the operator, start time, duration and result in
 `replication-replay-audit.jsonl` in its state directory. A concurrent replay is refused,
 not queued. Do not restart the daemon to “fix” a replay; let the running replay finish.
+The estimate names any blocked owned sets. Canonical replay removes their retained
+physical `desired` and `mission_definitions` rows and cannot rebuild them while the
+sets remain blocked; authoritative claims and set receipts are not deleted. Resolve
+the blockers first if those retained rows must remain available. `--confirm` prints
+the same warning before starting; it does not add another confirmation flag.
 
 ## Writer queue waits
 

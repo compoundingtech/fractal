@@ -9,7 +9,16 @@ pub use fractal_api_core::api::client_v0::raw_terminal::{splice};
 pub mod lease;
 pub mod peek_capability;
 
-const SUBPROTOCOL: &str = "st3.client.pty.v0";
+const SUBPROTOCOL: &str = "fractal.client.pty.v0";
+
+#[test]
+fn server_raw_subprotocol_uses_fractal_and_negotiates_legacy_offers() {
+    assert_eq!(SUBPROTOCOL, "fractal.client.pty.v0");
+    for protocol in ["st3.client.pty.v0", SUBPROTOCOL] {
+        assert_eq!(super::super::wire_names::terminal_protocol(&[protocol], SUBPROTOCOL, true),
+            Some((protocol, None)));
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

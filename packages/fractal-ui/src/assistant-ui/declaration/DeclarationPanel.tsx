@@ -27,12 +27,14 @@ export interface DeclarationPanelProps {
   readonly state: DeclarationPanelState
   /** Host controls placed after Copy all, such as a modal's close button. */
   readonly actions?: React.ReactNode
+  /** `tab`: hosted in a tab of a surface that already names the subject, so the panel shows no heading of its own. */
+  readonly variant?: 'sheet' | 'tab'
 }
 
 type CopyState = { readonly tag: 'ready' } | { readonly tag: 'copying' } | { readonly tag: 'copied'; readonly text: string } | { readonly tag: 'failed' }
 
 /** Read-only declaration source with tinting, line numbers and copy-all. Presentational; no modal coupling. */
-export function DeclarationPanel({ title, state, actions }: DeclarationPanelProps) {
+export function DeclarationPanel({ title, state, actions, variant = 'sheet' }: DeclarationPanelProps) {
   const [copy, setCopy] = React.useState<CopyState>({ tag: 'ready' })
   const text = state._tag === 'Ready' ? state.text : undefined
   const copyAll = async () => {
@@ -49,7 +51,7 @@ export function DeclarationPanel({ title, state, actions }: DeclarationPanelProp
   const copyLabel = copy.tag === 'copying' ? 'Copying…' : copiedCurrent ? 'Copied' : 'Copy all'
   return <section data-testid="declaration-panel" data-declaration-state={state._tag} aria-busy={state._tag === 'Loading'} {...stylex.props(styles.panel)}>
     <header {...stylex.props(styles.header)}>
-      <Heading slot="title" level={2} {...stylex.props(styles.title)}>{title}</Heading>
+      {variant === 'sheet' ? <Heading slot="title" level={2} {...stylex.props(styles.title)}>{title}</Heading> : <span {...stylex.props(styles.spacer)} />}
       {state._tag === 'Ready' ? <span data-testid="declaration-language" {...stylex.props(styles.language)}>{state.language === 'kdl' ? 'KDL' : 'JSON'}</span> : null}
       {text === undefined ? null : <Button aria-label={copyLabel === 'Copy all' ? 'Copy all declaration source' : copyLabel} isDisabled={copy.tag === 'copying'} onPress={copyAll} {...stylex.props(styles.button)}>{copyLabel}</Button>}
       {actions}
@@ -82,6 +84,7 @@ const styles = stylex.create({
   panel: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, height: '100%', color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   header: { display: 'flex', alignItems: 'center', gap: s.md, minHeight: g.band, paddingInline: s.lg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   title: { flexGrow: 1, minWidth: 0, margin: 0, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightSemibold },
+  spacer: { flexGrow: 1 },
   language: { flexShrink: 0, fontFamily: t.fontMono, fontSize: t.metaSize, color: ink.fgMuted },
   button: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: ink.fgMuted } },
   source: { margin: 0, paddingInline: s.lg, paddingBlockStart: s.md, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere' },

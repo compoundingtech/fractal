@@ -96,7 +96,7 @@ const lifecycleOf = (row: DecodedAgent): Agent['lifecycle'] => {
 
 const workFromLabel = (work: NonNullable<DecodedAgent['current_work']>[number]): NonNullable<Agent['currentWork']>[number] => ({
   id: work.id, missionId: work.mission_id, runId: work.mission_run_id,
-  path: work.path, title: Option.getOrUndefined(work.title), state: leafText(work.state),
+  path: work.path, title: Option.getOrUndefined(work.title), goal: Option.getOrUndefined(work.goal), state: leafText(work.state),
 })
 
 const agentFromRow = (row: DecodedAgent): Agent => {
@@ -284,7 +284,7 @@ const sameWork = (a: Agent['currentWork'], b: Agent['currentWork']): boolean =>
   a === b || (a !== undefined && b !== undefined && a.length === b.length && a.every((work, index) => {
     const other = b[index]!
     return work.id === other.id && work.missionId === other.missionId && work.runId === other.runId &&
-      work.path === other.path && work.title === other.title && work.state === other.state
+      work.path === other.path && work.title === other.title && work.goal === other.goal && work.state === other.state
   }))
 
 // oxlint-disable-next-line overeng/named-args -- Retained Agent projection comparator; fixed positional Equivalence shape.

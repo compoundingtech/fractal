@@ -86,3 +86,61 @@ ${index === 0 ? '' : `    depends-on { step "sweep-${String(index - 1).padStart(
 }).join('\n')}
 }
 `
+
+// ---------- A mapped mission across two revisions; the second changed only through a helper ----------
+
+const position = (line: number) => ({ line, column: 1 })
+const span = (file: number, start: number, end: number) => ({ file, start: position(start), end: position(end) })
+
+export const mappedMissionTs = `import { mission } from '@fractal/dsl'
+import { review } from '../../lib/review.ts'
+
+export default mission({
+  id: 'example/land-code',
+  goal: 'Land the change once review and CI agree.',
+  steps: [
+    review({ reviewers: 2 }),
+    { id: 'merge', needs: ['review'], goal: 'Merge with --match-head-commit.' },
+  ],
+})
+`
+export const mappedHelperTs = (goal: string): string => `/** Shared review step for landing missions. */
+export const review = ({ reviewers }: { readonly reviewers: number }) => ({
+  id: 'review',
+  goal: '${goal}',
+  prompt: \`Ask \${reviewers} independent reviewers for an exact-head GO.\`,
+})
+`
+export const mappedMissionKdl = (goal: string): string => `version 2
+mission "example/land-code" {
+    goal "Land the change once review and CI agree."
+    step "review" {
+        goal "${goal}"
+        prompt "Ask 2 independent reviewers for an exact-head GO."
+    }
+    step "merge" {
+        needs "review"
+        goal "Merge with --match-head-commit."
+    }
+}
+`
+export const mappedHashes = { mission: 'a'.repeat(64), helperBefore: 'b'.repeat(64), helperAfter: 'c'.repeat(64) } as const
+export const mappedSourceMap = (revision: string, sha: string, sequence: number, helperHash: string) => ({
+  subject: 'mission/example/land-code', revision, repository: 'schickling/factory', ref: 'main', sha, sequence, declaration: 0, inputs: [0, 1],
+  files: [
+    { repository: 'schickling/factory', path: 'graph/example/land-code/mission.ts', blob_hash: mappedHashes.mission },
+    { repository: 'schickling/factory', path: 'lib/review.ts', blob_hash: helperHash },
+  ],
+  nodes: [
+    { kdl: 'mission[example/land-code]', span: span(0, 4, 11), frames: [] },
+    { kdl: 'mission[example/land-code]/goal[0]', span: span(0, 6, 6), frames: [] },
+    { kdl: 'mission[example/land-code]/step[review]', span: span(1, 2, 6), frames: [{ ...span(0, 8, 8), role: 'declaration', precision: 'exact' }, { ...span(1, 2, 6), role: 'helper', precision: 'exact' }] },
+    { kdl: 'mission[example/land-code]/step[review]/goal[0]', span: span(1, 4, 4), frames: [{ ...span(0, 8, 8), role: 'declaration', precision: 'exact' }, { ...span(1, 4, 4), role: 'value', precision: 'exact' }] },
+    { kdl: 'mission[example/land-code]/step[review]/prompt[0]', span: span(1, 5, 5), frames: [{ ...span(0, 8, 8), role: 'declaration', precision: 'exact' }, { ...span(1, 5, 5), role: 'value', precision: 'enclosing' }] },
+    { kdl: 'mission[example/land-code]/step[merge]', span: span(0, 9, 9), frames: [] },
+  ],
+})
+export const mappedRevisions = [
+  { revision: 'c41d2a0c7e', sha: '7e1f0a9c3b2d4e5f60718293a4b5c6d7e8f90a1b', sequence: 1912, recorded_at_unix_ms: Date.UTC(2026, 10, 10, 9, 25) },
+  { revision: '3f9c2ab1d0', sha: '3f9c2ab1d0e4f5a6b7c8d9e0f1a2b3c4d5e6f708', sequence: 1911, recorded_at_unix_ms: Date.UTC(2026, 10, 9, 17, 2) },
+] as const

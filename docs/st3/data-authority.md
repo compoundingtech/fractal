@@ -163,6 +163,68 @@ publication by local arrival time, so after the clock steps back they stay hidde
 until it catches up; they still replicate. A configured OpenTelemetry collector
 receives every response.
 
+Response evidence uses the existing timeline usage body, independently of any review or
+invocation result. OMP/pi terminal `message_end` assistant messages supply actual
+`model`, `provider`, `api`, `response_id` and `stop_reason`. The response's `timestamp`
+and `completedAt` become `started_at_unix_ms` and `completed_at_unix_ms`; `duration`
+and `ttft` become fractional `duration_ms` and `ttft_ms`. These are harness observations,
+not step wall duration, and duration need not equal completion minus start. Requested
+launch models are not evidence of the actual response model.
+
+The shipped driver and daemon OMP/pi channel hooks explicitly allowlist this response
+metadata, numeric token/cost/quota observations, and the one-hour cache subset before
+emitting terminal timeline frames. String bounds and tool payload redaction still
+apply; raw request/response objects and unrecognized usage fields are not forwarded.
+The hook smoke check drives the real extensions through a channel recorder using the
+response-evidence fixture, including missing, zero, partial and invalid observations.
+
+OMP/pi input, output, cache-read (`cached_tokens`) and cache-write buckets are disjoint.
+`reasoning_tokens` is a subset of output; `cache_write_1h_tokens` (OMP
+`usage.cttl.ephemeral1h`, Claude `cache_creation.ephemeral_1h_input_tokens`) is a subset
+of cache writes. Neither subset is added to `total_tokens`. Preserve a reported total;
+without one, sum only when all four disjoint OMP/pi buckets were observed. Missing
+fields are explicitly unknown by omission in the public schema and `None` in typed
+clients, never synthesized zeros. This includes unsupported reasoning/TTL fields.
+Codex's inclusive input is normalized to uncached input by subtracting its reported
+cache reads and any exposed cache writes; absent cache-write counters remain unknown.
+
+OpenCode retains its observed response creation/completion timestamps and finish
+reason in the same fields. Its reasoning counter is disjoint from visible output,
+so normalization includes it in `output_tokens` while retaining `reasoning_tokens`
+as a subset. Without both observations, normalized output stays unknown. A reported
+zero cost is a known USD observation, not a missing price. OpenCode message IDs remain
+event-source identities, not invented provider response IDs; unavailable API,
+provider response ID, measured duration and TTFT stay unknown.
+
+OMP `usage.cost.total` populates the existing scalar USD `cost` field. Numeric scalar
+`usage.cost` from other real channel inputs remains supported. Optional
+`cost_components.{input,output,cache_read,cache_write}` retains the object components;
+it is evidence of that same cost, not additional spend. Partial objects do not invent
+a reported total. Existing reported/estimated/unpriced accounting and price-table
+provenance remain authoritative; this adds no ledger or rate card. Optional
+`provider_quota:{unit:"premium_requests",quantity}` retains `usage.premiumRequests`,
+including zero and fractional quantities, separately from tokens and money.
+
+The accounting boundary admits a spend response only when at least one primary
+token count/total or a valid reported scalar cost was observed. Metadata-only
+terminal evidence stays in the timeline without a spend record or deduplication
+receipt. Rate-card estimates require all four disjoint token buckets and, when
+writes are nonzero, their one-hour subset; incomplete counters remain unpriced
+rather than being zero-filled for pricing. A reported cost, including zero, remains
+authoritative even when token counters are unavailable. This does not recompute
+historical spend.
+
+Only terminal assistant response messages contribute usage. A provider `responseId`
+is the channel event identity when present, ahead of a local message ID, so repeated
+terminal snapshots with that response ID do not add spend. Without a provider ID,
+the existing local ID or deterministic event-source key remains the identity;
+`response_id` itself stays unknown. Streaming deltas and `agent_end` copies are not
+additional response observations. Older observations remain readable with their
+original omissions; this change does not backfill information discarded at capture.
+The metadata-only OMP response fixtures preserve observed GPT and Opus field shapes
+and measurements with replaced IDs and without prompts, output, credentials, request
+controls or local paths.
+
 Claude event hooks submit `harness.telemetry` observations to their local daemon. They retain
 the counter recorded at the shared hook's actual application point, bounded warning/error logs,
 operation times and the hook exit code. No collector or SDK exporter runs in a hook. Submission
@@ -342,6 +404,7 @@ order from the same admitted claims.
 | `local_message_marks` | Local | A consumer's delivery, read and close of a graph message recorded on this member instead of as a lifecycle claim. Never replicated, in no digest; carried by version 4 backups; the hourly trim removes superseded marks after seven days. |
 | `local_message_staged` | Local | A seat's native transport staging a graph message, recorded on this member instead of a `message.staged` claim. Written while marks are on and every other member advertises `message_staged_reads` (`marks_switch::staged_switched_tx`); until then a staging stays a claim. A release reading marks but not stagings (v0.3.25 and earlier) would offer the mail again after a rollback. Never replicated, in no digest, not backed up (a restored staging is in flight again); the hourly trim removes it seven days after a later lifecycle supersedes it. |
 | `local_message_mark_events` | Local | One row per mark or staging written, read by mailbox wakes and changes the way they read lifecycle claims. Never replicated, in no digest, not backed up; the hourly trim keeps the newest 16,384. |
+| `local_mission_supersession_heads_v3` | Local projection work queue | Selected mission heads awaiting owner-local supersession maintenance, with a per-head run-id cursor. Each writer considers at most 32 sources from one head; changing a partially processed head resets its cursor without losing its finite drain ceiling. Rebuilt from canonical mission definitions; never replicated, backed up as authority, or included in shared projection digests. Head seeding, the namespaced counter, and the completion witness commit together; a complete reopen does not write. Retired v2 queue state is not read. |
 | `local_message_outbox` | Local | A `message.sent` a graph write queued in its own transaction for the messages shard, which is a separate database (`message_outbox::enqueue_tx`); the daemon drains each row to the shard after the commit, exactly once by subject, and a message the shard refuses three times, or every message on a member whose shard did not open, goes to the graph as a legacy claim. Never replicated, in no digest, not backed up: a backup export drains it first and refuses while a row remains. Idle in this build: nothing queues yet. |
 | `local_stream_sent` | Local | Each stream item this member's messages shard holds, mirrored into the graph's file for the graph's own mail indexes (`stream_mirror::mirror`): its sender's fields and accepted time. Its insert folds the item's idle-mail row and unread row and queues its held-mail and usage work, as a graph `message.sent` claim's triggers do; the folds read it wherever they read the graph's sends, and a subject the graph also holds is the graph's. Every member mirrors every item it holds, whoever the recipient, so members holding the same mail count it alike. Never replicated, in no digest, not backed up: the daemon rebuilds it from the shard at start, from the cursors `stream_mirror_sent_through` and `stream_mirror_lifecycle_through` in `meta`. |
 | `local_stream_lifecycle` | Local | This member's lifecycle steps for its stream items (the shard's `stream_lifecycle`), mirrored with `local_stream_sent`: each moves the idle, unread and held indexes as a lifecycle claim or mark of its kind does. Never replicated, in no digest, not backed up; rebuilt from the shard. |
@@ -369,6 +432,8 @@ order from the same admitted claims.
 | `mission_definitions` | Shared projection | Shared selected mission revision/state/claim. |
 | `mission_revisions` | Shared projection | Shared full immutable mission revision/state/body and binding claim. created_index is a local historical cursor; repeated identical revision bindings need a deterministic representative claim. |
 | `mission_run_after` | Shared projection | Shared predecessor run dependency. |
+| `mission_run_capacity_v1` | Local projection | Indexed active-run admission facts, rebuilt from canonical run headers, current generations, and immutable revision bodies. Preserves the strictest pinned limit. Malformed or excessively deep JSON, non-object bodies, missing revisions, and invalid limits project to a refusing sentinel, without aborting canonical source writes or becoming unlimited; downstream source errors remain visible. Trigger-maintained, never replicated, backed up as authority, or included in shared digests. Bootstrap and witness commit atomically; a complete reopen does not write. |
+| `mission_run_capacity_totals_v1` | Local projection | Constant-size per-mission active-run totals maintained with `mission_run_capacity_v1`; disposable, rebuilt with that projection, and excluded from replicated authority and digests. |
 | `mission_run_deadlines` | Shared projection | Shared durable run timeout/deadline derived from run creation; evaluate expiration with an explicit as_of. |
 | `mission_run_requests` | Local | Local original request-hash cache paired with idempotency; run identities in the request API are origin-scoped. |
 | `mission_runs` | Shared projection | Shared run creation inputs, hierarchy, ownership, workspace, requester, mode, status/phase and durable timestamps. Digest full logical row, not just status columns. |
@@ -388,6 +453,7 @@ order from the same admitted claims.
 | `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source, operation or actual-state projections. Actual values, provenance, runtime origin and runtime-epoch reads use this durable repaired-ID membership even after local receipt cleanup. |
 | `projection_digest_state` | Local | Maintained shared projection digest state; the logical digest is shared, these rows are local maintenance. |
 | `projection_health` | Local | Local admission/projection/quarantine status, frontier, errors and observation timestamps. Deterministic shared degraded-state summaries must be separate from receipt health. |
+| `person_attention_controls` | Rebuildable projection | Each person's own controls per attention row: the earliest `person.attention-seen` and the newest `person.attention-snoozed` by canonical claim key, projected on append and replication and refolded from the claims on first open, repair and replay. Order-free, so outside projection digests; the claims carry the shared coverage. |
 | `read_positions` | Rebuildable projection | Each person's largest `read-position.advanced` time per conversation (ties by canonical claim key), projected on append and replication and refolded from the claims on first open, repair and replay. Order-free, so outside projection digests; the claims carry the shared coverage. changed_index is a local arrival cursor. |
 | `replica_envelope_holds` | Local | Local validation/fencing hold state and observation time. |
 | `replica_envelope_signatures` | Shared storage, with stated local fields | Shared signed envelope identity/member-key/signature; stored_at is local receipt time. Authority/signature inventory is distinct from outcome projection digests. |

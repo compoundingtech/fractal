@@ -41,6 +41,11 @@ export default {
       if (published._tag === 'Failure') return published
       return { _tag: 'Success', value: { published: published.value, gate: await gate(ctx) } }
     }
+    if (ctx.payload.mode === 'uncaught-ask') {
+      void wait(ctx, 'still-open', () => ctx.ask({ key: 'still-open', for: 'person/owner', title: 'Another question', request: null }))
+      const exit = await wait(ctx, 'withdrawn', () => ctx.ask({ key: 'withdrawn', for: 'person/owner', title: 'Still needed?', request: null }))
+      return exit
+    }
     const asks = await Promise.all([
       wait(ctx, 'approve', () => ctx.ask({ key: 'approve', for: 'person/owner', title: 'Ship it?', request: DECISION, deadline: '2m', default: 'ship' })),
       wait(ctx, 'note', () => ctx.ask({ key: 'note', for: 'person/owner', title: 'Anything to add?', request: null })),
@@ -98,6 +103,13 @@ mission "program-parent" state="ready" {{
     retry {{ attempts 2 }}
     program "{0}" sha256="{hash}"
   }}
+}}
+mission "program-uncaught-ask" state="ready" {{
+  goal "Fail an uncaught ask cancellation and run cleanup."
+  input "mode" kind="text"
+  input "gate" kind="text"
+  step "program" {{ program "{0}" sha256="{hash}" }}
+  finally {{ step "cleanup" {{ agentless }} }}
 }}
 mission "program-unauthorized" state="ready" {{
   goal "Start a child run it holds no authority to start."
@@ -275,6 +287,7 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
     let completed = json!({
         "run": child.as_str(),
         "status": "completed",
+        "executions": [],
         "products": {
             (format!("resource/{child}/published")): {"kind": "custom.st3.program-test", "head": "h1"},
         },
@@ -401,7 +414,8 @@ fn children_are_cancelled_with_their_run_or_their_step_and_a_retry_starts_a_new_
     assert_eq!(error["run"], attempt_two.as_str());
     assert_eq!(error["status"], "failed");
     assert!(error["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{error}");
-    assert_eq!(error.as_object().unwrap().len(), 4, "{error}");
+    assert_eq!(error["executions"], json!([]), "the unclaimed child has no executions");
+    assert_eq!(error.as_object().unwrap().len(), 5, "{error}");
 }
 
 #[test]
@@ -486,4 +500,95 @@ fn asks_are_answered_defaulted_or_withdrawn_and_their_answers_replay() {
     let (_, value) = fixture.result(&parent.step, RESULT_KEY, 1).unwrap();
     assert_eq!(value["asks"][0], json!({"_tag": "Success", "value": defaulted}));
     assert_eq!(value["asks"][2], json!({"_tag": "Failure", "error": {"_tag": "AskCancelled", "ask": withdrawn.as_str()}}));
+}
+
+fn publish_child_replacement(fixture: &Fixture) {
+    apply_source(&fixture.store, r#"version 2
+mission "program-child" state="ready" {
+  goal "Publish the corrected head."
+  concurrent-runs max=1
+  input "head" kind="text"
+  step "publish" {
+    assigned-to "agent/publisher"
+    produces { resource "mission-run/${ST_MISSION_RUN}/published" { kind "custom.st3.program-test" } }
+  }
+}"#, "superseding-child");
+}
+
+#[test]
+fn a_program_waits_for_its_superseding_child_instead_of_failing_on_source_cancellation() {
+    let fixture = fixture();
+    let parent = fixture.start("superseding-child", "child");
+    fixture.until("the child starts", || fixture.child(&parent.step, "publish", 1).is_some());
+    let child = fixture.child(&parent.step, "publish", 1).unwrap();
+    publish_child_replacement(&fixture);
+    let source = fixture.store.mission_run(&child).unwrap().unwrap();
+    let successor = source.superseded_by.clone().unwrap_or_else(|| panic!(
+        "child publication did not supersede {} (status={}, phase={}, fault={:?})",
+        source.subject, source.status, source.phase, source.supersession_fault,
+    ));
+    fixture.until("the replacement is admitted", || fixture.store.mission_run(&successor).unwrap().unwrap().phase == "normal");
+    assert_eq!(fixture.run_status(&child), "cancelled");
+    assert_eq!(fixture.run_status(&parent.run), "running");
+    assert_eq!(fixture.result(&parent.step, "publish", 1), None);
+    fixture.complete_child(&successor);
+    fixture.until("the child result resolves", || fixture.result(&parent.step, "publish", 1).is_some());
+    let (status, result) = fixture.result(&parent.step, "publish", 1).unwrap();
+    assert_eq!(status, "completed");
+    assert_eq!(result["run"], successor);
+    std::fs::write(&parent.gate, "").unwrap();
+    fixture.until("the parent program completes", || fixture.status(&parent.step) == "completed");
+}
+
+#[test]
+fn a_cancelled_program_step_cancels_the_latest_superseding_child() {
+    let fixture = fixture();
+    let parent = fixture.start("cancel-superseding-child", "child");
+    fixture.until("the child starts", || fixture.child(&parent.step, "publish", 1).is_some());
+    let child = fixture.child(&parent.step, "publish", 1).unwrap();
+    publish_child_replacement(&fixture);
+    let source = fixture.store.mission_run(&child).unwrap().unwrap();
+    let successor = source.superseded_by.clone().unwrap_or_else(|| panic!(
+        "child publication did not supersede {} (status={}, phase={}, fault={:?})",
+        source.subject, source.status, source.phase, source.supersession_fault,
+    ));
+    fixture.store.set_step_state(&parent.step, "cancelled", Some("the work is withdrawn")).unwrap();
+    fixture.reconciler.evaluate_changed_mission_runs().unwrap();
+    fixture.until("the replacement child is cancelled", || fixture.run_status(&successor) == "cancelled");
+}
+
+#[test]
+fn an_uncaught_ask_cancellation_fails_the_program_and_run_and_runs_cleanup() {
+    let fixture = fixture();
+    let parent = fixture.start_mission("program-uncaught-ask", "uncaught", "uncaught-ask");
+    fixture.until("both asks are waiting", || {
+        fixture.child(&parent.step, "withdrawn", 1).is_some()
+            && fixture.child(&parent.step, "still-open", 1).is_some()
+            && fixture.status(&parent.step) == "waiting-person"
+    });
+    let withdrawn = fixture.child(&parent.step, "withdrawn", 1).unwrap();
+    let still_open = fixture.child(&parent.step, "still-open", 1).unwrap();
+    fixture.store.finish_person_step(&PersonStepResponse {
+        delegation: None,
+        subject: withdrawn.clone(),
+        actor: PROGRAM_ASKER.into(),
+        summary: "No longer needed.".into(),
+        evidence: Vec::new(),
+        episode: None,
+        answer: None,
+        idempotency_key: "withdraw-uncaught".into(),
+    }, true).unwrap();
+    fixture.until("uncaught cancellation ends the run", || fixture.run_status(&parent.run) == "failed");
+    let cancelled = json!({"_tag": "AskCancelled", "ask": withdrawn});
+    assert_eq!(fixture.result(&parent.step, "withdrawn", 1), Some(("failed".into(), cancelled.clone())));
+    // Failed program exits retain the typed error as the step's reason; only successful
+    // program exits write RESULT_KEY.
+    let failed = fixture.store.step_run(&parent.step).unwrap().unwrap();
+    assert_eq!(failed.status, "failed");
+    assert_eq!(serde_json::from_str::<Value>(failed.blocked_reason.as_deref().unwrap()).unwrap(), cancelled);
+    let run = fixture.store.mission_run(&parent.run).unwrap().unwrap();
+    assert_eq!(run.phase, "terminal");
+    assert_eq!(run.steps.iter().find(|step| step.step == "cleanup").unwrap().status, "completed");
+    assert_eq!(fixture.status(&still_open), "cancelled");
+    assert!(fixture.engine.requests(&parent.run).is_empty());
 }

@@ -31,6 +31,7 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 | `fractal alerts ls` | List requests and approvals. |
 | `fractal conversations` | Read and send durable conversation. |
 | `fractal usage` | Inspect observed usage and estimated cost. |
+| `fractal availability` | Read or set your status, interruptions and deadline clock. |
 
 ## Publication and planning
 
@@ -46,6 +47,16 @@ harness. Launch changes retain their existing actions (such as
 still take precedence.
 
 For small independent authorized work, use `fractal work start`. Claim before executing assigned work, record progress, and complete with evidence. Use `fractal work revise` for an explicit new generation of an existing run.
+
+### Where declarations come from
+
+A set publication may carry a source map (`fractal apply --set … --source-map FILE`), which records, per new agent or mission revision, the files it was rendered from, the span of each KDL node in them, and the helper and value frames that fed it. These commands read it; each takes `--json`.
+
+- `fractal subject show SUBJECT --source [--revision REV] [--node NODE]` prints the revision's commit, its declaration span with a GitHub permalink pinned to that commit, every step and gate with the line that declares it, and the other files it uses. `--node` takes a KDL node path or a short form such as `step:review/goal` and prints that node's span and frames (declared → helper → value). A `step-run/…` subject resolves through the revision its run pinned.
+- `fractal source where PATH[:LINE]` (or a local file in a git checkout, or a GitHub blob URL with `#L…`) lists the live agents and missions that file, or that line of it, declares, feeds or is imported by. Spans recorded against an older version of the file are carried into the newest one by a line diff; `--repository OWNER/REPO` narrows a path present in several repositories.
+- `fractal source diff SUBJECT [A..B]` compares two mapped revisions (unique prefixes; either side may be empty; no range compares the two newest): a diff of every contributing file whose text changed, the canonical KDL diff, and a Why line that says whether the subject's own file, only a file it uses, or neither changed.
+
+`fractal work claim` prints a `SOURCE` row under the step's definition when its run's revision has a map, and the faults for a broken gate or a step out of time, and a failing gate's reason, name the line that declares it.
 
 ### Bulk desired declarations
 

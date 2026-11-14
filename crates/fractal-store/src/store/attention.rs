@@ -554,8 +554,10 @@ impl Store {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
+        items.extend(self.model_drift_attention_items(person, as_of)?);
         items.extend(self.harness_prompt_attention_items(person, as_of)?);
         items.extend(self.custom_attention_items(person)?);
+        items.extend(self.host_hold_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
             self.broken_gate_items(person, as_of)?
@@ -607,7 +609,7 @@ impl Store {
                         sources.insert((run, "mission-run.created"));
                     }
                 }
-                "harness-login" | "harness-prompt" | "fault" => {
+                "harness-login" | "harness-prompt" | "fault" | model_drift::MODEL_DRIFT_ATTENTION_KIND => {
                     actors.insert(item.subject.clone());
                 }
                 kind if kind.starts_with("custom.") => {
@@ -666,6 +668,7 @@ impl Store {
             let run_origin = || run_subject(item)
                 .and_then(|run| source(&run, "mission-run.created").map(|(origin, _)| origin.clone()));
             let origin = match item.kind.as_str() {
+                "host-hold" => Some(self.origin.to_owned()),
                 "person-step" | "agent-request" => {
                     if let Some(ask) = source(&item.subject, "work.person-asked") {
                         owner(Some(ask))
@@ -674,7 +677,7 @@ impl Store {
                 "human-gate" | "revision-approval" => run_origin(),
                 "launch-approval" => source(&item.subject, "planning-session.started")
                     .map(|(origin, _)| origin.clone()),
-                "harness-login" | "harness-prompt" => member_origin(&item.subject),
+                "harness-login" | "harness-prompt" | model_drift::MODEL_DRIFT_ATTENTION_KIND => member_origin(&item.subject),
                 "fault" => {
                     if item.mission_run.is_some() { run_origin() }
                     else { member_origin(&item.subject) }
@@ -1751,7 +1754,7 @@ mod population_attention_ownership_tests {
         let store = Store::open_memory("replica").unwrap();
         place(&store, "agent/source", "seat-host");
         place(&store, "agent/presentation-only", "presentation-host");
-        for kind in ["harness-login", "harness-prompt", "fault"] {
+        for kind in ["harness-login", "harness-prompt", "fault", "model-drift"] {
             assert_eq!(
                 store.attention_source_origin(&item(kind, "agent/source", None)).unwrap(),
                 "seat-host",

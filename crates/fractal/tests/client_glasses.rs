@@ -20,6 +20,7 @@ fn state(root: &Path) -> AppState {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "glasses-test".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: "pty".into(),

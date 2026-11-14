@@ -61,7 +61,7 @@ Pairing and grant administration are explicit owner operations, not adapter star
      --consent-evidence CONSENT_RECORD
    ```
 
-   Nothing is granted implicitly. Omit the conversation scope if conversation access is not intended. Add `--scope write.assistant.answers` or `--scope write.assistant.messages` only when the owner explicitly authorizes that write capability. Read consent is not write authorization.
+   Nothing is granted implicitly. Omit the conversation scope if conversation access is not intended. Add `--scope read.assistant.slo` for the SLO tools; it reads operational objective and budget rows, not conversation content. Add `--scope write.assistant.answers` or `--scope write.assistant.messages` only when the owner explicitly authorizes that write capability. Read consent is not write authorization.
 
 2. Before the single-use challenge expires (five minutes), complete it on the adapter machine. `MEMBER_ORIGIN` is the issuer gateway's HTTP or HTTPS origin, without a path. The code is read privately from stdin:
 
@@ -156,12 +156,15 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_alert_answer` | `write.assistant.answers` | Write | Execute one typed person-ask answer using the alert's current episode and fence. |
 | `fractal_missions_list` | `read.assistant.missions` | Read | List mission metadata. |
 | `fractal_agents_list` | `read.assistant.agents` | Read | List agent metadata, not priorities or conversation content. |
+| `fractal_availability_get` | `read.assistant.availability` | Read | Read the owning person's own effective status (available/away, override expiry), interruptions (all/urgent/none), deadline clock (run/hold-routine/hold-all), and current directive note; raw device presence is never shown. The note text is cut to fit `max_response_bytes` and `directive_note_truncated` is then true; read again with a larger budget, up to 16384, for the whole note. Park blocking asks while the person is away or interruptions is none. Grant the scope explicitly with `--scope read.assistant.availability`. |
 | `fractal_conversations_list` | `read.assistant.conversation` | Read | Discover source-bounded conversation metadata and read handles without conversation content. |
 | `fractal_conversation_detail` | `read.assistant.conversation` | Read | Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. |
 | `fractal_conversation_timeline` | `read.assistant.conversation` | Read | Page bounded chat excerpts and revision-pinned read handles. |
 | `fractal_conversation_search` | `read.assistant.conversation` | Read | Search bounded plain conversation text snippets. |
 | `fractal_conversation_read` | `read.assistant.conversation` | Read | Read one bounded revision-pinned conversation content range. |
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
+| `fractal_slo_list` | `read.assistant.slo` | Read | Page every objective and budget row: target, current measurement, window, remaining budget, status and forecast. Continue with `value.page.next_cursor`. |
+| `fractal_slo_history` | `read.assistant.slo` | Read | Chart what was left of one row (`id` from `fractal_slo_list`) across a period of at most 7 days, in 1 to 1000 steps. |
 
 The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the bridged executable alias.
 

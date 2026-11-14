@@ -23,6 +23,7 @@ mod tests {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0).0,
             node: "lease-owner".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: root.path().join("unused-pty"),

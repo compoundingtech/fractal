@@ -60,6 +60,21 @@ leaves `resolveImage` at its default `Defer`. The kit renders no remote image be
 or after this callback; it never fetches the URL on the app's behalf.
 `onOpenResource` remains reserved for workspace references.
 
+The GitHub plugin's reads, `GET /v1/client/plugins/github/{owner}/{repo}/...`, are not
+that proxy. The browser sends only typed path values (an owner, a repository, a number
+or id), never a URL. The daemon checks them and reads `https://api.github.com` alone,
+through `fractal-github-base`'s credentialed, admitted send boundary. It sends one
+hop and follows no redirect: a 301 is reported as `moved` only when its `Location` is
+on `api.github.com` and parses back to a typed item. Every upstream body is bounded.
+The answer is JSON (`apps/fractal-web/src/plugins/github/schema.ts`). Avatars and
+body images are never fetched; they stay links.
+REST and GraphQL reads select the owner's installation credential before looking up
+the cache; documents, ETags and repository relocations are partitioned by the selected
+principal. Bounded PAT fallback responses do not populate installation document caches.
+File lists count encoded JSON bytes (including escaping and metadata), reserving
+128,000 bytes below the advertised client response ceiling for the read wrapper and envelope.
+Excess patches are omitted, or the file list is cut short, with `truncated: true`.
+
 Sent and received image attachments use a separate consent boundary: **Show image**
 reads the attachment through `AttachmentPort.chunk`, retaining the native message
 carrier so the gateway authorizes the viewer. No upload preview URL is reused.
@@ -789,3 +804,68 @@ For the stale-fence negative control, replace the SDK retry's `readTerminalRunti
 with `Effect.succeed(observation)`: the stale-attach test must fail because no fresh runtime
 is read and the replacement terminal cannot be subscribed.
 
+
+## Fractal web availability
+
+The Settings dialog's **Availability** section shows the paired person's own effective
+availability and directive note, as `GET /v1/client/availability` (without a person, so the
+session person's own row with its presence) and `GET /v1/client/notes` return them. Status
+names its source: set by the person, with its end, or following presence, with the folded
+presence and its age. When no device has reported for a day (`status_source: unreported`) the
+status reads Available and says that no device is reporting, so agents ask as usual; it never
+reads as away. Interruptions and the deadline clock show their bounds; `urgent` interruptions
+let through only asks with priority `critical`, and a `hold-routine` clock says that those
+urgent asks keep running. A response word this build does not know shows as itself.
+The note shows its text and expiry, or that there is none.
+
+Availability is not a followed collection, so the section reads it when Settings opens, when
+the page regains focus or becomes visible, and when the connection returns; a later answer
+replaces an earlier one only if it was requested later. Fixture sources have no availability
+port, and a replay page drops the live source's port, so neither shows the section. A refused
+read explains itself: a rejected credential asks for pairing again, a missing grant says that
+reading was not granted, and a session that is no person says so.
+
+Below the summary the person sets or clears each axis and the note. **Changes last** bounds the
+next change: until changed, 30 minutes, 1 hour, 2 hours, tomorrow at 9:00 local time (the next
+calendar day, even before 9:00 today), or a custom local time that must lie in the future. The
+presets count from the source's clock. Status is Available, Away or **Follow presence** (a
+null status, which clears the override); interruptions are all asks, urgent asks only, or none;
+the deadline clock runs, holds routine asks, or holds every ask. Following presence, all asks
+and a running clock are the defaults and carry no end. **Save note** sets the note with the
+chosen end as its expiry; **Clear note** removes it. Writes go one at a time. Each write
+(`PUT /v1/client/availability`, `PUT /v1/client/notes`) shows the state Fractal answers with,
+never a local guess, and drops any read requested before it. A read requested while the write
+was in flight (focus, visibility or reconnection) may have been answered before or after the
+write took effect, so neither it nor the write's answer is shown: the section reads again and the
+editor stays pending until that read lands. A refused write keeps the summary and explains itself:
+a pairing without the `write.availability` or `write.notes` scope must be paired again.
+
+The page reports the browser's raw presence state for as long as it lives
+(`POST /v1/client/presence`; the daemon assigns the pairing as the source and derives presence
+from the state). It starts only once the capabilities say the session may: `write.presence` is
+granted and the session actor is a person. A capabilities read that fails counts as no grant
+until the page loads again. The state is `active` while any tab of the app is visible and
+focused, and `inactive` when every tab is hidden or blurred; a browser cannot see a locked
+screen or sleep, so it never reports `locked` or `sleeping`. `last_input_at` is the newest input
+(pointer, key, wheel or touch, or switching to a tab) in any tab. The page applies no idle
+threshold and sends no heartbeat: it reports every change of the state, again at the answer's
+`report_again_at` with the newest input, and, after a null `report_again_at`, on the first newer
+input while `active`. Input arriving during a report is reconciled after its answer, so a null
+deadline cannot strand newer input; reports never overlap. Regaining focus counts as input even
+when a brief blur never became an inactive report. A drop to `inactive` waits a second, so a tab
+switch, which blurs one tab before focusing the next, stays `active`. A failed report is sent
+again after a minute, then after two, four and eight, and then every fifteen minutes until one
+succeeds, which resets the wait. A refused report (403: no `write.presence` grant or no person; 404: a daemon without the
+route) stops reporting in every tab and releases the reporter role, so a tab loaded later, for
+example after pairing again, takes it up. A replay reports nothing.
+
+Every tab of the browser shares the pairing and so the one presence source, so exactly one tab
+reports. The reporter is whichever tab holds the `fractal.presence` Web Lock. The tabs tell each
+other their visibility, focus and input times over the `fractal.presence` `BroadcastChannel`,
+input at most every five seconds, so an untouched window never calls the person away while
+they work in another. A tab that closes or navigates (`pagehide`) says goodbye and releases the
+lock; the browser also releases it when a tab dies. The next tab in line takes the role,
+reports at once, and asks the others for their state, forgetting the previous holder and any
+tab that does not answer within a second. A tab restored from the back-forward cache asks again
+and queues for the role. Without Web Locks every tab reports on its own, each the browser
+state it hears.

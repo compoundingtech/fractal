@@ -292,6 +292,7 @@ fn node_state(root: &Path, name: &str) -> AppState {
         seat_admission: Default::default(),
         store: Arc::new(store),
         node: name.into(),
+        api_socket: dir.join("api.sock"),
         state_dir: dir,
         ..super::tests::state(root)
     }

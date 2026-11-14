@@ -43,19 +43,22 @@ fn adapter_accepts_only_paired_gateway_socket_names() {
 }
 
 #[test]
-fn discovery_has_exactly_eleven_closed_tools_and_correct_hints() {
+fn discovery_has_exactly_fourteen_closed_tools_and_correct_hints() {
     let expected = [
         (ALERTS_LIST, true, false, false),
         (ALERT_GET, true, false, false),
         (ALERT_ANSWER, false, true, false),
         (MISSIONS_LIST, true, false, false),
         (AGENTS_LIST, true, false, false),
+        (AVAILABILITY_GET, true, false, false),
         (CONVERSATIONS_LIST, true, false, false),
         (CONVERSATION_DETAIL, true, false, false),
         (CONVERSATION_TIMELINE, true, false, false),
         (CONVERSATION_SEARCH, true, false, false),
         (CONVERSATION_READ, true, false, false),
         (MESSAGE_SEND, false, false, true),
+        (SLO_LIST, true, false, false),
+        (SLO_HISTORY, true, false, false),
     ];
     let tools = tool_definitions(Profile::ChatGpt);
     assert_eq!(tools.len(), expected.len());
@@ -114,9 +117,14 @@ fn validation_accepts_every_published_tool_contract() {
         assert!(validate_arguments(name, &json!({"limit":1,"cursor":"opaque","max_response_bytes":16384})).is_ok());
     }
     assert!(validate_arguments(ALERT_GET, &json!({"alert_id":"attention/test"})).is_ok());
+    assert!(validate_arguments(AVAILABILITY_GET, &json!({})).is_ok());
     assert!(validate_arguments(CONVERSATION_READ, &json!({"agent_id":"agent/example-reader","session_id":"session/a",
         "reference":"opaque","revision":"claim/a","start":0,"end":1,"max_response_bytes":1})).is_ok());
     assert!(validate_arguments(MESSAGE_SEND, &send_arguments()).is_ok());
+    assert!(validate_arguments(SLO_LIST, &json!({})).is_ok());
+    assert!(validate_arguments(SLO_LIST, &json!({"max_response_bytes":16384})).is_ok());
+    assert!(validate_arguments(SLO_HISTORY, &json!({"id":"merge-latency/p95"})).is_ok());
+    assert!(validate_arguments(SLO_HISTORY, &json!({"id":"cpu","since_ms":0,"until_ms":1,"steps":1000,"max_response_bytes":16384})).is_ok());
     assert!(validate_arguments(ALERT_ANSWER, &json!({"action_id":"action/test","idempotency_key":"test-key-12345678",
         "fence":{"snapshot_id":"snapshot/test"},"alert_id":"attention/test","episode":"episode/test",
         "option":"done","summary":"Done"})).is_ok());
@@ -216,10 +224,21 @@ fn validation_rejects_unknown_tools_nonobjects_extra_missing_and_wrong_types() {
         (ALERTS_LIST, json!({"max_response_bytes":16385})),
         (ALERT_GET, json!({})),
         (ALERT_GET, json!({"alert_id":null})),
+        (AVAILABILITY_GET, json!({"limit":1})),
+        (AVAILABILITY_GET, json!({"person":"person/ada"})),
+        (AVAILABILITY_GET, json!({"max_response_bytes":"4096"})),
         (ALERT_GET, json!({"alert_id":3})),
         (ALERT_ANSWER, json!({"action_id":"a"})),
         (CONVERSATION_READ, json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":-1,"end":3})),
         (CONVERSATION_READ, json!({"agent_id":"a","session_id":"s","reference":"r","revision":"v","start":0,"end":"3"})),
+        (SLO_LIST, json!({"limit":0})),
+        (SLO_LIST, json!({"cursor":7})),
+        (SLO_HISTORY, json!({})),
+        (SLO_HISTORY, json!({"id":7})),
+        (SLO_HISTORY, json!({"id":"cpu","steps":0})),
+        (SLO_HISTORY, json!({"id":"cpu","steps":1001})),
+        (SLO_HISTORY, json!({"id":"cpu","since_ms":"1"})),
+        (SLO_HISTORY, json!({"id":"cpu","since_ms":-1})),
     ];
     for (name, args) in negatives {
         assert_eq!(validate_arguments(name, &args).unwrap_err()["code"], "invalid-arguments", "{name}: {args}");
@@ -247,11 +266,14 @@ fn validation_rejects_open_or_untyped_nested_fences() {
 
 fn bounded_read_cases() -> Vec<(&'static str, &'static str, Value)> {
     vec![
+        (AVAILABILITY_GET, "availability", json!({"max_response_bytes":16384})),
         (CONVERSATIONS_LIST, "conversations", json!({"cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
         (CONVERSATION_DETAIL, "conversation-detail", json!({"agent_id":"agent/example-reader","max_response_bytes":16384})),
         (CONVERSATION_TIMELINE, "conversation-timeline", json!({"agent_id":"agent/example-reader","session_id":"session/a","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
         (CONVERSATION_SEARCH, "conversation-search", json!({"text":"hello +&? café","agent_id":"agent/example-reader","cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
         (CONVERSATION_READ, "conversation-content", json!({"agent_id":"agent/example-reader","session_id":"session/a","reference":"content/a +&?","revision":"revision/a","start":0,"end":12,"max_response_bytes":16384})),
+        (SLO_LIST, "slo", json!({"cursor":"page/a +&?","limit":2,"max_response_bytes":16384})),
+        (SLO_HISTORY, "slo-history", json!({"id":"merge-latency/p95","since_ms":1,"until_ms":2,"steps":120,"max_response_bytes":16384})),
     ]
 }
 
@@ -334,7 +356,7 @@ async fn bounded_reads_dispatch_exact_get_routes_queries_and_bearer_and_preserve
 }
 
 #[tokio::test]
-async fn deprecated_aliases_dispatch_identically_for_all_eleven_tools() {
+async fn deprecated_aliases_dispatch_identically_for_all_fourteen_tools() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -362,7 +384,7 @@ async fn deprecated_aliases_dispatch_identically_for_all_eleven_tools() {
             (ALERT_ANSWER, write_arguments(ALERT_ANSWER)),
             (MESSAGE_SEND, write_arguments(MESSAGE_SEND)),
         ]);
-        assert_eq!(cases.len(), 11);
+        assert_eq!(cases.len(), 14);
         for (name, args) in cases {
             let alias = format!("st_{}", name.strip_prefix("fractal_").unwrap());
             assert_eq!(call(&adapter, &alias, &args).await.unwrap(),
@@ -391,7 +413,7 @@ async fn http_tools_list_advertises_only_canonical_names() {
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
     let result: Value = serde_json::from_slice(&bytes).unwrap();
     let published = result["result"]["tools"].as_array().unwrap();
-    assert_eq!(published.len(), 11);
+    assert_eq!(published.len(), 14);
     for (tool, (name, _, _)) in published.iter().zip(TOOLS) {
         assert_eq!(tool["name"], *name);
         assert!(name.starts_with("fractal_"));
@@ -633,6 +655,11 @@ fn chatgpt_discovery_matches_main_golden() {
     // tools: tool_definitions(), ..Default::default() }) to a capture file.
     // Run `cargo test -p fractal-chatgpt capture_main_chatgpt_tools_golden`,
     // copy those bytes here, then discard the temporary test.
+    // Adding fractal_availability_get inserted its definition after
+    // fractal_agents_list; the other entries are unchanged. Its description
+    // later gained the note-truncation sentences, edited in place.
+    // Adding fractal_slo_list and fractal_slo_history appended their two
+    // definitions at the end.
     let result = ListToolsResult {
         tools: tool_definitions(Profile::ChatGpt),
         ..Default::default()
@@ -660,19 +687,22 @@ fn profiles_pin_server_identity_and_cross_profile_annotations() {
 }
 
 #[test]
-fn all_eleven_mcp_output_schemas_pin_envelopes_and_value_contracts() {
+fn all_fourteen_mcp_output_schemas_pin_envelopes_and_value_contracts() {
     let expected = [
         (ALERTS_LIST, Some("page"), vec!["kind","items","page"]),
         (ALERT_GET, None, vec!["id","episode","kind","title","detail","request"]),
         (ALERT_ANSWER, Some("action-result"), vec!["kind","action_id","status"]),
         (MISSIONS_LIST, Some("page"), vec!["kind","items","page"]),
         (AGENTS_LIST, Some("page"), vec!["kind","items","page"]),
+        (AVAILABILITY_GET, Some("person-availability"), vec!["kind","availability","directive_note","directive_note_truncated"]),
         (CONVERSATIONS_LIST, Some("page"), vec!["kind","items","page"]),
         (CONVERSATION_DETAIL, Some("conversation-detail"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
         (CONVERSATION_TIMELINE, Some("conversation-timeline"), vec!["kind","items","page","agent_id","session_id","current_session_id"]),
         (CONVERSATION_SEARCH, Some("conversation-search"), vec!["kind","items","page"]),
         (CONVERSATION_READ, Some("assistant-conversation-content"), vec!["kind","agent_id","session_id","reference","revision","start","end","text","returned_bytes","truncated","next_range"]),
         (MESSAGE_SEND, Some("action-result"), vec!["kind","action_id","status"]),
+        (SLO_LIST, Some("page"), vec!["kind","items","page"]),
+        (SLO_HISTORY, Some("slo-history"), vec!["kind","id","since_ms","until_ms","samples","steps"]),
     ];
     let tools = tool_definitions(Profile::Mcp);
     assert_eq!(tools.len(), expected.len());
@@ -738,7 +768,7 @@ fn legacy_call_bytes_and_mcp_structured_text_mirrors_are_pinned() {
 }
 
 #[tokio::test]
-async fn mcp_dispatches_all_eleven_tools_over_only_the_existing_gateway_routes() {
+async fn mcp_dispatches_all_fourteen_tools_over_only_the_existing_gateway_routes() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("st3-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -767,6 +797,7 @@ async fn mcp_dispatches_all_eleven_tools_over_only_the_existing_gateway_routes()
             "fence":{"snapshot_id":"snapshot/example"},"alert_id":"alert/example","episode":"claim/example","option":"yes","summary":"Approved"})),
         (MISSIONS_LIST,"missions-rich",json!({})),
         (AGENTS_LIST,"agents-rich",json!({"agent_id":"agent/example-reader"})),
+        (AVAILABILITY_GET,"availability",json!({})),
         (CONVERSATIONS_LIST,"conversations",json!({})),
         (CONVERSATION_DETAIL,"conversation-detail",json!({"agent_id":"agent/example-reader"})),
         (CONVERSATION_TIMELINE,"conversation-timeline",json!({"agent_id":"agent/example-reader","session_id":"session/example"})),
@@ -775,6 +806,8 @@ async fn mcp_dispatches_all_eleven_tools_over_only_the_existing_gateway_routes()
             "reference":"content/example","revision":"revision/example","start":0,"end":1})),
         (MESSAGE_SEND,"propose",json!({"action_id":"action/example-message","idempotency_key":"example-message-key",
             "fence":{"snapshot_id":"snapshot/example"},"to":"agent/example-recipient","title":"Example","content":"Exact example"})),
+        (SLO_LIST,"slo",json!({})),
+        (SLO_HISTORY,"slo-history",json!({"id":"cpu"})),
     ];
     for (name, route, args) in cases {
         let result = call(&adapter, name, &args).await.unwrap();
@@ -871,3 +904,95 @@ async fn mcp_telemetry_has_no_chatgpt_wording() {
     assert!(text.contains("MCP tool call finished"), "{text}");
     assert!(!text.contains("ChatGPT"), "{text}");
 }
+
+#[test]
+fn availability_tool_tells_assistants_when_to_park_and_pins_the_closed_value() {
+    let tool = serde_json::to_value(tool_definitions(Profile::Mcp).into_iter()
+        .find(|tool| tool.name == AVAILABILITY_GET).unwrap()).unwrap();
+    let description = tool["description"].as_str().unwrap();
+    for phrase in ["away", "interruptions is none", "park blocking asks", "hold-routine", "directive_note", "unreported",
+        "directive_note_truncated", "max_response_bytes (up to 16384)"] {
+        assert!(description.contains(phrase), "{phrase}: {description}");
+    }
+    assert_eq!(tool["inputSchema"]["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["max_response_bytes"]);
+    let value = &tool["outputSchema"]["oneOf"][0]["properties"]["value"];
+    let availability = &value["properties"]["availability"];
+    assert_eq!(availability["properties"]["status"], json!({"enum":["available","away"]}));
+    assert_eq!(availability["properties"]["status_source"], json!({"enum":["override","presence","unreported"]}));
+    assert_eq!(availability["properties"]["presence"], json!({"type":"null"}), "assistants never see raw presence");
+    assert_eq!(availability["properties"]["presence_observed_at"], json!({"type":"null"}));
+    assert_eq!(availability["properties"]["interruptions"], json!({"enum":["all","urgent","none"]}));
+    assert_eq!(availability["properties"]["deadline_clock"], json!({"enum":["run","hold-routine","hold-all"]}));
+    assert_eq!(availability["required"].as_array().unwrap().len(), 11);
+    assert_eq!(value["properties"]["directive_note"]["type"], json!(["object","null"]));
+    assert_eq!(value["properties"]["directive_note_truncated"], json!({"type":"boolean"}));
+}
+
+#[tokio::test]
+async fn mcp_reads_a_fixture_slo_list_and_history_through_the_assistant_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("fractal-client.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let snapshot = json!({"id":"snapshot/example","host_id":"host/example","store_index":7});
+    let page = |items: Value, next_cursor: Value| json!({"api_version":"st3.client.v0",
+        "request_id":"request/example","snapshot":snapshot,
+        "value":{"kind":"page","collection":"assistant.slo","items":items,
+            "page":{"limit":50,"has_more":!next_cursor.is_null(),"next_cursor":next_cursor}}});
+    let first = page(json!([
+        {"id":"merge-latency/p95","kind":"objective","about":"Pull requests from ready to merged",
+         "target":"p95 <= 4h","current":"p95 2h 10m over 31 merges","window":"7d",
+         "remaining_percent":61.5,"status":"met","tone":"green","measured_at_unix_ms":1_762_905_000_000_u64}
+    ]), json!("cursor/slo-2"));
+    let second = page(json!([
+        {"id":"codex/b122122b509719b7/weekly","kind":"budget","account":"codex/b122122b509719b7",
+         "about":"Codex weekly allowance","target":"100% per week","current":"72% used","window":"weekly",
+         "remaining_percent":28.0,"status":"at-risk","tone":"yellow","resets_at_unix_ms":1_763_000_000_000_u64,
+         "forecast_used_percent":96.0,"forecast_basis_minutes":360}
+    ]), Value::Null);
+    let history = json!({"api_version":"st3.client.v0","request_id":"request/example","snapshot":snapshot,
+        "value":{"kind":"slo-history","id":"merge-latency/p95","since_ms":1_762_819_200_000_u64,
+            "until_ms":1_762_905_600_000_u64,"samples":3,"steps":[70.0,null,61.5]}});
+    let (pages, history_body) = ((first.clone(), second.clone()), history.clone());
+    let (sent, mut received) = tokio::sync::mpsc::channel(2);
+    let gateway = Router::new()
+        .route("/v1/client/assistant/slo", get(move |uri: axum::http::Uri| {
+            let (sent, (first, second)) = (sent.clone(), pages.clone());
+            async move {
+                sent.send(uri.to_string()).await.unwrap();
+                axum::Json(if uri.query().is_some_and(|query| query.contains("cursor=")) { second } else { first })
+            }
+        }))
+        .route("/v1/client/assistant/slo-history", get(move |uri: axum::http::Uri| {
+            let body = history_body.clone();
+            async move { assert_eq!(uri.query(), Some("id=merge-latency%2Fp95&steps=3")); axum::Json(body) }
+        }));
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    let adapter = Adapter { client: reqwest::Client::builder().unix_socket(socket).build().unwrap(),
+        bearer: "test-only-mcp-credential".into(), profile: Profile::Mcp };
+
+    // A default call reads the first page; its cursor continues until next_cursor is null.
+    let mut args = json!({});
+    let mut rows = Vec::new();
+    let mut results = Vec::new();
+    loop {
+        let result = call(&adapter, SLO_LIST, &args).await.unwrap();
+        let published = serde_json::to_value(tool_result(Profile::Mcp, result.clone(), false)).unwrap();
+        assert_eq!(published["structuredContent"], result);
+        rows.extend(result["value"]["items"].as_array().unwrap().iter().cloned());
+        let next = result["value"]["page"]["next_cursor"].clone();
+        results.push(result);
+        let Some(cursor) = next.as_str() else { break };
+        args = json!({"cursor":cursor});
+    }
+    assert_eq!(results, [first, second]);
+    assert_eq!(received.recv().await.unwrap(), "/v1/client/assistant/slo");
+    assert_eq!(received.recv().await.unwrap(), "/v1/client/assistant/slo?cursor=cursor%2Fslo-2");
+    assert_eq!(rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["merge-latency/p95", "codex/b122122b509719b7/weekly"]);
+
+    let result = call(&adapter, SLO_HISTORY, &json!({"id":"merge-latency/p95","steps":3})).await.unwrap();
+    assert_eq!(result, history);
+    assert_eq!(result["value"]["steps"], json!([70.0, null, 61.5]));
+    server.abort();
+}
+

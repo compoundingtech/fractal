@@ -50,6 +50,7 @@ export type { MenuProps, MenuItemProps, PopoverProps, CheckboxProps, TooltipProp
 /** Controlled sidebar row; the host owns clock and data. */
 export { SidebarAgentRow, sidebarRowDescription } from './sidebar/SidebarAgentRow.tsx'
 export { AgentHoverCard, AgentRowActions, type AgentRowActionsProps } from './sidebar/DeferredRowActions.tsx'
+export * from './entity/index.ts'
 export { SidebarQueryContext, sidebarRowAccessibleName } from './sidebar/rowPresentation.tsx'
 export { MilestoneAgentRow, openAgentRowMenu, type MilestoneAgentRowProps } from './sidebar/MilestoneAgentRow.tsx'
 export { SidebarStatus, type SidebarStatusProps } from './sidebar/SidebarStatus.tsx'

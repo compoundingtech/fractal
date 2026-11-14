@@ -134,7 +134,7 @@ async fn authenticated_get_during_pairing() {
         browser_pairing_login:None,
         seat_admission:Default::default(), owning_person:Some(OWNER.into()), store:store.clone(),
         notify:Arc::new(tokio::sync::Notify::new()), event_notify:tokio::sync::watch::channel(0).0,
-        node:NODE.into(), state_dir:root.path().into(), pty_root:root.path().join("pty"), pty_binary:PathBuf::from("pty"),
+        node:NODE.into(), api_socket: root.path().join("api.sock"),state_dir:root.path().into(), pty_root:root.path().join("pty"), pty_binary:PathBuf::from("pty"),
         fleet_id:None, configured_peers:vec![], client_relay:None, native_session_home:None,
         planner_default:Default::default(), harness_question_sink:None, assistant_receipts:Default::default(), private_notes:Default::default(),
     };

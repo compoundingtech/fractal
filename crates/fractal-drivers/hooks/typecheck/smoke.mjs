@@ -6,6 +6,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { assertResponseEvidence } from "./response-evidence.mjs";
 
 // A recorder standing in for `st2 driver pi-channel`, so this smoke can assert what the extension
 // EMITS and not merely that it loads. With `true` as the channel binary the frames go into a pipe
@@ -129,6 +130,9 @@ for (const ctx of [bareCtx, fullCtx, throwingCtx]) {
   await handlers.get("agent_settled")({}, ctx);
   await handlers.get("session_shutdown")({ reason: "smoke" }, ctx);
 }
+await handlers.get("session_start")({}, fullCtx);
+await assertResponseEvidence(handlers, fullCtx, readFrames);
+await handlers.get("session_shutdown")({ reason: "smoke" }, fullCtx);
 
 // Native completion fields reach Rust; assistant content and aborted turns do not.
 await handlers.get("session_start")({}, bareCtx);

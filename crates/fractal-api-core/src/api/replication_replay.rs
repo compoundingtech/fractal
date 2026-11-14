@@ -1,4 +1,5 @@
 use super::*;
+use crate::OwnedSetsStore;
 use std::io::{BufRead as _, Read as _, Seek as _, Write as _};
 use std::path::PathBuf;
 
@@ -97,9 +98,14 @@ pub async fn replay(
         let path = state.state_dir.join("replication-replay-audit.jsonl");
         let previous = last_duration(&path).map_err(ApiError::internal)?;
         let claims: u64 = state.store.readers.get().query_row("SELECT count(*) FROM claims", [], |row| row.get(0)).map_err(ApiError::internal)?;
-        let warning = "The writer is held for the whole replay. Use a planned window; do not restart the daemon to fix a replay.";
+        let blocked_owned_sets: Vec<_> = state.store.owned_sets().map_err(ApiError::internal)?
+            .into_iter().filter(|set| !set.blockers.is_empty()).map(|set| set.id).collect();
+        let mut warning = "The writer is held for the whole replay. Use a planned window; do not restart the daemon to fix a replay.".to_owned();
+        if !blocked_owned_sets.is_empty() {
+            warning.push_str(&format!(" Blocked owned sets: {}. Replay removes their retained physical desired and mission-definition rows without rebuilding them while blocked; authoritative claims and set receipts remain.", blocked_owned_sets.join(", ")));
+        }
         if !request.confirm {
-            return Ok(Json(json!({"confirmed":false,"claim_count":claims,"last_replay_duration_ms":previous,"warning":warning})));
+            return Ok(Json(json!({"confirmed":false,"claim_count":claims,"last_replay_duration_ms":previous,"warning":warning,"blocked_owned_sets":blocked_owned_sets})));
         }
         let actor = state.owning_person.as_deref().ok_or_else(|| ApiError::bad(FractalError::new(
             "replication-replay-owner-required", "configure the local owning person before replaying",
@@ -108,7 +114,7 @@ pub async fn replay(
         let record = json!({"actor":actor,"started_at_unix_ms":started,"claim_count":claims,"result":"running"});
         audit(&path, &record).map_err(ApiError::internal)?;
         let mut attempt = AuditAttempt { path, record, timer: Instant::now(), completed: false };
-        tracing::warn!(actor, claims, "replication replay starting; writer held for the whole replay");
+        tracing::warn!(actor, claims, %warning, "replication replay starting; writer held for the whole replay");
         let result = state.store.replay_replication_graph();
         attempt.record["duration_ms"] = json!(attempt.timer.elapsed().as_millis());
         attempt.record["result"] = json!(if result.is_ok() { "healthy" } else { "failed" });

@@ -2155,6 +2155,7 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             .clone()
             .context("the replication worker needs shared_secret_file")?,
         state_dir: config.state_dir.clone(),
+        api_socket: config.socket.clone(),
         peers: config.peers.clone(),
         peer_listen: config.peer_listen.clone(),
         fleet: config.fleet.clone(),

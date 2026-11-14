@@ -8,6 +8,11 @@
 //! that show them. It never copies fault or cancellation text, which can carry anything a step
 //! printed. A reporter that is not a live agent gets a fault on the run instead, once per
 //! reason, and the next evaluation looks again without sending anything twice.
+//!
+//! A run that never named a reporter still reports a stall by default: to its requester when that
+//! is an agent, else to an agent that the stuck step's agent is `under`. Never to the stuck agent
+//! itself, never to an agent that is not running, and never for a silence that was already past
+//! its limit when the default was turned on, so an upgrade does not send a burst.
 use crate::AttentionSnapshotStore;
 use crate::MissionsStore;
 use super::*;
@@ -23,6 +28,37 @@ pub struct RunReport {
     pub stalled_after_ms: u64,
     pub completed: bool,
     pub stalls: bool,
+}
+
+/// What a run says about its reporter.
+pub(super) enum ReportChoice {
+    /// The run, or its latest `report-to` change, names this report.
+    Named(RunReport),
+    /// `report-to --clear`: nobody, not even a default.
+    Cleared,
+    /// The run never named one, so its stalls go to a default reporter.
+    Unnamed,
+}
+
+/// The agents that hold or are assigned the run's open work: the agents whose silence a stall is.
+fn stuck_agents(run: &MissionRunView) -> Vec<String> {
+    let mut agents = Vec::new();
+    for step in &run.steps {
+        if step.agentless || !matches!(step.status.as_str(), "ready" | "claimed" | "working") {
+            continue;
+        }
+        let agent = step
+            .claimant
+            .as_ref()
+            .or(step.assigned_to.as_ref())
+            .or_else(|| (step.available_to.len() == 1).then(|| &step.available_to[0]));
+        if let Some(agent) = agent.filter(|agent| agent.starts_with("agent/"))
+            && !agents.contains(agent)
+        {
+            agents.push(agent.clone());
+        }
+    }
+    agents
 }
 
 /// What happened to a run that its reporter is told.
@@ -136,28 +172,134 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Who a run reports to: its latest `st missions report-to`, else what it was created with.
+    /// A default reporter is not named, so it is not returned here.
     pub fn run_report(&self, run: &str) -> Result<Option<RunReport>> {
-        let claim = match self
+        Ok(match self.report_choice(run)? {
+            ReportChoice::Named(report) => Some(report),
+            ReportChoice::Cleared | ReportChoice::Unnamed => None,
+        })
+    }
+
+    pub(super) fn report_choice(&self, run: &str) -> Result<ReportChoice> {
+        let fields = |claim: &crate::model::ClaimRecord| {
+            crate::store::run_report_fields(&claim.body).map(
+                |(to, stalled_after_ms, completed, stalls)| RunReport {
+                    to,
+                    stalled_after_ms,
+                    completed,
+                    stalls,
+                },
+            )
+        };
+        if let Some(changed) = self
             .store
             .latest_claim(run, Some(crate::store::RUN_REPORT_KIND))?
         {
-            Some(changed) => changed,
-            None => match self
-                .store
-                .latest_claim(run, Some("mission-run.created"))?
-            {
-                Some(created) => created,
-                None => return Ok(None),
-            },
+            return Ok(fields(&changed).map_or(ReportChoice::Cleared, ReportChoice::Named));
+        }
+        Ok(self
+            .store
+            .latest_claim(run, Some("mission-run.created"))?
+            .and_then(|created| fields(&created))
+            .map_or(ReportChoice::Unnamed, ReportChoice::Named))
+    }
+
+    /// Turn the default stall report on or off. Turning it on starts the time before which a
+    /// silence that was already past its limit is never reported by default.
+    pub fn set_default_stall_reports(&self, on: bool) {
+        let mut since = self
+            .default_stall_reports_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *since = match (on, *since) {
+            (false, _) => None,
+            (true, None) => Some(now_ms()),
+            (true, kept) => kept,
         };
-        Ok(crate::store::run_report_fields(&claim.body).map(
-            |(to, stalled_after_ms, completed, stalls)| RunReport {
-                to,
-                stalled_after_ms,
-                completed,
-                stalls,
-            },
-        ))
+    }
+
+    /// The agents a run that names no reporter tells of its stall, in order, with why each is
+    /// told: its requester when that is an agent, then each agent a stuck agent is `under`.
+    /// A stuck agent itself is never one.
+    fn default_reporters(&self, run: &MissionRunView, stuck: &[String]) -> Result<Vec<(String, String)>> {
+        let mut reporters = Vec::<(String, String)>::new();
+        if run.requester.starts_with("agent/") && !stuck.contains(&run.requester) {
+            reporters.push((run.requester.clone(), "you requested the run".into()));
+        }
+        for agent in stuck {
+            for declared in self.store.desired_subjects_named(std::slice::from_ref(agent))? {
+                if declared.kind != "agent" {
+                    continue;
+                }
+                for under in crate::graph::agent_under(&declared.desired) {
+                    if !stuck.contains(&under.agent)
+                        && !reporters.iter().any(|(to, _)| *to == under.agent)
+                    {
+                        reporters.push((under.agent, format!("{agent} is `under` you")));
+                    }
+                }
+            }
+        }
+        Ok(reporters)
+    }
+
+    /// Tell a default reporter that a run that names none has stalled, and return when it will
+    /// have if it has not yet. Only a stall is reported by default. A run linked from a parent
+    /// step is left to its parent, which counts its activity and its stuck agents.
+    pub(super) fn report_stall_by_default(&self, run: &MissionRunView, now: u128) -> Result<Option<u128>> {
+        let Some(enabled_since) = *self
+            .default_stall_reports_since
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        else {
+            return Ok(None);
+        };
+        if run.parent_step_run.is_some() || !can_stall(run) {
+            return Ok(None);
+        }
+        // Work in linked child runs, such as loop rounds and nested work, is the run's work too.
+        let mut stuck = stuck_agents(run);
+        let mut pending = run.steps.iter().map(|step| step.subject.clone()).collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(step) = pending.pop() {
+            for child in self.store.mission_run_children_for_step(&step)? {
+                if !visited.insert(child.subject.clone()) {
+                    continue;
+                }
+                for agent in stuck_agents(&child) {
+                    if !stuck.contains(&agent) {
+                        stuck.push(agent);
+                    }
+                }
+                pending.extend(child.steps.into_iter().map(|step| step.subject));
+            }
+        }
+        if stuck.is_empty() {
+            return Ok(None);
+        }
+        let reporters = self.default_reporters(run, &stuck)?;
+        if reporters.is_empty() {
+            return Ok(None);
+        }
+        let stalled_after_ms = crate::mission::DEFAULT_STALLED_AFTER_MS;
+        let since = self.run_report_activity(run)?;
+        let stalls_at = since.saturating_add(u128::from(stalled_after_ms));
+        if now < stalls_at {
+            return Ok(Some(stalls_at));
+        }
+        // A silence already past its limit when the default came on is old news, not a stall
+        // this daemon saw happen.
+        if stalls_at < enabled_since {
+            return Ok(None);
+        }
+        for (to, why) in reporters {
+            if self.store.agent_is_live(&to)? {
+                let report = RunReport { to, stalled_after_ms, completed: false, stalls: true };
+                self.tell_reporter(run, &report, RunEvent::Stalled { since }, Some(&why))?;
+                break;
+            }
+        }
+        Ok(None)
     }
 
     /// Tell the reporter what this run's phase calls for, and return when a run that has not
@@ -175,7 +317,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             _ => None,
         };
         if let Some(event) = event {
-            self.tell_reporter(run, report, event)?;
+            self.tell_reporter(run, report, event, None)?;
             return Ok(None);
         }
         if !report.stalls || !can_stall(run) {
@@ -186,7 +328,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if now < stalls_at {
             return Ok(Some(stalls_at));
         }
-        self.tell_reporter(run, report, RunEvent::Stalled { since })?;
+        self.tell_reporter(run, report, RunEvent::Stalled { since }, None)?;
         Ok(None)
     }
 
@@ -239,6 +381,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         run: &MissionRunView,
         report: &RunReport,
         event: RunEvent,
+        default_because: Option<&str>,
     ) -> Result<()> {
         let key = match event {
             RunEvent::Stalled { since } => {
@@ -301,8 +444,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ),
             ),
         };
+        let because = match default_because {
+            None => "the run names you in `report-to`".to_owned(),
+            Some(why) => format!(
+                "{why} and the run names no `report-to`. A person or the requester can name a reporter, or stop these with `st missions report-to {} --clear`",
+                run.subject
+            ),
+        };
         let content = format!(
-            "{detail}\n\nRun: {run_subject}\nMission: {mission}\n\nInspect: `st missions show {run_subject}`, and `st work show STEP_SUBJECT` for a step. The reason is on the run, not in this message.\n\nYou are told because the run names you in `report-to`. st sends one message for each event of a run.",
+            "{detail}\n\nRun: {run_subject}\nMission: {mission}\n\nInspect: `st missions show {run_subject}`, and `st work show STEP_SUBJECT` for a step. The reason is on the run, not in this message.\n\nYou are told because {because}. st sends one message for each event of a run.",
             run_subject = run.subject,
             mission = run.mission,
         );

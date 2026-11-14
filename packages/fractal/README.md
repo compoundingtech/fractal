@@ -7,6 +7,7 @@ Typed authoring for Fractal declarations: agents, missions, schedules and object
 | `fractal` | isomorphic | The `Fractal` authoring namespace; declaration schemas and the KDL lowering (`agent`, `mission`, `schedule`, `objectiveNode` nodes, `emit`, `fractalKdl`) as named exports |
 | `fractal/tree` | Node | `loadSubjectTree`, `programMission`, the define forms and reference types |
 | `fractal/testing` | Node | `scratchDaemonLayer`, an isolated daemon for conformance tests |
+| `fractal/source-map` | Node; the read trace needs Bun | `sourceMap` and `traceSourceReads`: the `fractal.source-map/v1` document of a rendered tree |
 | `fractal/effect` | Bun program host, isomorphic | The `Fractal` namespace with the program forms of `mission` and `step`, plus `ask`, `run`, `command`, `env`, `cwd` and `Worker`; the host contract (`ProgramEntry`, `HostContextV1`) as named exports |
 
 ## Authoring
@@ -40,7 +41,7 @@ export default Fractal.mission({
 })
 ```
 
-An objective (`docs/st3/objectives.md`) is a target over something Fractal measures. A fleet declares intervals over claims, named `NAMESPACE/NAME` by their directory; `objective.ts` needs no `meta` because nothing references an objective, and a `name`, if given, must equal the path ID.
+An objective (`docs/st3/objectives.md`) is a target over something Fractal measures. A fleet declares intervals and counts over claims, named `NAMESPACE/NAME` by their directory; `objective.ts` needs no `meta` because nothing references an objective, and a `name`, if given, must equal the path ID.
 
 ```ts
 // ops/change-rollout/objective.ts
@@ -67,9 +68,39 @@ export default Fractal.objective({
 })
 ```
 
-`Fractal.objective` checks the rules the native reader enforces and throws on the first broken one. The other indicators (`latency`, `share`, `statement`, `transaction`, `writerHold`, `cpu`, `database`, `divergence`, `ciDuration`, `ciCount`) are native telemetry: Fractal ships them in [`slo/objectives.kdl`](../../slo/objectives.kdl), rendered by [`slo/objectives.kdl.genie.ts`](../../slo/objectives.kdl.genie.ts), and the tree loader refuses them. `src/objective.ts` and `src/kdl.ts` import nothing outside the package, so Genie bundles that file without installing dependencies.
+A count takes one `per-hour` target with `min` or `max`: `Fractal.indicator.count({ subjectPrefix: 'custom/factory/merged-pr/', event: { kind: 'custom.factory.pr-merged', at: 'merged_at' }, labels: ['repository'] })` with `window: { span: '24h' }` and `targets: [{ stat: 'per-hour', min: 10 }]`. Only the count's own row is judged against the target; each label row is a part of it, shown without a verdict.
+
+An interval or count keeps a sample or event only when its start (or event) claim has one of the values of each `only: [{ field, values }]`, one per field; a claim without the field is left out, and left-out ones are counted with the excluded. An interval's `stop` may name its `start` kind when both name different `at` fields: one claim is then the whole sample, as `start: { kind: 'github.workflow-run', at: 'created_at' }, stop: { kind: 'github.workflow-run', at: 'completed_at' }` reads a CI run from creation to completion. Such a stop takes no `expect` or `member`.
+
+`Fractal.objective` checks the rules the native reader enforces and throws on the first broken one. The other indicators (`latency`, `share`, `statement`, `transaction`, `writerHold`, `cpu`, `database`, `divergence`) are native telemetry: Fractal ships them in [`slo/objectives.kdl`](../../slo/objectives.kdl), rendered by [`slo/objectives.kdl.genie.ts`](../../slo/objectives.kdl.genie.ts), and the tree loader refuses them. `src/objective.ts` and `src/kdl.ts` import nothing outside the package, so Genie bundles that file without installing dependencies.
 
 The namespace also holds `step`, `gate`, `person`, `input`, `product`, `t`, `doc`, `pr`, `childMission`, `runId`, `completed`/`failed`/`terminal`, `Timing`, `Launch`, `Review`, `Fragment`, `Mission`, `Round`, `omp` and `pinMission`. `Fractal.defineAgent`, `Fractal.defineMission`, `Fractal.defineSchedule` and `Fractal.defineObjective` are the low-level forms: `{ meta, intent }`, where `intent` may be a function of the loader's `context`.
+
+### Harness startup messages
+
+OMP, Codex and Claude harnesses accept an optional `message: { text, id }`:
+
+```ts
+Fractal.agent({
+  id: 'garden/worker',
+  harness: Fractal.omp({
+    model: '@generalist_root',
+    message: { text: 'Read the garden plan and begin.', id: 'garden-start-v1' },
+  }),
+})
+```
+
+This lowers to `harness "omp" { model "@generalist_root"; message "Read the garden plan and begin." id="garden-start-v1"; }`.
+For Codex or Claude, supply the same `message` field on the harness record.
+The native runtime delivers it as a one-shot first-turn message keyed by
+`(subject, id)`, not as a recurring prompt. Changing either the text or the id
+restarts the agent. Text must be nonblank, contain no NUL, and fit in 64 KiB of
+UTF-8; the nonempty id must fit in 256 UTF-8 bytes, matching native admission.
+Blankness follows Unicode `White_Space`, as in the native Rust reader:
+U+0085 alone is blank, while U+FEFF alone is not.
+All rendered strings (including node names and property keys) use KDL v2
+escaping for control characters, Unicode newlines, BOM and directional controls.
+Unpaired UTF-16 surrogates cannot represent Unicode scalars and are rejected.
 
 `step()` and `gate.*()` validate eagerly, so a step handle's `assignedTo` must be an object with an `id`; a path-derived reference works in an inline step object, which the loader lowers.
 
@@ -85,6 +116,30 @@ const objectiveKdl = emit([objectiveNode({ ...intent, name: subject.id })])
 ```
 
 Validate the output with `fractal validate` before publishing it with `fractal apply`.
+
+### Source maps
+
+`fractal apply --set … --source-map MAP.json` records where each published revision came from ([owned sets](../../docs/st3/owned-sets.md#source-maps)). `fractal/source-map` builds that document for rendered subjects. It imports nothing outside Node, so a loader can use it from a pinned checkout; the caller passes `parseSync` from `oxc-parser`.
+
+```ts
+import { parseSync } from 'oxc-parser'
+import { sourceMap, traceSourceReads } from 'fractal/source-map'
+
+// Before the tree is imported, in Bun: wrap the literal consts of the tree's modules.
+const trace = traceSourceReads({ parse: parseSync, roots: [root] })
+// …load and render the tree…
+const { document, coverage } = sourceMap({
+  parse: parseSync,
+  subjects: rendered.map(({ subject, file, kdl }) => ({ subject, file, kdl })),
+  reads: trace.reads(),
+  locate: (file) => (file.startsWith(`${root}/`) ? { repository: 'acme/fleet', path: relative(root, file) } : undefined),
+  texts: true,
+})
+```
+
+Each KDL node with its own authoring site gets a `span` and `frames`, outermost first: the `declaration` call site in the subject module, `helper` call sites, and the `value` that was read; `constructor` and `fragment` frames name the call or the reused step object that authors it. Nodes are keyed by their KDL path (`mission[ID]/step[ID]/goal[0]`): agents, missions, steps and gates by their first string argument, other nodes by their index among siblings of the same name. Unlisted nodes inherit the nearest listed ancestor. Positions are 1-based lines and UTF-16 columns with exclusive ends.
+
+The AST pass follows the default export through constructor calls (`Fractal.mission({…})`, `define*({ meta, intent })`), consts and static imports to the authoring object, its properties and array elements, and step objects by their `id`. The read trace covers values that helpers compute: it wraps literal object and array consts only, never frozen values, and nested values only where the initializer is itself a literal, so step and gate handles keep their identity. Values pass through unchanged, so the rendered KDL is byte-identical with and without the trace; `src/source-map.unit.test.ts` checks that.
 
 ## Relation to `@fractal/declarations`
 
@@ -135,7 +190,7 @@ A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fracta
 
 ### Publishing a program
 
-`loadSubjectTree({ root, context, bundleDir })` bundles every program mission it loads with `bun build --target=bun` (`bun` on `PATH`, or the `bun` option) and writes the bundle to `<bundleDir>/<sha256>.mjs`; `bundleDir` must be absolute, and a tree with a program mission and no `bundleDir` is refused. Bun names inlined modules by their path from the tree root, so the same tree and lockfile give the same bytes wherever they are checked out. Before it pins the bundle the loader checks that its default export carries the entry. The mission then loads like any other, so `emit([mission(intent)])` renders it:
+`loadSubjectTree({ root, context, bundleDir })` bundles every program mission it loads with `bun build --target=bun --minify-whitespace` (`bun` on `PATH`, or the `bun` option) and writes the bundle to `<bundleDir>/<sha256>.mjs`; `bundleDir` must be absolute, and a tree with a program mission and no `bundleDir` is refused. Minified whitespace drops the comment Bun writes above each inlined module with its path from the build directory, so the same sources and lockfile give the same bytes wherever the tree and its dependencies are checked out. Before it pins the bundle the loader checks that its default export carries the entry. The mission then loads like any other, so `emit([mission(intent)])` renders it:
 
 ```kdl
 mission "factory/land-program" report-to="agent/factory" state="ready" timeout="2h" {
@@ -154,7 +209,7 @@ mission "factory/land-program" report-to="agent/factory" state="ready" timeout="
 }
 ```
 
-The intent's `timeout` bounds the mission and its program step, `stalledAfter` becomes the program's `stalled-after`, `concurrentRuns` becomes `concurrent-runs max=N`, and `authority` (`publish`, `start`, `revise` and `write` rules, rendered in canonical order) becomes the run authority block. `fractal validate` checks the KDL and that each bundle still has its pinned sha256; `fractal apply` publishes the mission and carries the bundle to the daemon. `fixtures/land-program.kdl` is the landing program's rendering; after an intended change to the program or to code its bundle inlines, `FRACTAL_UPDATE_GOLDENS=1 pnpm --filter fractal test` rewrites it.
+The intent's `timeout` bounds the mission and its program step, `stalledAfter` becomes the program's `stalled-after`, `concurrentRuns` becomes `concurrent-runs max=N`, and `authority` (`publish`, `start`, `revise` and `write` rules, rendered in canonical order) becomes the run authority block. `fractal validate` checks the KDL and that each bundle still has its pinned sha256; `fractal apply` publishes the mission and carries the bundle to the daemon. `fixtures/land-program.kdl` is the landing program's rendering; after an intended change to the program or to code its bundle inlines, `nix develop .#web -c env FRACTAL_UPDATE_GOLDENS=1 pnpm --filter fractal test` rewrites it. Use the web shell's pinned Bun, as hosted TypeScript CI does: the default Rust shell uses a separate Nixpkgs input and can produce different bundle bytes.
 
 A loader that walks its own tree renders one program mission the same way with `programMission({ root, file, definition, bundleDir, bun? })`: `file` is a `mission.ts` below the tree `root`, `definition` its default export, and the subject ID its real directory below `root`'s real path. The result is `{ kdl, bundle, sha256 }`, the bytes `loadSubjectTree` would render for that subject.
 

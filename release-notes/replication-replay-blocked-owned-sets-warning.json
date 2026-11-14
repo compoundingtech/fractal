@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Warn before replication replay removes retained projections for blocked owned sets",
+  "replay": {"status": "none", "detail": "Canonical replay behavior is unchanged. Estimates now name blocked owned sets and explain that their retained physical desired and mission-definition rows are removed without rebuilding them while blocked; authoritative claims and set receipts remain."},
+  "schema": {"status": "none", "detail": "No schema or audit format changes."},
+  "rules": {"status": "none", "detail": "No admission or graph rules change; no additional confirmation flag or refusal."},
+  "compatibility": {"status": "none", "detail": "Replay estimates add blocked_owned_sets. Confirmed CLI replay prints an estimate warning to stderr before requesting the replay, preserving JSON stdout."},
+  "downtime": {"status": "none", "detail": "Replay still requires a planned writer-maintenance window."},
+  "manual": {"status": "none", "detail": "Resolve named owned-set blockers before replay if retained physical projection rows must remain available."},
+  "recovery": {"status": "none", "detail": "Do not restart the daemon to fix a running replay."}
+}

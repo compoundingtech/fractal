@@ -13,6 +13,11 @@ pub(super) async fn run_replication(
             let mut client = client.clone();
             // Match planned checkpoint maintenance, rather than the interactive 15-second limit.
             client.deadlines.request = Duration::from_secs(30 * 60);
+            if confirm {
+                let estimate: Value = client.post("/v1/replication/replay", &json!({"confirm":false})).await?;
+                // Print before the destructive request, including when stdout is JSON.
+                eprintln!("{}", estimate["warning"].as_str().unwrap_or_default());
+            }
             let report: Value = client.post("/v1/replication/replay", &json!({"confirm":confirm})).await?;
             if json_output {
                 return print_value(&report, true);

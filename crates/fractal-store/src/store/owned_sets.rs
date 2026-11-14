@@ -134,6 +134,9 @@ pub struct Request {
     /// The program bundles the set declares, base64 by sha256, as `ApplyRequest` carries them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub program_bundles: BTreeMap<String, String>,
+    /// Apply only: recorded beside the commit, excluded from every digest and the preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_map: Option<fractal_schema::source_map::SourceMap>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -161,6 +164,12 @@ pub struct Preview {
     /// Open source debt against the previous revision that this publication closes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reverted_debts: Vec<crate::model::SourceDebt>,
+    /// The missions whose exact revision this store does not hold yet. Publication checks only
+    /// their exec gates: a held revision is not checked again, even if it was published with
+    /// --no-gate-check or replicated from another daemon (`fractal missions check` checks it).
+    /// Absent from older daemons, whose publications check every mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_check: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -298,6 +307,17 @@ fn task_parent(desired: &DesiredSubject) -> Option<&str> {
         return None;
     }
     desired.member.as_ref()?.tags.get("st3.agent").map(String::as_str)
+}
+
+/// The effect of keeping an agent retired ad hoc retired; `declared` when the source still
+/// declares it.
+fn kept_retired(retirement: &ClaimRecord, declared: bool) -> String {
+    format!(
+        "keep terminally retired by {}: {}{}",
+        retirement.actor.as_deref().unwrap_or("unknown"),
+        retirement.body["fields"]["reason"].as_str().unwrap_or_default(),
+        if declared { "; drop it from the source" } else { "" },
+    )
 }
 
 fn stop_declaration(subject: &str) -> Result<DesiredSubject, FractalError> {
@@ -1487,7 +1507,8 @@ pub fn plan_tx(
     let bundle_digest = canonical_hash(&(&input.subjects, &input.missions)).map_err(internal)?;
     let prior_policy = old.as_ref().and_then(|v| v.receipt.policy.clone());
     let policy = resolve_policy(prior_policy.as_ref(), options.policy.as_ref())?;
-    // Every debt this set still carries; this publication converges and closes all of it.
+    // Every debt this set still carries; this publication converges and closes all of it, except
+    // an ad hoc terminal retirement of a member the source still declares.
     let open_debts = match &old {
         Some(old) => open_debt_records(transaction, Some(&old.id), None)?,
         None => Vec::new(),
@@ -1619,6 +1640,7 @@ pub fn plan_tx(
     let mut changes = BTreeMap::<String, String>::new();
     let mut effects = BTreeMap::<String, String>::new();
     let mut heads = BTreeMap::new();
+    let mut gate_check = BTreeSet::new();
     let mut adoptions = BTreeMap::new();
     let mut retired = old
         .as_ref()
@@ -1650,6 +1672,22 @@ pub fn plan_tx(
                 adoptions.insert(s.clone(), tokens.clone());
             }
         }
+        // Terminal retirement outranks the source: an agent retired ad hoc becomes a retired
+        // member through its stopped form, and every publication still declaring it reports that
+        // instead of failing. A member the set already keeps retired keeps its reference.
+        if s.starts_with("agent/")
+            && let Some(retirement) = retirements::record(transaction, s, None)?
+        {
+            if old.as_ref().is_some_and(|v| v.receipt.retired.contains_key(s)) {
+                intent.subjects.remove(s);
+            } else {
+                intent.subjects.insert(s.clone(), stop_declaration(s)?);
+            }
+            changes.insert(s.clone(), "retired".into());
+            effects.insert(s.clone(), kept_retired(&retirement, true));
+            heads.insert(s.clone(), tokens);
+            continue;
+        }
         let existing = old.as_ref().and_then(|v| v.receipt.members.get(s));
         changes.insert(
             s.clone(),
@@ -1662,6 +1700,13 @@ pub fn plan_tx(
             }
             .into(),
         );
+        if let Some(mission) = s.strip_prefix("mission/")
+            && existing.is_none_or(|m| m.revision != *revision)
+            && crate::store::missions::mission_revision_spec_tx(transaction, mission, revision)?
+                .is_none()
+        {
+            gate_check.insert(s.clone());
+        }
         if existing.is_none_or(|m| m.revision != *revision) {
             let effect = if s.starts_with("mission/") {
                 "publish definition; retain active runs".to_owned()
@@ -1765,6 +1810,16 @@ pub fn plan_tx(
                 materialize.insert(s.clone());
             }
             if live.contains_key(s) {
+                continue;
+            }
+            // An agent already retired ad hoc is not retired by this publication.
+            if m.kind == "agent"
+                && let Some(retirement) = retirements::record(transaction, s, None)?
+            {
+                intent.subjects.insert(s.clone(), stop_declaration(s)?);
+                heads.insert(s.clone(), intent_leaves_tx(transaction, s).map_err(internal)?);
+                changes.insert(s.clone(), "retired".into());
+                effects.insert(s.clone(), kept_retired(&retirement, false));
                 continue;
             }
             let manual = manual_member(transaction, m)?;
@@ -1883,16 +1938,24 @@ pub fn plan_tx(
         &intent,
         changes
             .iter()
-            .filter(|(_, change)| change.as_str() != "unchanged")
+            .filter(|(_, change)| !matches!(change.as_str(), "unchanged" | "retired"))
             .map(|(subject, _)| subject.as_str()),
         Some(current_index(transaction).map_err(internal)?),
     )?;
     // Publication converges every member to this bundle, so it closes all of the set's open
-    // debt and reports what each forced change becomes.
+    // debt and reports what each forced change becomes. An ad hoc retirement cannot be reverted:
+    // its debt stays open while the source declares the member and is adopted once it does not.
     let mut reverted_debts = Vec::new();
     if !noop {
         for record in &open_debts {
             let Some(mut debt) = debt_view(record) else { continue };
+            if debt.verb == Verb::Retire.as_str() {
+                if !live.contains_key(&debt.subject) {
+                    debt.outcome = Some("adopted".into());
+                    reverted_debts.push(debt);
+                }
+                continue;
+            }
             let forced = record.body["fields"]["revision"].as_str();
             let adopted = forced.is_some() && live.get(&debt.subject).map(String::as_str) == forced;
             debt.outcome = Some(match (forced.is_some(), adopted) {
@@ -1936,6 +1999,7 @@ pub fn plan_tx(
         noop,
         policy,
         reverted_debts,
+        gate_check: Some(gate_check),
     };
     Ok(Plan {
         intent,
@@ -2014,6 +2078,10 @@ pub fn commit_tx(
     let mut members = BTreeMap::new();
     let mut retired = plan.retired.clone();
     for (s, change) in &plan.preview.changes {
+        // A member the set already keeps retired publishes nothing and keeps its reference.
+        if change == "retired" && !plan.intent.subjects.contains_key(s) {
+            continue;
+        }
         let member = if s.starts_with("mission/") {
             transaction
                 .query_row(
@@ -2041,7 +2109,7 @@ pub fn commit_tx(
                     .get(s)
                     .and_then(|d| d.member.as_ref())
                     .is_some_and(|m| m.one_shot),
-                manual_rollout: if change == "retiring" {
+                manual_rollout: if change == "retiring" || change == "retired" {
                     plan.retired.get(s).is_some_and(|m| m.manual_rollout)
                 } else {
                     plan.intent
@@ -2054,7 +2122,7 @@ pub fn commit_tx(
                 revision: row.revision,
             }
         };
-        if change == "retiring" {
+        if change == "retiring" || change == "retired" {
             retired.insert(s.clone(), member);
         } else {
             members.insert(s.clone(), member);
@@ -2303,7 +2371,9 @@ impl Store {
 
     /// The follow-up of a gated runtime write to `subject`, run in that write's transaction: the
     /// gate is decided again there and records debt for a forced write (naming the write as its
-    /// request) or an audit record for a write an `enforce` set would refuse.
+    /// request) or an audit record for a write an `enforce` set would refuse. An audited terminal
+    /// retirement also records debt: no publication can revert it, so it stays open until the
+    /// source stops declaring the retired member.
     pub fn source_follow_up<'a>(
         &'a self,
         subject: &'a str,
@@ -2316,9 +2386,15 @@ impl Store {
             Gate::Force(view) => record_debt_tx(transaction, &self.origin, &view, subject, verb,
                 Forced::Request(&record.id), None, actor, force_reason.unwrap_or_default(), None)
                 .map(drop),
-            Gate::Audit(view, refused) => record_audit_tx(transaction, &self.origin, &view, subject,
-                verb, actor, &refused, None)
-                .map(drop),
+            Gate::Audit(view, refused) => {
+                record_audit_tx(transaction, &self.origin, &view, subject, verb, actor, &refused, None)?;
+                if verb == Verb::Retire {
+                    let reason = record.body["fields"]["reason"].as_str().unwrap_or_default();
+                    record_debt_tx(transaction, &self.origin, &view, subject, verb,
+                        Forced::Request(&record.id), None, actor, reason, None)?;
+                }
+                Ok(())
+            }
         }
     }
 

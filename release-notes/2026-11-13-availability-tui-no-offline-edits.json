@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "TUI availability changes cannot be queued while offline or reconnecting",
+  "replay": { "status": "none", "detail": "No graph replay." },
+  "schema": { "status": "none", "detail": "No API or claim change." },
+  "rules": { "status": "none", "detail": "No server rule change." },
+  "compatibility": { "status": "changed", "detail": "Keyboard and clicked availability edits require a live connection, including the final choice of an editor opened online. Losing the live link discards unsent changes and closes the editor. Already-sent writes are not retried or presumed canceled." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "Reconnect and make the desired change explicitly." }
+}

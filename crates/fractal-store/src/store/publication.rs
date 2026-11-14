@@ -11,6 +11,8 @@ pub struct CommitChecks<'a> {
     pub guard: Option<&'a Guard>,
     /// `--force --reason`: accept ad hoc changes to owned-set members as source debt.
     pub force: Option<&'a str>,
+    /// Recorded beside an owned-set commit only; never part of any digest.
+    pub source_map: Option<&'a fractal_schema::source_map::SourceMap>,
 }
 
 pub struct Check {
