@@ -199,7 +199,7 @@ fn native_mounts_share_the_same_timeline_and_a_direct_reply() {
 #[tokio::test]
 async fn native_mount_sends_and_closes_through_the_real_daemon_socket() {
     use fractal_client::{CollectionEvent, CollectionStream};
-    use fractal_daemon::SeatsStoreCore as _;
+    use fractal_daemon::{PersonWorkStore as _, SeatsStoreCore as _};
     use ratatui::{buffer::Buffer, layout::Rect};
     use std::sync::Arc;
 
@@ -234,11 +234,19 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         },
     )
     .unwrap();
+    let ask = store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        legacy_request: None, person: person.into(), title: "Review the worker".into(),
+        reason: "Discuss the review without answering the ask.".into(), actor: agent.into(),
+        step: None, new_run: None, incarnation: None, request: None,
+        deadline_ms: None, default_answer: None, idempotency_key: "native-thread-origin".into(),
+    }).unwrap();
+    let ask_item = store.attention_items(Some(person)).unwrap().into_iter()
+        .find(|item| item.subject == ask.subject).unwrap();
     let state = fractal_daemon::api::AppState {
         browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: Some(person.into()),
-        store,
+        store: store.clone(),
         notify: Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
         node: "native-thread-test".into(),
@@ -325,6 +333,37 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         }
         std::fs::write(std::path::Path::new(&dir).join(format!("{name}.txt")), text).unwrap();
     }
+    let inbox = Pane::Home(Some(ask.subject.clone()));
+    let context = ThreadInterest::Inbox { source: ask.subject.clone(), episode: ask_item.episode.clone() };
+    let origin_snapshot = client.thread_get(id).await.unwrap().snapshot.id;
+    ui.threads.origins.insert(ask.subject.clone(), Origin {
+        context: context.clone(), agent: agent.into(), title: ask_item.title.clone(),
+        snapshot: origin_snapshot,
+    });
+    ui.threads.lists.insert(context, Vec::new());
+    ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
+    capture(&mut ui, &inbox, "harness-socket-start-before");
+    ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(ask.subject.clone())));
+    ui.paste("Start the review discussion.".into());
+    capture(&mut ui, &inbox, "harness-socket-start-draft");
+    ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    ui.click(Hit::Thread(inbox.key(), thread::Tap::Start(ask.subject.clone())));
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let start = ui.threads.writes().pop().expect("native first-message start action");
+    let started_id = start.id.clone();
+    let receipt = start.perform(client.clone()).await;
+    assert!(matches!(receipt.confirmation, Confirmation::Applied(_)), "real first message committed");
+    ui.threads.complete(receipt, &mut ui.conversation_state.drafts);
+    let timeline = client.thread_timeline(&started_id, None, Some(50)).await.unwrap();
+    assert_eq!(timeline.value.items.len(), 1, "start commits exactly one first message");
+    ui.threads.window(
+        ThreadInterest::Timeline(started_id), timeline.snapshot, true,
+        ThreadCollectionRows::Timeline(timeline.value.items.clone()), vec![],
+        timeline.value.items.iter().map(|event| event.id.clone()).collect(), false,
+    );
+    capture(&mut ui, &inbox, "harness-socket-start-after");
+    assert!(store.attention_items(Some(person)).unwrap().iter().any(|item| item.subject == ask.subject),
+        "starting a discussion never answers the ask");
     let pane = Pane::Thread(id.into());
     ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
     let host = pane.key();
