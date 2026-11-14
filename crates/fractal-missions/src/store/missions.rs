@@ -6822,6 +6822,11 @@ impl MissionsStore for Store {
             self.with_run_fence(&subject, apply_action)
         };
         let (mut view, snapshot) = committed?;
+        if matches!(action, "complete" | "fail" | "release") {
+            // A predecessor-named request may have committed on its carried
+            // successor; the committed view names that terminal event's subject.
+            self.finish_work_turn_traces(&view.subject, requested_incarnation).map_err(internal)?;
+        }
         // An exact retry also replays a view cached without these fields.
         let filled = if action == "renew" {
             if enrich_renewal { self.enrich_work_response(&mut view) } else { Ok(()) }
