@@ -327,6 +327,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    pub async fn availability_history(&self, person: Option<&str>, from: &str, to: &str, bucket_seconds: u64) -> Result<Envelope<AvailabilityHistory>, ClientError> {{ let person = person.map(|person| format!(\"&person={{}}\", percent_encode(person))).unwrap_or_default(); self.get(&format!(\"/v1/client/availability/history?from={{}}&to={{}}&bucket_seconds={{bucket_seconds}}{{person}}\", percent_encode(from), percent_encode(to))).await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -565,6 +567,8 @@ fn swift_operation_methods(
             writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    public func availabilityHistory(person: String? = nil, from: String, to: String, bucketSeconds: Int) async throws -> Envelope<AvailabilityHistory> {{ var query = [URLQueryItem(name: \"from\", value: from), URLQueryItem(name: \"to\", value: to), URLQueryItem(name: \"bucket_seconds\", value: String(bucketSeconds))]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; return try await get(\"v1/client/availability/history\", query: query) }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -727,7 +731,9 @@ fn rust_field(name: &str) -> String {
         "loop" => "loop_spec".into(),
         "ref" => "reference".into(),
         "kdlLines" => "kdl_lines".into(),
-        other => other.into(),
+        "override" => "r#override".into(),
+        // A wire word used as a key, such as `hold-routine`.
+        other => other.replace('-', "_"),
     }
 }
 
@@ -896,6 +902,13 @@ fn validate_surfaces(
         "AvailabilitySet",
         "PresenceReport",
         "PresenceReportResult",
+        "AvailabilityHistory",
+        "AvailabilityHistoryBucket",
+        "AvailabilityStatusDurations",
+        "AvailabilityStatusSourceDurations",
+        "AvailabilityPresenceDurations",
+        "AvailabilityInterruptionsDurations",
+        "AvailabilityDeadlineClockDurations",
         "DirectiveNoteSet",
         "DirectiveNoteSetResult",
         "ResourceObservation",
@@ -1804,6 +1817,8 @@ fn typescript_operation_methods(
             writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    async availabilityHistory(options: {{ from: string; to: string; bucket_seconds: number; person?: string }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AvailabilityHistory>> {{ return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,

@@ -733,6 +733,10 @@ const PROBES: &[Probe] = &[
         "text":format!("Invented current person context {attempt}"),
     })),
     get("GET /v1/client/availability", "/v1/client/availability"),
+    get(
+        "GET /v1/client/availability/history",
+        "/v1/client/availability/history?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z&bucket_seconds=3600",
+    ),
     put("PUT /v1/client/availability", "/v1/client/availability", |_, attempt| json!({
         "interruptions": {"value": if attempt % 2 == 0 { "urgent" } else { "all" }},
     })),

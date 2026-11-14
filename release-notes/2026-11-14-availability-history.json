@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Read a person's availability history in buckets through client-v0",
+  "replay": {
+    "status": "none",
+    "detail": "The new read folds the existing availability claims; nothing is written or replayed."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No claim kind, retention rule or projection changes. The client-v0 contract adds availability.history with AvailabilityHistory, AvailabilityHistoryBucket and the per-axis millisecond durations AvailabilityStatusDurations, AvailabilityStatusSourceDurations, AvailabilityPresenceDurations, AvailabilityInterruptionsDurations and AvailabilityDeadlineClockDurations."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "GET /v1/client/availability/history (read.projections) folds a person's status, interruptions, deadline-clock and presence claims by the same rules as GET /v1/client/availability at every instant of [from, to), into at most 2016 buckets over at most 31 days, and ends at the read's instant. The live read and the history share one status rule and one presence fold. Readers are as for the current read: presence only for the person's own read, and an agent names the person."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Public client contract addition with generated Rust availability_history, Swift availabilityHistory and TypeScript availabilityHistory. An older daemon answers the route with an empty 404, which every generated client reports as unsupported-capability."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup migration or service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action. History reaches back to the person's first availability claim, since availability writes are durable and presence reports are kept whole."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover: the read writes nothing."
+  }
+}

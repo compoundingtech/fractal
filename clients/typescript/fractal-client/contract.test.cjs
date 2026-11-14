@@ -484,6 +484,26 @@ test('availability reads select a person and writes send the session person noth
     assert.equal(sent[3][1].headers.Authorization, 'Bearer test-credential');
 });
 
+test('availabilityHistory sends its range and an older daemon is unsupported', async () => {
+    const fixture = require('../../../docs/st3/client-v0/fixtures/availability-history.json');
+    const requests = [];
+    let old = false;
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
+        const url = String(input);
+        requests.push(url);
+        if (new URL(url).pathname === '/v1/client/capabilities') return response(capabilityFixture);
+        return old ? new Response(null, { status: 404 }) : response(fixture);
+    }});
+    const range = { from: '2026-11-12T09:00:00Z', to: '2026-11-12T11:00:00Z', bucket_seconds: 3600 };
+    assert.deepEqual(await client.availabilityHistory({ ...range, person: 'person/ada' }), fixture);
+    old = true;
+    await assert.rejects(client.availabilityHistory(range), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/availability/history'), [
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600&person=person%2Fada',
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600',
+    ]);
+});
+
 test('notesSet sends only the text and expiry and a clear as null', async () => {
     const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json');
     const set = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');

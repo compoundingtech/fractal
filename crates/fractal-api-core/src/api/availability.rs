@@ -95,6 +95,49 @@ pub async fn list(
     Ok((Extension(snapshot), Json(json!({"people": people}))))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryQuery {
+    #[serde(default)]
+    person: Option<String>,
+    from: String,
+    to: String,
+    bucket_seconds: u64,
+}
+
+/// One person's availability over a past range in buckets, folded from the same claims and by
+/// the same rules as the current read. The person sees their presence; anyone else does not.
+pub async fn history(
+    State(state): State<AppState>,
+    Extension(session): Extension<client_v0::ClientSession>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
+    client_v0::require_scope(&session, "read.projections")?;
+    let person_reader = is_person(&session.authority_actor);
+    if !person_reader && !session.authority_actor.starts_with("agent/") {
+        return Err(client_v0::forbidden("identify the person or agent reading availability"));
+    }
+    let person = match query.person {
+        Some(person) if is_person(&person) => person,
+        Some(_) => return Err(client_v0::validation("person must be an exact person/NAME")),
+        None if person_reader => session.authority_actor.clone(),
+        None => return Err(client_v0::validation("an agent names the person whose availability history it reads")),
+    };
+    // A local harness or peer naming a person is still no person: it reads only coarsely.
+    let own = person_reader && !session.local_peer && person == session.authority_actor;
+    let (from, to) = (unix_ms(&query.from, "from")?, unix_ms(&query.to, "to")?);
+    let now = client_now_ms();
+    let (snapshot, history) = blocking_api(move || {
+        let (snapshot, history) = state.store.read_snapshot(|index| Ok((
+            client_snapshot_at(&state, index),
+            state.store.person_availability_history(&person, from, to, query.bucket_seconds, now),
+        ))).map_err(ApiError::internal)?;
+        Ok((snapshot, history.map_err(ApiError::bad).map_err(client_refusal)?))
+    }).await?;
+    let history = if own { history } else { history.without_presence() };
+    Ok((Extension(snapshot), Json(serde_json::to_value(history).map_err(ApiError::internal)?)))
+}
+
 /// A present key is required even when null: null clears the status override or the note.
 pub(super) fn required<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
     Option::deserialize(deserializer)
