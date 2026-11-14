@@ -325,15 +325,17 @@ fn an_expanded_empty_thread_says_it_has_no_messages_under_its_heading() {
 
 #[test]
 fn start_thread_keycap_reads_t_and_both_t_and_shift_t_start_the_draft() {
-    let item = "attention/ask";
+    for item in super::super::demo::test_world().attention.items() {
+    let item = item.id.as_str();
     let context = ThreadInterest::Inbox {
         source: "step-run/example/ask".into(),
         episode: "claim/ask".into(),
     };
     let inbox = Pane::Home(Some(item.into()));
     for key in [
-        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
-        KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT),
+        Some(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+        Some(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT)),
+        None,
     ] {
         let mut threads = Threads::default();
         threads.enable(true);
@@ -361,13 +363,22 @@ fn start_thread_keycap_reads_t_and_both_t_and_shift_t_start_the_draft() {
             "the keycap matches the footer and help: {start:?}"
         );
         capture_mount("p1-7-start-thread-keycap-100", &threads, &inbox, 100);
+        let start_hit = mounted(&threads, &inbox, 100).targets.into_iter()
+            .find_map(|target| matches!(&target.hit,
+                Hit::Thread(_, thread::Tap::Start(id)) if id == item).then_some(target.hit))
+            .expect("every Inbox item with a writable context has a clickable Start thread");
         let mut ui = super::super::Ui::new(super::super::demo::test_world());
         ui.threads = threads;
         ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
-        ui.key(key);
+        if let Some(key) = key {
+            ui.key(key);
+        } else {
+            ui.click(start_hit);
+        }
         assert!(
             matches!(&ui.threads.focused, Some((_, Input::Start { .. }))),
-            "{key:?} reaches the first-message composer through Ui::key"
+            "{item}: {key:?} reaches the first-message composer through the shell"
         );
+    }
     }
 }

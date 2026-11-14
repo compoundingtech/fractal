@@ -646,11 +646,6 @@ mod tests {
         for item in ui.world.attention.items() {
             let (_, items) = ui.subject_menu(&item.id).unwrap();
             assert!(items[0].0.starts_with("Open item"));
-            assert!(
-                items
-                    .iter()
-                    .any(|(_, action)| *action == activate(Some(&item.id), Hit::Key('t')))
-            );
             let doc = screens::home_detail(
                 &ui.world,
                 Some(&item.id),
