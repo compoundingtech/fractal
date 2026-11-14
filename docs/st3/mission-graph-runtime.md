@@ -2481,7 +2481,7 @@ An authorized agent uses `fractal work publish-mission`, fenced to its claimed p
 
 ### References that must resolve
 
-`apply` (and its legacy `missions publish` and `agents apply` commands), a run revision, and `work publish-mission` refuse, with the code
+`apply`, a run revision, and `work publish-mission` refuse, with the code
 `unresolved-reference`, a publication that names something Fractal cannot find:
 
 - a pinned mission revision that is not stored on this host, in `uses-mission`, a schedule's `work`,

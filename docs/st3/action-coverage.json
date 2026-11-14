@@ -571,14 +571,6 @@
       "verification": "real CLI over private Unix socket; seeded receipt and acknowledgement survive disk-store reopen, replay is idempotent, and fresh launches never restage or rearm seed"
     },
     {
-      "command": "st agents apply",
-      "description": "Preview and apply one KDL file containing durable agent seats",
-      "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_agent_and_shell_declarations_survive_restart"
-      ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
-    },
-    {
       "command": "st agents handoff ready",
       "description": "Say this seat's handoff is current so a waiting restart can go ahead",
       "tests": [
@@ -1799,14 +1791,6 @@
     {
       "command": "st missions outcome",
       "description": "Set a finished run's outcome to completed, failed, or cancelled, with a reason",
-      "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
-      ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
-    },
-    {
-      "command": "st missions publish",
-      "description": "Publish exact authored mission KDL after preview and check mission and step exec gates; loop until scripts run after each round",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
       ],

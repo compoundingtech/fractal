@@ -1834,8 +1834,8 @@ fn a_program_effect_acts_as_its_run() {
     assert!(parse_actor_subject("mission-run/").is_err());
 }
 
-/// A run publishes missions as itself: `apply` and `missions publish` take `--as mission-run/RUN`,
-/// and `apply` defaults to it when it holds a run credential. The commands a run's authority cannot
+/// A run publishes missions as itself: `apply` takes `--as mission-run/RUN`,
+/// and defaults to it when it holds a run credential. The commands a run's authority cannot
 /// grant still take only a person or an agent.
 #[test]
 fn a_run_is_a_mission_publication_actor() {
@@ -1848,7 +1848,6 @@ fn a_run_is_a_mission_publication_actor() {
     assert!(parse_publication_actor("mission-run/abc").is_err());
     for command in [
         vec!["st", "apply", "notes.kdl", "--as", "mission-run/abc"],
-        vec!["st", "missions", "publish", "notes.kdl", "--as", "mission-run/abc"],
     ] {
         assert!(Cli::try_parse_from(&command).is_ok(), "{command:?}");
     }
@@ -5710,39 +5709,15 @@ fn apply_rejects_duplicate_stdin_and_unversioned_files() {
     );
 }
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
 #[test]
-fn mission_publish_requires_an_explicit_person_or_agent_actor() {
-    let cli = Cli::try_parse_from([
-        "st3",
-        "missions",
-        "publish",
-        "missions/typecase.kdl",
-        "--as",
-        "agent/example/cos/standing/cos",
-    ])
-    .unwrap();
-    let Command::Missions {
-        command: MissionViewCommand::Publish(args),
-    } = cli.command
-    else {
-        panic!("the mission publish command did not parse");
-    };
-    assert_eq!(args.file, PathBuf::from("missions/typecase.kdl"));
-    assert_eq!(args.actor, "agent/example/cos/standing/cos");
-    assert!(
-        Cli::try_parse_from([
-            "st3",
-            "missions",
-            "publish",
-            "missions/typecase.kdl",
-            "--as",
-            "cos",
-        ])
-        .is_err()
-    );
+fn legacy_publication_commands_are_not_accepted() {
+    for command in [["missions", "publish"], ["agents", "apply"]] {
+        assert!(Cli::try_parse_from([
+            "fractal", command[0], command[1], "declaration.kdl",
+            "--as", "agent/example/worker",
+        ]).is_err());
+    }
 }
-// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
 
 #[test]
 fn mission_cancel_requires_an_exact_actor_and_reason() {
