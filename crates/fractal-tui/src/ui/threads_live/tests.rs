@@ -2437,6 +2437,7 @@ fn ctrl_arrows_leave_message_boxes_without_losing_their_drafts() {
     ui.key(ctrl(KeyCode::Down));
     assert!(!ui.editing, "the composer lets go of the keys");
     assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft");
+    ui.key(ctrl(KeyCode::Down));
     assert_eq!(ui.threads.focused_row(&pane, &ui.conversation_state.drafts).as_deref(), Some("thread/worker"));
     ui.key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
     assert_eq!(ui.threads.writes().pop().map(|write| write.id).as_deref(), Some("thread/worker"));
