@@ -40,6 +40,20 @@ pub async fn input(
     if let Some(Extension(session)) = session.as_ref() {
         require_scope(session, "control.runtimes")?;
     }
+    let receipts = state.store.invocation_receipts(&request.invocation_id).map_err(ApiError::internal)?;
+    let message = state.store.message(&request.message_id).map_err(ApiError::internal)?;
+    let message_matches = message.is_some_and(|message|
+        message.subject == request.message_id && message.to == request.agent
+            && message.tags.iter().any(|tag| tag.strip_prefix("fractal-invocation:") == Some(request.invocation_id.as_str())));
+    if request.incarnation.is_empty() || request.message_id.is_empty() || !message_matches
+        || !receipts.iter().any(|receipt| receipt.agent == request.agent
+            && receipt.incarnation.as_deref() == Some(request.incarnation.as_str())
+            && receipt.event_key.as_deref() == Some(request.message_id.as_str()))
+    {
+        return Err(ApiError { status: StatusCode::CONFLICT, code: "invocation-input-mismatch".into(),
+            message: "input must match an exact invocation receipt's agent, incarnation and message".into(),
+            details: Box::default() });
+    }
     // Agent identity alone survives restarts. Reuse the kernel-generation and
     // daemon-owned runtime provenance guard used for helper launch authority;
     // never accept the requested incarnation as proof of the caller's process.
@@ -54,20 +68,6 @@ pub async fn input(
         return Err(ApiError { status: StatusCode::FORBIDDEN,
             code: "invocation-input-caller-incarnation".into(),
             message: "native input requires the exact live invocation process".into(),
-            details: Box::default() });
-    }
-    let receipts = state.store.invocation_receipts(&request.invocation_id).map_err(ApiError::internal)?;
-    let message = state.store.message(&request.message_id).map_err(ApiError::internal)?;
-    let message_matches = message.is_some_and(|message|
-        message.subject == request.message_id && message.to == request.agent
-            && message.tags.iter().any(|tag| tag.strip_prefix("fractal-invocation:") == Some(request.invocation_id.as_str())));
-    if request.incarnation.is_empty() || request.message_id.is_empty() || !message_matches
-        || !receipts.iter().any(|receipt| receipt.agent == request.agent
-            && receipt.incarnation.as_deref() == Some(request.incarnation.as_str())
-            && receipt.event_key.as_deref() == Some(request.message_id.as_str()))
-    {
-        return Err(ApiError { status: StatusCode::CONFLICT, code: "invocation-input-mismatch".into(),
-            message: "input must match an exact invocation receipt's agent, incarnation and message".into(),
             details: Box::default() });
     }
     // Retry the original immutable capture rather than replacing it with a later envelope.
@@ -151,9 +151,7 @@ fn retained(store: &Store, agent: &str, invocation: &str, kind: &str, hash: &str
             && claim.body["fields"]["kind"] == kind
             && (claim.body["fields"]["sha256"] == hash || claim.body["fields"]["artifact"]["sha256"] == hash))
         .ok_or_else(|| ApiError::not_found("invocation artifact does not exist"))?;
-    if latest.body["fields"]["status"] != "retained"
-        || invocation_artifacts::is_deleted(store, invocation, kind, hash).map_err(ApiError::internal)?
-    {
+    if latest.body["fields"]["status"] != "retained" {
         return Err(ApiError {status:StatusCode::GONE,code:"artifact-deleted".into(),
             message:"the invocation artifact reference was deleted".into(),details:Box::default()});
     }

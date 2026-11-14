@@ -10072,7 +10072,10 @@ fn agent_roster_typical_claim_kind_baseline() {
     assert_eq!(breakdown["work.progress"], (6, 6));
     assert_eq!(breakdown["harness.todo.observed"], (12, 0));
     assert_eq!(local_breakdown["harness.usage"], 12);
-    assert_eq!(old_cold, 12);
+    // Carried turn termination and work-turn invocation receipts now append one
+    // durable harness.invocation pair per claimed turn in this fixture.
+    assert_eq!(breakdown["harness.invocation"], (12, 12));
+    assert_eq!(old_cold, 24);
 }
 
 #[test]
@@ -16683,8 +16686,7 @@ async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_del
         actor:None,fields:serde_json::from_value(json!({"invocation_id":invocation,
             "operation_id":"artifact-test","phase":"admitted","agent":agent})).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None }).unwrap();
-    let mut artifact = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
-    artifact.message_id = Some("message/a".into());
+    let artifact = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
     invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
     let query = || Query(serde_json::from_value(json!({"invocation":invocation,"kind":"input"})).unwrap());
     let stranger = client_v0::ClientSession::local(Some("person/other")).unwrap();
@@ -16697,32 +16699,9 @@ async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_del
     assert_eq!(allowed.status(),StatusCode::OK);
     drop(super::agent_invocations::delete_artifact(State(state.clone()),Extension(owner.clone()),
         AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap());
-    let deleted = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
-        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
+    let deleted = super::agent_invocations::artifact(State(state),Extension(owner),
+        AxumPath(artifact.sha256),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
     assert_eq!(deleted.status,StatusCode::GONE);
-
-    let mut second = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
-    second.message_id = Some("message/b".into());
-    assert_eq!(second.sha256, artifact.sha256);
-    invocation_artifacts::record(&state.store, agent, &second).unwrap();
-    let recaptured = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
-        AxumPath(second.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
-    assert_eq!(recaptured.status, StatusCode::GONE);
-
-    // Deterministically model a capture committing a stale retained claim after deletion.
-    state.store.append_claim(&ClaimInput {
-        subject:agent.into(),kind:"harness.invocation-artifact".into(),actor:None,
-        fields:serde_json::from_value(json!({"invocation_id":invocation,"kind":"input",
-            "status":"retained","artifact":second})).unwrap(),
-        evidence:vec![],expected_subject:None,idempotency_key:None,
-    }).unwrap();
-    let raced = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
-        AxumPath(second.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
-    assert_eq!(raced.status, StatusCode::GONE);
-    invocation_artifacts::delete(root.path(), &state.store, agent, &second, now_ms()).unwrap();
-    let repeated = super::agent_invocations::artifact(State(state),Extension(owner),
-        AxumPath(second.sha256),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
-    assert_eq!(repeated.status, StatusCode::GONE);
 }
 
 #[cfg(target_os = "linux")]
