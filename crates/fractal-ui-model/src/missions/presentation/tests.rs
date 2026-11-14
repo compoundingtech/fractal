@@ -69,7 +69,10 @@ fn mission(state: &str, steps: Vec<Value>) -> fractal_client::Mission {
 
 #[test]
 fn a_gate_makes_a_person_decide_and_owns_its_step() {
-    let mission = mission("running", vec![step("review", "verifying", json!({}))]);
+    let mission = mission(
+        "running",
+        vec![step("review", "working", json!({"agentless": true}))],
+    );
     let gates = [Gate {
         mission: "mission/fleet/example/audit".into(),
         step: Some("step-run/audit/review".into()),
@@ -95,6 +98,50 @@ fn a_gate_makes_a_person_decide_and_owns_its_step() {
     assert_ne!(
         present(&mission, &other, &Agents::default()).word,
         Word::Decision
+    );
+}
+
+#[test]
+fn working_requires_an_assigned_agent() {
+    for extra in [
+        json!({}),
+        json!({"agentless": true}),
+        json!({"agentless": true, "assignee": "agent/keeper"}),
+    ] {
+        let mission = mission("running", vec![step("review", "working", extra)]);
+        let shown = present(&mission, &[], &Agents::default());
+        assert_eq!(shown.word, Word::Held);
+        assert_eq!(shown.steps[0].word, StepState::Waiting);
+    }
+    let mission = mission(
+        "running",
+        vec![step("build", "working", json!({"assignee": "agent/keeper"}))],
+    );
+    let shown = present(&mission, &[], &Agents::default());
+    assert_eq!(shown.word, Word::Working);
+    assert_eq!(shown.word.name(), "working");
+    assert_eq!(shown.steps[0].word, StepState::Working);
+}
+
+#[test]
+fn an_agentless_person_ask_waits_on_its_named_person() {
+    let mission = mission(
+        "running",
+        vec![step(
+            "answer",
+            "working",
+            json!({"agentless": true, "assignee": "person/avery"}),
+        )],
+    );
+    let shown = present(&mission, &[], &Agents::default());
+    assert_eq!(shown.word, Word::Held);
+    assert_eq!(shown.steps[0].word, StepState::Waiting);
+    assert_eq!(
+        shown.steps[0].owner,
+        Actor::Person {
+            person: "person/avery".into(),
+            label: "avery".into(),
+        }
     );
 }
 
@@ -403,7 +450,7 @@ fn a_settled_mission_says_when_and_serializes_words_json_ids() {
 fn a_person_assignee_is_never_serialized_as_an_agent() {
     // Both forms appeared in production-shaped mission projections: the ready generated
     // person-ask step and the completed person step in its originating mission.
-    for state in ["ready", "completed"] {
+    for state in ["ready", "working", "completed"] {
         let mission = mission(
             "running",
             vec![
@@ -419,5 +466,10 @@ fn a_person_assignee_is_never_serialized_as_an_agent() {
         assert_eq!(owner("human"), json!({"kind": "person", "person": "person/avery", "label": "avery"}));
         assert_eq!(owner("agent"), json!({"kind": "agent", "agent": "agent/reviewer", "label": "reviewer"}));
         assert_eq!(owner("unassigned"), json!({"kind": "nobody"}));
+        if state == "working" {
+            let human = shown.steps.iter().find(|step| step.path == "human").unwrap();
+            assert_eq!(human.word, StepState::Waiting);
+            assert_eq!(shown.word, Word::Working, "the assigned agent is still working");
+        }
     }
 }

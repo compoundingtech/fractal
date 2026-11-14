@@ -218,11 +218,8 @@ fn a_mission_nobody_started_says_so_and_a_moving_step_drops_its_old_reason() {
         .find(|mission| mission.id.ends_with("/gate"))
         .unwrap();
     assert_eq!(gate.steps[0].note, None);
-    assert_eq!(
-        gate.steps[0].state,
-        StepState::Working,
-        "st calls it working"
-    );
+    assert_eq!(gate.word, Word::Held);
+    assert_eq!(gate.steps[0].state, StepState::Waiting);
 
     // The same step, once st asks a person to answer it.
     model.attention = window(vec![json!({
@@ -240,6 +237,8 @@ fn a_mission_nobody_started_says_so_and_a_moving_step_drops_its_old_reason() {
         .unwrap();
     assert_eq!(gate.steps[0].state, StepState::NeedsYou);
     assert_eq!(gate.steps[0].owner.as_deref(), Some("you"));
+    assert_eq!(gate.word, Word::Decision);
+    assert_eq!(gate.word.explain(), "a step is waiting for your answer");
 }
 
 #[test]
@@ -423,6 +422,7 @@ fn metadata_case(
 ) {
     let mut raw_step = step("assess", state, false);
     raw_step["id"] = json!("step-run/audit-1/assess");
+    raw_step["assignee"] = json!("agent/assessor");
     raw_step["blocked_reason"] = json!(reason);
     raw_step["last_progress"] = json!(progress);
     let run_state = match state {
@@ -515,9 +515,11 @@ fn waiting_blocker_remains_presented_and_retains_raw_metadata() {
 
 #[test]
 fn all_open_runs_contribute_and_only_the_latest_finished_run_is_the_fallback() {
+    let mut first = step("first", "claimed", false);
+    first["claimant"] = json!("agent/assessor");
     let mut model = input(vec![
         run("old", "completed", vec![step("old", "completed", false)]),
-        run("first", "running", vec![step("first", "claimed", false)]),
+        run("first", "running", vec![first]),
         run("second", "running", vec![step("second", "ready", false)]),
     ]);
     let missions = project(&model);
@@ -564,10 +566,13 @@ fn only_agentless_keep_open_work_is_watching() {
     for (keep_open, agentless, expected) in [
         (true, true, Word::Watching),
         (true, false, Word::Working),
-        (false, true, Word::Working),
+        (false, true, Word::Held),
     ] {
         let mut open = step("keep-watch", "claimed", agentless);
         open["keep_open"] = json!(keep_open);
+        if !agentless {
+            open["assignee"] = json!("agent/watcher");
+        }
         let model = input(vec![run(
             "open",
             "running",
