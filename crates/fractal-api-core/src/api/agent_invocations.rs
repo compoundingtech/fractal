@@ -1,5 +1,6 @@
 //! Generic invocation evidence and private retained input/transcript reads.
 use super::*;
+use crate::gate_check::now_ms;
 use super::client_v0::{ClientSession, require_scope};
 use fractal_store::invocation_artifacts::{self, InvocationArtifact};
 

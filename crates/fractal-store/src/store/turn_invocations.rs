@@ -259,10 +259,10 @@ mod tests {
             append_claim_tx(tx, "node", step, "work.claimed", Some(agent),
                 &json!({"fields":{"attempt":1,"claimant":agent,"claim_incarnation":"one",
                     "invocation_id":receipt.invocation_id}}), &[], None)?;
-            let wrong = append_claim_tx(tx, "node", step, "work.failed", Some(agent),
+            let wrong = append_claim_tx(tx, "node", step, "work.released", Some(agent),
                 &json!({"fields":{"attempt":1,"claim_incarnation":"other","reason":"wrong"}}), &[], None)?;
             record_terminal_tx(tx, "node", &wrong)?;
-            let exact = append_claim_tx(tx, "node", step, "work.released", Some(agent),
+            let exact = append_claim_tx(tx, "node", step, "work.failed", Some(agent),
                 &json!({"fields":{"attempt":1,"claim_incarnation":null,"reason":"stopped"}}), &[], None)?;
             record_terminal_tx(tx, "node", &exact)?;
             record_terminal_tx(tx, "node", &exact)?;
