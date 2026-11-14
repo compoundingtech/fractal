@@ -23,9 +23,9 @@ impl Store {
 
     pub fn finish_invocation_trace(&self, invocation: &str, failed: bool) {
         let owners = self.extension::<InvocationTraces>();
-        if let Some(owner) = owners.0.lock().unwrap_or_else(PoisonError::into_inner).remove(invocation) {
-            if failed { owner.failed(); }
-        }
+        let Some(owner) = owners.0.lock().unwrap_or_else(PoisonError::into_inner).remove(invocation)
+            else { return; };
+        if failed { owner.failed(); }
     }
 }
 
