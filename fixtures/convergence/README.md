@@ -405,3 +405,17 @@ The local fixed sweep observed only seeds 13 and 294 without a checkpoint trim; 
 trims on every modern node after its old build is excused and the next cut falls due. The
 exact v30 `NEVER_TRIMS` set is `[13, 294]`, carried from the invocation-receipt corpus
 schedule measured before main took v29.
+
+`claims-v31.json` adds the durable, system-only append receipts `effect.intended`,
+`effect.in-flight`, `effect.confirmed`, and `effect.unresolved` on dedicated
+`effect/OPERATION_ID` subjects. Versions 1 through 30 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v31.json`;
+do not hand-edit it. The simulation and audit reports select v31. Effect draws bind the
+operation identity, payload digest, step attempt, and admitting lease; confirmed draws
+include a provider reference and evidence.
+
+The broad v31 test run observed seed 294 trim a checkpoint, failing only its stale v30
+non-trimming expectation; seed 13 passed its non-trimming expectation and the continuation
+requiring every modern node to trim after its old build is excused and the next cut falls due.
+The exact v31 `NEVER_TRIMS` set is `[13]`; all other fixed seeds trim. Convergence equivalence,
+per-seed trim assertions, and the majority trim-coverage invariant remain enforced.

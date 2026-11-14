@@ -16323,14 +16323,15 @@ async fn send_message(
         return Ok(None);
     }
     let mut request = MessageSendRequest {
-        idempotency_key: String::new(),
-        from,
-        to,
-        content: body,
-        title: args.subject,
-        in_reply_to: args.in_reply_to,
-        tags: args.tags,
-        attachments,
+    owner: None,
+    idempotency_key: String::new(),
+    from,
+    to,
+    content: body,
+    title: args.subject,
+    in_reply_to: args.in_reply_to,
+    tags: args.tags,
+    attachments,
     };
     request.idempotency_key = match args.idempotency_key {
         Some(key) => key,

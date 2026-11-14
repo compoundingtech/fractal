@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v30.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v31.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1050,6 +1050,39 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if matches!(spec.kind.as_str(), fractal_schema::effects::KIND_INTENDED
+            | fractal_schema::effects::KIND_IN_FLIGHT | fractal_schema::effects::KIND_CONFIRMED
+            | fractal_schema::effects::KIND_UNRESOLVED)
+        {
+            let operation_id = self.fresh("effect-operation");
+            let subject = format!("effect/{operation_id}");
+            let mut fields = BTreeMap::from([
+                ("effect_id".into(), json!(subject)),
+                ("operation_id".into(), json!(operation_id)),
+                ("provider".into(), json!("native.message")),
+                ("target".into(), json!("agent/example/receiver")),
+                ("payload_digest".into(), json!("example-payload-digest")),
+                ("class".into(), json!("native-coordinated")),
+                ("bound_step_run".into(), json!("step-run/gen-0/send")),
+                ("bound_attempt".into(), json!(0)),
+                ("lease_owner".into(), json!("agent/example/sender")),
+                ("lease_incarnation".into(), json!("example-incarnation")),
+                ("evidence".into(), json!([])),
+            ]);
+            if spec.kind == fractal_schema::effects::KIND_CONFIRMED {
+                fields.insert("provider_ref".into(), json!("message/example"));
+                fields.insert("evidence".into(), json!(["message/example"]));
+            }
+            return Some(ClaimInput {
+                subject,
+                kind: spec.kind.clone(),
+                actor: None,
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("effect")),
+            });
+        }
         if spec.kind == fractal_schema::usage_limits::KIND {
             return Some(ClaimInput {
                 subject: "agent/sample/usage-producer".into(),
@@ -1222,6 +1255,7 @@ impl World {
             "daemon" => format!("daemon/{}", self.nodes[index].name),
             "doc" => format!("doc/convergence/{small}"),
             "exec" => format!("exec/run-0/job-{small}"),
+            "effect" => format!("effect/{}", self.fresh("effect-operation")),
             "file" => format!("file/{}:/srv/example-{small}", self.nodes[index].name),
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
@@ -2070,11 +2104,11 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v30 adds durable native invocation receipts on top of v29's notice-owner registry
-/// entry. The local fixed sweep observed only seeds 13 and 294 without a trim, carried from
-/// the invocation-receipt corpus schedule before main took v29. Each still trims on every
-/// modern node after excusing the old build and advancing to the next cut.
-const NEVER_TRIMS: &[u64] = &[13, 294];
+/// Corpus v31 adds durable native effect receipts on top of v30's invocation receipts.
+/// The broad test run observed only seed 13 without a trim; seed 294 now trims.
+/// Seed 13 still trims on every modern node after excusing the old build and advancing
+/// to the next cut.
+const NEVER_TRIMS: &[u64] = &[13];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
@@ -2084,7 +2118,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v30 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v31 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2093,7 +2127,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v30 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v31 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2101,7 +2135,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v30 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v31 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2314,7 +2348,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v30.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v31.json"
         }))
         .unwrap(),
     )

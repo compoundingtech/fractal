@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Native message sends can bind to a stable mission effect key under an attested worker lease. Durable intent, in-flight, confirmation and unresolved receipts recover committed messages by key without repeating origination.",
+  "replay": {"status": "none", "detail": "Existing messages and work leases are unchanged; no historical effects are inferred."},
+  "schema": {"status": "changed", "detail": "Adds the effect subject family and four durable system-only append kinds: effect.intended, effect.in-flight, effect.confirmed and effect.unresolved."},
+  "rules": {"status": "changed", "detail": "Extends the claim registry and convergence corpus for native effect receipts."},
+  "compatibility": {"status": "changed", "detail": "MessageSendRequest accepts an optional owner block, omitted when absent. Existing unbound and signed sends retain their wire shape. Effect-bound sends require exact live worker process provenance and lease authority; first origination requires both the creation-anchor host and current work-claim host to be local."},
+  "downtime": {"status": "none", "detail": "No startup migration or scheduled downtime."},
+  "manual": {"status": "none", "detail": "Ordinary sends require no action. Effect owners opt in through the native message endpoint."},
+  "recovery": {"status": "changed", "detail": "Interrupted effect sends recover a committed message by key or park with effect-unresolved. A different current worker of the same bound step may recover the unchanged original payload, recording recovering_actor separately, but cannot originate under the original sender. Missing receipts or an unavailable creation anchor never permit resend or timeout takeover. The origination fence covers the same step's original run; cross-run uniqueness is not guaranteed under partition because replication has no contiguous per-origin visibility fence."}
+}
