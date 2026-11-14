@@ -13,16 +13,21 @@ Records are moving to tags because a ruleset can protect tags and not notes (doc
   exit 1  not satisfied (JSON carries the reason), including unreadable input
   exit 2  usage error
 
+`--batch` answers many runs in one process: their argument vectors as a JSON array on stdin, and for each the exit status and output
+a run of its own gives (run_batch).
+
 Trust comes only from the key list given with --keys or --keys-from (the accepted
 base, never the change under test). The trust level of a signer is the part of its
 principal before the first slash, and is never read from the record itself.
 """
 import argparse
 import concurrent.futures
+import contextlib
 import copy
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import re
@@ -30,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 from datetime import datetime, timedelta, timezone
 
 sys.dont_write_bytecode = True
@@ -765,11 +771,28 @@ def read_statement(repo, commit, tree=None):
     return statement
 
 
+_SIGNED = {}
+
+
 def signature(repo, commit, keys, revocations):
-    """(status, principal) from git's own SSH verification against the key list."""
+    """(status, principal) from git's own SSH verification against the key list, once per process for a record and a key list.
+
+    Each check looks at the signature of every record of the tree before it keeps its own, so `--batch` asked the same thing once per check
+    (ssh-keygen, about 140 ms a record). The answer depends only on the signed commit and the two lists, so the memo is keyed by the
+    lists' contents, never their paths: every run of a batch writes the base's keys to a temporary file of its own, and a path can be
+    reused for other keys. It lives in this process only and is never written to disk."""
+    try:
+        with open(keys, 'rb') as allowed, open(revocations, 'rb') as revoked:
+            key = (repo, commit, hashlib.sha256(allowed.read()).hexdigest(), hashlib.sha256(revoked.read()).hexdigest())
+    except OSError:
+        key = None  # git reports the unreadable list as it did before
+    if key is not None and key in _SIGNED:
+        return _SIGNED[key]
     config = [f'gpg.ssh.allowedSignersFile={keys}', f'gpg.ssh.revocationFile={revocations}']
     shown = git(repo, 'show', '-s', '--format=%G?%x00%GS', commit, config=config).decode().strip('\n')
     status, _, principal = shown.partition('\0')
+    if key is not None:
+        _SIGNED[key] = (status, principal)
     return status, principal
 
 
@@ -1433,7 +1456,42 @@ def other_trees_have(repo, commits, tree, check):
     return False
 
 
+def run_batch(text):
+    """`--batch`: a JSON array of argument vectors on standard input, and on standard output a JSON array with, for each in order,
+    {"exit", "stdout", "stderr"}: what a run of its own with that vector prints and exits with. One process answers them all, so a record's
+    statement and its signature against one key list are read once (`load`, `signature`); nothing else is carried from one run to the next.
+    fractal-test --status asks one batch for every check where it ran the verifier once per check."""
+    try:
+        runs = json.loads(text)
+        if not isinstance(runs, list) or not all(isinstance(run, list) and all(isinstance(item, str) for item in run) for run in runs):
+            raise ValueError
+    except ValueError:
+        print('--batch reads a JSON array of argument vectors, each an array of strings, on standard input', file=sys.stderr)
+        return 2
+    answers = []
+    for run in runs:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            if run[:1] == ['--batch']:
+                print('--batch cannot be nested', file=sys.stderr)
+                code = 2
+            else:
+                try:
+                    code = main(run)
+                except Exception:  # what a run of its own would end with: a traceback and exit 1
+                    traceback.print_exc()
+                    code = 1
+        answers.append({'exit': code, 'stdout': out.getvalue(), 'stderr': err.getvalue()})
+    print(json.dumps(answers))
+    return 0
+
+
 def main(argv):
+    if argv[:1] == ['--batch']:
+        if len(argv) != 1:
+            print('--batch takes no other argument: each run\'s arguments come on standard input', file=sys.stderr)
+            return 2
+        return run_batch(sys.stdin.read())
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--repo', default='.')
     target = parser.add_mutually_exclusive_group(required=True)

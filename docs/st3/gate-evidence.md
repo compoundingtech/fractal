@@ -981,6 +981,12 @@ Exit 0 is satisfied, exit 1 is not satisfied, exit 2 is a usage error. Both prin
 document: `{"satisfied":true,"tree","check","record","kind","signer","trust_level","tier","observed_at","command"}`
 or `{"satisfied":false,"reason","check","detail"}`.
 
+`scripts/evidence-verify --batch` answers many questions in one process. It reads a JSON array of argument vectors on stdin. For each vector, in
+order, it writes `{"exit","stdout","stderr"}` to a JSON array on stdout, exactly what a run of its own with that vector gives. A record's statement,
+and its signature against one key list, are read once per process. The signature memo is keyed by the record and the key and revocation lists'
+contents, never their paths, and nothing is written to disk. Each check looks at the signature of every record of the tree, and `ssh-keygen` takes
+about 140 ms a record, so one batch saves most of the time a run per check spends on the same signatures.
+
 Trust comes only from the key list: `--keys FILE`, or `--keys-from COMMIT`, which reads
 `.st/evidence-keys` (OpenSSH allowed-signers syntax, `namespaces="git"`) from the
 accepted base, never from the change under test. A signer's trust level is the part of
@@ -2030,6 +2036,9 @@ is signed like any other since 2026-10-26 (the base's `evidence-wrap` records th
 "tree"` accepts), so it is covered only by such a note; against an older base, whose wrapper refuses it, the check reads `lane edit: CI runs it`,
 and the pre-push hook refuses that row like a missing note. Unless `--check` names checks, every check of the skip
 policy is listed, and one without a local command (fractal-web today) reads `CI runs it`.
+It asks the base's verifier about every check, and the per-crate members, in one `--batch`. A base whose verifier has no `--batch` is asked one
+process per check, as before. A batch that fails or answers in another shape is every check's answer, so each reads as a
+verifier that gave no answer (not covered); nothing is then asked one process per check to hide it.
 
 **An agent's push is refused unless its tree is covered.** Our agents run the tests deliberately, as part of their work, with
 `scripts/fractal-test --push origin`, which signs what it ran. When `ST_AGENT` is set and this machine's signer is listed in `.st/evidence-keys` on

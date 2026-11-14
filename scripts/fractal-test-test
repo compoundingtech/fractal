@@ -4572,6 +4572,81 @@ if os.environ.get('CI_TEST_FLAKY'):
 """
 
 
+class VerifierBatch(unittest.TestCase):
+    """--status asks the base's verifier every question in one --batch; only a verifier without one is asked a process per question."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(dir=PRIVATE_TMPDIR))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.alone = self.dir / 'alone'
+        st_test.VERIFIER_ANSWERS.clear()
+        self.addCleanup(st_test.VERIFIER_ANSWERS.clear)
+
+    def verifier(self, batch):
+        """A verifier that answers `batch` (shell) to --batch and records any run of its own; None: one with no batch at all."""
+        path = self.dir / 'evidence-verify'
+        marker = '# def run_batch(\n' if batch is not None else ''
+        path.write_text(f'''import subprocess, sys
+{marker}if sys.argv[1:] == ['--batch']:
+    sys.exit(subprocess.run(['sh', '-c', {batch!r}]).returncode)
+open({str(self.alone)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')
+print('{{"satisfied": true, "kind": "wrapper", "record": "{'0' * 40}"}}')
+''')
+        return str(path)
+
+    def commands(self, verifier, *checks):
+        return [[sys.executable, verifier, '--check', check] for check in checks]
+
+    def runs_alone(self):
+        return self.alone.read_text().splitlines() if self.alone.exists() else []
+
+    def test_a_batch_that_fails_or_answers_in_another_shape_is_every_answer_and_nothing_is_asked_alone(self):
+        for batch in ('echo boom >&2; exit 1', 'echo not json', 'echo \'[{"exit": 0, "stdout": "", "stderr": ""}]\'',
+                      'echo \'[{"exit": "0", "stdout": "", "stderr": ""}, {"exit": 0, "stdout": "", "stderr": ""}]\''):
+            with self.subTest(batch=batch):
+                commands = self.commands(self.verifier(batch), 'a', 'b')
+                st_test.ask_verifier_batch(commands[0][1], commands)
+                for command in commands:
+                    done = st_test.run_verifier(command)
+                    self.assertEqual(done.returncode, 2)
+                    self.assertIn("the verifier's --batch failed", done.stderr)
+                self.assertEqual(self.runs_alone(), [])
+
+    def test_a_check_reads_a_failed_batch_as_a_verifier_that_gave_no_answer(self):
+        verifier = self.verifier('echo boom >&2; exit 1')
+        with mock.patch.object(st_test, 'own_levels', return_value=(None, [])):
+            commands = [st_test.verifier_command(verifier, '.', 'f' * 40, check, 'HEAD', None)[0] for check in ('a', 'b')]
+            st_test.ask_verifier_batch(verifier, commands)
+            covered, why = st_test.covered(verifier, '.', 'f' * 40, 'a', 'HEAD', None)
+        self.assertEqual((covered, why), (False, "verifier gave no answer: the verifier's --batch failed: boom"))
+        self.assertEqual(self.runs_alone(), [])
+
+    def test_a_failed_batch_leaves_every_crate_uncovered_with_no_run_per_crate(self):
+        verifier = self.verifier('echo boom >&2; exit 1')
+        members = st_test.members_verify_command(verifier, '.', 'f' * 40, 'HEAD', 'org/repo', None)
+        st_test.ask_verifier_batch(verifier, [members, *self.commands(verifier, 'a')])
+        missing, have = st_test.uncovered_crates(verifier, '.', 'f' * 40, 'HEAD', 'org/repo', None, {'one': 'k1', 'two': 'k2'})
+        self.assertEqual((missing, have), ([('one', "the verifier's --batch failed: boom"), ('two', "the verifier's --batch failed: boom")], 0))
+        self.assertEqual(self.runs_alone(), [])
+
+    def test_a_verifier_without_a_batch_is_asked_one_process_per_question(self):
+        commands = self.commands(self.verifier(None), 'a', 'b')
+        st_test.ask_verifier_batch(commands[0][1], commands)
+        self.assertEqual(st_test.VERIFIER_ANSWERS, {})
+        self.assertEqual([st_test.run_verifier(command).returncode for command in commands], [0, 0])
+        self.assertEqual(self.runs_alone(), ['--check a', '--check b'])
+
+    def test_each_batch_answer_is_handed_out_once(self):
+        answers = json.dumps([{'exit': 1, 'stdout': '{"reason": "no_record"}', 'stderr': ''}, {'exit': 0, 'stdout': '{}', 'stderr': 'x'}])
+        commands = self.commands(self.verifier(f"cat >/dev/null; echo '{answers}'"), 'a', 'b')
+        st_test.ask_verifier_batch(commands[0][1], commands)
+        self.assertEqual([(done.returncode, done.stdout, done.stderr) for done in map(st_test.run_verifier, commands)],
+                         [(1, '{"reason": "no_record"}', ''), (0, '{}', 'x')])
+        self.assertEqual(self.runs_alone(), [])
+        self.assertEqual(st_test.run_verifier(commands[0]).returncode, 0)  # asked again: a run of its own
+        self.assertEqual(self.runs_alone(), ['--check a'])
+
+
 class HandOver(unittest.TestCase):
     def test_a_tree_wait_handover_during_a_top_up_keeps_the_consumed_rounds(self):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.dict(st_test.HANDOVER, {'top_up': '2'}, clear=True), \

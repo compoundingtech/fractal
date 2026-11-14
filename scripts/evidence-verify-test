@@ -2834,5 +2834,112 @@ class FleetCompatKey(unittest.TestCase):
             target.write_text(f'{name}\n')
 
 
+class Batch(unittest.TestCase):
+    """`--batch` gives each run exactly what a run of its own gives: one process only reads a record and checks its signature once."""
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'machine/ci1')
+        self.stranger = self.f.key('stranger')
+        trusted = self.f.keys.read_text()
+        self.base, _ = self.files({'scripts/run.sh': 'run\n', 'config/x.json': '{}\n', 'src/code.rs': 'one\n',
+                                   '.st/required-lanes.json': json.dumps(LANES), '.st/evidence-keys': trusted})
+        self.main, _ = self.files({'scripts/run.sh': 'changed on main\n'})  # main moves a lane script after the branch point
+        self.revoked, _ = self.files({'.st/evidence-keys': ''})  # a base that trusts no key
+        self.f.git('checkout', '-q', '--detach', self.base)
+        commit, self.tree = self.files({'src/code.rs': 'behind\n'})  # a branch that only lags main
+        digest = evidence_verify.lane_for(str(self.f.repo), self.tree, (json.dumps(LANES), self.main), 'unit', self.base)['sha256']
+        self.f.note(commit, self.tree, self.ci, 'machine/ci1', inputs={'lane_definition_sha256': digest})
+        self.f.note(commit, self.tree, self.ci, 'machine/ci1', check='lint', exit_code=1)  # a record the verifier refuses
+        commit, self.unsigned = self.files({'src/code.rs': 'unsigned\n'})
+        self.f.note(commit, self.unsigned, self.ci, 'machine/ci1', sign=False)
+        commit, self.foreign = self.files({'src/code.rs': 'foreign\n'})
+        self.f.note(commit, self.foreign, self.stranger, 'machine/ci1')  # a key the base does not list
+        _, self.bare = self.files({'src/code.rs': 'no record\n'})
+
+    def files(self, changes):
+        for name, content in changes.items():
+            path = self.f.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '--allow-empty', '-m', 'step')
+        return self.f.git('rev-parse', 'HEAD'), self.f.git('rev-parse', 'HEAD^{tree}')
+
+    def runs(self):
+        """(argument vector, the reason it must give, or None for satisfied), in an order that would carry a leaked answer forward: a good
+        signature is checked first, then another record (across commits) and the same record against another key list (across keys)."""
+        repo = ['--repo', str(self.f.repo)]
+        lane = ['--lanes-from', self.main, '--command', json.dumps(['make', 'test'])]
+        unit = lambda tree, base=None: repo + ['--tree', tree, '--check', 'unit', '--keys-from', base or self.main]
+        return [
+            (unit(self.tree) + lane + ['--lane-base', self.base], None),
+            (unit(self.unsigned), 'bad_signature'),
+            (unit(self.tree, self.revoked), 'untrusted_signer'),
+            (unit(self.foreign), 'untrusted_signer'),
+            (unit(self.tree) + lane, 'definition_changed'),  # held to main's lane, not its branch point's
+            (repo + ['--tree', self.tree, '--check', 'lint', '--keys-from', self.main], 'check_failed'),
+            (repo + ['--tree', self.tree, '--check', 'absent', '--keys-from', self.main], 'wrong_check'),
+            (unit(self.bare), 'no_record'),
+            (unit(self.tree) + lane + ['--lane-base', self.base], None),  # the same question after the others: the same answer
+            (unit(self.tree, self.revoked) + lane + ['--lane-base', self.base], 'untrusted_signer'),
+            (repo + ['--tree', self.tree, '--keys-from', self.main], 'usage'),
+        ]
+
+    def batch(self, runs):
+        done = subprocess.run([sys.executable, str(SCRIPT), '--batch'], input=json.dumps(runs).encode(), capture_output=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr.decode())
+        return json.loads(done.stdout)
+
+    def test_each_run_of_a_batch_decides_as_a_run_of_its_own(self):
+        runs = self.runs()
+        answers = self.batch([argv for argv, _ in runs])
+        self.assertEqual(len(answers), len(runs))
+        for (argv, reason), answer in zip(runs, answers):
+            with self.subTest(argv=argv[2:], reason=reason):
+                code, out, err = self.f.cli(*argv[2:])
+                self.assertEqual((answer['exit'], answer['stdout'], answer['stderr']), (code, out, err))
+                if reason == 'usage':
+                    self.assertEqual(code, 2)
+                elif reason is None:
+                    self.assertEqual((code, json.loads(out)['satisfied']), (0, True), out)
+                else:
+                    self.assertEqual((code, json.loads(out)['reason']), (1, reason), out)
+
+    def test_a_signature_is_checked_once_per_record_and_key_list(self):
+        runs = [argv for argv, reason in self.runs() if reason in (None, 'check_failed', 'wrong_check', 'definition_changed')]
+        shows = []
+        real = evidence_verify.git
+
+        def counting(repo, *args, **kwargs):
+            if args[:2] == ('show', '-s'):
+                shows.append(args[-1])
+            return real(repo, *args, **kwargs)
+        with mock.patch.object(evidence_verify, 'git', counting), mock.patch.object(evidence_verify, '_SIGNED', {}), \
+                mock.patch.object(evidence_verify, '_LOADED', {}), mock.patch('sys.stdin', io.StringIO(json.dumps(runs))), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(evidence_verify.main(['--batch']), 0)
+        self.assertEqual(len(runs), 5)
+        self.assertEqual(sorted(shows), sorted(set(shows)))  # this tree's two records, once each, for five runs
+        self.assertEqual(len(shows), 2)
+
+    def test_the_memo_is_keyed_by_what_the_key_list_says_not_its_path(self):
+        record = self.f.note(*self.files({'src/code.rs': 'path\n'}), self.ci, 'machine/ci1')
+        with tempfile.NamedTemporaryFile() as revocations, mock.patch.object(evidence_verify, '_SIGNED', {}):
+            self.assertEqual(evidence_verify.signature(str(self.f.repo), record, str(self.f.keys), revocations.name), ('G', 'machine/ci1'))
+            self.f.keys.write_text('')  # the same path, now trusting nobody
+            self.assertNotEqual(evidence_verify.signature(str(self.f.repo), record, str(self.f.keys), revocations.name)[0], 'G')
+
+    def test_a_batch_is_refused_whole_when_it_is_not_a_list_of_argument_vectors(self):
+        for text in ('', '{}', '[["--tree", 1]]', '["--tree"]'):
+            with self.subTest(text=text):
+                done = subprocess.run([sys.executable, str(SCRIPT), '--batch'], input=text.encode(), capture_output=True, check=False)
+                self.assertEqual((done.returncode, done.stdout), (2, b''))
+        done = subprocess.run([sys.executable, str(SCRIPT), '--batch', '--check', 'unit'], input=b'[]', capture_output=True, check=False)
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(self.batch([['--batch']]), [{'exit': 2, 'stdout': '', 'stderr': '--batch cannot be nested\n'}])
+
+
 if __name__ == '__main__':
     unittest.main()
