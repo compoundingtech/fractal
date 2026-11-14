@@ -583,7 +583,7 @@ header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright m
 ## Fractal web threads connected preview
 
 `node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,
-isolated daemon for reviewing Threads; Storybook's `Fractal/App/InboxThreads` stories stay local
+isolated daemon for reviewing Threads; Storybook's `Fractal/App/Inbox threads` stories stay local
 fixtures. `serve` makes a throwaway instance (`threadspreview`, under its own HOME in
 `/var/tmp/fractal-threadspreview`) with `thread_writes = true` and agent/example/manager as the
 explicit `inbox_fallback_agent`, person/avery, program seats agent/example/atlas and
@@ -596,11 +596,17 @@ the human gate of mission `example/release-notes`, whose discussion falls back t
 one thread so the Missions view lists it. Vite then serves the app on `127.0.0.1:5317` through
 `WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`, with the browser's credential.
 
-Seats never write on their own, and the fixture daemon attributes every local command to the person,
-so the preview holds no agent-authored thread replies, and it cannot link a new ask to a thread:
-only the bound requesting agent may. `offline` and `online` stop and restart the daemon for the
-paused and reconnect states, `revoke` revokes the browser pairing as the app's own revoke does (the
-refused state), and `down` removes the instance.
+The asks name Atlas as their requester through `work ask --as agent/example/atlas`; the seeded
+thread messages are all person-authored, and the program seats never write on their own. This
+fixture cannot act as an agent: its login shell disables Unix peer ancestry binding, so every local
+caller is a person, and `ST_AGENT`, `FRACTAL_AGENT` or `--as` do not establish the bound-agent
+authority that agent replies and linking an ask require (`thread edits require a concrete person`,
+`only the bound requesting agent can attach an ask`). The preview therefore has no agent-authored
+replies and no linked asks; do not read person replies as agent evidence.
+
+`up` seeds without serving. `offline` and `online` stop and restart the daemon for the paused and
+reconnect states, `revoke` revokes the browser pairing as the app's own revoke does (the refused
+state), and `down` removes the instance.
 The script needs a systemd user manager, `pty`, and `FRACTAL_BINARY` set to the test-support
 `fractal-fixture` built from this checkout
 (`cargo build --locked -p fractal --features test-support --bin fractal-fixture`).

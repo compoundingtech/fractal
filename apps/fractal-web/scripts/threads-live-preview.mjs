@@ -3,6 +3,7 @@
  * Connected, controlled Threads preview: the real web app against a real, isolated Fractal.
  *
  *   node apps/fractal-web/scripts/threads-live-preview.mjs serve        # up + seed + serve on loopback
+ *   node apps/fractal-web/scripts/threads-live-preview.mjs up           # up + seed without serving
  *   node apps/fractal-web/scripts/threads-live-preview.mjs offline|online|revoke|status|down
  *
  * `serve` makes a throwaway instance (`threadspreview`) under its own HOME in PREVIEW_ROOT
@@ -19,12 +20,14 @@
  * It then serves the app with Vite on 127.0.0.1:PREVIEW_PORT (default 5317) through the existing
  * WF_ST_GATEWAY/WF_ST_AUTHORIZATION paired gateway. The browser authenticates only through that path.
  *
- * Agents in this instance are program seats: they never write on their own. The fixture daemon attributes every
- * local command to a person (see below), so no agent-authored thread reply can be seeded or typed here, and the
- * daemon refuses to link a new ask to a thread (only the bound requesting agent may); every message on screen is
- * the person's. `offline` stops the daemon (the app shows its paused and reconnecting
- * states), `online` starts it again, `revoke` revokes the browser pairing (the app falls back to its
- * refused state; `serve` pairs a new device on the next start), and `down` removes everything.
+ * Agents in this instance are program seats: they never write on their own. The asks name Atlas
+ * as their requester via `work ask --as`, but the seeded thread messages are person-authored.
+ * The fixture disables Unix peer ancestry binding: ST_AGENT/FRACTAL_AGENT and `--as` cannot
+ * establish the BoundAgent authority required for agent replies or linking asks. Device pairing
+ * grants person authority, not agent authority. Do not read person replies as agent evidence.
+ * `offline` stops the daemon (the app shows its paused and reconnecting states), `online` starts
+ * it again, `revoke` revokes the browser pairing (the app falls back to its refused state;
+ * `serve` pairs a new device on the next start), and `down` removes everything.
  *
  * Needs: systemd user manager; FRACTAL_BINARY, the test-support `fractal-fixture` built from this checkout
  * (`cargo build --locked -p fractal --features test-support --bin fractal-fixture`), and PTY_BINARY (default
