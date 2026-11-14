@@ -42,6 +42,23 @@ test('full and read entrypoints share validators and strict unknown-case trackin
     assert.equal(read.decodeUnknownSync(read.ReadCollectionCommand)(conversation).collection, 'conversation');
 });
 
+test('human-gate attention read schema accepts the source step-run Id, never its bare path', async () => {
+    const read = await import('./ReadSchema.generated.ts');
+    const decode = read.decodeUnknownSync(read.Attention, 'strict');
+    const step = 'step-run/example-generation/approve';
+    const wire = {
+        id: 'attention/example-gate', kind: 'attention', attention_kind: 'human-gate',
+        source_id: step, step_run_id: step, person_id: 'person/alex',
+        revision: 'request-1', updated_at: '2026-11-14T00:00:00Z',
+        requested_at: '2026-11-14T00:00:00Z', title: 'Approve', detail: 'Ready?',
+        priority: 'normal', state: 'open', actions: ['review.approve'],
+    };
+    const gate = decode(wire);
+    assert.equal(gate.step_run_id, gate.source_id);
+    assert.equal(read.decodeUnknownSync(read.Id, 'strict')(gate.step_run_id), step);
+    assert.throws(() => decode({ ...wire, step_run_id: 'approve' }));
+});
+
 test('mission supersession lineage is optional nonnullable and preserves retry lineage', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = {
