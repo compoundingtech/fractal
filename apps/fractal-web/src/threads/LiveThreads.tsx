@@ -202,8 +202,8 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
       </div>}
     </div>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    <ThreadListPage source={source} query={query} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
     {retained.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
+    {/* A draft opens at the top of the list, where its thread lands once sent. */}
     {!offerStart ? null : agent === undefined
       ? <p {...stylex.props(styles.note)}>No responsible agent is configured for this Inbox item.</p>
       : starting ? <ThreadPanel thread={{ title: startTitle, state: 'open' }} initiallyExpanded onHideDraft={() => { restoreStart.current = true; setStarting(false) }}>
@@ -217,6 +217,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
           onSent={id => { setFocused(id); setStarting(false); setTitleInput(undefined) }} />
       </ThreadPanel>
       : count === 0 && focused === undefined ? <p {...stylex.props(styles.note)}>Ask <AgentName id={agent} /> about this item without answering it.</p> : null}
+    <ThreadListPage source={source} query={query} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
   </section>
 }
 

@@ -290,7 +290,8 @@ async function serve() {
   await server.listen()
   console.log(JSON.stringify({
     label: 'connected preview: real fractal-web and a real isolated daemon running the test-support fractal-fixture (host ancestry binding off), through the paired client gateway; not the installed runtime',
-    url: `http://127.0.0.1:${port}/w/inbox`,
+    // The workspace's main pane is a conversation; the Inbox is the Alerts tab in its sidebar.
+    url: `http://127.0.0.1:${port}/w/${agents.atlas}`,
     buildRev: execFileSync('git', ['-C', app, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
     agents, fallback: agents.manager, mission,
     threads: fractalJson(['attention', 'ls', '--as', person], { check: false })?.value?.items?.length ?? null,
