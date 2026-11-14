@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add inactive immutable job host bindings and pure host-authority admission decisions in fractal-jobs.",
+  "replay": {"status": "none", "detail": "No projection changes. Unit 4 must add the job kind and trusted-fact adapters, then fence local append, replicated admission and rebuild/replay."},
+  "schema": {"status": "none", "detail": "Pure unused types only; no claim kind or database schema changes."},
+  "rules": {"status": "none", "detail": "No active admission changes. Gate-slot remains the admission path; no host activation, execution-host lease or policy defaults."},
+  "compatibility": {"status": "none", "detail": "The pure validator requires independently verified signed binding and authenticated writer-window facts, current membership authority, a consistent persisted binding lookup, and matching local origin and host node signer. Refusals are unknown-host, conflicting-host, stale-authority and origin-mismatch. Evidence is not deserializable and this function does not verify signatures."},
+  "downtime": {"status": "none", "detail": "No runtime wiring or host activation."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Removing these inactive contracts does not change runtime behavior. A binding cannot switch host or silently replace its pinned authority."}
+}

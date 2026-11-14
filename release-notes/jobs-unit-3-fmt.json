@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Apply formatting-only rustfmt wrapping to unit 3 job host-authority code and tests.",
+  "replay": {"status": "none", "detail": "Formatting only; replay behavior is unchanged."},
+  "schema": {"status": "none", "detail": "Formatting only; no schema changes."},
+  "rules": {"status": "none", "detail": "Formatting only; admission decisions are unchanged."},
+  "compatibility": {"status": "none", "detail": "Formatting only; host-authority contracts and wire formats are unchanged."},
+  "downtime": {"status": "none", "detail": "Formatting only; no runtime changes."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Formatting only; recovery behavior is unchanged."}
+}
