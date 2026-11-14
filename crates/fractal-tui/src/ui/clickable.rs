@@ -1,9 +1,100 @@
 //! Pointer instructions describe the painted target and use the menu's own resolver.
+//!
+//! In the TUI, middle-click closes or dismisses an item in any closable list.
+//! Destructive actions and answering decisions are excluded.
 
 use super::context::PointMenu;
 use super::*;
 
+#[derive(PartialEq, Eq)]
+pub(super) enum CloseTarget {
+    Tab(usize, usize),
+    InboxRow(String),
+    InboxCard(String),
+}
+
+pub(super) enum MiddleClose<T> {
+    Ignored,
+    Consumed,
+    Released(T),
+}
+
+/// A closable list owns its middle press through release, including drags outside it.
+pub(super) fn middle_close<T: PartialEq>(
+    pressed: &mut Option<T>,
+    kind: MouseEventKind,
+    target: Option<T>,
+) -> MiddleClose<T> {
+    match kind {
+        MouseEventKind::Down(button) => {
+            *pressed = if button == MouseButton::Middle { target } else { None };
+            if pressed.is_some() { MiddleClose::Consumed } else { MiddleClose::Ignored }
+        }
+        MouseEventKind::Drag(MouseButton::Middle) if pressed.is_some() => MiddleClose::Consumed,
+        MouseEventKind::Up(MouseButton::Middle) => match pressed.take() {
+            Some(pressed) if target.as_ref() == Some(&pressed) => MiddleClose::Released(pressed),
+            Some(_) => MiddleClose::Consumed,
+            None => MiddleClose::Ignored,
+        },
+        _ => MiddleClose::Ignored,
+    }
+}
+
 impl Ui {
+    fn inbox_row_at<'a>(&self, frame: &'a FrameInfo, x: u16, y: u16) -> Option<&'a str> {
+        frame.context_rows.iter().rev()
+            .find(|(rect, _, _)| contains(*rect, x, y))
+            .map(|(_, id, _)| id.as_str())
+            .filter(|id| self.world.attention.items().iter().any(|item| item.id == *id))
+    }
+
+    /// Resolve the painted Inbox target, independently of keyboard focus or selection.
+    pub(super) fn close_target(&self, x: u16, y: u16) -> Option<CloseTarget> {
+        let frame = self.frame.borrow();
+        let (_, hit) = frame.hits.iter().rev().find(|(rect, _)| contains(*rect, x, y))?;
+        match hit {
+            Hit::GlassTab(group, tab) => Some(CloseTarget::Tab(*group, *tab)),
+            Hit::Row(_) => self.inbox_row_at(&frame, x, y)
+                .map(|id| CloseTarget::InboxRow(id.to_owned())),
+            Hit::Key('x') => frame.panes.iter().rev()
+                .find(|pane| contains(pane.rect, x, y))
+                .and_then(|pane| pane.key.strip_prefix("home:"))
+                .map(|id| CloseTarget::InboxCard(id.to_owned())),
+            _ => None,
+        }
+    }
+
+    pub(super) fn dismiss_inbox(&mut self, id: String) {
+        let Some(item) = self.world.attention.items().iter().find(|item| item.id == id) else {
+            return;
+        };
+        if item.actions.iter().any(|action| action == "custom.reply") {
+            self.flash("Reply with c using this source's declared fields");
+            return;
+        }
+        if self.closed.remove(&id) {
+            self.acted.insert(id.clone());
+            if let Load::Ready(items) = &mut self.world.attention {
+                items.retain(|item| item.id != id);
+            }
+            if self.tab() == 0 {
+                self.select(self.selected[0]);
+            }
+            return;
+        }
+        match item.kind.word() {
+            "request" => self.act_attention(id, 'r'),
+            "update" => self.read_update_id(id),
+            "message" => self.act_attention(id, 'm'),
+            "fault" => self.flash(
+                "A fault clears when the agent that owns it retries or cancels; open it with g",
+            ),
+            word => self.flash(format!(
+                "A {word} waits on your decision, so x cannot dismiss it: answer it with the keys on its card"
+            )),
+        }
+    }
+
     pub(super) fn draw_click_hint(
         &self,
         buf: &mut Buffer,
@@ -123,6 +214,17 @@ impl Ui {
                 None => "no menu".into(),
             }
         };
+        let middle = if match hit {
+            Hit::Row(_) => self.inbox_row_at(&self.frame.borrow(), point.0, point.1).is_some(),
+            Hit::Key('x') => self.frame.borrow().panes.iter().any(|pane| {
+                contains(pane.rect, point.0, point.1) && pane.key.starts_with("home:")
+            }),
+            _ => false,
+        } {
+            " · Middle: dismiss"
+        } else {
+            ""
+        };
         let build = self
             .build
             .then(|| format!(" {} ", crate::version::short(crate::version::now())));
@@ -131,9 +233,9 @@ impl Ui {
             .map_or(0, |build| text::width(build) as u16 + 1);
         let width = area.width.saturating_sub(reserved + 2) as usize;
         // Keep both operations visible on narrow terminals, even when the labels are long.
-        let allowance = width.saturating_sub(text::width("Click:  · Right: ")) / 2;
+        let allowance = width.saturating_sub(text::width("Click:  · Right: ") + text::width(middle)) / 2;
         let hint = format!(
-            "Click: {} · Right: {}",
+            "Click: {} · Right: {}{middle}",
             text::truncate(&left, allowance),
             text::truncate(&right, allowance)
         );
@@ -182,6 +284,14 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn another_button_disarms_a_middle_press() {
+        let mut pressed = None;
+        assert!(matches!(middle_close(&mut pressed, MouseEventKind::Down(MouseButton::Middle), Some(1)), MiddleClose::Consumed));
+        assert!(matches!(middle_close(&mut pressed, MouseEventKind::Down(MouseButton::Left), Some(1)), MiddleClose::Ignored));
+        assert!(matches!(middle_close(&mut pressed, MouseEventKind::Up(MouseButton::Middle), Some(1)), MiddleClose::Ignored));
+    }
 
     fn draw(ui: &Ui) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
@@ -323,6 +433,130 @@ mod tests {
         draw(&ui);
         assert!(!ui.frame.borrow().hits.iter()
             .any(|(_, hit)| matches!(hit, Hit::GlassTab(0, 1))));
+    }
+
+    fn inbox(kind: &str) -> (Ui, String) {
+        let mut world = demo::test_world();
+        let mut item = world.attention.items()[0].clone();
+        item.id = "attention/middle-target".into();
+        item.kind = match kind {
+            "request" | "named" => AttentionKind::Request {
+                from: "Planner".into(), from_id: "agent/example/planner".into(),
+                question: "Choose a runner".into(), images: Vec::new(),
+                structured: (kind == "named").then(|| Box::new(fractal_client::StructuredRequest {
+                    version: 1, entry_type: "decision".into(), question: "Choose a runner".into(),
+                    answers: vec![fractal_client::RequestAnswerOption {
+                        id: "yes".into(), label: "Yes".into(), ..Default::default()
+                    }], ..Default::default()
+                })),
+            },
+            "update" => AttentionKind::Update {
+                from: "Planner".into(), body: "Finished".into(), about: String::new(), subjects: Vec::new(),
+            },
+            "prompt" => AttentionKind::Prompt {
+                seat: "Builder".into(), seat_id: "agent/example/builder".into(), text: "Allow?".into(),
+                question: false, answers: Vec::new(), episode: String::new(), call: None,
+                calls: Ok(Vec::new()), allow: false,
+            },
+            "closed" => item.kind.clone(),
+            word => world.attention.items().iter().find(|item| item.kind.word() == word).unwrap().kind.clone(),
+        };
+        item.actions = vec!["work.done".into(), "message.read".into()];
+        let id = item.id.clone();
+        let mut other = item.clone();
+        other.id = "attention/other".into();
+        world.attention = Load::Ready(vec![item, other]);
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.open_home();
+        if kind == "closed" {
+            ui.closed.insert(id.clone());
+        }
+        (ui, id)
+    }
+
+    #[test]
+    fn middle_click_inbox_releases_only_over_the_pressed_item_for_every_kind() {
+        for kind in ["request", "named", "update", "message", "closed", "review",
+            "feedback", "launch", "revision", "prompt", "fault"] {
+            let (mut ui, id) = inbox(kind);
+            let index = ui.listing_for(0, 40).ids.iter().position(|candidate| candidate == &id).unwrap();
+            ui.select(1 - index);
+            draw(&ui);
+            let row = target(&ui, |hit| *hit == Hit::Row(index));
+            let other = target(&ui, |hit| *hit == Hit::Row(1 - index));
+            pointer(&mut ui, MouseEventKind::Moved, row.x, row.y);
+            let footer = line(&draw(&ui), 47);
+            assert!(footer.contains("Middle: dismiss"), "{kind}: {footer}; close target: {:?}", ui.close_target(row.x, row.y).is_some());
+            pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), row.x, row.y);
+            assert!(ui.effects.is_empty() && ui.confirm.is_none() && ui.flash.is_none(), "{kind}");
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), other.x, other.y);
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), row.x, row.y);
+            assert!(ui.effects.is_empty() && ui.flash.is_none(), "{kind}");
+            pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), row.x, row.y);
+            pointer(&mut ui, MouseEventKind::Drag(MouseButton::Middle), other.x, other.y);
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), row.x, row.y);
+            assert!(ui.confirm.is_none(), "{kind}");
+            match kind {
+                // Requests follow main's dismissal semantics: the person's own dismissal
+                // (`attention.dismiss`), not a work.done answer.
+                "request" | "named" => {
+                    assert!(matches!(ui.effects.as_slice(), [Effect::Dismiss { id: sent, .. }]
+                        if sent == &id), "{kind}: {:?}", ui.effects);
+                }
+                "update" | "message" => {
+                    let expected = if kind == "message" { "message.read" } else { "work.done" };
+                    assert!(matches!(ui.effects.as_slice(), [Effect::Attention { id: sent, action, reason, answer, .. }]
+                        if sent == &id && action == expected && match kind {
+                            "update" => reason.as_deref() == Some("Read") && answer.as_deref() == Some("read"),
+                            _ => answer.is_none(),
+                        }), "{kind}: {:?}", ui.effects);
+                }
+                "closed" => {
+                    assert!(!ui.closed.contains(&id));
+                    assert!(!ui.world.attention.items().iter().any(|item| item.id == id));
+                    assert!(ui.effects.is_empty());
+                }
+                _ => {
+                    assert!(ui.effects.is_empty(), "{kind}");
+                    let flash = &ui.flash.as_ref().unwrap().0;
+                    assert!(flash.contains(if kind == "fault" { "A fault clears" } else { "x cannot dismiss it" }), "{flash}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn middle_click_inbox_card_x_dismisses_its_card() {
+        let (mut ui, id) = inbox("request");
+        let index = ui.listing_for(0, 40).ids.iter().position(|candidate| candidate == &id).unwrap();
+        ui.select(index);
+        draw(&ui);
+        let button = target(&ui, |hit| *hit == Hit::Key('x'));
+        ui.select(1 - index); // The painted card, not the keyboard selection, owns the action.
+        pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), button.x, button.y);
+        assert!(ui.effects.is_empty() && ui.confirm.is_none());
+        pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), button.x, button.y);
+        assert!(matches!(ui.effects.as_slice(), [Effect::Dismiss { id: sent, .. }]
+            if sent == &id), "{:?}", ui.effects);
+        assert!(ui.confirm.is_none());
+    }
+
+    #[test]
+    fn inbox_middle_click_respects_popover_and_palette_guards() {
+        for palette in [false, true] {
+            let (mut ui, _) = inbox("request");
+            draw(&ui);
+            let row = target(&ui, |hit| *hit == Hit::Row(0));
+            if palette {
+                ui.open_palette(None, glass::Open::Here);
+            } else {
+                ui.popover = Some("agent/example/planner".into());
+            }
+            pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), row.x, row.y);
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), row.x, row.y);
+            assert!(ui.effects.is_empty() && ui.confirm.is_none());
+        }
     }
 
     #[test]
