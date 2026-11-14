@@ -172,6 +172,69 @@ public struct PresenceReportResult: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey { case availability, reportAgainAt = "report_again_at" }
 }
 
+/// Milliseconds spent in each status during a history bucket.
+public struct AvailabilityStatusDurations: Codable, Sendable, Equatable {
+    public let available: Int
+    public let away: Int
+}
+
+/// Milliseconds the status came from each source during a history bucket.
+public struct AvailabilityStatusSourceDurations: Codable, Sendable, Equatable {
+    public let `override`: Int
+    public let presence: Int
+    public let unreported: Int
+}
+
+/// Milliseconds of each derived presence during a history bucket.
+public struct AvailabilityPresenceDurations: Codable, Sendable, Equatable {
+    public let present: Int
+    public let idle: Int
+    public let locked: Int
+    public let unreported: Int
+}
+
+/// Milliseconds of each interruptions setting during a history bucket.
+public struct AvailabilityInterruptionsDurations: Codable, Sendable, Equatable {
+    public let all: Int
+    public let urgent: Int
+    public let none: Int
+}
+
+/// Milliseconds of each deadline-clock mode during a history bucket.
+public struct AvailabilityDeadlineClockDurations: Codable, Sendable, Equatable {
+    public let run: Int
+    public let holdRoutine: Int
+    public let holdAll: Int
+    enum CodingKeys: String, CodingKey { case run, holdRoutine = "hold-routine", holdAll = "hold-all" }
+}
+
+/// One history bucket; each axis's durations sum to `coveredMS`. `presence` is nil for anyone
+/// but the person.
+public struct AvailabilityHistoryBucket: Codable, Sendable, Equatable {
+    public let start: String
+    public let coveredMS: Int
+    public let status: AvailabilityStatusDurations
+    public let statusSource: AvailabilityStatusSourceDurations
+    public let presence: AvailabilityPresenceDurations?
+    public let interruptions: AvailabilityInterruptionsDurations
+    public let deadlineClock: AvailabilityDeadlineClockDurations
+    enum CodingKeys: String, CodingKey {
+        case start, status, presence, interruptions
+        case coveredMS = "covered_ms", statusSource = "status_source", deadlineClock = "deadline_clock"
+    }
+}
+
+/// A person's availability over `[from, to)` in buckets of `bucketSeconds` from `from`; `to` is
+/// the requested end clamped to when the daemon answered.
+public struct AvailabilityHistory: Codable, Sendable, Equatable {
+    public let person: String
+    public let from: String
+    public let to: String
+    public let bucketSeconds: Int
+    public let buckets: [AvailabilityHistoryBucket]
+    enum CodingKeys: String, CodingKey { case person, from, to, buckets, bucketSeconds = "bucket_seconds" }
+}
+
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {
     public let apiVersion: String
     public let requestID: String

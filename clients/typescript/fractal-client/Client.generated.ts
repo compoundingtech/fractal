@@ -7,7 +7,7 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
-    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
+    AvailabilitySet, AvailabilityHistory, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -352,10 +352,13 @@ export class FractalClient {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         // These projections have no missing-item 404, including an old router's empty response.
-        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
-        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
+        const route = path.split('?')[0];
+        const unsupported = path.startsWith('/v1/client/agent-related-runs/') ? 'agent-related-runs.get'
+            : route === '/v1/client/schedules' ? 'schedules.list'
+            : route === '/v1/client/availability/history' ? 'availability.history' : undefined;
+        if (response.status === 404 && unsupported) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${unsupported}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
@@ -717,6 +720,7 @@ export class FractalClient {
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
     async availabilityList(person?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailabilities>> { return this.get('/v1/client/availability' + query({ person }), undefined, requestOptions); }
+    async availabilityHistory(options: { from: string; to: string; bucket_seconds: number; person?: string }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AvailabilityHistory>> { return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }

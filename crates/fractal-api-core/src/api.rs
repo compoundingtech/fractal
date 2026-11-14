@@ -666,6 +666,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
         .route("/v1/client/availability", get(availability::list).put(availability::set))
+        .route("/v1/client/availability/history", get(availability::history))
         .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))

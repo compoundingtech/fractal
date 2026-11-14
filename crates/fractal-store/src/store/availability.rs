@@ -180,6 +180,31 @@ fn active(claim: Option<ClaimRecord>, now: u128) -> Option<ClaimRecord> {
     claim.filter(|claim| until(claim).is_none_or(|until| now < until))
 }
 
+/// The status an override claim sets; `None` for a claim that clears the override.
+fn override_status(claim: &ClaimRecord) -> Option<Status> {
+    parse(claim.body["fields"].get("status"))
+}
+
+fn interruptions_of(claim: &ClaimRecord) -> Option<Interruptions> {
+    parse(claim.body["fields"].get("interruptions"))
+}
+
+fn deadline_clock_of(claim: &ClaimRecord) -> Option<DeadlineClock> {
+    parse(claim.body["fields"].get("deadline_clock"))
+}
+
+/// The one status rule: an override in force wins; otherwise `available` while some device is
+/// present, `away` while devices report but none is present, and `available` when no device's
+/// state counts. Nobody reporting is not evidence of absence.
+fn effective_status(status_override: Option<Status>, folded: FoldedPresence) -> (Status, StatusSource) {
+    match (status_override, folded) {
+        (Some(status), _) => (status, StatusSource::Override),
+        (None, FoldedPresence { reported: false, .. }) => (Status::Available, StatusSource::Unreported),
+        (None, FoldedPresence { presence: Presence::Present, .. }) => (Status::Available, StatusSource::Presence),
+        (None, _) => (Status::Away, StatusSource::Presence),
+    }
+}
+
 /// An ask is urgent when its asker gave it priority `critical`; see
 /// [`fractal_schema::availability::urgent_priority`].
 pub fn urgent_ask(ask_fields: &Value) -> bool {
@@ -256,13 +281,18 @@ pub fn deadline_clock_holds_in(connection: &Connection, person: &str, since: u12
 /// it never speak for it.
 pub fn fold_presence(newest_first: &[ClaimRecord], now: u128) -> FoldedPresence {
     let mut seen = BTreeSet::new();
+    fold_reports(
+        newest_first.iter()
+            .filter(|claim| claim.body["fields"]["source"].as_str().is_some_and(|source| seen.insert(source.to_owned())))
+            .filter_map(DeviceReport::from_claim),
+        now,
+    )
+}
+
+/// Fold each device's newest report at `now`; see [`fold_presence`].
+fn fold_reports(newest_per_device: impl IntoIterator<Item = DeviceReport>, now: u128) -> FoldedPresence {
     let mut folded = FoldedPresence { presence: Presence::Unreported, observed_at: None, reported: false };
-    for claim in newest_first {
-        let Some(source) = claim.body["fields"]["source"].as_str() else { continue };
-        if !seen.insert(source.to_owned()) {
-            continue;
-        }
-        let Some(report) = DeviceReport::from_claim(claim) else { continue };
+    for report in newest_per_device {
         let Some(presence) = report.presence_at(now) else { continue };
         folded.reported = true;
         if presence < folded.presence || (presence == folded.presence && folded.observed_at.is_none_or(|at| report.observed_at > at)) {
@@ -271,6 +301,221 @@ pub fn fold_presence(newest_first: &[ClaimRecord], now: u128) -> FoldedPresence 
         }
     }
     folded
+}
+
+/// The longest range one history read covers, and the most buckets it answers.
+pub const HISTORY_MAX_RANGE_MS: u128 = 31 * 24 * 60 * 60_000;
+pub const HISTORY_MAX_BUCKETS: u128 = 2016;
+
+/// Milliseconds spent in each status during a bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StatusDurations { pub available: u64, pub away: u64 }
+
+/// Milliseconds the status came from each source during a bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StatusSourceDurations {
+    #[serde(rename = "override")]
+    pub overridden: u64,
+    pub presence: u64,
+    pub unreported: u64,
+}
+
+/// Milliseconds of each derived presence during a bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PresenceDurations { pub present: u64, pub idle: u64, pub locked: u64, pub unreported: u64 }
+
+/// Milliseconds of each interruptions setting during a bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InterruptionsDurations { pub all: u64, pub urgent: u64, pub none: u64 }
+
+/// Milliseconds of each deadline-clock mode during a bucket; keys are the wire words.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeadlineClockDurations {
+    pub run: u64,
+    #[serde(rename = "hold-routine")]
+    pub hold_routine: u64,
+    #[serde(rename = "hold-all")]
+    pub hold_all: u64,
+}
+
+/// One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of
+/// the bucket that lies within the answered range.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HistoryBucket {
+    pub start: String,
+    pub covered_ms: u64,
+    pub status: StatusDurations,
+    pub status_source: StatusSourceDurations,
+    /// The person's own read only; `None` for anyone else, like [`PersonAvailability::presence`].
+    pub presence: Option<PresenceDurations>,
+    pub interruptions: InterruptionsDurations,
+    pub deadline_clock: DeadlineClockDurations,
+}
+
+/// A person's availability over `[from, to)` in buckets of `bucket_seconds` starting at `from`,
+/// folded from the same claims and by the same rules as [`PersonAvailability`] at each instant.
+/// `to` is the requested end clamped to the read's instant, so no bucket covers the future.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AvailabilityHistory {
+    pub person: String,
+    pub from: String,
+    pub to: String,
+    pub bucket_seconds: u64,
+    pub buckets: Vec<HistoryBucket>,
+}
+
+impl AvailabilityHistory {
+    /// The view for anyone but the person: effective values only, no presence.
+    #[must_use]
+    pub fn without_presence(mut self) -> Self {
+        for bucket in &mut self.buckets {
+            bucket.presence = None;
+        }
+        self
+    }
+}
+
+/// One kind's claims, oldest first, swept forward in time.
+struct Sweep<'a> {
+    claims: &'a [ClaimRecord],
+    next: usize,
+}
+
+impl<'a> Sweep<'a> {
+    fn new(claims: &'a [ClaimRecord]) -> Self {
+        Self { claims, next: 0 }
+    }
+
+    /// The next claim accepted at or before `at` that the sweep has not passed yet.
+    fn pass(&mut self, at: u128) -> Option<&'a ClaimRecord> {
+        let claim = self.claims.get(self.next).filter(|claim| claim.accepted_at_unix_ms <= at)?;
+        self.next += 1;
+        Some(claim)
+    }
+
+    /// The claim in force at `at`: the newest accepted by then, while its value has not expired.
+    fn in_force(&mut self, at: u128) -> Option<&'a ClaimRecord> {
+        while self.pass(at).is_some() {}
+        let claims = self.claims;
+        self.next.checked_sub(1)
+            .and_then(|index| claims.get(index))
+            .filter(|claim| until(claim).is_none_or(|until| at < until))
+    }
+
+    fn next_accepted(&self) -> Option<u128> {
+        self.claims.get(self.next).map(|claim| claim.accepted_at_unix_ms)
+    }
+
+    /// The first instant after `at` when this axis can change: its next claim, or the expiry
+    /// of the newest claim so far.
+    fn next_change(&self, at: u128) -> Option<u128> {
+        let expiry = self.next.checked_sub(1).and_then(|index| until(&self.claims[index])).filter(|until| *until > at);
+        expiry.into_iter().chain(self.next_accepted()).min()
+    }
+}
+
+fn add(slot: &mut u64, ms: u128) {
+    *slot = slot.saturating_add(u64::try_from(ms).unwrap_or(u64::MAX));
+}
+
+/// Fold one person's availability claims, each kind oldest first, into buckets of `bucket_ms`
+/// over `[from, end)`. Each kind's claims must reach back to the one in force at `from`, and
+/// the presence reports to every report accepted after `from - PRESENCE_COUNTS_MS`. At every
+/// instant the fold applies exactly the rules [`AvailabilityStore::person_availability`] applies
+/// to the claims accepted by then, sweeping from one change to the next: a claim's acceptance,
+/// an `until`, an active device turning idle, or a report ceasing to count.
+pub fn history_buckets(
+    status: &[ClaimRecord],
+    interruptions: &[ClaimRecord],
+    deadline_clock: &[ClaimRecord],
+    presence: &[ClaimRecord],
+    from: u128,
+    end: u128,
+    bucket_ms: u128,
+) -> Vec<HistoryBucket> {
+    let bucket_ms = bucket_ms.max(1);
+    let mut buckets: Vec<HistoryBucket> = (0..end.saturating_sub(from).div_ceil(bucket_ms))
+        .map(|index| {
+            let start = from + index * bucket_ms;
+            HistoryBucket {
+                start: rfc3339(start).unwrap_or_default(),
+                covered_ms: u64::try_from((start + bucket_ms).min(end) - start).unwrap_or(u64::MAX),
+                status: StatusDurations::default(),
+                status_source: StatusSourceDurations::default(),
+                presence: Some(PresenceDurations::default()),
+                interruptions: InterruptionsDurations::default(),
+                deadline_clock: DeadlineClockDurations::default(),
+            }
+        })
+        .collect();
+    let (mut status, mut interruptions, mut deadline_clock, mut reports) =
+        (Sweep::new(status), Sweep::new(interruptions), Sweep::new(deadline_clock), Sweep::new(presence));
+    // Each device's newest report so far, as the live fold reads it.
+    let mut devices: BTreeMap<&str, DeviceReport> = BTreeMap::new();
+    let mut at = from;
+    'sweep: while at < end {
+        while let Some(claim) = reports.pass(at) {
+            let Some(source) = claim.body["fields"]["source"].as_str() else { continue };
+            // A newest report the live fold cannot read silences its device there too.
+            match DeviceReport::from_claim(claim) {
+                Some(report) => devices.insert(source, report),
+                None => devices.remove(source),
+            };
+        }
+        let folded = fold_reports(devices.values().copied(), at);
+        let status_override = status.in_force(at)
+            .filter(|claim| !claim.body["fields"]["status"].is_null())
+            .and_then(override_status);
+        let (state, source) = effective_status(status_override, folded);
+        let interrupt = interruptions.in_force(at).and_then(interruptions_of).unwrap_or(Interruptions::All);
+        let clock = deadline_clock.in_force(at).and_then(deadline_clock_of).unwrap_or(DeadlineClock::Run);
+        let device_change = devices.values()
+            .flat_map(|report| {
+                let idle = (report.state == DeviceState::Active).then(|| report.last_input() + PRESENCE_IDLE_MS);
+                idle.into_iter().chain([report.observed_at + PRESENCE_COUNTS_MS])
+            })
+            .filter(|change| *change > at)
+            .min();
+        let next = [status.next_change(at), interruptions.next_change(at), deadline_clock.next_change(at), reports.next_accepted(), device_change]
+            .into_iter()
+            .flatten()
+            .fold(end, u128::min);
+        while at < next {
+            let index = (at - from) / bucket_ms;
+            let span = next.min(from + (index + 1) * bucket_ms) - at;
+            // Every instant before `end` lies in one of the buckets made above.
+            let Some(bucket) = usize::try_from(index).ok().and_then(|index| buckets.get_mut(index)) else { break 'sweep };
+            match state {
+                Status::Available => add(&mut bucket.status.available, span),
+                Status::Away => add(&mut bucket.status.away, span),
+            }
+            match source {
+                StatusSource::Override => add(&mut bucket.status_source.overridden, span),
+                StatusSource::Presence => add(&mut bucket.status_source.presence, span),
+                StatusSource::Unreported => add(&mut bucket.status_source.unreported, span),
+            }
+            if let Some(durations) = bucket.presence.as_mut() {
+                match folded.presence {
+                    Presence::Present => add(&mut durations.present, span),
+                    Presence::Idle => add(&mut durations.idle, span),
+                    Presence::Locked => add(&mut durations.locked, span),
+                    Presence::Unreported => add(&mut durations.unreported, span),
+                }
+            }
+            match interrupt {
+                Interruptions::All => add(&mut bucket.interruptions.all, span),
+                Interruptions::Urgent => add(&mut bucket.interruptions.urgent, span),
+                Interruptions::None => add(&mut bucket.interruptions.none, span),
+            }
+            match clock {
+                DeadlineClock::Run => add(&mut bucket.deadline_clock.run, span),
+                DeadlineClock::HoldRoutine => add(&mut bucket.deadline_clock.hold_routine, span),
+                DeadlineClock::HoldAll => add(&mut bucket.deadline_clock.hold_all, span),
+            }
+            at += span;
+        }
+    }
+    buckets
 }
 
 pub trait AvailabilityStore {
@@ -282,6 +527,10 @@ pub trait AvailabilityStore {
     /// report, so a delayed or retried older state cannot replace it.
     fn report_person_presence(&self, person: &str, source: &str, report: DeviceReport, now: u128) -> Result<PresenceReported, FractalError>;
     fn deadline_clock_holds(&self, person: &str, since: u128) -> Result<Vec<ClockHold>>;
+    /// The person's availability over `[from, to)` in buckets of `bucket_seconds`, with `to`
+    /// clamped to `now`. Refuses an empty range, a range over [`HISTORY_MAX_RANGE_MS`] and more
+    /// than [`HISTORY_MAX_BUCKETS`] buckets.
+    fn person_availability_history(&self, person: &str, from: u128, to: u128, bucket_seconds: u64, now: u128) -> Result<AvailabilityHistory, FractalError>;
 }
 
 fn person_subject(person: &str) -> Result<(), FractalError> {
@@ -303,6 +552,22 @@ impl Store {
         })?;
         Ok(claims)
     }
+
+    /// The person's claims of `kind` accepted before `end`, oldest first: every claim accepted
+    /// after `since`, and with `with_prior` also the newest accepted at or before it, the value
+    /// then in force.
+    fn history_claims(&self, person: &str, kind: &str, since: u128, end: u128, with_prior: bool) -> Result<Vec<ClaimRecord>> {
+        let mut claims = Vec::new();
+        self.claims_in_order(person, kind, true, |claim| {
+            let at = claim.accepted_at_unix_ms;
+            if at < end && (at > since || with_prior) {
+                claims.push(claim.clone());
+            }
+            at > since
+        })?;
+        claims.reverse();
+        Ok(claims)
+    }
 }
 
 impl AvailabilityStore for Store {
@@ -315,29 +580,47 @@ impl AvailabilityStore for Store {
             let clock = active(self.latest_claim(person, Some(DEADLINE_CLOCK_KIND))?, now)
                 .filter(|claim| claim.body["fields"]["deadline_clock"] != "run");
             let folded = fold_presence(&self.counting_presence(person, now)?, now);
-            // Nobody reporting is not evidence of absence: an unreported person reads available.
-            let (derived, derived_source) = match folded {
-                FoldedPresence { reported: false, .. } => (Status::Available, StatusSource::Unreported),
-                FoldedPresence { presence: Presence::Present, .. } => (Status::Available, StatusSource::Presence),
-                _ => (Status::Away, StatusSource::Presence),
-            };
-            let status_override = status.as_ref().and_then(|claim| parse::<Status>(claim.body["fields"].get("status")));
+            let (status_value, status_source) = effective_status(status.as_ref().and_then(override_status), folded);
             Ok(PersonAvailability {
                 person: person.to_owned(),
-                status: status_override.unwrap_or(derived),
-                status_source: if status_override.is_some() { StatusSource::Override } else { derived_source },
+                status: status_value,
+                status_source,
                 status_until: status.as_ref().and_then(until).and_then(rfc3339),
                 presence: Some(folded.presence),
                 presence_observed_at: folded.observed_at.and_then(rfc3339),
-                interruptions: interruptions.as_ref()
-                    .and_then(|claim| parse(claim.body["fields"].get("interruptions")))
-                    .unwrap_or(Interruptions::All),
+                interruptions: interruptions.as_ref().and_then(interruptions_of).unwrap_or(Interruptions::All),
                 interruptions_until: interruptions.as_ref().and_then(until).and_then(rfc3339),
-                deadline_clock: clock.as_ref()
-                    .and_then(|claim| parse(claim.body["fields"].get("deadline_clock")))
-                    .unwrap_or(DeadlineClock::Run),
+                deadline_clock: clock.as_ref().and_then(deadline_clock_of).unwrap_or(DeadlineClock::Run),
                 deadline_clock_since: clock.as_ref().and_then(|claim| rfc3339(claim.accepted_at_unix_ms)),
                 deadline_clock_until: clock.as_ref().and_then(until).and_then(rfc3339),
+            })
+        }).map_err(internal)
+    }
+
+    fn person_availability_history(&self, person: &str, from: u128, to: u128, bucket_seconds: u64, now: u128) -> Result<AvailabilityHistory, FractalError> {
+        person_subject(person)?;
+        let bucket_ms = u128::from(bucket_seconds) * 1000;
+        if bucket_ms == 0 || from >= to {
+            return Err(FractalError::new("invalid-availability", "from must be before to, and bucket_seconds positive"));
+        }
+        if to - from > HISTORY_MAX_RANGE_MS {
+            return Err(FractalError::new("invalid-availability", "an availability history covers at most 31 days"));
+        }
+        if (to - from).div_ceil(bucket_ms) > HISTORY_MAX_BUCKETS {
+            return Err(FractalError::new("invalid-availability", format!("an availability history answers at most {HISTORY_MAX_BUCKETS} buckets")));
+        }
+        // Nothing is known about the future: the answer ends at the read's instant.
+        let end = to.min(now).max(from);
+        self.read_snapshot(|_| {
+            let axis = |kind| self.history_claims(person, kind, from, end, true);
+            // A report accepted a day or more before `from` cannot count at `from` or later.
+            let presence = self.history_claims(person, PRESENCE_KIND, from.saturating_sub(PRESENCE_COUNTS_MS), end, false)?;
+            Ok(AvailabilityHistory {
+                person: person.to_owned(),
+                from: rfc3339(from).unwrap_or_default(),
+                to: rfc3339(end).unwrap_or_default(),
+                bucket_seconds,
+                buckets: history_buckets(&axis(STATUS_KIND)?, &axis(INTERRUPTIONS_KIND)?, &axis(DEADLINE_CLOCK_KIND)?, &presence, from, end, bucket_ms),
             })
         }).map_err(internal)
     }

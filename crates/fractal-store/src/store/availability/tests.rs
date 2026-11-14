@@ -289,3 +289,160 @@ fn the_clock_history_records_holds_since_an_ask_and_resumes() {
     let resumed = store.deadline_clock_holds(ADA, asked).unwrap();
     assert_eq!(effective_deadline(asked, deadline, true, &resumed), Some(deadline + 35 * MINUTE));
 }
+
+/// One instant of availability: status, its source, presence, interruptions, deadline clock.
+type Instant = (Status, StatusSource, Presence, Interruptions, DeadlineClock);
+
+fn live(store: &Store, at: u128) -> Instant {
+    let view = store.person_availability(ADA, at).unwrap();
+    (view.status, view.status_source, view.presence.unwrap(), view.interruptions, view.deadline_clock)
+}
+
+/// The one value that held for a nonzero time.
+fn held<T: Copy + std::fmt::Debug, const N: usize>(durations: [(u64, T); N]) -> T {
+    let held: Vec<T> = durations.iter().filter(|(ms, _)| *ms > 0).map(|(_, value)| *value).collect();
+    assert_eq!(held.len(), 1, "{durations:?}");
+    held[0]
+}
+
+/// The history fold over every claim the store holds, read for the single millisecond at `at`.
+fn history_at(store: &Store, at: u128) -> Instant {
+    use fractal_schema::availability::{DEADLINE_CLOCK_KIND, INTERRUPTIONS_KIND, PRESENCE_KIND, STATUS_KIND};
+    let claims = |kind| store.claims_for(ADA, Some(kind)).unwrap();
+    let buckets = history_buckets(&claims(STATUS_KIND), &claims(INTERRUPTIONS_KIND), &claims(DEADLINE_CLOCK_KIND), &claims(PRESENCE_KIND), at, at + 1, 1);
+    let [bucket] = &buckets[..] else { panic!("one bucket: {buckets:?}") };
+    assert_eq!(bucket.covered_ms, 1);
+    let (status, source, presence) = (bucket.status, bucket.status_source, bucket.presence.unwrap());
+    (
+        held([(status.available, Status::Available), (status.away, Status::Away)]),
+        held([(source.overridden, StatusSource::Override), (source.presence, StatusSource::Presence), (source.unreported, StatusSource::Unreported)]),
+        held([(presence.present, Presence::Present), (presence.idle, Presence::Idle), (presence.locked, Presence::Locked), (presence.unreported, Presence::Unreported)]),
+        held([(bucket.interruptions.all, Interruptions::All), (bucket.interruptions.urgent, Interruptions::Urgent), (bucket.interruptions.none, Interruptions::None)]),
+        held([(bucket.deadline_clock.run, DeadlineClock::Run), (bucket.deadline_clock.hold_routine, DeadlineClock::HoldRoutine), (bucket.deadline_clock.hold_all, DeadlineClock::HoldAll)]),
+    )
+}
+
+/// One write a replay applies at its instant.
+type Write = Box<dyn Fn(&Store, u128)>;
+type Event = (u128, Write);
+
+#[test]
+fn history_agrees_with_the_live_fold_at_every_instant() {
+    let store = store();
+    let status = |status, until: Option<u128>| -> Write {
+        Box::new(move |store: &Store, at: u128| { set(store, AvailabilityChange::Status(status, until.map(|until| at + until)), at); })
+    };
+    let clock = |clock, until: Option<u128>| -> Write {
+        Box::new(move |store: &Store, at: u128| { set(store, AvailabilityChange::DeadlineClock(clock, until.map(|until| at + until)), at); })
+    };
+    let reporting = |source: &'static str, state| -> Write {
+        Box::new(move |store: &Store, at: u128| { report(store, source, state, at); })
+    };
+    let events: Vec<Event> = vec![
+        (T0, reporting("mac", DeviceState::Active)),
+        (T0 + 2 * MINUTE, reporting("phone", DeviceState::Locked)),
+        (T0 + 5 * MINUTE, Box::new(|store: &Store, at: u128| { set(store, AvailabilityChange::Interruptions(Interruptions::Urgent, Some(at + 35 * MINUTE)), at); })),
+        (T0 + 8 * MINUTE, status(Some(Status::Away), Some(12 * MINUTE))),
+        (T0 + 12 * MINUTE, clock(DeadlineClock::HoldRoutine, None)),
+        // Off the sampling grid, so the idle threshold that follows is too.
+        (T0 + 25 * MINUTE + 7_000, reporting("mac", DeviceState::Active)),
+        (T0 + 30 * MINUTE, clock(DeadlineClock::HoldAll, Some(15 * MINUTE))),
+        (T0 + 31 * MINUTE, status(Some(Status::Away), None)),
+        (T0 + 33 * MINUTE, status(None, None)),
+        (T0 + 50 * MINUTE, reporting("mac", DeviceState::Inactive)),
+        // Observed ten minutes before it was accepted: it counts for a day from when it was observed.
+        (T0 + 60 * MINUTE, Box::new(|store: &Store, at: u128| {
+            let _clock = Clock::at(at);
+            store.report_person_presence(ADA, "tablet", device(DeviceState::Locked, None, at - 10 * MINUTE), at).unwrap();
+        })),
+        (T0 + 3 * 60 * MINUTE, reporting("phone", DeviceState::Sleeping)),
+        (T0 + 4 * 60 * MINUTE, Box::new(|store: &Store, at: u128| { set(store, AvailabilityChange::Interruptions(Interruptions::None, None), at); })),
+    ];
+    // Replay the writes in order and record what the live read says at each sample, just before
+    // and at every half minute, through the end of the last report's day.
+    let mut pending = events.iter().peekable();
+    let mut seen = Vec::new();
+    for grid in (T0 - MINUTE..=T0 + 28 * 60 * MINUTE).step_by(30_000) {
+        for at in [grid - 1, grid] {
+            while let Some((when, write)) = pending.next_if(|(when, _)| *when <= at) {
+                write(&store, *when);
+            }
+            seen.push((at, live(&store, at)));
+        }
+    }
+    assert!(pending.next().is_none());
+    assert!(seen.iter().any(|(_, (_, source, ..))| *source == StatusSource::Unreported), "the day runs out");
+    // History, folded after every write, says what the live read said then.
+    for (at, expected) in seen {
+        assert_eq!(history_at(&store, at), expected, "T0{:+}ms", i128::try_from(at).unwrap() - i128::try_from(T0).unwrap());
+    }
+}
+
+#[test]
+fn history_buckets_split_at_transitions_and_cover_only_the_past() {
+    let store = store();
+    report(&store, "mac", DeviceState::Active, T0);
+    set(&store, AvailabilityChange::Status(Some(Status::Away), Some(T0 + 25 * MINUTE)), T0 + 15 * MINUTE);
+    let m = |minutes: u64| minutes * 60_000;
+    // Seventy minutes asked, read at T0+55m: the last bucket covers five minutes and none the future.
+    let history = store.person_availability_history(ADA, T0 - 10 * MINUTE, T0 + 60 * MINUTE, 600, T0 + 55 * MINUTE).unwrap();
+    assert_eq!((history.from.as_str(), history.to.as_str(), history.bucket_seconds), (rfc3339(T0 - 10 * MINUTE).unwrap().as_str(), rfc3339(T0 + 55 * MINUTE).unwrap().as_str(), 600));
+    assert_eq!(history.buckets.iter().map(|bucket| bucket.start.clone()).collect::<Vec<_>>(), (0..7).map(|index| rfc3339(T0 - 10 * MINUTE + index * 10 * MINUTE).unwrap()).collect::<Vec<_>>());
+    let status = history.buckets.iter()
+        .map(|bucket| (bucket.covered_ms, bucket.status.available, bucket.status.away, bucket.status_source.overridden, bucket.status_source.presence, bucket.status_source.unreported))
+        .collect::<Vec<_>>();
+    assert_eq!(status, vec![
+        (m(10), m(10), 0, 0, 0, m(10)),     // before any report: unreported reads available
+        (m(10), m(10), 0, 0, m(10), 0),     // present
+        (m(10), 0, m(10), m(5), m(5), 0),   // idle at T0+10m, the override from T0+15m
+        (m(10), 0, m(10), m(5), m(5), 0),   // the override expires at T0+25m; still idle
+        (m(10), 0, m(10), 0, m(10), 0),
+        (m(10), 0, m(10), 0, m(10), 0),
+        (m(5), 0, m(5), 0, m(5), 0),
+    ]);
+    let presence = history.buckets.iter()
+        .map(|bucket| bucket.presence.map(|presence| (presence.present, presence.idle, presence.locked, presence.unreported)).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(presence, vec![(0, 0, 0, m(10)), (m(10), 0, 0, 0), (0, m(10), 0, 0), (0, m(10), 0, 0), (0, m(10), 0, 0), (0, m(10), 0, 0), (0, m(5), 0, 0)]);
+    for bucket in &history.buckets {
+        assert_eq!((bucket.interruptions.all, bucket.deadline_clock.run), (bucket.covered_ms, bucket.covered_ms));
+    }
+    assert!(history.without_presence().buckets.iter().all(|bucket| bucket.presence.is_none()));
+    // A bucket size that does not divide the range leaves a short last bucket.
+    let ragged = store.person_availability_history(ADA, T0, T0 + 25 * MINUTE, 600, T0 + 60 * MINUTE).unwrap();
+    assert_eq!(ragged.buckets.iter().map(|bucket| bucket.covered_ms).collect::<Vec<_>>(), vec![m(10), m(10), m(5)]);
+    assert_eq!(ragged.to, rfc3339(T0 + 25 * MINUTE).unwrap());
+}
+
+#[test]
+fn history_refuses_unbounded_reads_and_reads_an_empty_past_as_unreported() {
+    let store = store();
+    for (from, to, bucket) in [
+        (T0, T0, 60),
+        (T0 + 1, T0, 60),
+        (T0, T0 + MINUTE, 0),
+        (T0, T0 + HISTORY_MAX_RANGE_MS + 1_000, 86_400),
+        (T0, T0 + 2017 * MINUTE, 60),
+    ] {
+        assert_eq!(store.person_availability_history(ADA, from, to, bucket, T0).unwrap_err().code, "invalid-availability", "{from} {to} {bucket}");
+    }
+    assert!(store.person_availability_history("agent/worker", T0 - MINUTE, T0, 60, T0).is_err());
+    assert_eq!(store.person_availability_history(ADA, T0, T0 + HISTORY_MAX_RANGE_MS, 86_400, T0 + HISTORY_MAX_RANGE_MS).unwrap().buckets.len(), 31);
+    assert_eq!(store.person_availability_history(ADA, T0, T0 + 2016 * MINUTE, 60, T0 + 2016 * MINUTE).unwrap().buckets.len(), 2016);
+    // Entirely in the future: nothing to answer yet.
+    let ahead = store.person_availability_history(ADA, T0 + MINUTE, T0 + 2 * MINUTE, 60, T0).unwrap();
+    assert!(ahead.buckets.is_empty());
+    assert_eq!((ahead.from.as_str(), ahead.to.as_str()), (rfc3339(T0 + MINUTE).unwrap().as_str(), rfc3339(T0 + MINUTE).unwrap().as_str()));
+    // No claims at all: available and unreported throughout, as the live read says.
+    let empty = store.person_availability_history(ADA, T0 - 60 * MINUTE, T0, 600, T0).unwrap();
+    assert_eq!(empty.buckets.len(), 6);
+    for bucket in &empty.buckets {
+        assert_eq!((bucket.status.available, bucket.status_source.unreported, bucket.presence.unwrap().unreported), (600_000, 600_000, 600_000));
+    }
+    // A device's state counts for a day after it was observed, then the person is unreported.
+    report(&store, "mac", DeviceState::Locked, T0);
+    let hour = 60 * MINUTE;
+    let day = store.person_availability_history(ADA, T0 + 23 * hour, T0 + 25 * hour, 3600, T0 + 30 * hour).unwrap();
+    let rows = day.buckets.iter().map(|bucket| (bucket.status.available, bucket.status.away, bucket.status_source.presence, bucket.status_source.unreported)).collect::<Vec<_>>();
+    assert_eq!(rows, vec![(0, 3_600_000, 3_600_000, 0), (3_600_000, 0, 0, 3_600_000)]);
+}
