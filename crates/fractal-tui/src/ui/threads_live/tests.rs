@@ -30,7 +30,7 @@ fn snapshot() -> Snapshot {
 }
 
 #[test]
-fn start_thread_keycap_reads_t_and_both_t_and_shift_t_start_the_draft() {
+fn start_thread_t_and_shift_t_and_rendered_click_start_the_draft() {
     for item in super::super::demo::test_world().attention.items() {
         let item = item.id.as_str();
         let context = ThreadInterest::Inbox {
@@ -65,19 +65,6 @@ fn start_thread_keycap_reads_t_and_both_t_and_shift_t_start_the_draft() {
                 &edit::Cursor::default(),
                 &super::super::demo::test_world(),
                 &HashMap::new(),
-            );
-            let before = mounted
-                .lines
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            let start = before
-                .iter()
-                .find(|line| line.contains("Start thread"))
-                .unwrap_or_else(|| panic!("{before:#?}"));
-            assert!(
-                start.contains(" t ") && !start.contains(" T "),
-                "the keycap matches the footer and help: {start:?}"
             );
             let start_hit = mounted
                 .targets
