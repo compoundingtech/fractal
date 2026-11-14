@@ -1865,6 +1865,29 @@ version 2
     assert!(view.claim_expires_at_unix_ms.is_none());
 }
 
+// Attribution follows immutable claim episodes, not the agent's mutable desired owner.
+fn claim_usage_step(store: &Store, agent: &str, step: &str, previous: Option<&str>) {
+    let at = now_ms();
+    let mut writer = store.connection.lock().unwrap();
+    writer.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    let tx = writer.transaction().unwrap();
+    if let Some(previous) = previous {
+        fractal_store::store::append_claim_tx(&tx, store.origin(), previous, "work.released",
+            Some(agent), &json!({"fields":{"attempt":1},"evidence":[]}), &[], None).unwrap();
+    }
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h41d3a4749140 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs
+        (subject,run_id,generation_id,step_path,definition_hash,status,attempt,goals,
+         activated_at_unix_ms,created_at_unix_ms,updated_at_unix_ms)
+        VALUES(?1,'example','example',?1,'hash','working',1,'[]',?2,?2,?2)",
+        params![step, at.to_string()]).unwrap();
+    fractal_store::store::append_claim_tx(&tx, store.origin(), step, "work.claimed",
+        Some(agent), &json!({"fields":{"attempt":1,"claimant":agent,
+            "claim_incarnation":"inc-one","claim_expires_at_unix_ms":at+3_600_000},
+            "evidence":[]}), &[], None).unwrap();
+    tx.commit().unwrap();
+    writer.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+}
+
 #[test]
 fn response_usage_stays_local_while_attributed_totals_replicate() {
     let local = Store::open_memory("host-one").unwrap();
@@ -1886,12 +1909,8 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
             })
             .unwrap()
     };
-    let seed = observed("ready", "usage-seed");
-    local.connection.lock().unwrap().execute(
-        /* sqlite-large-value: allow-for-now lv-h79caef580176 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
-             VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', 'step-run/example/record')",
-        params![subject, seed.id],
-    ).unwrap();
+    observed("ready", "usage-seed");
+    claim_usage_step(&local, subject, "step-run/example/record", None);
     let record = |entry: &str, input: u64, output: u64, reads: u64, writes: u64| {
         let mut claim = timeline_observation(subject, "inc-one", entry);
         claim
@@ -2343,13 +2362,11 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
             })
             .unwrap()
     };
-    let seed = observed("working", "spend-seed");
+    observed("working", "spend-seed");
+    let previous = std::cell::RefCell::new(None::<String>);
     let own_step = |step: &str| {
-        local.connection.lock().unwrap().execute(
-            /* sqlite-large-value: allow-for-now lv-ha43c88827ede owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
-                 VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', ?3)",
-            params![subject, seed.id, step],
-        ).unwrap();
+        claim_usage_step(&local, subject, step, previous.borrow().as_deref());
+        *previous.borrow_mut() = Some(step.to_owned());
     };
     let respond = |entry: &str, body: Value| {
         let mut claim = timeline_observation(subject, "inc-one", entry);
