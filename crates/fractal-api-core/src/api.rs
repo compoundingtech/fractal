@@ -196,6 +196,7 @@ mod native_delivery;
 pub mod replication;
 mod replication_replay;
 mod runs;
+mod agent_invocations;
 pub mod sessions;
 pub mod work;
 // Other api code calls these handlers directly.
@@ -736,6 +737,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/blobs/{id}", get(client_blobs::get))
         .route("/v1/client/blobs/{id}/chunk", get(client_blobs::chunk))
+        .route("/v1/client/invocation-artifacts/{id}", get(agent_invocations::artifact).delete(agent_invocations::delete_artifact))
         .route("/v1/client/adapter/import", post(client_adapters::import_message))
         .route("/v1/client/adapter/deliveries", get(client_adapters::deliveries))
         .route("/v1/schema", get(schema))
@@ -1014,6 +1016,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
+        .route("/v1/agent-invocations/{*invocation}", get(agent_invocations::get))
+        .route("/v1/invocation-input", post(agent_invocations::input))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
             "/v1/revision-proposals/{proposal}",
@@ -7650,9 +7654,9 @@ async fn serve_reserved_unix_with_lookup_ready(
                     if let HarnessAncestry::Run(credential) = &ancestry {
                         request.extensions_mut().insert(credential.clone());
                     }
-                    if matches!(ancestry, HarnessAncestry::Unavailable) {
-                        request.extensions_mut().insert(HarnessAncestry::Unavailable);
-                    }
+                    // Preserve positive person evidence as well as failures. Private reads
+                    // must distinguish a verified operator from a missing ancestry binding.
+                    request.extensions_mut().insert(ancestry);
                     app.oneshot(request).await
                 }
             });
