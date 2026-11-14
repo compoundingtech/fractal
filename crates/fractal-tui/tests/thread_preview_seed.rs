@@ -166,6 +166,45 @@ fn seed_scratch_threads() {
     );
 }
 
+/// Agent-authored Inbox sources for the person's final inline-thread trial.
+/// Run only with the existing scratch daemon stopped, after seed_scratch_threads.
+#[test]
+#[ignore = "seeds agent asks in the isolated preview scratch store"]
+fn seed_scratch_trial_asks() {
+    use fractal_daemon::PersonWorkStore as _;
+    let root = std::path::PathBuf::from(
+        std::env::var("THREAD_PREVIEW_ROOT").expect("THREAD_PREVIEW_ROOT names the scratch root"),
+    );
+    assert!(
+        std::os::unix::net::UnixStream::connect(root.join("run/st3.sock")).is_err(),
+        "stop the scratch daemon before seeding its store",
+    );
+    let store = Store::open(&root.join("store/claims.sqlite3"), "previewnode").unwrap();
+    for (agent, title, key) in [
+        ("agent/glasshouse/botanist", "Preview trial: humidity calibration decision", "preview-trial-ask-calibration-v1"),
+        ("agent/glasshouse/surveyor", "Preview trial: frost cover decision", "preview-trial-ask-frost-v1"),
+    ] {
+        let input = fractal_daemon::model::PersonAskRequest {
+            legacy_request: None,
+            person: "person/avery".into(),
+            title: title.into(),
+            reason: "Scratch-only TUI trial. Start a thread to discuss this decision; leave the ask unanswered while testing rename, close and reopen.".into(),
+            actor: agent.into(),
+            step: None,
+            new_run: None,
+            incarnation: None,
+            request: None,
+            deadline_ms: None,
+            default_answer: None,
+            idempotency_key: key.into(),
+        };
+        let ask = store.ask_person(&input).unwrap();
+        assert_eq!(store.ask_person(&input).unwrap().subject, ask.subject, "reseed is idempotent");
+        assert!(store.attention_items(Some("person/avery")).unwrap().iter().any(|item| item.subject == ask.subject));
+        println!("TRIAL ASK subject={} requester={agent} idempotency_key={key} title={title}", ask.subject);
+    }
+}
+
 /// Synthetic scratch authority only: the sole scope is read.projections.
 /// Stop the scratch daemon before running; never use a production state root.
 #[tokio::test]
