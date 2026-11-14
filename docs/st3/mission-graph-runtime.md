@@ -1276,12 +1276,15 @@ The append-only `work.person-override` claim records `answer`, `summary`, `episo
 cutoff and shows it instead of the default. Repeating that answer is idempotent; a later
 different answer is allowed within the same seven-day window, and the latest override
 in canonical claim order stands. Duplicate keys admitted independently on offline members
-use their first canonical receipt. Retrying an earlier answer's key after a later override
+use their first canonical receipt for both standing answers and retry admission. A retry
+must match that receipt's answer and summary; conflicting offline submissions do not
+change which payload is accepted. Retrying an earlier answer's key after a later override
 succeeds without selecting the earlier answer again, including after the window closes.
 Claims with a mismatching episode, deadline link, or person
 do not stand. The ask's origin member notifies the asker once per override key, including
 overrides submitted on another member and replicated later. Disabling new deadlines does
-not stop notifications for already-resolved asks.
+not stop notifications for already-resolved asks. Once an explicit override stands,
+a delayed pre-cutoff person answer does not produce a contradictory replacement notice.
 
 An override does not reopen the origin step or roll back effects already taken on the
 default. The asker decides whether and how to compensate those effects. The explicit CLI

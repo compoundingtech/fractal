@@ -820,7 +820,7 @@ impl PersonWorkStore for Store {
                 .query_map([&subject], claim_from_row).map_err(internal)?
                 .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
             // A retry remains successful even after the admission window, without notifying again.
-            if let Some(existing) = responses.iter().find(|claim| claim.kind == "work.person-override"
+            if let Some(existing) = responses.iter().rev().find(|claim| claim.kind == "work.person-override"
                 && claim.body["fields"]["key"] == key && claim.actor.as_deref() == Some(actor.as_str())) {
                 if existing.body["fields"]["answer"] != answer || existing.body["fields"]["summary"] != summary {
                     return Err(FractalError::new("idempotency-conflict", "this override key already has another answer"));
@@ -1023,6 +1023,20 @@ impl PersonWorkStore for Store {
                     // The same cutoff `standing_responses` keeps the answer by.
                     if response.kind != "work.person-override"
                         && response.accepted_at_unix_ms >= answer_cutoff(tx, &ask)?.unwrap_or(*applied) {
+                        continue;
+                    }
+                    // An explicit post-resolution action supersedes ordinary racing answers.
+                    // A delayed pre-cutoff response must not tell the asker that it now stands.
+                    if response.kind != "work.person-override" && tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM claims replacement JOIN claims deadline
+                           ON deadline.id=json_extract(replacement.body,'$.fields.overrides')
+                         WHERE replacement.subject=?1 AND replacement.kind='work.person-override'
+                           AND replacement.actor=?2 AND json_extract(replacement.body,'$.fields.episode')=?3
+                           AND json_type(replacement.body,'$.fields.answer')='object'
+                           AND deadline.subject=?1 AND deadline.kind='work.person-done'
+                           AND json_extract(deadline.body,'$.fields.resolved_by')='deadline'
+                           AND json_extract(deadline.body,'$.fields.episode')=?3)",
+                        params![ask.subject, ask.body["fields"]["person"].as_str(), ask.id], |row| row.get::<_, bool>(0))? {
                         continue;
                     }
                     send_overridden_default_tx(tx, &self.origin, &ask, &response).map_err(anyhow::Error::new)?;

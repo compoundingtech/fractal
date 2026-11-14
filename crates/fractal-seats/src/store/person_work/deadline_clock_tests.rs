@@ -362,3 +362,55 @@ fn remote_override_notifies_owner_even_after_deadlines_are_disabled() {
         .filter(|message| message.content.contains("Effects already taken on the default were not undone")).count();
     assert_eq!(told, 1);
 }
+
+#[test]
+fn delayed_pre_cutoff_answer_does_not_contradict_a_standing_override_notification() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (owner, origin, _, mut answer, deadline) = override_fixture();
+    let other = Store::open_memory("birch").unwrap();
+    other.set_ask_deadlines(true);
+    other.project_replication_backlog().unwrap();
+    receive(&owner, &other);
+    smallclaims::store::set_thread_clock(Some(deadline - MINUTE));
+    other.finish_person_step(&answer, false).unwrap();
+    smallclaims::store::set_thread_clock(Some(deadline));
+    owner.reconcile_person_asks_at(deadline).unwrap();
+    smallclaims::store::set_thread_clock(Some(deadline + HOUR));
+    answer.answer.as_mut().unwrap().id = Some("keep-open".into());
+    owner.override_person_step(&answer).unwrap();
+    receive(&other, &owner);
+    owner.tell_overridden_defaults().unwrap();
+    let messages = owner.messages(Some("agent/alder.asker"), true).unwrap();
+    assert_eq!(messages.iter().filter(|message| message.content.contains("Effects already taken")).count(), 1);
+    assert!(messages.iter().all(|message| !message.content.contains("answered, before its deadline,")));
+    let view = owner.step_run(&origin.subject).unwrap().unwrap();
+    assert_eq!(view.person_answers.len(), 1);
+    assert_eq!(view.person_answers[0].answer.as_ref().unwrap()["id"], "keep-open");
+}
+
+#[test]
+fn conflicting_offline_override_retries_use_the_first_canonical_receipt() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (owner, origin, _, mut first, deadline) = override_fixture();
+    smallclaims::store::set_thread_clock(Some(deadline));
+    owner.reconcile_person_asks_at(deadline).unwrap();
+    let other = Store::open_memory("birch").unwrap();
+    other.project_replication_backlog().unwrap();
+    receive(&owner, &other);
+    first.summary = "First canonical summary".into();
+    let mut conflicting = first.clone();
+    conflicting.summary = "Later conflicting summary".into();
+    smallclaims::store::set_thread_clock(Some(deadline + HOUR));
+    owner.override_person_step(&first).unwrap();
+    smallclaims::store::set_thread_clock(Some(deadline + 2 * HOUR));
+    other.override_person_step(&conflicting).unwrap();
+    receive(&other, &owner);
+    receive(&owner, &other);
+    for member in [&owner, &other] {
+        member.override_person_step(&first).unwrap();
+        assert_eq!(member.override_person_step(&conflicting).unwrap_err().code, "idempotency-conflict");
+        let view = member.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(view.person_answers.len(), 1);
+        assert_eq!(view.person_answers[0].summary, first.summary);
+    }
+}
