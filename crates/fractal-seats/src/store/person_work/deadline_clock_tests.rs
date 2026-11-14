@@ -236,3 +236,181 @@ fn an_answer_after_the_stored_deadline_but_before_the_held_one_beats_the_default
         .filter(|message| message.content.contains("before its deadline")).count();
     assert_eq!(told, 1);
 }
+
+fn override_fixture() -> (Store, StepRunView, StepRunView, PersonStepResponse, u128) {
+    let (store, origin, mut input) = fixture();
+    store.set_ask_deadlines(true);
+    input.person = "person/operator".into();
+    input.request = Some(gateway_decision());
+    input.deadline_ms = Some(HOUR as u64);
+    input.default_answer = Some("keep-open".into());
+    let ask = store.ask_person(&input).unwrap();
+    let episode = request(&store.readers.get(), &ask.subject).unwrap().unwrap().id;
+    let deadline = stored_deadline(&store, &ask.subject);
+    let answer = PersonStepResponse {
+        delegation: None, subject: ask.subject.clone(), actor: "person/operator".into(),
+        summary: String::new(), evidence: vec![], episode: Some(episode),
+        idempotency_key: "override".into(),
+        answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: vec![] }),
+    };
+    (store, origin, ask, answer, deadline)
+}
+
+#[test]
+fn deadline_override_stands_on_another_member_and_tells_the_asker_once() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (store, origin, ask, answer, deadline) = override_fixture();
+    smallclaims::store::set_thread_clock(Some(deadline));
+    assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
+    smallclaims::store::set_thread_clock(Some(deadline + HOUR));
+    store.override_person_step(&answer).unwrap();
+    store.override_person_step(&answer).unwrap();
+    let other = Store::open_memory("birch").unwrap();
+    other.set_ask_deadlines(true);
+    other.project_replication_backlog().unwrap();
+    receive(&store, &other);
+    for member in [&store, &other] {
+        let view = member.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(view.person_answers.len(), 1);
+        assert_eq!(view.person_answers[0].answer.as_ref().unwrap()["id"], "land");
+        let own = member.step_run(&ask.subject).unwrap().unwrap();
+        assert_eq!(own.person_answers[0].answer.as_ref().unwrap()["id"], "land");
+    }
+    let told = store.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
+        .filter(|message| message.content.contains("Effects already taken on the default were not undone")).count();
+    assert_eq!(told, 1);
+    // A different answer is another explicit override; the latest one stands.
+    let mut changed = answer.clone();
+    changed.answer.as_mut().unwrap().id = Some("keep-open".into());
+    smallclaims::store::set_thread_clock(Some(deadline + 2 * HOUR));
+    store.override_person_step(&changed).unwrap();
+    let view = store.step_run(&origin.subject).unwrap().unwrap();
+    assert_eq!(view.person_answers.len(), 1);
+    assert_eq!(view.person_answers[0].answer.as_ref().unwrap()["id"], "keep-open");
+    smallclaims::store::set_thread_clock(Some(deadline + fractal_missions::store::person_work::PERSON_OVERRIDE_WINDOW_MS + 1));
+    store.override_person_step(&answer).unwrap();
+    let view = store.step_run(&origin.subject).unwrap().unwrap();
+    assert_eq!(view.person_answers[0].answer.as_ref().unwrap()["id"], "keep-open", "an older key retry does not reselect it");
+}
+
+#[test]
+fn deadline_override_admission_fences() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (store, _, _, answer, deadline) = override_fixture();
+    assert_eq!(store.override_person_step(&answer).unwrap_err().code, "stale-fence", "open ask");
+    smallclaims::store::set_thread_clock(Some(deadline));
+    store.reconcile_person_asks_at(deadline).unwrap();
+    let mut invalid = answer.clone();
+    invalid.actor = "agent/operator".into();
+    assert_eq!(store.override_person_step(&invalid).unwrap_err().code, "forbidden");
+    invalid.actor = "person/other".into();
+    assert_eq!(store.override_person_step(&invalid).unwrap_err().code, "forbidden");
+    invalid = answer.clone();
+    invalid.episode = Some("wrong-episode".into());
+    assert_eq!(store.override_person_step(&invalid).unwrap_err().code, "stale-fence");
+    smallclaims::store::set_thread_clock(Some(deadline + fractal_missions::store::person_work::PERSON_OVERRIDE_WINDOW_MS + 1));
+    assert_eq!(store.override_person_step(&answer).unwrap_err().code, "stale-fence");
+}
+
+#[test]
+fn person_answer_cannot_be_overridden_as_a_deadline_answer() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (store, _, _, answer, _) = override_fixture();
+    store.finish_person_step(&answer, false).unwrap();
+    assert_eq!(store.override_person_step(&answer).unwrap_err().code, "stale-fence");
+}
+
+#[test]
+fn override_retried_on_offline_members_notifies_only_once_after_replication() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (owner, _, _, answer, deadline) = override_fixture();
+    smallclaims::store::set_thread_clock(Some(deadline));
+    owner.reconcile_person_asks_at(deadline).unwrap();
+    let other = Store::open_memory("birch").unwrap();
+    other.set_ask_deadlines(true);
+    other.project_replication_backlog().unwrap();
+    receive(&owner, &other);
+    smallclaims::store::set_thread_clock(Some(deadline + HOUR));
+    other.override_person_step(&answer).unwrap();
+    assert!(other.messages(Some("agent/alder.asker"), true).unwrap().iter()
+        .all(|message| !message.content.contains("Effects already taken")));
+    owner.override_person_step(&answer).unwrap();
+    receive(&other, &owner);
+    owner.tell_overridden_defaults().unwrap();
+    owner.tell_overridden_defaults().unwrap();
+    let told = owner.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
+        .filter(|message| message.content.contains("Effects already taken on the default were not undone")).count();
+    assert_eq!(told, 1);
+}
+
+#[test]
+fn remote_override_notifies_owner_even_after_deadlines_are_disabled() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (owner, _, _, answer, deadline) = override_fixture();
+    smallclaims::store::set_thread_clock(Some(deadline));
+    owner.reconcile_person_asks_at(deadline).unwrap();
+    let other = Store::open_memory("birch").unwrap();
+    other.project_replication_backlog().unwrap();
+    receive(&owner, &other);
+    owner.set_ask_deadlines(false);
+    smallclaims::store::set_thread_clock(Some(deadline + HOUR));
+    other.override_person_step(&answer).unwrap();
+    receive(&other, &owner);
+    assert!(owner.reconcile_person_asks_at(deadline + HOUR).unwrap().changed);
+    owner.reconcile_person_asks_at(deadline + HOUR + 1).unwrap();
+    let told = owner.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
+        .filter(|message| message.content.contains("Effects already taken on the default were not undone")).count();
+    assert_eq!(told, 1);
+}
+
+#[test]
+fn delayed_pre_cutoff_answer_does_not_contradict_a_standing_override_notification() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (owner, origin, _, mut answer, deadline) = override_fixture();
+    let other = Store::open_memory("birch").unwrap();
+    other.set_ask_deadlines(true);
+    other.project_replication_backlog().unwrap();
+    receive(&owner, &other);
+    smallclaims::store::set_thread_clock(Some(deadline - MINUTE));
+    other.finish_person_step(&answer, false).unwrap();
+    smallclaims::store::set_thread_clock(Some(deadline));
+    owner.reconcile_person_asks_at(deadline).unwrap();
+    smallclaims::store::set_thread_clock(Some(deadline + HOUR));
+    answer.answer.as_mut().unwrap().id = Some("keep-open".into());
+    owner.override_person_step(&answer).unwrap();
+    receive(&other, &owner);
+    owner.tell_overridden_defaults().unwrap();
+    let messages = owner.messages(Some("agent/alder.asker"), true).unwrap();
+    assert_eq!(messages.iter().filter(|message| message.content.contains("Effects already taken")).count(), 1);
+    assert!(messages.iter().all(|message| !message.content.contains("answered, before its deadline,")));
+    let view = owner.step_run(&origin.subject).unwrap().unwrap();
+    assert_eq!(view.person_answers.len(), 1);
+    assert_eq!(view.person_answers[0].answer.as_ref().unwrap()["id"], "keep-open");
+}
+
+#[test]
+fn conflicting_offline_override_retries_use_the_first_canonical_receipt() {
+    let _clock = SimulatedClock::at(ASKED);
+    let (owner, origin, _, mut first, deadline) = override_fixture();
+    smallclaims::store::set_thread_clock(Some(deadline));
+    owner.reconcile_person_asks_at(deadline).unwrap();
+    let other = Store::open_memory("birch").unwrap();
+    other.project_replication_backlog().unwrap();
+    receive(&owner, &other);
+    first.summary = "First canonical summary".into();
+    let mut conflicting = first.clone();
+    conflicting.summary = "Later conflicting summary".into();
+    smallclaims::store::set_thread_clock(Some(deadline + HOUR));
+    owner.override_person_step(&first).unwrap();
+    smallclaims::store::set_thread_clock(Some(deadline + 2 * HOUR));
+    other.override_person_step(&conflicting).unwrap();
+    receive(&other, &owner);
+    receive(&owner, &other);
+    for member in [&owner, &other] {
+        member.override_person_step(&first).unwrap();
+        assert_eq!(member.override_person_step(&conflicting).unwrap_err().code, "idempotency-conflict");
+        let view = member.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(view.person_answers.len(), 1);
+        assert_eq!(view.person_answers[0].summary, first.summary);
+    }
+}

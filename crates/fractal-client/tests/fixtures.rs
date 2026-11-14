@@ -1287,6 +1287,23 @@ fn ordered_membership_envelopes_decode_and_missing_buckets_fail_before_a_request
 }
 
 #[test]
+fn invocation_attribution_preserves_each_optional_evidence_field() {
+    for mask in 0..8 {
+        let mut raw = serde_json::json!({"agent_id":"agent/example",
+            "mission_run_id":null,"generation_id":null,"step_id":null});
+        for (bit, key, value) in [
+            (1, "execution_id", serde_json::json!("claim/exact")),
+            (2, "invocation_id", serde_json::json!("invocation/exact")),
+            (4, "attempt", serde_json::json!(2)),
+        ] {
+            if mask & bit != 0 { raw[key] = value; }
+        }
+        let typed: TimelineAttribution = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), raw);
+    }
+}
+
+#[test]
 fn relay_omission_fixture_round_trips_without_inventing_nonnullable_fields() {
     let bytes = fixture("timeline-relay-omission.json");
     let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

@@ -2,6 +2,105 @@
     mod agent_review_loop_branches;
 
     #[test]
+    fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
+        for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
+            "unsupported", "unproven-stop"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let subject = "agent/example/transcript";
+            apply_source(&store,
+                "version 2\nagent \"example/transcript\" { workspace \"/tmp\"; command \"true\"; }",
+                "transcript-fixture");
+            let desired = store.desired_subject_with_writer(subject).unwrap().unwrap().0;
+            let mut member = desired.member.clone().unwrap();
+            member.driver = Some(if case == "unsupported" { "codex" } else { "omp" }.into());
+            let operation_id = uuid::Uuid::now_v7().to_string();
+            member.tags.insert(start_jobs::OPERATION_TAG.into(), operation_id.clone());
+            let invocation = format!("invocation/{operation_id}");
+            let mut operation = RuntimeStartOperation {
+                id: operation_id.clone(), subject: subject.into(), owner: "fixture".into(),
+                body: serde_json::json!({"subject":desired,
+                    "selected_token":store.selected_desired_token(subject).unwrap().unwrap(),
+                    "request":null, "member":desired.member, "launch_member":member, "reason":"fixture"}),
+                revoked_by:None, finished:false, result:None, applied:false,
+                cleanup_verified:false, dispatched:false, receipted:false,
+            };
+            if case != "unproven-stop" {
+                store.admit_runtime_start(&mut operation, 2).unwrap();
+                assert!(store.invocation_launch_member(&invocation).unwrap().is_some());
+            }
+            store.append_claim(&ClaimInput { subject:subject.into(), kind:"harness.invocation".into(),
+                actor:None, fields:serde_json::from_value(serde_json::json!({
+                    "invocation_id":invocation, "operation_id":operation_id, "agent":subject,
+                    "phase":"started", "incarnation":"exact-incarnation", "harness":member.driver
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            if case == "exact" {
+                store.append_claim(&ClaimInput { subject:subject.into(), kind:"harness.invocation".into(),
+                    actor:None, fields:serde_json::from_value(serde_json::json!({
+                        "invocation_id":"invocation/turn-capture", "operation_id":"turn-capture",
+                        "agent":subject, "phase":"started", "incarnation":"exact-incarnation",
+                        "parent_invocation_id":invocation, "event_key":"message/turn"
+                    })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            }
+            let runtime_fields = |status: &str, incarnation: &str| BTreeMap::from([
+                ("status".into(), Value::from(status)),
+                ("incarnation_id".into(), Value::from(incarnation)),
+                ("runtime_id".into(), Value::from(member.runtime_id.clone())),
+                ("terminal".into(), Value::from(member.terminal)),
+            ]);
+            let bound_incarnation = if case == "wrong-incarnation" { "other-incarnation" } else { "exact-incarnation" };
+            store.append_claim(&ClaimInput { subject:subject.into(), kind:"runtime.observed".into(),
+                actor:None, fields:runtime_fields("running", bound_incarnation),
+                evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            let transcript = root.path().join("native.jsonl");
+            fs::write(&transcript, format!("{}\n{}\n",
+                serde_json::json!({"type":"session","id":"native-exact","cwd":root.path()}),
+                serde_json::json!({"type":"message","id":"m1","message":{
+                    "role":"user","content":"token=fixture-secret"}}))).unwrap();
+            let binding = store.append_claim(&ClaimInput {
+                subject:subject.into(), kind:"harness.session-file".into(), actor:Some(subject.into()),
+                fields:serde_json::from_value(serde_json::json!({
+                    "harness":member.driver, "incarnation_id":bound_incarnation,
+                    "session_id":if case == "wrong-session" { "native-other" } else { "native-exact" },
+                    "path":transcript,
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            let runtime = Arc::new(FakeRuntime::default());
+            let mut reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+            reconciler.driver_state_dir = root.path().join("drivers");
+            let status = match case { "running" => "running", "vanished" => "vanished", _ => "stopped" };
+            // Exercise the actual observation writer, including its unchanged-observation retry.
+            for _ in 0..2 {
+                reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+            }
+            let claims = store.claims_for(subject, Some("harness.invocation-artifact")).unwrap();
+            let captured = claims.iter().filter(|claim| claim.body["fields"]["status"] == "retained").collect::<Vec<_>>();
+            if case == "exact" {
+                assert_eq!(captured.len(), 1);
+                let artifact: crate::invocation_artifacts::InvocationArtifact =
+                    serde_json::from_value(captured[0].body["fields"]["artifact"].clone()).unwrap();
+                assert_eq!(artifact.incarnation.as_deref(), Some("exact-incarnation"));
+                assert_eq!(artifact.native_session_id.as_deref(), Some("native-exact"));
+                assert_eq!(artifact.binding_claim.as_deref(), Some(binding.id.as_str()));
+                assert_eq!(artifact.invocation_id, invocation);
+                assert!(store.invocation_receipts(&invocation).unwrap().iter().any(|receipt|
+                    receipt.transcript_ref == Some(format!("sha256:{}", artifact.sha256))));
+                assert!(store.invocation_receipts("invocation/turn-capture").unwrap().iter()
+                    .all(|receipt| receipt.transcript_ref.is_none()));
+                assert!(!claims.iter().any(|claim|
+                    claim.body["fields"]["invocation_id"] == "invocation/turn-capture"
+                        && claim.body["fields"]["status"] == "retained"));
+                let bytes = crate::invocation_artifacts::read(root.path(), &artifact, now_ms()).unwrap().unwrap();
+                assert!(!String::from_utf8(bytes).unwrap().contains("fixture-secret"));
+                fs::write(&transcript, "not the original transcript").unwrap();
+                reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+                assert_eq!(store.claims_for(subject, Some("harness.invocation-artifact")).unwrap().len(), claims.len());
+            } else {
+                assert!(captured.is_empty(), "{case} must never retain guessed or live bytes");
+            }
+        }
+    }
+
+    #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;
         use fractal_runtime::PRIORITY_ENV;
