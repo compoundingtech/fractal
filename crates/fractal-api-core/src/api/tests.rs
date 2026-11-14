@@ -16694,8 +16694,8 @@ async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_del
     let allowed = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
         AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap();
     assert_eq!(allowed.status(),StatusCode::OK);
-    super::agent_invocations::delete_artifact(State(state.clone()),Extension(owner.clone()),
-        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap();
+    drop(super::agent_invocations::delete_artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap());
     let deleted = super::agent_invocations::artifact(State(state),Extension(owner),
         AxumPath(artifact.sha256),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
     assert_eq!(deleted.status,StatusCode::GONE);
@@ -16715,7 +16715,7 @@ async fn invocation_input_requires_authenticated_exact_agent_incarnation_and_mes
         })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
     state.store.append_claim(&ClaimInput { subject:"message/exact".into(), kind:"message.sent".into(),
         actor:None, fields:serde_json::from_value(json!({"from":"person/owner","to":agent,
-            "content":"wake", "tags":[format!("fractal-invocation:{invocation}")]})).unwrap(),
+            "content":"wake", "status":"sent", "tags":[format!("fractal-invocation:{invocation}")]})).unwrap(),
         evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
     let request = || InputRequest { agent:agent.into(), incarnation:"exact-incarnation".into(),
         invocation_id:invocation.into(), message_id:"message/exact".into(),
@@ -16845,7 +16845,7 @@ async fn invocation_input_rejects_non_message_events_and_foreign_or_untagged_mes
     ] {
         state.store.append_claim(&ClaimInput { subject:subject.into(), kind:"message.sent".into(),
             actor:None, fields:serde_json::from_value(json!({"from":"person/owner",
-                "to":recipient,"content":"wake","tags":tags})).unwrap(),
+                "to":recipient,"content":"wake","status":"sent","tags":tags})).unwrap(),
             evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
     }
     for event in [observation.id.as_str(), "work-claim-event", "transcript:0123456789",
