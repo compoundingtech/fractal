@@ -587,15 +587,20 @@ isolated daemon for reviewing Threads; Storybook's `Fractal/App/InboxThreads` st
 fixtures. `serve` makes a throwaway instance (`threadspreview`, under its own HOME in
 `/var/tmp/fractal-threadspreview`) with `thread_writes = true` and agent/example/manager as the
 explicit `inbox_fallback_agent`, person/avery, program seats agent/example/atlas and
-agent/example/manager, and one full-control device paired through the client gateway. It seeds two
-atlas asks (one with an earlier thread and an atlas reply, one with no thread) and the human gate of
-mission `example/release-notes`, whose discussion falls back to the Manager. Vite then serves the
-app on `127.0.0.1:5317` through `WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`.
+agent/example/manager, and one full-control owner device paired through the client gateway. The
+browser's own credential comes from Fractal's browser pairing (`browser_pairing_login` is set for
+the instance): the owner device asks, the script approves the "Pair browser" ask from that device as
+avery would from the Inbox, and the browser redeems its one-use key, so the daemon grants it
+`thread-browser-send`. It seeds two atlas asks (one with an earlier thread, one with no thread) and
+the human gate of mission `example/release-notes`, whose discussion falls back to the Manager, with
+one thread so the Missions view lists it. Vite then serves the app on `127.0.0.1:5317` through
+`WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`, with the browser's credential.
 
-Seats never write on their own: `reply THREAD atlas|manager TEXT` posts an agent message with
-Fractal's agent-side command, and `link-ask THREAD TITLE` has atlas ask again and link the new ask to
-an existing thread. `offline` and `online` stop and restart the daemon for the paused and reconnect
-states, `revoke` revokes the browser device for the refused state, and `down` removes the instance.
+Seats never write on their own, and the fixture daemon attributes every local command to the person,
+so the preview holds no agent-authored thread replies, and it cannot link a new ask to a thread:
+only the bound requesting agent may. `offline` and `online` stop and restart the daemon for the
+paused and reconnect states, `revoke` revokes the browser pairing as the app's own revoke does (the
+refused state), and `down` removes the instance.
 The script needs a systemd user manager, `pty`, and `FRACTAL_BINARY` set to the test-support
 `fractal-fixture` built from this checkout
 (`cargo build --locked -p fractal --features test-support --bin fractal-fixture`).

@@ -3,26 +3,26 @@
  * Connected, controlled Threads preview: the real web app against a real, isolated Fractal.
  *
  *   node apps/fractal-web/scripts/threads-live-preview.mjs serve        # up + seed + serve on loopback
- *   node apps/fractal-web/scripts/threads-live-preview.mjs reply THREAD [atlas|manager] TEXT
- *   node apps/fractal-web/scripts/threads-live-preview.mjs link-ask THREAD TITLE   # atlas asks again, linked to THREAD
  *   node apps/fractal-web/scripts/threads-live-preview.mjs offline|online|revoke|status|down
  *
  * `serve` makes a throwaway instance (`threadspreview`) under its own HOME in PREVIEW_ROOT
  * (default /var/tmp/fractal-threadspreview), so neither `~/.st-instance` nor the default install
  * is touched. The daemon opts into thread writes and names agent/example/manager as the explicit
  * `inbox_fallback_agent`. It declares person/avery and two program seats (atlas and manager), pairs
- * one full-control browser device for avery (its bearer stays in PREVIEW_ROOT/authorization,
- * mode 0600) and seeds three Inbox sources:
- *   - "Review the release checklist", asked by atlas, with one earlier thread and an atlas reply;
+ * one full-control owner device for avery, and through it a browser by Fractal's own browser pairing,
+ * so the daemon grants the browser `thread-browser-send` (both bearers stay in PREVIEW_ROOT, mode 0600).
+ * It seeds three Inbox sources:
+ *   - "Review the release checklist", asked by atlas, with one earlier thread;
  *   - "Confirm the rollout window", asked by atlas, with no thread (the empty state);
  *   - the human gate of mission example/release-notes, which has no originating agent, so
- *     discussion goes to the configured Manager fallback and its threads belong to that mission.
+ *     discussion goes to the configured Manager fallback; one thread on it, so the Missions view lists it.
  * It then serves the app with Vite on 127.0.0.1:PREVIEW_PORT (default 5317) through the existing
  * WF_ST_GATEWAY/WF_ST_AUTHORIZATION paired gateway. The browser authenticates only through that path.
  *
- * Agents in this instance are program seats: they never write on their own. `reply` is the only way
- * an agent message appears, so every agent line on screen was typed by the reviewer through Fractal's
- * own agent-side command. `offline` stops the daemon (the app shows its paused and reconnecting
+ * Agents in this instance are program seats: they never write on their own. The fixture daemon attributes every
+ * local command to a person (see below), so no agent-authored thread reply can be seeded or typed here, and the
+ * daemon refuses to link a new ask to a thread (only the bound requesting agent may); every message on screen is
+ * the person's. `offline` stops the daemon (the app shows its paused and reconnecting
  * states), `online` starts it again, `revoke` revokes the browser pairing (the app falls back to its
  * refused state; `serve` pairs a new device on the next start), and `down` removes everything.
  *
@@ -36,7 +36,7 @@
  * every host) and uses its own login shell. It is not the installed runtime.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { basename, dirname, join } from 'node:path'
@@ -54,7 +54,9 @@ const home = join(root, 'home')
 const tools = join(root, 'tools')
 const instanceDir = join(home, '.st-instance', instance)
 const runDir = join(instanceDir, 'run')
-const authorizationFile = join(root, 'authorization')
+const authorizationFile = join(root, 'authorization') // the browser's, granted by browser pairing
+const ownerAuthorizationFile = join(root, 'owner-authorization') // avery's full-control device
+const browserLogin = 'avery@preview.invalid'
 const gateway = () => {
   const socket = join(runDir, 'fractal-client.sock')
   // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
@@ -69,11 +71,11 @@ const env = which('env')
 const sleep = which('sleep')
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** A transient user unit with the instance's clean environment; the daemon attributes a local caller by ST_AGENT. */
-const isolated = (argv, agent) => [env, '-i', `HOME=${home}`, `PATH=${tools}:${dirname(sleep)}:/usr/bin:/bin`, `USER=${process.env.USER ?? 'preview'}`,
-  'LANG=C.UTF-8', 'SHELL=/bin/sh', ...(agent === undefined ? [] : [`ST_AGENT=${agent}`]), ...argv]
-const fractal = (args, { check = true, agent, input } = {}) => {
-  const result = spawnSync('systemd-run', ['--user', '--wait', '--pipe', '--collect', '--quiet', ...isolated([join(tools, 'fractal'), '--instance', instance, ...args], agent)],
+/** A transient user unit with the instance's clean environment. */
+const isolated = (argv) => [env, '-i', `HOME=${home}`, `PATH=${tools}:${dirname(sleep)}:/usr/bin:/bin`, `USER=${process.env.USER ?? 'preview'}`,
+  'LANG=C.UTF-8', 'SHELL=/bin/sh', ...argv]
+const fractal = (args, { check = true, input } = {}) => {
+  const result = spawnSync('systemd-run', ['--user', '--wait', '--pipe', '--collect', '--quiet', ...isolated([join(tools, 'fractal'), '--instance', instance, ...args])],
     { encoding: 'utf8', ...(input === undefined ? {} : { input }) })
   if (check && result.status !== 0) throw new Error(`fractal ${args.join(' ')} exited ${result.status}: ${result.stderr || result.stdout}`)
   return result
@@ -82,16 +84,45 @@ const fractalJson = (args, options) => JSON.parse(fractal(['--json', ...args], o
 const alive = () => existsSync(gateway()) && fractal(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
 const marker = (name) => join(root, name)
 
-const gatewayPost = (path, body) => new Promise((resolve, reject) => {
-  const payload = JSON.stringify(body)
-  const req = request({ socketPath: gateway(), path, method: 'POST', headers: { host: '127.0.0.1', 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (res) => {
+const gatewayCall = (method, path, body, authorization) => new Promise((resolve, reject) => {
+  const payload = body === undefined ? undefined : JSON.stringify(body)
+  const headers = { host: '127.0.0.1', ...(authorization === undefined ? {} : { authorization }),
+    ...(payload === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }) }
+  const req = request({ socketPath: gateway(), path, method, headers }, (res) => {
     let text = ''
     res.on('data', (chunk) => { text += chunk })
-    res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`POST ${path}: ${res.statusCode} ${text}`)))
+    res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`${method} ${path}: ${res.statusCode} ${text}`)))
   })
   req.on('error', reject)
   req.end(payload)
 })
+
+/**
+ * The browser's credential comes from Fractal's own browser pairing, so the daemon grants it
+ * `thread-browser-send` exactly as it would a browser paired through the web server: the owner
+ * device asks, avery approves the "Pair browser" ask from that device, and the browser redeems
+ * its one-use request key. The approval is the click a person makes in their Inbox; here the
+ * script makes it, through the same client action.
+ */
+async function pairBrowser(owner) {
+  const requestKey = randomBytes(32).toString('hex')
+  const begun = (await gatewayCall('POST', '/v1/client/pairing/browser-requests', {
+    deviceLabel: 'Threads preview browser', tailnetLogin: browserLogin,
+    requestKeyDigest: createHash('sha256').update(requestKey).digest('hex'),
+  }, owner)).value
+  const inbox = await gatewayCall('GET', '/v1/client/attention', undefined, owner)
+  const approval = inbox.value.items.find((item) => item.state === 'open' && item.detail?.includes(`Request: ${begun.requestId}`))
+  if (approval === undefined) throw new Error(`no "Pair browser" ask for browser request ${begun.requestId}`)
+  const id = `action/${randomUUID()}`
+  await gatewayCall('POST', '/v1/client/actions', {
+    api_version: inbox.api_version, id, type: 'work.done', idempotency_key: id,
+    fence: { snapshot_id: inbox.snapshot.id, subject_revisions: { [approval.id]: approval.revision } },
+    parameters: { target_id: approval.source_id, episode: approval.episode, summary: 'Approve', answer: { id: 'approve' } },
+  }, owner)
+  const redeemed = (await gatewayCall('POST', `/v1/client/pairing/browser-requests/${begun.requestId}/redeem`, { requestKey }, owner)).value
+  if (typeof redeemed.bearer !== 'string') throw new Error(`browser request ${begun.requestId} was not approved: ${JSON.stringify(redeemed)}`)
+  return `Bearer ${redeemed.bearer}`
+}
 
 /** The daemon reads its policy from the instance's config file at startup. */
 function configure() {
@@ -100,7 +131,8 @@ function configure() {
   mkdirSync(directory, { recursive: true })
   const file = join(directory, 'config.toml')
   const current = existsSync(file) ? readFileSync(file, 'utf8') : ''
-  const lines = [['thread_writes', 'thread_writes = true'], ['inbox_fallback_agent', `inbox_fallback_agent = "${agents.manager}"`]]
+  const lines = [['thread_writes', 'thread_writes = true'], ['inbox_fallback_agent', `inbox_fallback_agent = "${agents.manager}"`],
+    ['browser_pairing_login', `browser_pairing_login = "${browserLogin}"`]]
     .filter(([key]) => !new RegExp(`^${key}\\s*=`, 'm').test(current)).map(([, line]) => line)
   // Root keys must precede the first table.
   if (lines.length > 0) writeFileSync(file, `${lines.join('\n')}\n${current}`)
@@ -123,20 +155,30 @@ async function start() {
     writeFileSync(marker('fleet-created'), '')
   }
   configure()
-  spawnSync('systemctl', ['--user', 'reset-failed', unit], { stdio: 'ignore' })
-  execFileSync('systemd-run', ['--user', `--unit=${unit}`, '--collect', '--quiet', ...isolated([join(tools, 'fractal'), '--instance', instance, 'up', '--pty-binary', join(tools, 'pty')])])
-  for (let i = 0; i < 120 && !alive(); i++) await pause(500)
-  if (!alive()) throw new Error(`The preview daemon did not start; see journalctl --user -u ${unit}`)
+  await launch()
   if (!existsSync(marker('setup-done'))) {
     fractal(['setup', '--person', person.slice('person/'.length), '--yes', '--service', 'false', '--install', 'false', '--harness', 'none', '--claude-channel', 'false', '--assistant', 'false'])
     writeFileSync(marker('setup-done'), '')
+    // The daemon reads its person at startup; browser pairing is the configured person's alone.
+    spawnSync('systemctl', ['--user', 'stop', unit], { stdio: 'inherit' })
+    await launch()
   }
+}
+
+async function launch() {
+  // A daemon unit that is already running is waited for, never launched a second time.
+  if (spawnSync('systemctl', ['--user', 'is-active', '--quiet', unit]).status !== 0) {
+    spawnSync('systemctl', ['--user', 'reset-failed', unit], { stdio: 'ignore' })
+    execFileSync('systemd-run', ['--user', `--unit=${unit}`, '--collect', '--quiet', ...isolated([join(tools, 'fractal'), '--instance', instance, 'up', '--pty-binary', join(tools, 'pty')])])
+  }
+  for (let i = 0; i < 120 && !alive(); i++) await pause(500)
+  if (!alive()) throw new Error(`The preview daemon did not start; see journalctl --user -u ${unit}`)
 }
 
 async function up() {
   if (!alive()) await start()
   if (!existsSync(marker('declared'))) {
-    // Program seats exist in the roster and run; they never write unless `reply` speaks for them.
+    // Program seats exist in the roster and run; they never write on their own.
     const seats = join(root, 'seats.kdl')
     writeFileSync(seats, ['version 2', ...Object.values(agents).map((agent) =>
       `agent "${agent.slice('agent/'.length)}" {\n  workspace "${join(root, 'workspace')}"\n  argv "${sleep}" "infinity"\n}`)].join('\n') + '\n')
@@ -158,18 +200,21 @@ mission "${mission}" state="ready" {
     writeFileSync(marker('declared'), '')
   }
   for (let i = 0; i < 60 && (fractal(['agents', 'ls']).stdout.match(/running/g) ?? []).length < 2; i++) await pause(500)
-  if (!existsSync(authorizationFile)) {
-    // Pair as a web device would: begin locally for avery, complete on the paired gateway.
-    const challenge = fractalJson(['devices', 'pair', 'Threads preview browser', '--full-control', '--as', person]).value
-    const session = await gatewayPost(`/v1/client/pairings/${encodeURIComponent(challenge.pairing_id.replace(/^pairing\//, ''))}/complete`, {
+  if (!existsSync(ownerAuthorizationFile)) {
+    // avery's own device: begin locally, complete on the paired gateway.
+    const challenge = fractalJson(['devices', 'pair', 'Threads preview owner device', '--full-control', '--as', person]).value
+    const session = await gatewayCall('POST', `/v1/client/pairings/${encodeURIComponent(challenge.pairing_id.replace(/^pairing\//, ''))}/complete`, {
       api_version: 'st3.client.v0', code: challenge.code, device_public_key: `threads-preview-${randomBytes(24).toString('base64url')}`,
     })
     const credential = session.value?.credential ?? session.credential
     if (!credential) throw new Error('Pairing returned no credential')
-    writeFileSync(authorizationFile, `Bearer ${credential}`, { mode: 0o600 })
-    writeFileSync(marker('pairing'), challenge.pairing_id)
+    writeFileSync(ownerAuthorizationFile, `Bearer ${credential}`, { mode: 0o600 })
+  }
+  if (!existsSync(authorizationFile)) {
+    writeFileSync(authorizationFile, await pairBrowser(readFileSync(ownerAuthorizationFile, 'utf8').trim()), { mode: 0o600 })
   }
   if (!existsSync(marker('seeded'))) seed()
+  if (!existsSync(marker('mission-thread'))) discussGate()
 }
 
 function ask(key, title, reason) {
@@ -185,24 +230,17 @@ function seed() {
   const started = fractal(['attention', 'discuss', review, '-m', 'Does the checklist cover the database migration?', '--as', person]).stdout
   const thread = started.match(/thread\/[A-Za-z0-9_-]+/)?.[0]
   if (thread === undefined) throw new Error(`attention discuss printed no thread: ${started}`)
-  reply(thread, 'atlas', 'Not yet. I will add the migration and its rollback as separate checklist items.')
   writeFileSync(marker('seeded'), `${thread}\n`)
 }
 
-function reply(thread, who, text) {
-  const agent = agents[who]
-  if (agent === undefined) throw new Error(`reply speaks for ${Object.keys(agents).join(' or ')}`)
-  process.stdout.write(fractal(['conversations', 'reply-in-thread', thread, '-m', text], { agent }).stdout)
-}
-
-/** A new ask from atlas, attached to an existing (possibly closed) thread as its requesting agent. */
-function linkAsk(thread, title) {
-  const key = `link-${randomBytes(4).toString('hex')}`
-  const subject = ask(key, title, 'Following up in the thread we already have.')
-  const events = fractalJson(['trace', 'show', subject, '--as', agents.atlas]).value?.items ?? []
-  const claim = events.find((event) => event.kind === 'work.person-asked')?.claim_id
-  if (claim === undefined) throw new Error(`no work.person-asked claim in the trace of ${subject}`)
-  process.stdout.write(fractal(['work', 'link-thread', subject, '--thread', thread, '--episode', claim, '--as', agents.atlas]).stdout)
+/** A thread on the mission's human gate, so the Missions view lists a thread the Manager fallback holds. */
+function discussGate() {
+  const gate = fractalJson(['attention', 'ls', '--as', person]).value.items.find((item) => item.mission_id === `mission/${mission}`)
+  if (gate === undefined) throw new Error(`no open attention for mission/${mission}`)
+  const started = fractal(['attention', 'discuss', gate.id, '-m', 'Before I approve: are the breaking changes listed first?', '--as', person]).stdout
+  const thread = started.match(/thread\/[A-Za-z0-9_-]+/)?.[0]
+  if (thread === undefined) throw new Error(`attention discuss printed no thread: ${started}`)
+  writeFileSync(marker('mission-thread'), `${thread}\n`)
 }
 
 async function serve() {
@@ -222,9 +260,9 @@ async function serve() {
   }, null, 2))
 }
 
-function revoke() {
-  const pairing = readFileSync(marker('pairing'), 'utf8').trim()
-  process.stdout.write(fractal(['devices', 'revoke', pairing, '--as', person]).stdout)
+/** The browser forgets itself the way the app's own revoke does; the next `serve` pairs it again. */
+async function revoke() {
+  process.stdout.write(`${JSON.stringify(await gatewayCall('POST', '/v1/client/pairing/browser-requests/revoke-current', {}, readFileSync(authorizationFile, 'utf8').trim()))}\n`)
   rmSync(authorizationFile, { force: true })
 }
 
@@ -244,22 +282,12 @@ function down() {
   console.log(`removed ${root}`)
 }
 
-const [command = 'serve', ...rest] = process.argv.slice(2)
+const [command = 'serve'] = process.argv.slice(2)
 if (command === 'serve') await serve()
 else if (command === 'up') await up()
-else if (command === 'reply') {
-  const [thread, who, ...text] = rest
-  if (thread === undefined || text.length === 0) throw new Error('usage: threads-live-preview.mjs reply THREAD atlas|manager TEXT')
-  reply(thread, who, text.join(' '))
-}
 else if (command === 'offline') spawnSync('systemctl', ['--user', 'stop', unit], { stdio: 'inherit' })
 else if (command === 'online') await start()
-else if (command === 'revoke') revoke()
+else if (command === 'revoke') await revoke()
 else if (command === 'status') console.log(JSON.stringify(fractalJson(['attention', 'ls', '--as', person], { check: false }), null, 2))
-else if (command === 'link-ask') {
-  const [thread, ...title] = rest
-  if (thread === undefined || title.length === 0) throw new Error('usage: threads-live-preview.mjs link-ask THREAD TITLE')
-  linkAsk(thread, title.join(' '))
-}
 else if (command === 'down') down()
-else throw new Error('usage: threads-live-preview.mjs [serve|up|reply|link-ask|offline|online|revoke|status|down]')
+else throw new Error('usage: threads-live-preview.mjs [serve|up|offline|online|revoke|status|down]')
