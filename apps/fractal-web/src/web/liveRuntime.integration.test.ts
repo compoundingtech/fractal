@@ -2,8 +2,9 @@ import { Effect } from 'effect'
 import * as FetchHttpClient from 'effect/http/FetchHttpClient'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
-// Isolate the page's transport ownership; use the real telemetry and OTLP exporter.
-const source = vi.hoisted(() => vi.fn(() => ({ dispose: vi.fn(async () => {}) })))
+// Isolate the page's transport ownership; use the real telemetry and OTLP exporter. The source has no
+// availability port, as against a daemon without it, so the page starts no presence reports.
+const source = vi.hoisted(() => vi.fn(() => ({ source: {}, dispose: vi.fn(async () => {}) })))
 const pairingStatus = vi.hoisted(() => vi.fn(async (): Promise<{ status: 'paired' | 'unpaired'; credentialChanged: boolean } | undefined> => undefined))
 const closeEarly = vi.hoisted(() => vi.fn())
 vi.mock('../data/browserPairing.ts', () => ({ browserPairingPort: () => ({ status: pairingStatus }) }))

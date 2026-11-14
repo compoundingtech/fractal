@@ -282,9 +282,18 @@ def source_paths(root: Path):
 
 
 def record(site: Site) -> dict:
+    # Diagnostics (location, excerpt) are recomputed from source when the checker
+    # reports a finding; only reviewed identity/metadata is stored per site.
     return {"id": site.id, "path": site.path, "kind": site.kind,
             "fingerprint": site.fingerprint, "owner": site.owner, "todo": site.todo,
-            "disposition": "allow-for-now", "line_hint": site.line, "excerpt": site.excerpt}
+            "disposition": "allow-for-now"}
+
+RECORD_FIELDS = frozenset({"id", "path", "kind", "fingerprint", "owner", "todo", "disposition"})
+
+
+def locate(site: Site) -> str:
+    """On-demand diagnostic location; excerpt and line come from source, never storage."""
+    return f"{site.path}:{site.line}: {site.excerpt}"
 
 
 REGENERATE = "python3 scripts/check-sqlite-large-values --format"
@@ -354,6 +363,10 @@ def findings(root: Path, manifest: dict) -> list[str]:
             continue
         if e["id"] in by_id:
             problems.append(f"duplicate inventory exception {e['id']}")
+        if set(e) != RECORD_FIELDS:
+            problems.append(f"non-canonical fields in inventory exception {e['id']}; "
+                            f"a record carries only {sorted(RECORD_FIELDS)}; remove stored "
+                            f"source-derived diagnostics instead of keeping them")
         by_id[e["id"]] = e
     cache = {}
     sites, markers = scan(root, cache)
@@ -376,15 +389,15 @@ def findings(root: Path, manifest: dict) -> list[str]:
     for site in sites:
         e = by_id.pop(site.id, None)
         if e is None:
-            problems.append(f"{site.path}:{site.line}: unregistered {site.kind} {site.id}")
-        elif any(e.get(k) != v for k, v in record(site).items() if k not in ("line_hint", "excerpt")):
-            problems.append(f"{site.path}:{site.line}: stale/malformed inventory metadata for {site.id}")
+            problems.append(f"unregistered {site.kind} {site.id} at {locate(site)}")
+        elif any(e.get(k) != v for k, v in record(site).items()):
+            problems.append(f"stale/malformed inventory metadata for {site.id} at {locate(site)}")
         index = bisect_right(marker_ends.get(site.path, []), site.start) - 1
         marker = path_markers[site.path][index] if index >= 0 else None
         if marker and contents[site.path][marker[2]:site.start].strip():
             marker = None
         if marker is None or marker[3] is None or marker[3] != {"id": site.id, "owner": site.owner, "todo": site.todo}:
-            problems.append(f"{site.path}:{site.line}: missing/mismatched adjacent allow-for-now marker for {site.id}")
+            problems.append(f"missing/mismatched adjacent allow-for-now marker for {site.id} at {locate(site)}")
         else:
             seen_markers.add((marker[0], marker[1]))
     for e in by_id.values():
@@ -616,8 +629,7 @@ def inventory_delta(root: Path, manifest: dict) -> dict:
         new_ids.remove(site.id)
         removed_ids.remove(prior_id)
     for identifier in sorted(set(old) & set(current)):
-        if any(old[identifier].get(k) != v for k, v in current[identifier].items()
-               if k not in ("line_hint", "excerpt")):
+        if old[identifier] != current[identifier]:
             changed.append({"anchor": "same-id-metadata", "before": old[identifier], "proposed": current[identifier]})
     actual_declarations = declarations(root, sites, {p: v[0] for p, v in cache.items()})
     encode = lambda e: json.dumps(e, sort_keys=True, ensure_ascii=False)

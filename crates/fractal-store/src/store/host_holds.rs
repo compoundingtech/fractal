@@ -313,6 +313,7 @@ mod tests {
         ];
         for store in stores {
             assert!(store.host_holds(None, false).unwrap().is_empty());
+            assert!(store.resource_memberships_for_host("host-a").unwrap().is_empty());
             let hold = store.place_host_hold("person/operator", &request()).unwrap();
             assert_eq!(store.host_holds(None, false).unwrap(), vec![hold]);
         }

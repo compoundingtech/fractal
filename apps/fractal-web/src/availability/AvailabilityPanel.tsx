@@ -55,7 +55,7 @@ export const AvailabilityPanel = ({ port }: { readonly port: AvailabilityPort })
       return result
     }
     return {
-      read: port.read,
+      ...port,
       set: (change) => write(() => port.set(change), (availability) => ({ availability })),
       setNote: (change) => write(() => port.setNote(change), (note) => ({ note })),
     }
