@@ -1,4 +1,4 @@
-import { markdownBlock } from './assistant-ui/composition/markdown-text'
+import { markdownBlock, markdownCodeFence } from './assistant-ui/composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { flushSync } from 'react-dom'
@@ -297,7 +297,7 @@ export const CodeHeadersLight: Story = codeHeaders('light')
 const longFenceLabel = 'notarealprogramminglanguage'.repeat(8)
 const narrowStyles = stylex.create({ narrowLane: { width: '100%', maxWidth: '440px', minWidth: 0, marginInline: 'auto' } })
 export const CodeHeaderLongLabelNarrow: Story = { ...contractFixture,
-  render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div data-testid="markdown-narrow-lane" {...stylex.props(narrowStyles.narrowLane)}><Markdown text={markdownBlock(`\`\`\`${longFenceLabel}\nconst keep = 1\n\`\`\``)} /></div></ThemePortal></main>,
+  render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div data-testid="markdown-narrow-lane" {...stylex.props(narrowStyles.narrowLane)}><Markdown text={markdownCodeFence('const keep = 1', longFenceLabel)} /></div></ThemePortal></main>,
   play: async ({ canvasElement }) => {
     await document.fonts.ready
     const lane = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-narrow-lane"]')
@@ -319,7 +319,8 @@ export const CodeHeaderLongLabelNarrow: Story = { ...contractFixture,
     await userEvent.hover(fence)
     await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
     await userEvent.click(copy)
-    for (let frame = 0; copy.getAttribute('aria-label') === 'Copy code' && frame < 600; frame++) await settle()
+    // The clipboard write settles asynchronously: wait for the copy to leave ready/copying, not for the first label change.
+    for (let frame = 0; (fence.dataset.copyState === 'ready' || fence.dataset.copyState === 'copying') && frame < 600; frame++) await settle()
     await expect(copy.getAttribute('aria-label')).toBe('Copy code: Copied')
   },
 }
