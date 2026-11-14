@@ -11,6 +11,7 @@ pub use crate::api::tests_shared_client_v0_tests::{checked_agent_cache, get_requ
 use crate::RolloutsStore;
 use super::*;
 use crate::model::SESSION_CLAIMS;
+use crate::gate_check::now_ms;
 use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
@@ -10071,7 +10072,10 @@ fn agent_roster_typical_claim_kind_baseline() {
     assert_eq!(breakdown["work.progress"], (6, 6));
     assert_eq!(breakdown["harness.todo.observed"], (12, 0));
     assert_eq!(local_breakdown["harness.usage"], 12);
-    assert_eq!(old_cold, 12);
+    // Carried turn termination and work-turn invocation receipts now append one
+    // durable harness.invocation pair per claimed turn in this fixture.
+    assert_eq!(breakdown["harness.invocation"], (12, 12));
+    assert_eq!(old_cold, 24);
 }
 
 #[test]
@@ -16668,4 +16672,337 @@ fn population_repository_normalizes_production_shaped_checkout_paths() {
     let mut cards = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
     overlay_population_repositories(&store, &mut cards).unwrap();
     assert_eq!(cards[0]["observed_repository"], "example/repo");
+}
+
+#[tokio::test]
+async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_deletion() {
+    use fractal_store::invocation_artifacts;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.owning_person = Some("person/owner".into());
+    let invocation = "invocation/artifact-test";
+    let agent = "agent/example/worker";
+    state.store.append_claim(&ClaimInput { subject:agent.into(),kind:"harness.invocation".into(),
+        actor:None,fields:serde_json::from_value(json!({"invocation_id":invocation,
+            "operation_id":"artifact-test","phase":"admitted","agent":agent})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None }).unwrap();
+    let artifact = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
+    invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+    let query = || Query(serde_json::from_value(json!({"invocation":invocation,"kind":"input"})).unwrap());
+    let stranger = client_v0::ClientSession::local(Some("person/other")).unwrap();
+    let denied = super::agent_invocations::artifact(State(state.clone()),Extension(stranger),
+        AxumPath(artifact.sha256.clone()),query(),None,None,None).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let owner = client_v0::ClientSession::local(Some("person/owner")).unwrap();
+    let allowed = super::agent_invocations::artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap();
+    assert_eq!(allowed.status(),StatusCode::OK);
+    drop(super::agent_invocations::delete_artifact(State(state.clone()),Extension(owner.clone()),
+        AxumPath(artifact.sha256.clone()),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap());
+    let deleted = super::agent_invocations::artifact(State(state),Extension(owner),
+        AxumPath(artifact.sha256),query(),None,None,Some(Extension(HarnessAncestry::Person))).await.unwrap_err();
+    assert_eq!(deleted.status,StatusCode::GONE);
+}
+
+#[cfg(target_os = "linux")]
+fn invocation_input_session(state: &AppState, agent: &str, incarnation: &str) -> client_v0::ClientSession {
+    use std::os::fd::FromRawFd as _;
+    let name = agent.strip_prefix("agent/").unwrap();
+    state.store.apply_internal(&parse_intent(&format!(
+        "version 2\nagent \"{name}\" {{ workspace \"/tmp\"; harness \"codex\" {{}} }}"
+    ), "node").unwrap(), "input-process-fixture").unwrap();
+    let pid = std::process::id();
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "incarnation_id":incarnation})),
+        ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":incarnation,
+            "harness":"codex", "runtime_pid":pid,
+            "runtime_pid_start_token":fractal_runtime::process_start_token(pid).unwrap().to_string()})),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+            fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+            expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    assert!(fd >= 0);
+    let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) };
+    let mut session = client_v0::ClientSession::local(Some(agent)).unwrap();
+    session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(pid, descriptor).unwrap());
+    session
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn invocation_input_rejects_an_old_process_claiming_a_new_incarnation() {
+    use super::agent_invocations::{InputRequest, input};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/input-restarted";
+    let session = invocation_input_session(&state, agent, "incarnation-a");
+    let invocation = "invocation/restarted-input";
+    for (subject, kind, fields) in [
+        (agent, "harness.invocation", json!({"invocation_id":invocation, "operation_id":"restarted-input",
+            "phase":"started", "agent":agent, "incarnation":"incarnation-b", "event_key":"message/restarted"})),
+        ("message/restarted", "message.sent", json!({"from":"person/owner", "to":agent,
+            "content":"wake", "status":"sent", "tags":[format!("fractal-invocation:{invocation}")]})),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:subject.into(), kind:kind.into(), actor:None,
+            fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+            expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    let request = || InputRequest { agent:agent.into(), incarnation:"incarnation-b".into(),
+        invocation_id:invocation.into(), message_id:"message/restarted".into(), text:"forged envelope".into() };
+    let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+        Some(Extension(session.clone())), None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+    // Even a current projection naming B cannot make A its process: the generation
+    // witness recorded for B must match, rather than trusting an incarnation label.
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "incarnation_id":"incarnation-b"})),
+        ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":"incarnation-b",
+            "harness":"codex", "runtime_pid":std::process::id(),
+            "runtime_pid_start_token":fractal_runtime::process_start_token(std::process::id()).unwrap().wrapping_add(1).to_string()})),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+            fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+            expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())), None,
+        Some(Extension(session)), None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn invocation_input_requires_authenticated_exact_agent_incarnation_and_message() {
+    use super::agent_invocations::{InputRequest, input};
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/input";
+    let session = invocation_input_session(&state, agent, "exact-incarnation");
+    let invocation = "invocation/input-test";
+    state.store.append_claim(&ClaimInput { subject: agent.into(), kind: "harness.invocation".into(),
+        actor: None, fields: serde_json::from_value(json!({
+            "invocation_id":invocation, "operation_id":"input-test", "phase":"started",
+            "agent":agent, "incarnation":"exact-incarnation", "event_key":"message/exact"
+        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    state.store.append_claim(&ClaimInput { subject:"message/exact".into(), kind:"message.sent".into(),
+        actor:None, fields:serde_json::from_value(json!({"from":"person/owner","to":agent,
+            "content":"wake", "status":"sent", "tags":[format!("fractal-invocation:{invocation}")]})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    let request = || InputRequest { agent:agent.into(), incarnation:"exact-incarnation".into(),
+        invocation_id:invocation.into(), message_id:"message/exact".into(),
+        text:"native pi/omp envelope\ntoken=fixture-secret".into() };
+    let denied = input(State(state.clone()), None, None, None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let denied = input(State(state.clone()), Some(BoundActor::Agent("agent/other".into())),
+        None, None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    let denied = input(State(state.clone()), Some(BoundActor::Run(agent.into())),
+        None, None, None, Json(request())).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    for mismatch in ["agent", "incarnation", "message", "invocation"] {
+        let mut request = request();
+        match mismatch {
+            "agent" => request.agent = "agent/other".into(),
+            "incarnation" => request.incarnation = "candidate-incarnation".into(),
+            "message" => request.message_id = "message/unrelated".into(),
+            _ => request.invocation_id = "invocation/unrelated".into(),
+        }
+        let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+            None, Some(Extension(session.clone())), None, Json(request)).await.unwrap_err();
+        assert!(matches!(denied.status, StatusCode::FORBIDDEN | StatusCode::CONFLICT));
+    }
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+    let Json(first) = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, Some(Extension(session.clone())), None, Json(request())).await.unwrap();
+    let Json(retry) = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, Some(Extension(session.clone())), None, Json(request())).await.unwrap();
+    assert_eq!(first, retry);
+    let artifact: fractal_store::invocation_artifacts::InvocationArtifact =
+        serde_json::from_value(first["artifact"].clone()).unwrap();
+    assert_eq!(artifact.incarnation.as_deref(), Some("exact-incarnation"));
+    assert_eq!(artifact.message_id.as_deref(), Some("message/exact"));
+    let retained = fractal_store::invocation_artifacts::read(root.path(), &artifact, now_ms())
+        .unwrap().unwrap();
+    assert_eq!(String::from_utf8(retained).unwrap(), "native pi/omp envelope\ntoken=[REDACTED]");
+    let mut changed = request();
+    changed.text = "different envelope".into();
+    let denied = input(State(state.clone()), Some(BoundActor::Agent(agent.into())),
+        None, Some(Extension(session.clone())), None, Json(changed)).await.unwrap_err();
+    assert_eq!(denied.status, StatusCode::CONFLICT);
+    assert_eq!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().len(), 1);
+    let body = json!({"agent":agent, "incarnation":"exact-incarnation",
+        "invocation_id":invocation, "message_id":"message/exact",
+        "text":"native pi/omp envelope\ntoken=fixture-secret"});
+    for (writer, expected) in [(agent, StatusCode::OK), ("agent/other", StatusCode::FORBIDDEN)] {
+        let app = router(state.clone()).layer(Extension(NativeDeliveryPeer {
+            agent:writer.into(), transport:"omp-channel", pid:37, archives_inbox:false,
+        })).layer(Extension(LocalPeer { pid:std::process::id(), ancestor:Some(writer.into()),
+            peer_process:session.peer_process.clone() }));
+        let (status, response) = json_request(app, "/v1/invocation-input", body.clone()).await;
+        assert_eq!(status, expected, "{response}");
+        assert!(!response.to_string().contains("fixture-secret"));
+    }
+}
+
+#[tokio::test]
+async fn invocation_artifact_router_rejects_forged_unix_identity_headers() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.owning_person = Some("person/owner".into());
+    let agent = "agent/example/private-artifact";
+    let invocation = "invocation/private-router";
+    state.store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.invocation".into(),
+        actor:None, fields:serde_json::from_value(json!({"agent":agent,
+            "invocation_id":invocation,"operation_id":"private-router","phase":"admitted"})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    let artifact = fractal_store::invocation_artifacts::capture_input(root.path(), invocation,
+        "private-native-input", now_ms()).unwrap();
+    fractal_store::invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+    let step = state.store.start_program_step_for_tests();
+    let secret = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    let uri = format!("/v1/client/invocation-artifacts/{}?invocation={}&kind=input",
+        artifact.sha256, urlencoding::encode(invocation));
+    for claimed in [agent, "person/owner"] {
+        for caller in ["foreign-agent", "native-peer", "run", "unverifiable", "missing-ancestry"] {
+            let request = Request::builder().method("GET").uri(&uri)
+                .header(client_v0::LOCAL_PERSON_HEADER, claimed);
+            let request = match caller {
+                "foreign-agent" => request.extension(BoundAgent("agent/other".into())),
+                "native-peer" => request.extension(NativeDeliveryPeer {
+                    agent:"agent/other".into(), transport:"omp-channel", pid:37, archives_inbox:false,
+                }),
+                "run" => request.extension(RunCredential::new(secret.clone())),
+                "unverifiable" => request.extension(HarnessAncestry::Unavailable),
+                _ => request,
+            };
+            let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            assert!(!response.status().is_success(), "{caller} claimed {claimed}");
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("private-native-input"));
+        }
+    }
+    // Real operator and actual owning-agent reads still pass through the same middleware.
+    for caller in ["owner", "own-agent", "own-peer"] {
+        let request = Request::builder().method("GET").uri(&uri)
+            .header(client_v0::LOCAL_PERSON_HEADER, if caller == "owner" { "person/owner" } else { agent });
+        let request = match caller {
+            "owner" => request.extension(HarnessAncestry::Person),
+            "own-agent" => request.extension(BoundAgent(agent.into())),
+            _ => request.extension(NativeDeliveryPeer {
+                agent:agent.into(), transport:"omp-channel", pid:37, archives_inbox:false,
+            }),
+        };
+        let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{caller}");
+        assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap().as_ref(), b"private-native-input");
+    }
+}
+
+#[tokio::test]
+async fn invocation_input_rejects_non_message_events_and_foreign_or_untagged_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let agent = "agent/example/input-events";
+    let invocation = "invocation/input-events";
+    let observation = state.store.append_claim(&ClaimInput { subject:agent.into(),
+        kind:"runtime.observed".into(), actor:None, fields:serde_json::from_value(json!({
+            "status":"stopped","incarnation_id":"exact"})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    for (subject, recipient, tags) in [
+        ("message/foreign", "agent/other", vec![format!("fractal-invocation:{invocation}")]),
+        ("message/untagged", agent, vec![]),
+        ("message/other-invocation", agent, vec!["fractal-invocation:invocation/other".into()]),
+    ] {
+        state.store.append_claim(&ClaimInput { subject:subject.into(), kind:"message.sent".into(),
+            actor:None, fields:serde_json::from_value(json!({"from":"person/owner",
+                "to":recipient,"content":"wake","status":"sent","tags":tags})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+    }
+    for event in [observation.id.as_str(), "work-claim-event", "transcript:0123456789",
+        "message/missing", "message/foreign", "message/untagged", "message/other-invocation"] {
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.invocation".into(),
+            actor:None, fields:serde_json::from_value(json!({"agent":agent, "incarnation":"exact",
+                "invocation_id":invocation,"operation_id":"input-events","phase":"observed",
+                "event_key":event})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+        let app = router(state.clone()).layer(Extension(NativeDeliveryPeer {
+            agent:agent.into(), transport:"omp-channel", pid:37, archives_inbox:false,
+        }));
+        let (status, response) = json_request(app, "/v1/invocation-input", json!({
+            "agent":agent,"incarnation":"exact","invocation_id":invocation,
+            "message_id":event,"text":"must not be retained"
+        })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{event}: {response}");
+    }
+    assert!(state.store.claims_for(agent, Some("harness.invocation-artifact")).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invocation_artifact_unix_server_preserves_verified_person_ancestry() {
+    use http_body_util::BodyExt as _;
+    for caller in ["person", "own-agent", "foreign-agent", "unavailable"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.owning_person = Some("person/owner".into());
+        let agent = "agent/example/unix-private";
+        let invocation = "invocation/unix-private";
+        state.store.append_claim(&ClaimInput { subject:agent.into(), kind:"harness.invocation".into(),
+            actor:None, fields:serde_json::from_value(json!({"agent":agent,
+                "invocation_id":invocation,"operation_id":"unix-private","phase":"admitted"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+        let artifact = fractal_store::invocation_artifacts::capture_input(root.path(), invocation,
+            "private-unix-input", now_ms()).unwrap();
+        fractal_store::invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
+        let socket = root.path().join("private.sock");
+        let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let store = state.store.clone();
+        // Use the production accept/ancestry-to-request handoff, not manually inserted
+        // request extensions. Only the completed ancestry lookup result is controlled.
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
+            reserved, router(state), Some(store), None,
+            move |_, _| Ok(match caller {
+                "person" => HarnessAncestry::Person,
+                "own-agent" => HarnessAncestry::Bound("agent/example/unix-private".into()),
+                "foreign-agent" => HarnessAncestry::Bound("agent/other".into()),
+                _ => HarnessAncestry::Unavailable,
+            }),
+            move || { let _ = ready.send(()); },
+        ));
+        waiting.await.unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+        let connection = tokio::spawn(connection);
+        let uri = format!("/v1/client/invocation-artifacts/{}?invocation={}&kind=input",
+            artifact.sha256, urlencoding::encode(invocation));
+        let allowed = matches!(caller, "person" | "own-agent");
+        for method in ["GET", "DELETE"] {
+            let response = sender.send_request(Request::builder().method(method).uri(&uri)
+                .header("host", "local")
+                .header(client_v0::LOCAL_PERSON_HEADER, if caller == "own-agent" { agent } else { "person/owner" })
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status().is_success(), allowed, "{caller} {method}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            if allowed && method == "GET" {
+                assert_eq!(bytes.as_ref(), b"private-unix-input");
+            } else {
+                assert!(!String::from_utf8_lossy(&bytes).contains("private-unix-input"));
+            }
+        }
+        if allowed {
+            let response = sender.send_request(Request::builder().method("GET").uri(&uri)
+                .header("host", "local")
+                .header(client_v0::LOCAL_PERSON_HEADER, if caller == "own-agent" { agent } else { "person/owner" })
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::GONE, "{caller}");
+            response.into_body().collect().await.unwrap();
+        }
+        connection.abort();
+        server.abort();
+    }
 }
