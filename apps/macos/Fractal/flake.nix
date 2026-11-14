@@ -4,8 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/4ba99f3209788ed04f01af38f77ddb803ad6ec63";
     fractal = {
-      # The availability API's unmerged head, compoundingtech/fractal#6456 (stack #6457).
-      url = "git+https://github.com/compoundingtech/fractal?ref=schickling-assistant/2026-11-12-availability-surface&rev=93a83bbb18494a6249e568e0ee32941ebd7209cf&shallow=1";
+      # Fractal main since #6450–#6456, #6499/#6501 and #6502: availability, controls
+      # and `work update --speech` client APIs are pinned by rev, no branch ref.
+      url = "git+https://github.com/compoundingtech/fractal?rev=ace6e01a8d04f2169026593bd1d31a2272a91900&shallow=1";
       flake = false;
     };
   };
