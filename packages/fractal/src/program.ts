@@ -86,6 +86,17 @@ export interface ProgramIntent<
   readonly timeout?: string
   /** How long the program may go without a journal entry before its run reports it stalled. */
   readonly stalledAfter?: string
+  /** Engine-side retries start a fresh attempt with a fresh journal and cancel old children. */
+  readonly retry?: {
+    /** Typed error tags eligible for retry; empty matches every failure. */
+    readonly on: readonly string[]
+    /** Total attempts including the first (1..100). */
+    readonly attempts: number
+    /** Delay before each retry; the final delay repeats. */
+    readonly delays?: readonly string[]
+    /** Whole-policy window from the first attempt's start. */
+    readonly within?: string
+  }
   /** At most this many runs at once (`concurrent-runs max=N`). */
   readonly concurrentRuns?: number
   /** What the mission's runs may do as `mission-run/RUN` (docs/st3/program-engine.md §3). */
