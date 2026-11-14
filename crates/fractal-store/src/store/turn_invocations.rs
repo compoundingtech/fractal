@@ -170,7 +170,7 @@ fn terminal_owner_tx(tx: &Transaction<'_>, terminal: &ClaimRecord) -> Result<Opt
          AND {} ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         canonical::after_sql("boundary", "claims")));
     loop {
-        let id: Option<String> = tx.query_row(&query, params![subject, boundary],
+        let id: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h88764425ed87 owner=fractal_store::store::turn_invocations TODO=trace-statement-and-value-representation */ &query, params![subject, boundary],
             |row| row.get(0)).optional()?;
         let Some(owner) = id.map(|id| claim_by_id_tx(tx, &id)).transpose()?.flatten()
             else { return Ok(None); };
