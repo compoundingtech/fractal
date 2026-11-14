@@ -165,7 +165,7 @@
         ".gitattributes",
         ".github",
         ".gitignore",
-        ".fractal",
+        ".st",
         ".fractal",
         "apps/fractal-web/.gitignore",
         "apps/fractal-web/scripts/devnet",
