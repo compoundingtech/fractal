@@ -12,6 +12,8 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packa
 import { useAgent, useDataSource, useNow } from '../data/react.tsx'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
+import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
+import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { ThreadEditor } from './ThreadEditor.tsx'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import type { RetainedThreadStart, ThreadObservation, ThreadSource } from './threadSource.ts'
@@ -44,7 +46,7 @@ function ThreadGroupContent({ source, query, label, onOpenThread }: OpenThread &
 }) {
   const { read, upgradeRequired } = useAtomValue(source.access)
   const list = useAtomValue(source.list(query))
-  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
+  if (upgradeRequired) return <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
   if (!read || (list._tag === 'Observed' && list.value.items.length === 0 && Option.isNone(list.value.next_cursor))) return null
   return <details {...stylex.props(styles.group)}>
     <summary>{label}</summary>
@@ -61,13 +63,13 @@ function ThreadListPage({ source, query, onOpenThread, exclude }: OpenThread & {
 }) {
   const list = useAtomValue(source.list(query))
   const [showNext, setShowNext] = React.useState(false)
-  if (list._tag !== 'Observed') return <ReadStatus state={list._tag} />
+  if (list._tag !== 'Observed') return <ReadStatus feed={list} subject="threads" onRetry={source.reload} />
   const next = Option.getOrUndefined(list.value.next_cursor)
   return <>
     {list.value.items.filter(thread => !exclude?.includes(thread.id)).map(thread => <LiveThread key={thread.id} source={source} thread={thread} onOpenThread={onOpenThread} />)}
     {next === undefined ? null : showNext
       ? <ThreadListPage source={source} query={{ ...query, cursor: next }} onOpenThread={onOpenThread} exclude={exclude} />
-      : <ActionButton onPress={() => setShowNext(true)}>Load more threads</ActionButton>}
+      : <div {...stylex.props(styles.startArea)}><ActionButton onPress={() => setShowNext(true)}>Load more threads</ActionButton></div>}
   </>
 }
 
@@ -91,26 +93,49 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   const { read, actions, inboxOrigins, upgradeRequired } = useAtomValue(source.access)
   const retained = useAtomValue(source.pendingStarts?.(originSource) ?? noPendingStarts)
     .filter(start => start.parameters.origin.episode === episode)
+  const query = React.useMemo(() => ({ origin_source: originSource, origin_episode: episode }), [originSource, episode])
+  const list = useAtomValue(source.list(query))
   const [starting, setStarting] = React.useState(false)
   const [focused, setFocused] = React.useState<string>()
+  const headingId = React.useId()
+  const startArea = React.useRef<HTMLDivElement>(null)
+  const restoreStart = React.useRef(false)
+  // Hiding the draft removes the focused editor; focus returns to the control that opened it.
+  React.useLayoutEffect(() => {
+    if (starting || !restoreStart.current) return
+    restoreStart.current = false
+    startArea.current?.querySelector('button')?.focus()
+  }, [starting])
   const threadTitle = threadTitleFromAsk(title)
   const startInput = React.useCallback((input: HTMLTextAreaElement | null) => { input?.focus() }, [])
   const draftKey = `inbox:${JSON.stringify([originSource, episode])}`
-  if (upgradeRequired || (read && !inboxOrigins)) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
+  if (upgradeRequired || (read && !inboxOrigins)) return <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
   if (!read) return null
-  return <div {...stylex.props(styles.groupBody)}>
+  // Only a complete first page states how many threads this item has.
+  const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
+  // A start cannot be offered beside a list the source refused to read.
+  const offerStart = retained.length === 0 && actions.has('thread.start') && canStart && list._tag !== 'Unavailable'
+  if (count === 0 && focused === undefined && retained.length === 0 && !offerStart) return null
+  return <section aria-labelledby={headingId} {...stylex.props(styles.inbox)}>
+    <h3 id={headingId} {...stylex.props(styles.inboxHeading)}>
+      Threads{count === undefined || count === 0 ? null : <span {...stylex.props(styles.count)}>{count}</span>}
+    </h3>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    <ThreadListPage source={source} query={{ origin_source: originSource, origin_episode: episode }} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
+    <ThreadListPage source={source} query={query} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
     {retained.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
-    {retained.length > 0 || !actions.has('thread.start') || !canStart ? null : agent === undefined
+    {count === 0 && focused === undefined && retained.length === 0 && !starting
+      ? <p {...stylex.props(styles.note)}>No threads about this item yet.</p> : null}
+    {!offerStart ? null : agent === undefined
       ? <p {...stylex.props(styles.note)}>No responsible agent is configured for this Inbox item.</p>
-      : !starting ? <ActionButton onPress={() => setStarting(true)}>Start thread</ActionButton>
-      : <ThreadPanel thread={{ title: threadTitle, state: 'open' }} initiallyExpanded onHideDraft={() => setStarting(false)}>
+      : !starting ? <div ref={startArea} {...stylex.props(styles.startArea)}>
+        <ActionButton variant="outline" onPress={() => setStarting(true)}><Icon name="plus" size={12} />Start thread</ActionButton>
+      </div>
+      : <ThreadPanel thread={{ title: threadTitle, state: 'open' }} initiallyExpanded onHideDraft={() => { restoreStart.current = true; setStarting(false) }}>
         <ThreadEditor source={source} destination={draftKey} label={threadTitle} inputRef={startInput}
           send={content => source.start(draftKey, { agent_id: agent, origin: { source_id: originSource, episode }, title: threadTitle, content })}
           onSent={id => { setFocused(id); setStarting(false) }} />
       </ThreadPanel>}
-  </div>
+  </section>
 }
 
 /** Pending first sends survive the Inbox source that originally hosted their editor. */
@@ -168,9 +193,9 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
 }) {
   const { read, upgradeRequired } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
-  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
+  if (upgradeRequired) return <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="thread" />
   if (!read) return <p>This connection does not support threads.</p>
-  if (detail._tag !== 'Observed') return <ReadStatus state={detail._tag} />
+  if (detail._tag !== 'Observed') return <ReadStatus feed={detail} subject="thread" onRetry={source.reload} />
   return <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
 }
 
@@ -332,9 +357,12 @@ function ThreadConversation({ source, thread, editable, focusComposer, timelineR
   } : undefined
   return <>
     <div ref={timelineRef}><ThreadTimeline source={source} threadId={thread.id} agentId={thread.agent_id} agentName={agentName} onQuote={quote} /></div>
-    {!editable ? null
-      : <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput}
-        send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />}
+    {!editable ? null : <>
+      {/* Replying never changes the lifecycle; only Reopen does. */}
+      {thread.state === 'closed' ? <p {...stylex.props(styles.note)}>This thread is closed. Replying won’t reopen it.</p> : null}
+      <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput}
+        send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />
+    </>}
   </>
 }
 
@@ -352,13 +380,13 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
   const { actor } = useAtomValue(source.access)
   const now = useNow()
   const [showOlder, setShowOlder] = React.useState(false)
-  if (feed._tag !== 'Observed') return <ReadStatus state={feed._tag} />
+  if (feed._tag !== 'Observed') return <ReadStatus feed={feed} subject="messages" onRetry={source.reload} />
   const next = Option.getOrUndefined(feed.value.next_cursor)
   return <>
     {next === undefined ? null : showOlder
       ? <ThreadTimeline source={source} threadId={threadId} cursor={next} agentId={agentId} agentName={agentName} onQuote={onQuote} />
       : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
-    {feed.freshness === 'stale' ? <p role="status" {...stylex.props(styles.note)}>Updates paused</p> : null}
+    {feed.freshness === 'stale' ? <SystemNotice kind="stale" scope="rail" connection title="Updates paused" /> : null}
     <ol {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
         const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You' : event.actor_id === agentId && agentName !== undefined ? agentName : event.actor_id.split('/').at(-1) ?? event.actor_id
@@ -393,13 +421,25 @@ function EventText({ event, excerpt }: { readonly event: ThreadTimelineEvent; re
   }
 }
 
-function ReadStatus({ state, detail }: { readonly state: 'Waiting' | 'Unavailable'; readonly detail?: string }) {
-  return state === 'Waiting' ? <p role="status">Loading threads…</p> : <p role="alert">{detail ?? 'Threads could not be loaded.'}</p>
+/** Loading is only loading; a refusal says what Fractal refused, and only a failed read offers Retry. */
+function ReadStatus({ feed, subject, onRetry }: {
+  readonly feed: Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>
+  readonly subject: 'threads' | 'thread' | 'messages'
+  readonly onRetry?: (() => void) | undefined
+}) {
+  if (feed._tag === 'Waiting') return <SystemNotice kind="loading" scope="rail" title={`Loading ${subject}`} />
+  return <SystemNotice kind={feed.reason === 'unsupported' ? 'empty' : 'error'} scope="rail" title={feed.detail}
+    {...(feed.reason === 'failed' && onRetry !== undefined ? { onRetry } : {})} />
 }
 
 const styles = stylex.create({
   group: { flexShrink: 0, paddingInline: s.md, fontSize: t.metaSize },
   groupBody: { display: 'flex', flexDirection: 'column', gap: s.sm, maxHeight: '35vh', overflowY: 'auto', paddingBlock: s.sm },
+  // The Inbox detail pane scrolls as one region; its threads never get a nested scroller.
+  inbox: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0, fontSize: t.metaSize },
+  inboxHeading: { display: 'flex', alignItems: 'baseline', gap: s.sm, margin: 0, color: c.fgMuted, fontSize: t.metaSize, fontWeight: 600 },
+  count: { fontWeight: 400, fontVariantNumeric: 'tabular-nums' },
+  startArea: { display: 'flex' },
   standalone: { position: 'absolute', inset: 0, overflowY: 'auto', backgroundColor: c.canvas, padding: s.md },
   timeline: { display: 'flex', flexDirection: 'column', gap: s.sm, padding: 0, margin: 0, listStyle: 'none' },
   event: { display: 'flex', flexDirection: 'column', gap: s.xs, color: c.fgMuted, fontSize: t.metaSize },

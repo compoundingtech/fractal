@@ -8,7 +8,7 @@ import * as React from 'react'
 import { Radio, RadioGroup } from 'react-aria-components'
 import { userEvent, waitFor, within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
-import { observed, unavailable, type AttachmentPort } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable, waiting, type AttachmentPort } from '../data/source.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { ConversationItem } from '../conversation/model.ts'
@@ -22,7 +22,7 @@ const episode = 'claim/thread-story/review'
 const existingId = 'thread/worker-tests'
 const closedId = 'thread/rollout-notes'
 const actor = 'person/operator'
-type Scenario = 'existing' | 'empty' | 'closed' | 'multiple' | 'custom-source' | 'clock-skew'
+type Scenario = 'existing' | 'empty' | 'closed' | 'multiple' | 'custom-source' | 'clock-skew' | 'loading' | 'refused' | 'failed' | 'offline' | 'unconfirmed'
 
 function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'timestamp' | 'action' = 'timestamp') {
   const agentRef = 'agent/build-host-a/worker-tests'
@@ -93,20 +93,29 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     ] })
     update(id, row => ({ ...row, message_count: previous.filter(event => event.kind === 'message').length + 1 }))
   }
+  // Read-state fixtures: each states only what the fixture source reports, never agent progress.
+  const failing = Atom.make(scenario === 'failed')
+  const unconfirmed = Atom.make<string | undefined>(scenario === 'unconfirmed' ? 'rename' : undefined)
   const threads: ThreadSource = {
     access: Atom.make({ read: true, inboxOrigins: true, actor, actions: new Set<string>(readOnly
       ? [] : ['thread.start', 'thread.reply', 'thread.rename', 'thread.close', 'thread.reopen', 'thread.read']) }),
     titles: Atom.make(get => new Map(get(summaries).map(row => [row.id, row.title]))),
-    list: query => Atom.make(get => observed({ value: {
-      items: get(summaries).filter(row => 'recently_closed' in query ? row.state === 'closed'
-        : 'origin_source' in query ? get(origins)[row.id] === query.origin_source && query.origin_episode === episode : true),
-      next_cursor: Option.none(),
-    } })),
+    list: query => Atom.make(get => scenario === 'loading' ? waiting
+      : scenario === 'refused' ? unavailable({ reason: 'unauthorized', detail: credentialExpiredMessage })
+      : get(failing) ? unavailable({ reason: 'failed', detail: 'Fractal could not load threads.' })
+      : observed({ value: {
+        items: get(summaries).filter(row => 'recently_closed' in query ? row.state === 'closed'
+          : 'origin_source' in query ? get(origins)[row.id] === query.origin_source && query.origin_episode === episode : true),
+        next_cursor: Option.none(),
+      } })),
+    reload: () => registry.set(failing, false),
     detail: id => Atom.make(get => {
       const row = get(summaries).find(candidate => candidate.id === id)
       return row === undefined ? unavailable({ reason: 'failed', detail: 'Fixture thread unavailable' }) : observed({ value: { summary: row, snapshotId: 'snapshot/thread-story' } })
     }),
-    timeline: id => Atom.make(get => observed({ value: { items: scenario === 'clock-skew' && ordering === 'timestamp' ? [...(get(history)[id] ?? [])].sort((a, b) => b.accepted_at_unix_ms - a.accepted_at_unix_ms) : get(history)[id] ?? [], next_cursor: Option.none() } })),
+    timeline: id => Atom.make(get => observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: { items: scenario === 'clock-skew' && ordering === 'timestamp' ? [...(get(history)[id] ?? [])].sort((a, b) => b.accepted_at_unix_ms - a.accepted_at_unix_ms) : get(history)[id] ?? [], next_cursor: Option.none() } })),
+    pendingChange: () => unconfirmed,
+    retryChange: async () => { registry.set(unconfirmed, undefined); return undefined },
     draft: drafts,
     start: async (_draft, input) => {
       const id = `thread/story-${++next}`
@@ -210,7 +219,7 @@ const meta = {
 } satisfies Meta<Args>
 export default meta
 
-export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'LatestPreview:contract-fixture'] as const
+export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'LatestPreview:contract-fixture'] as const
 type Story = StoryObj<typeof meta>
 
 export const AllStates: Story = {
@@ -238,6 +247,13 @@ export const CustomInboxSource: Story = {
     await within(await canvas.findByTestId('alert-details')).findByRole('textbox', { name: 'Message' })
   },
 }
+
+/** Read states state only what the source reports; none of them invent agent progress. */
+export const Loading: Story = { args: { scenario: 'loading' }, play: AllStates.play }
+export const Refused: Story = { args: { scenario: 'refused' }, play: AllStates.play }
+export const RetryAfterFailure: Story = { args: { scenario: 'failed' }, play: AllStates.play }
+export const UpdatesPaused: Story = { args: { placement: 'tab', scenario: 'offline' } }
+export const UnconfirmedChange: Story = { args: { placement: 'tab', scenario: 'unconfirmed' } }
 
 /** Local review controls inject fixtures into the production workspace. */
 function LatestPreviewHarness() {

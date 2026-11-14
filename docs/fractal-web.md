@@ -580,6 +580,24 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
+## Fractal web threads connected preview
+
+`node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,
+isolated daemon for reviewing Threads; Storybook's `Fractal/App/InboxThreads` stories stay local
+fixtures. `serve` makes a throwaway instance (`threadspreview`, under its own HOME in
+`/var/tmp/fractal-threadspreview`) with `thread_writes = true` and agent/example/manager as the
+explicit `inbox_fallback_agent`, person/avery, program seats agent/example/atlas and
+agent/example/manager, and one full-control device paired through the client gateway. It seeds two
+atlas asks (one with an earlier thread and an atlas reply, one with no thread) and the human gate of
+mission `example/release-notes`, whose discussion falls back to the Manager. Vite then serves the
+app on `127.0.0.1:5317` through `WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`.
+
+Seats never write on their own: `reply THREAD atlas|manager TEXT` posts an agent message with
+Fractal's agent-side command, and `link-ask THREAD TITLE` has atlas ask again and link the new ask to
+an existing thread. `offline` and `online` stop and restart the daemon for the paused and reconnect
+states, `revoke` revokes the browser device for the refused state, and `down` removes the instance.
+The script needs a systemd user manager, `FRACTAL_BINARY` built from this checkout and `pty`.
+
 ## Sidebar migration
 
 Importing `custom.fractal.sidebar` history into arrangements is client-owned. The legacy

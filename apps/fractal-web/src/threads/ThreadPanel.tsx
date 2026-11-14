@@ -41,6 +41,15 @@ export function ThreadPanel({
   const contentId = React.useId()
   const open = !embedded || expanded
   const [rename, setRename] = React.useState<{ readonly title: string; readonly revision: string }>()
+  const actions = React.useRef<HTMLDivElement>(null)
+  const restoreRename = React.useRef(false)
+  // The rename form owns focus while open; closing it returns focus to Rename, not the document body.
+  const closeRename = () => { restoreRename.current = true; setRename(undefined) }
+  React.useLayoutEffect(() => {
+    if (rename !== undefined || !restoreRename.current) return
+    restoreRename.current = false
+    actions.current?.querySelector<HTMLElement>('[data-thread-rename]')?.focus()
+  }, [rename])
   const [error, setError] = React.useState<string>()
   const [pending, setPending] = React.useState(false)
   const run = async (action: () => Promise<string | undefined>, onSuccess?: () => void) => {
@@ -65,7 +74,7 @@ export function ThreadPanel({
     {messageCount !== undefined && thread.state === 'closed' ? ' · ' : null}
     {thread.state === 'closed' ? 'Closed' : onHideDraft === undefined ? null : 'Draft'}
   </span>
-  const feedback = error === undefined ? null : <p role="alert">{error}</p>
+  const feedback = error === undefined ? null : <p role="alert" {...stylex.props(styles.error)}>{error}</p>
   const title = <span {...stylex.props(styles.title)} title={thread.title}>{thread.title}</span>
   const unreadDot = unread ? <span aria-label="Unread" {...stylex.props(styles.unread)}>●</span> : null
   const heading = embedded ? <Button aria-expanded={open} aria-controls={open ? contentId : undefined} onPress={() => { setExpanded(!open); onExpansionChange?.(!open) }} {...stylex.props(styles.header)}>
@@ -86,26 +95,27 @@ export function ThreadPanel({
     </div> : heading}
     {open ? <div id={contentId} {...stylex.props(styles.body)}>
       {children}
-      <div {...stylex.props(styles.actions)}>
-        {onRename === undefined || titleRevision === undefined ? null : <ActionButton variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</ActionButton>}
+      <div ref={actions} {...stylex.props(styles.actions)}>
+        {onRename === undefined || titleRevision === undefined ? null : <ActionButton data-thread-rename="" variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</ActionButton>}
         {onChangeState === undefined ? null : <ActionButton variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => {
           void run(() => onChangeState(thread.state === 'open' ? 'closed' : 'open'))
         }}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</ActionButton>}
         {onHideDraft === undefined ? null : <ActionButton onPress={onHideDraft}>Hide draft</ActionButton>}
         {embedded && onOpenInTab !== undefined ? <ActionButton onPress={onOpenInTab}>Open in tab</ActionButton> : null}
       </div>
-      {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status">
+      {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status" {...stylex.props(styles.actions, styles.pending)}>
         {retryPending ? 'Sending…' : `Fractal has not confirmed the previous ${pendingChange}.`}
-        <ActionButton variant="outline" isDisabled={pending || retryPending} onPress={() => { void run(onRetryChange, () => setRename(undefined)) }}>Retry {pendingChange}</ActionButton>
+        <ActionButton variant="outline" isDisabled={pending || retryPending} onPress={() => { void run(onRetryChange, closeRename) }}>Retry {pendingChange}</ActionButton>
       </div>}
       {rename === undefined || onRename === undefined ? null : <form onSubmit={event => {
         event.preventDefault()
         const title = rename.title.trim()
-        if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), () => setRename(undefined))
+        if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), closeRename)
       }} {...stylex.props(styles.actions)}>
-        <label>Thread title <input autoFocus value={rename.title} onChange={event => setRename({ ...rename, title: event.target.value })} /></label>
+        <label {...stylex.props(styles.field)}>Thread title <input autoFocus value={rename.title} onChange={event => setRename({ ...rename, title: event.target.value })}
+          onKeyDown={event => { if (event.key === 'Escape' && !pending) { event.preventDefault(); closeRename() } }} {...stylex.props(styles.input)} /></label>
         <ActionButton variant="outline" type="submit" isDisabled={pending || pendingChange !== undefined || rename.title.trim() === '' || rename.title.trim() === thread.title}>Save</ActionButton>
-        <ActionButton isDisabled={pending} onPress={() => setRename(undefined)}>Cancel</ActionButton>
+        <ActionButton isDisabled={pending} onPress={closeRename}>Cancel</ActionButton>
       </form>}
       {onMarkRead === undefined ? feedback : null}
     </div> : null}
@@ -128,4 +138,10 @@ const styles = stylex.create({
   unread: { flexShrink: 0, color: c.primary },
   body: { display: 'flex', minWidth: 0, flexDirection: 'column', gap: s.sm, padding: s.sm },
   actions: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.sm },
+  pending: { color: c.fgMuted, fontSize: t.metaSize },
+  error: { margin: 0, color: c.dangerFg, fontSize: t.metaSize },
+  field: { display: 'flex', alignItems: 'center', gap: s.sm, flex: '1 1 16rem', minWidth: 0, color: c.fgMuted, fontSize: t.metaSize },
+  input: { flex: '1 1 0', minWidth: 0, height: 24, boxSizing: 'border-box', paddingInline: s.sm, borderWidth: 1, borderStyle: 'solid',
+    borderColor: { default: c.borderStrong, ':focus-visible': c.primary }, borderRadius: 6, outline: 'none', backgroundColor: c.controlFill,
+    color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize },
 })

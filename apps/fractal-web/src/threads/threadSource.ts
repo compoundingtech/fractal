@@ -6,7 +6,7 @@ import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
-import { unavailable, waiting, type Feed } from '../data/source.ts'
+import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
 
@@ -49,6 +49,8 @@ export interface ThreadSource {
   readonly pendingChange?: (threadId: string) => Atom.Atom<string | undefined>
   readonly retryChange?: (threadId: string) => Promise<string | undefined>
   readonly markRead?: (thread: ThreadObservation, through: string, seen: readonly string[]) => Promise<string | undefined>
+  /** Read every mounted thread projection again, including one refused before. */
+  readonly reload?: () => void
 }
 
 type Watch<Row> = (receive: (event: FollowEvent<ThreadWindow<Row>>) => void) => () => void
@@ -65,10 +67,15 @@ const canSendUnsignedThread = (caps: Pick<Native.Capabilities, 'transport' | 'ca
   )
 
 const noAccess: ThreadAccess = { read: false, actions: new Set() }
-const refused = (error: unknown): Feed<never> => unavailable({
-  reason: error instanceof ClientError && (error.status === 401 || error.status === 403) ? 'ungranted' : 'failed',
-  detail: 'Fractal could not load this thread.',
-})
+// A revoked or expired browser credential needs pairing again; a missing grant does not.
+const refused = (error: unknown): Feed<never> => {
+  const reason = clientReadAuthorization(error) ?? 'failed'
+  return unavailable({
+    reason,
+    detail: reason === 'unauthorized' ? credentialExpiredMessage
+      : reason === 'ungranted' ? 'This connection has no access to threads.' : 'Fractal could not load threads.',
+  })
+}
 
 export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches): ThreadSource {
   const access = Atom.make<ThreadAccess>(get => {
@@ -127,6 +134,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       const demand = get(access)
       get(revision)
       if (!demand.read) return previous = waiting
+      // A new read of a refused projection is loading again, not still refused.
+      if (previous._tag === 'Unavailable') previous = waiting
       let active = true
       let abort: AbortController | undefined
       const publish = (value: T, freshness: 'live' | 'stale' = 'live') => {
@@ -371,6 +380,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   return {
     access,
     titles,
+    reload: () => registry.set(revision, registry.get(revision) + 1),
     pendingStarts: Atom.family((sourceId?: string) => Atom.make(get => {
       get(deliveryRevision)
       const grant = get(access)
