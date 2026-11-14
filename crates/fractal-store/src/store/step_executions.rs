@@ -8,6 +8,7 @@ pub(super) fn accumulate_response(
     buckets: [u64; 9], at: u128,
 ) -> Result<()> {
     connection.execute(
+        /* sqlite-large-value: allow-for-now lv-ha2dcdd19ebd4 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */
         "INSERT INTO local_step_execution_spend(execution_id,model,account,host,input_tokens,output_tokens,
          cache_write_tokens,cache_write_1h_tokens,cached_tokens,total_tokens,cost_microusd,
          reported_cost_microusd,unpriced_tokens,observed_at_unix_ms)
@@ -160,7 +161,7 @@ impl Store {
     pub fn step_executions(&self, step_subject: &str) -> Result<Vec<StepExecution>> {
         smallclaims::touched::note_read(|| step_subject.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare(&canonical_sql(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0d0d4dd29070 owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id, kind, actor, body, accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND (kind LIKE 'work.%' OR kind='step-run.state') ORDER BY CANONICAL_ASC(claims)",
         ))?;
@@ -208,7 +209,7 @@ impl Store {
             }
         }
         for execution in &mut executions {
-            let mut statement = connection.prepare(&canonical_sql(
+            let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h04350d02a7bb owner=fractal_store::store::step_executions TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT body FROM claims WHERE subject=?1 AND kind='harness.usage'
                    AND json_extract(body,'$.fields.execution_id')=?2 ORDER BY CANONICAL_ASC(claims)",
             ))?;
