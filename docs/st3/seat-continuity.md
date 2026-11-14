@@ -112,6 +112,12 @@ minutes after it started (a daemon that was down, or the release that added this
 already has its context, and an upgrade does not message every running seat. The daemon looks at
 each incarnation once and writes only when it sends, so a settled fleet costs nothing per pass.
 
+A replacement started for a mission `fresh-context` reset is deliberately sent none of this
+continuity message: re-injecting the old handoff, work and unread-mail summaries would defeat the
+reset. A later ordinary crash/restart of that replacement gets normal continuity again.
+The reset does not erase the seat's mailbox. Use a distinct run-owned subject as well when a turn
+must not inherit another agent's mailbox; see [step context isolation](mission-graph-runtime.md#step-syntax).
+
 A session that continues the earlier conversation receives the message too. It says so: such a
 session already knows what it describes.
 

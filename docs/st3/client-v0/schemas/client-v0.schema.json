@@ -430,6 +430,94 @@
       "type": "object", "additionalProperties": false, "required": ["notes"],
       "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/DirectiveNote"}}}
     },
+    "DirectiveNoteSet": {
+      "description": "Set or clear the session person's own directive note. `text` is required; null clears the note. The person always comes from the session.",
+      "type": "object", "additionalProperties": false, "required": ["text"],
+      "properties": {
+        "text": {"oneOf": [{"type": "string", "minLength": 1, "maxLength": 4096, "description": "At most 4096 UTF-8 bytes; whitespace-only text is refused."}, {"type": "null"}]},
+        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "DirectiveNoteSetResult": {
+      "description": "The person's current note after the write; null once cleared or already expired.",
+      "type": "object", "additionalProperties": false, "required": ["note"],
+      "properties": {"note": {"oneOf": [{"$ref": "#/$defs/DirectiveNote"}, {"type": "null"}]}}
+    },
+    "AvailabilityStatus": {"anyOf": [{"enum": ["available", "away"]}, {"type": "string"}], "description": "A person's effective status. Readers retain future values as Unknown."},
+    "AvailabilityStatusSource": {"anyOf": [{"enum": ["override", "presence", "unreported"]}, {"type": "string"}], "description": "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown."},
+    "AvailabilityPresence": {"anyOf": [{"enum": ["present", "idle", "locked", "unreported"]}, {"type": "string"}], "description": "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown."},
+    "AvailabilityInterruptions": {"anyOf": [{"enum": ["all", "urgent", "none"]}, {"type": "string"}], "description": "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown."},
+    "AvailabilityDeadlineClock": {"anyOf": [{"enum": ["run", "hold-routine", "hold-all"]}, {"type": "string"}], "description": "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown."},
+    "PersonAvailability": {
+      "description": "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person.",
+      "type": "object", "additionalProperties": false,
+      "required": ["person", "status", "status_source", "status_until", "presence", "presence_observed_at", "interruptions", "interruptions_until", "deadline_clock", "deadline_clock_since", "deadline_clock_until"],
+      "properties": {
+        "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "status": {"$ref": "#/$defs/AvailabilityStatus", "description": "The override while one is in force; otherwise `available` while some device is present or no device has reported, `away` while devices report but none is present."},
+        "status_source": {"$ref": "#/$defs/AvailabilityStatusSource"},
+        "status_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "presence": {"oneOf": [{"$ref": "#/$defs/AvailabilityPresence"}, {"type": "null"}]},
+        "presence_observed_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "interruptions": {"$ref": "#/$defs/AvailabilityInterruptions"},
+        "interruptions_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "deadline_clock": {"$ref": "#/$defs/AvailabilityDeadlineClock"},
+        "deadline_clock_since": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "deadline_clock_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "PersonAvailabilities": {
+      "type": "object", "additionalProperties": false, "required": ["people"],
+      "properties": {"people": {"type": "array", "items": {"$ref": "#/$defs/PersonAvailability"}}}
+    },
+    "AvailabilityStatusChange": {
+      "description": "`value` null clears the override, so presence derives status again; a clear takes no `until`.",
+      "type": "object", "additionalProperties": false, "required": ["value"],
+      "properties": {
+        "value": {"oneOf": [{"enum": ["available", "away"]}, {"type": "null"}]},
+        "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "AvailabilityInterruptionsChange": {
+      "type": "object", "additionalProperties": false, "required": ["value"],
+      "properties": {
+        "value": {"enum": ["all", "urgent", "none"]},
+        "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "AvailabilityDeadlineClockChange": {
+      "type": "object", "additionalProperties": false, "required": ["value"],
+      "properties": {
+        "value": {"enum": ["run", "hold-routine", "hold-all"]},
+        "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "AvailabilitySet": {
+      "description": "Changes to the session person's own availability; the daemon refuses a set that names no axis. An absent axis is unchanged; an `until` must be in the future. The person always comes from the session.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "status": {"$ref": "#/$defs/AvailabilityStatusChange"},
+        "interruptions": {"$ref": "#/$defs/AvailabilityInterruptionsChange"},
+        "deadline_clock": {"$ref": "#/$defs/AvailabilityDeadlineClockChange"}
+      }
+    },
+    "PresenceReport": {
+      "description": "One device's raw state for the session person, sent on every state change. The device applies no thresholds: the daemon derives presence the same way for every device (an `active` device is present until 10 minutes after `last_input_at`, then idle; `inactive` is idle; `locked` and `sleeping` are locked) and counts a device's newest state for 24 hours. The daemon assigns the source: the pairing grant, or this member for local callers. `observed_at` must be within the last 15 minutes and at most 2 minutes ahead; `last_input_at`, when sent, no later than `observed_at`.",
+      "type": "object", "additionalProperties": false, "required": ["state", "observed_at"],
+      "properties": {
+        "state": {"enum": ["active", "inactive", "locked", "sleeping"], "description": "`active`: unlocked and in front of the person, with the last input deciding idleness; `inactive`: running but not in front of the person (backgrounded, hidden, display asleep); `locked`; `sleeping`."},
+        "last_input_at": {"$ref": "#/$defs/Timestamp", "description": "When the person last gave this device input. Absent, an `active` report counts from `observed_at`."},
+        "observed_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "PresenceReportResult": {
+      "description": "The session person's availability after a presence report, and when this device should report again although its state has not changed.",
+      "type": "object", "additionalProperties": false, "required": ["availability", "report_again_at"],
+      "properties": {
+        "availability": {"$ref": "#/$defs/PersonAvailability"},
+        "report_again_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}], "description": "While the device is present: the instant it turns idle unless it has newer input, so it reports then with its current `last_input_at`. Null: report on the next state change, or on the next input after an idle stretch. Reporting more often is harmless; the daemon records only transitions."}
+      }
+    },
     "ObservationLatency": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "count", "over_target", "max_ms", "buckets"], "properties": {"target": {"enum": ["ios-open-to-live", "ios-connect", "ios-message-ack", "ios-conversation-open", "ios-terminal-open", "ios-recover"]}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "latency"}, "count": {"type": "integer", "minimum": 1, "maximum": 1000000}, "over_target": {"type": "integer", "minimum": 0, "maximum": 1000000}, "max_ms": {"type": "integer", "minimum": 0, "maximum": 3600000}, "buckets": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0, "maximum": 3670015}, {"type": "integer", "minimum": 1, "maximum": 1000000}], "minItems": 2, "maxItems": 2}}}},
     "ObservationLiveShare": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "foreground_ms", "live_ms"], "properties": {"target": {"const": "ios-live-share"}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "live-share"}, "foreground_ms": {"type": "integer", "minimum": 1, "maximum": 60000}, "live_ms": {"type": "integer", "minimum": 0, "maximum": 60000}}},
     "ObservationSample": {"oneOf": [{"$ref": "#/$defs/ObservationLatency"}, {"$ref": "#/$defs/ObservationLiveShare"}]},
@@ -992,6 +1080,10 @@
         "value": {
           "oneOf": [
             { "$ref": "#/$defs/DirectiveNotes" },
+            { "$ref": "#/$defs/PersonAvailabilities" },
+            { "$ref": "#/$defs/DirectiveNoteSetResult" },
+            { "$ref": "#/$defs/PersonAvailability" },
+            { "$ref": "#/$defs/PresenceReportResult" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/PrivateNotesSubject" },
             { "$ref": "#/$defs/DocumentContent" },
@@ -1174,6 +1266,7 @@
             "source_id": { "$ref": "#/$defs/Id" },
             "person_id": { "$ref": "#/$defs/Id" },
             "alert": { "type": "boolean", "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." },
+            "urgent": { "type": "boolean", "description": "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
@@ -1653,7 +1746,7 @@
         "current": { "type": "string" },
         "window": { "type": "string" },
         "remaining_percent": { "type": ["number", "null"], "minimum": 0, "maximum": 100, "description": "What is left of the error budget or allowance; null when nothing was measured." },
-        "status": { "enum": ["met", "missed", "no-data", "stale"] },
+        "status": { "anyOf": [{ "enum": ["met", "missed", "no-data", "stale"] }, { "type": "string" }], "description": "met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown." },
         "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
         "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
         "tone": { "type": "string", "description": "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." },
@@ -1716,6 +1809,7 @@
         "budget_microusd": { "type": "integer", "minimum": 0 },
         "used_microusd": { "type": "integer", "minimum": 0 },
         "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "period_start_ms": { "type": "integer", "minimum": 0 }
       }
     },
@@ -1744,6 +1838,7 @@
         "high_microusd": { "type": "integer", "minimum": 0 },
         "usage_cost_microusd": { "type": "integer", "minimum": 0 },
         "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "low_percent": { "type": ["number", "null"], "minimum": 0 },
         "high_percent": { "type": ["number", "null"], "minimum": 0 }
       }
@@ -1816,7 +1911,8 @@
         "cached_tokens": { "type": "integer", "minimum": 0 },
         "cost_microusd": { "type": "integer", "minimum": 0 },
         "reported_cost_microusd": { "type": "integer", "minimum": 0 },
-        "unpriced_tokens": { "type": "integer", "minimum": 0 }
+        "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 }
       }
     },
     "UsagePricingRates": {
@@ -1869,6 +1965,7 @@
         "unpriced_tokens"
       ],
       "properties": {
+        "unpriced_responses": { "type": "integer", "minimum": 0 },
         "price_table_id": {
           "type": "string"
         },
@@ -2169,10 +2266,48 @@
         "claim_expires_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
         "nudged_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When st last nudged this held step's holder for idling with nothing set to wake it." },
         "attempts": { "type": "array", "items": { "$ref": "#/$defs/MissionStepAttempt" }, "description": "Mission detail only, on the runs it enriches (open runs, the latest finished run and a `?run=` run): each attempt of this step, oldest first, folded from its lifecycle claims. Absent elsewhere and on older daemons, which is not proof of one attempt." },
+        "executions": { "type": "array", "items": { "$ref": "#/$defs/StepExecution" }, "description": "Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons." },
         "waits": { "type": "array", "items": { "$ref": "#/$defs/MissionStepWait" }, "description": "Mission detail only, like attempts: the intervals this step waited, by start." },
         "transitions": { "type": "array", "items": { "$ref": "#/$defs/MissionStepTransition" }, "description": "Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first." },
         "history_complete": { "type": "boolean", "description": "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." },
         "eta": { "$ref": "#/$defs/MissionStepEta" }
+      }
+    },
+    "StepExecution": {
+      "type": "object",
+      "required": ["id", "step_subject", "attempt", "agent", "incarnation_id", "declared_model", "observed_models", "fallback", "started_at_unix_ms", "ended_at_unix_ms", "duration_ms", "status", "trace_id", "exit_evidence", "usage"],
+      "properties": {
+        "id": { "type": "string", "description": "Durable work.claimed claim ID; invocation identity, not the logical attempt." },
+        "step_subject": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "agent": { "type": "string" },
+        "incarnation_id": { "type": ["string", "null"] },
+        "declared_model": { "type": ["string", "null"], "description": "Declaration captured at claim time, never the seat's current declaration." },
+        "observed_models": { "type": "array", "items": { "type": "string" } },
+        "fallback": { "type": ["boolean", "null"], "description": "Explicit fallback evidence; model mismatch alone does not establish fallback." },
+        "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "ended_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "status": { "type": ["string", "null"] },
+        "trace_id": { "type": ["string", "null"], "description": "Actual trace correlation when recorded; unknown without tracing evidence." },
+        "exit_evidence": { "type": ["string", "null"], "description": "Runtime observation claim ID retaining exit evidence for this incarnation." },
+        "usage": { "oneOf": [{ "$ref": "#/$defs/StepExecutionUsage" }, { "type": "null" }] }
+      }
+    },
+    "StepExecutionUsage": {
+      "type": "object",
+      "required": ["input_tokens", "output_tokens", "cache_write_tokens", "cache_write_1h_tokens", "cached_tokens", "total_tokens", "cost_microusd", "reported_cost_microusd", "unpriced_tokens"],
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "cache_write_tokens": { "type": "integer", "minimum": 0 },
+        "cache_write_1h_tokens": { "type": "integer", "minimum": 0 },
+        "cached_tokens": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 },
+        "cost_microusd": { "type": "integer", "minimum": 0 },
+        "reported_cost_microusd": { "type": "integer", "minimum": 0 },
+        "unpriced_tokens": { "type": "integer", "minimum": 0 },
+        "unpriced_responses": { "type": "integer", "minimum": 0 }
       }
     },
     "MissionStepProgram": {
@@ -3534,7 +3669,67 @@
     "TimelineToolResultBody": {"type": "object", "additionalProperties": false, "required": ["call_id", "status", "media_type", "content"], "properties": {"call_id": {"type": "string"}, "status": {"enum": ["success", "error"]}, "media_type": {"type": "string"}, "content": {}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineStatusBody": {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"$ref": "#/$defs/TimelineStatus"}, "detail": {"type": "string"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineErrorBody": {"type": "object", "additionalProperties": false, "required": ["code", "message", "retryable", "details"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "retryable": {"type": "boolean"}, "details": {"type": "object"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
-    "TimelineUsageBody": {"type": "object", "additionalProperties": false, "required": ["semantics", "driver", "attribution"], "properties": {"semantics": {"enum": ["context_occupancy", "session_cumulative", "response"]}, "driver": {"type": "string"}, "model": {"type": "string"}, "input_tokens": {"type": "integer", "minimum": 0}, "output_tokens": {"type": "integer", "minimum": 0}, "cached_tokens": {"type": "integer", "minimum": 0}, "cache_write_tokens": {"type": "integer", "minimum": 0}, "turn_id": {"type": "string"}, "total_tokens": {"type": "integer", "minimum": 0}, "context_used_tokens": {"type": "integer", "minimum": 0}, "context_window_tokens": {"type": "integer", "minimum": 0}, "context_used_percent": {"type": "number", "minimum": 0}, "compactions": {"type": "integer", "minimum": 0}, "last_compaction_ms": {"type": "integer", "minimum": 0}, "last_compaction_trigger": {"enum": ["manual", "auto", "threshold", "overflow", "idle", "unknown"]}, "cost": {"type": "number", "minimum": 0}, "currency": {"type": "string"}, "attribution": {"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "mission_run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}}}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "allOf": [{"if": {"properties": {"semantics": {"const": "context_occupancy"}}}, "then": {"anyOf": [{"required": ["context_used_tokens"]}, {"required": ["context_window_tokens"]}, {"required": ["context_used_percent"]}, {"required": ["compactions"]}]}}, {"if": {"properties": {"semantics": {"enum": ["session_cumulative", "response"]}}}, "then": {"required": ["total_tokens"]}}]},
+    "TimelineResponseCostComponents": {
+      "description": "Harness-reported USD components, not additional spend. The existing usage cost field is the reported total. Missing components are unknown, not zero; never derive a reported total from a partial object.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "input": {"type": "number", "minimum": 0},
+        "output": {"type": "number", "minimum": 0},
+        "cache_read": {"type": "number", "minimum": 0},
+        "cache_write": {"type": "number", "minimum": 0}
+      }
+    },
+    "TimelineProviderQuotaUnit": {"enum": ["premium_requests"]},
+    "TimelineProviderQuota": {
+      "description": "Provider quota consumption, separate from token counts and money. The enclosing response provider identifies the quota authority.",
+      "type": "object", "additionalProperties": false, "required": ["unit", "quantity"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/TimelineProviderQuotaUnit"},
+        "quantity": {"type": "number", "minimum": 0}
+      }
+    },
+    "GoldenResponseEvidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/TimelineUsageBody" }
+    },
+    "TimelineUsageBody": {
+      "description": "Response evidence is one terminal model response, not an invocation total. Optional absent fields mean unknown or unsupported, never zero. Actual response model/provider/API must not be inferred from the requested model. Reasoning and one-hour cache writes are subsets, not additive buckets.",
+      "type": "object", "additionalProperties": false, "required": ["semantics", "driver", "attribution"],
+      "properties": {
+        "semantics": {"enum": ["context_occupancy", "session_cumulative", "response"]},
+        "driver": {"type": "string"}, "model": {"type": "string"},
+        "provider": {"type": "string"}, "account": {"type": "string"},
+        "response_id": {"type": "string"}, "api": {"type": "string"}, "stop_reason": {"type": "string"},
+        "started_at_unix_ms": {"type": "integer", "minimum": 0},
+        "completed_at_unix_ms": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "number", "minimum": 0},
+        "ttft_ms": {"type": "number", "minimum": 0},
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "cached_tokens": {"type": "integer", "minimum": 0},
+        "cache_write_tokens": {"type": "integer", "minimum": 0},
+        "cache_write_1h_tokens": {"type": "integer", "minimum": 0},
+        "reasoning_tokens": {"type": "integer", "minimum": 0},
+        "turn_id": {"type": "string"},
+        "total_tokens": {"type": "integer", "minimum": 0},
+        "context_used_tokens": {"type": "integer", "minimum": 0},
+        "context_window_tokens": {"type": "integer", "minimum": 0},
+        "context_used_percent": {"type": "number", "minimum": 0},
+        "compactions": {"type": "integer", "minimum": 0},
+        "last_compaction_ms": {"type": "integer", "minimum": 0},
+        "last_compaction_trigger": {"enum": ["manual", "auto", "threshold", "overflow", "idle", "unknown"]},
+        "cost": {"type": "number", "minimum": 0},
+        "cost_components": {"$ref": "#/$defs/TimelineResponseCostComponents"},
+        "currency": {"type": "string"},
+        "provider_quota": {"$ref": "#/$defs/TimelineProviderQuota"},
+        "attribution": {"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "mission_run_id": {"type": ["string", "null"]}, "generation_id": {"type": ["string", "null"]}, "step_id": {"type": ["string", "null"]}}},
+        "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"semantics": {"const": "context_occupancy"}}}, "then": {"anyOf": [{"required": ["context_used_tokens"]}, {"required": ["context_window_tokens"]}, {"required": ["context_used_percent"]}, {"required": ["compactions"]}]}},
+        {"if": {"properties": {"semantics": {"const": "session_cumulative"}}}, "then": {"required": ["total_tokens"]}}
+      ]
+    },
     "TimelineRedactionBody": {"type": "object", "additionalProperties": false, "required": ["reason", "withheld_bytes"], "properties": {"reason": {"type": "string"}, "withheld_bytes": {"type": "integer", "minimum": 0}, "withheld_items": {"type": "integer", "minimum": 0}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineTruncationBody": {"type": "object", "additionalProperties": false, "required": ["reason", "omitted_from_sequence", "omitted_to_sequence"], "properties": {"reason": {"type": "string"}, "omitted_from_sequence": {"type": "integer", "minimum": 0}, "omitted_to_sequence": {"type": "integer", "minimum": 0}, "continuation_cursor": {"$ref": "#/$defs/Cursor"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelinePage": {
@@ -3752,6 +3947,7 @@
         "type": {"const": "update"},
         "about": {"$ref": "#/$defs/Id", "description": "Where the person asked: their mission run or step run, or their message to the agent."},
         "summary": { "x-st-text": "markdown-block","type": "string"},
+        "speech": {"type": "string", "minLength": 1, "maxLength": 300, "description": "Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it."},
         "subjects": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/RequestSubject"}}
       }
     },
@@ -4121,7 +4317,8 @@
       "read.assistant.slo",
       "write.assistant.messages",
       "write.assistant.custom-reply",
-      "write.assistant.answers"
+      "write.assistant.answers",
+      "read.assistant.availability"
     ] },
     "AssistantMinimalReadMode": { "enum": ["approval-once", "caller-bound-allow"] },
     "AssistantGrant": {
@@ -4492,7 +4689,18 @@
           "minItems": 1,
           "uniqueItems": true,
           "description": "Narrows the default limited grant. Must not be combined with full_control.",
-          "items": { "type": "string", "enum": ["read.projections", "write.client-diagnostics", "read.glasses", "control.glasses", "terminal.read", "control.attention", "control.launches"] }
+          "items": { "type": "string", "enum": [
+            "read.projections",
+            "write.client-diagnostics",
+            "write.availability",
+            "write.presence",
+            "write.notes",
+            "read.glasses",
+            "control.glasses",
+            "terminal.read",
+            "control.attention",
+            "control.launches"
+          ] }
         }
       }
     },
