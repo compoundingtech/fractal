@@ -399,9 +399,13 @@ no untrimmed seeds requiring old-build excusal and next-cut continuation in this
 on top of v29 notice-owner registry entry. Versions 1 through 29 stay frozen; v29 is main`s
 notice-owner corpus. Generate it with
 `cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v30.json`;
-do not hand-edit it. The simulation and audit reports select v30.
+do not hand-edit it. It remains the historical v30 corpus.
 
-The local fixed sweep observed only seeds 13 and 294 without a checkpoint trim; each still
-trims on every modern node after its old build is excused and the next cut falls due. The
-exact v30 `NEVER_TRIMS` set is `[13, 294]`, carried from the invocation-receipt corpus
-schedule measured before main took v29.
+`claims-v31.json` adds explicit deadline-answer replacements (`work.person-override`).
+Versions 1 through 30 remain byte-identical. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v31.json`;
+the simulation and audit reports select v31.
+
+The v31 fixed sweep observed only seed 179 without a checkpoint trim; it still trims on
+every modern node after its old build is excused and the next cut falls due. The exact
+v31 `NEVER_TRIMS` set is `[179]`.
