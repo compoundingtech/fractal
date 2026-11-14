@@ -142,7 +142,7 @@ const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
     },
     'hosted-proof-failure': {
       name: 'report red main',
-      needs: Object.keys(proofJobs),
+      needs: Object.keys(proofJobs).filter((id) => !['proof-evidence-shadow-compare'].includes(id)), // Report-only jobs never trigger red-main reporting.
       if: "always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))",
       'runs-on': 'ubuntu-latest',
       permissions: {},

@@ -2269,6 +2269,8 @@
         };
       }
     ) // {
+      # Fetch-only, NAR-verified Python source for the keyless CI comparison.
+      mergemasterSource = mergemaster.outPath;
       homeManagerModules.smalltalk = import ./nix/hm-module.nix { inherit self; };
       homeManagerModules.default = self.homeManagerModules.smalltalk;
     };

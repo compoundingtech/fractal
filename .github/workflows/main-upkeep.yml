@@ -5559,6 +5559,62 @@ jobs:
         env:
           CACHE_REASON: Signs the aggregate gate result from workflow context; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  proof-evidence-shadow-compare:
+    needs: [main-checks, proof-evidence-note-linux-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    continue-on-error: true
+    env:
+      BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Compare live shadow decisions (not gate coverage)
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence-base"
+          git fetch --quiet origin "$BASE_SHA" && git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+          key_path=.st/evidence-keys; [ -z "$(git ls-tree "$BASE_SHA" -- .fractal/evidence-keys)" ] || key_path=.fractal/evidence-keys
+          git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys"
+          shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+          grep -q -- --snapshot-tree "$shadow" || { echo "::notice::missing comparison coverage: accepted base predates C"; exit 1; }
+          mm=$(nix eval --raw --no-write-lock-file .#mergemasterSource)
+          python3 "$shadow" --snapshot-tree "$(git rev-parse 'HEAD^{tree}')" --keys "$RUNNER_TEMP/evidence-keys" --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" \
+            --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,ci-script-tests,typescript-client,fractal-web" \
+            --compare-shadow "$mm/scripts/ci-evidence-shadow" --comparison-out "$RUNNER_TEMP/evidence-shadow-comparison"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "evidence-shadow-comparison-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/evidence-shadow-comparison/"
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Fetches immutable source and evidence only; compiles nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) ) }}
+    name: post-merge evidence-shadow-compare
   proof-evidence-note-rust-tests:
     name: post-merge evidence-note-rust-tests
     needs:
