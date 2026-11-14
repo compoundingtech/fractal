@@ -183,17 +183,17 @@ final class BuildIdentityTests: XCTestCase {
   }
 
   func testShortFormHonestlyIdentifiesMissingRevisions() {
+    // A local stamp only reaches resolve() through the runtime `CLI_BUILD_STAMP` variable (an
+    // embedded stamp is honoured only when it is a nix stamp), so deliver these via environment.
     // `n/a · 3h`: no revision, but a known commit timestamp still renders its age.
     let absentRev = BuildIdentity.resolve(
-      baseVersion: "0.1.0",
-      buildStamp: stamp(["type": "local", "rev": "", "ts": now - 720, "commitTs": now - 3 * 3600, "dirty": false]),
-      environment: [:])
+      baseVersion: "0.1.0", buildStamp: placeholder,
+      environment: ["CLI_BUILD_STAMP": stamp(["type": "local", "rev": "", "ts": now - 720, "commitTs": now - 3 * 3600, "dirty": false])])
     XCTAssertEqual(absentRev.short(now: date), "n/a · 3h")
     // `n/a* · n/a`: empty revision stays dirty, and a missing commit time is never replaced.
     let absentBoth = BuildIdentity.resolve(
-      baseVersion: "0.1.0",
-      buildStamp: stamp(["type": "local", "rev": "", "ts": now - 720, "dirty": true]),
-      environment: [:])
+      baseVersion: "0.1.0", buildStamp: placeholder,
+      environment: ["CLI_BUILD_STAMP": stamp(["type": "local", "rev": "", "ts": now - 720, "dirty": true])])
     XCTAssertEqual(absentBoth.short(now: date), "n/a* · n/a")
   }
 
