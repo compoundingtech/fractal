@@ -596,7 +596,16 @@ Seats never write on their own: `reply THREAD atlas|manager TEXT` posts an agent
 Fractal's agent-side command, and `link-ask THREAD TITLE` has atlas ask again and link the new ask to
 an existing thread. `offline` and `online` stop and restart the daemon for the paused and reconnect
 states, `revoke` revokes the browser device for the refused state, and `down` removes the instance.
-The script needs a systemd user manager, `FRACTAL_BINARY` built from this checkout and `pty`.
+The script needs a systemd user manager, `pty`, and `FRACTAL_BINARY` set to the test-support
+`fractal-fixture` built from this checkout
+(`cargo build --locked -p fractal --features test-support --bin fractal-fixture`).
+
+The preview is connected, not production: the app, its SDK, the paired gateway and the daemon are
+real, but the daemon is the fixture executable, which turns off host process-ancestry binding and uses
+its own login shell. Each Fractal command runs in a transient user unit, and on hosts where the user
+service manager's environment cannot be read, the release binary refuses those callers as
+`foreign-agent-actor`. Read the preview's results as connected-fixture results, never as results of
+the installed runtime.
 
 ## Sidebar migration
 

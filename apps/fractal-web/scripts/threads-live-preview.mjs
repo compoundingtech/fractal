@@ -26,8 +26,14 @@
  * states), `online` starts it again, `revoke` revokes the browser pairing (the app falls back to its
  * refused state; `serve` pairs a new device on the next start), and `down` removes everything.
  *
- * Needs: systemd user manager; FRACTAL_BINARY (a fractal build from this checkout: the installed one
- * may predate threads) and PTY_BINARY (default `pty` on PATH). Run from `nix develop .#web`.
+ * Needs: systemd user manager; FRACTAL_BINARY, the test-support `fractal-fixture` built from this checkout
+ * (`cargo build --locked -p fractal --features test-support --bin fractal-fixture`), and PTY_BINARY (default
+ * `pty` on PATH). Run from `nix develop .#web`.
+ *
+ * What this proves, and what it does not: the app, its client SDK, the paired gateway and the daemon are real and
+ * connected. The daemon is the fixture executable, which turns off host process-ancestry binding (each Fractal
+ * command here runs in a transient user unit, whose service-manager ancestor the release binary cannot inspect on
+ * every host) and uses its own login shell. It is not the installed runtime.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
@@ -105,7 +111,7 @@ async function start() {
   mkdirSync(join(root, 'workspace'), { recursive: true })
   if (!existsSync(join(tools, 'fractal'))) {
     const binary = process.env.FRACTAL_BINARY
-    if (binary === undefined) throw new Error('Set FRACTAL_BINARY to a fractal built from this checkout')
+    if (binary === undefined) throw new Error('Set FRACTAL_BINARY to the fractal-fixture built from this checkout')
     copyFileSync(binary, join(tools, 'fractal'))
     copyFileSync(process.env.PTY_BINARY ?? which('pty'), join(tools, 'pty')) // Fractal finds pty beside itself
     chmodSync(join(tools, 'fractal'), 0o755); chmodSync(join(tools, 'pty'), 0o755)
@@ -208,7 +214,7 @@ async function serve() {
   const server = await createServer({ ...loaded.config, configFile: false, root: `${app}/src/web`, server: { ...loaded.config.server, host: '127.0.0.1', port, strictPort: true } })
   await server.listen()
   console.log(JSON.stringify({
-    label: 'connected preview: real fractal-web and a real isolated Fractal daemon through the paired client gateway',
+    label: 'connected preview: real fractal-web and a real isolated daemon running the test-support fractal-fixture (host ancestry binding off), through the paired client gateway; not the installed runtime',
     url: `http://127.0.0.1:${port}/w/inbox`,
     buildRev: execFileSync('git', ['-C', app, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
     agents, fallback: agents.manager, mission,
