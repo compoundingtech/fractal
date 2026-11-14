@@ -195,9 +195,35 @@ pub async fn recipient(
 
 pub async fn send_message(
     State(state): State<AppState>,
+    bound: Option<BoundActor>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    session: Option<Extension<client_v0::ClientSession>>,
+    local_peer: Option<Extension<LocalPeer>>,
     Json(request): Json<MessageSendRequest>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
-    blocking_api(move || accept_message_receipt(&state, request, None, None).map(Json)).await
+    if let Some(owner) = request.owner.as_ref() {
+        let actor = bound.as_ref().map(BoundActor::actor)
+            .or_else(|| peer.as_ref().map(|Extension(peer)| peer.agent.as_str()))
+            .or_else(|| session.as_ref().map(|Extension(session)| session.authority_actor.as_str()));
+        if actor != Some(request.from.as_str()) || matches!(bound, Some(BoundActor::Run(_)))
+            || peer.as_ref().is_some_and(|Extension(peer)| peer.agent != request.from)
+            || session.as_ref().is_some_and(|Extension(session)| session.authority_actor != request.from)
+        {
+            return Err(ApiError::bad(FractalError::new("effect-caller-refused",
+                "an effect requires its authenticated worker")));
+        }
+        let process = local_peer.as_ref().and_then(|Extension(peer)| peer.peer_process.as_ref())
+            .or_else(|| session.as_ref().and_then(|Extension(session)| session.peer_process.as_ref()));
+        let incarnation = state.store.verify_helper_launcher_peer(&request.from, process)
+            .map_err(|_| ApiError::bad(FractalError::new("effect-caller-refused",
+                "an effect requires the exact live worker process")))?;
+        if incarnation != owner.incarnation {
+            return Err(ApiError::bad(FractalError::new("effect-caller-refused",
+                "an effect requires the exact live worker process")));
+        }
+    }
+    blocking_api(move || accept_message_receipt_authorized(
+        &state, request, None, None, None, None, true).map(Json)).await
 }
 
 #[derive(Deserialize)]

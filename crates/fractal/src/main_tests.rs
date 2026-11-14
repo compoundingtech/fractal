@@ -6361,14 +6361,15 @@ fn message_send_and_reply_accept_a_key_for_unconfirmed_retries() {
 #[test]
 fn a_derived_message_key_names_one_message_in_one_hour() {
     let request = MessageSendRequest {
-        idempotency_key: String::new(),
-        from: "person/avery".into(),
-        to: "agent/example/worker".into(),
-        content: "The merge train is live.".into(),
-        title: Some("Merge train".into()),
-        in_reply_to: None,
-        tags: Vec::new(),
-        attachments: Vec::new(),
+    owner: None,
+    idempotency_key: String::new(),
+    from: "person/avery".into(),
+    to: "agent/example/worker".into(),
+    content: "The merge train is live.".into(),
+    title: Some("Merge train".into()),
+    in_reply_to: None,
+    tags: Vec::new(),
+    attachments: Vec::new(),
     };
     let key = derived_message_key(&request, None, 490_000);
     // The key never changes between builds: a retry after an upgrade finds the first send.
@@ -6633,14 +6634,15 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "message-read-final-state".into(),
-                from: "agent/sender".into(),
-                to: "agent/sup".into(),
-                content: "Read me".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "message-read-final-state".into(),
+            from: "agent/sender".into(),
+            to: "agent/sup".into(),
+            content: "Read me".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
         )
         .await
@@ -6654,14 +6656,15 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "message-read-archive-final-state".into(),
-                from: "agent/sender".into(),
-                to: "agent/sup".into(),
-                content: "Archive me".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "message-read-archive-final-state".into(),
+            from: "agent/sender".into(),
+            to: "agent/sup".into(),
+            content: "Archive me".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
         )
         .await
