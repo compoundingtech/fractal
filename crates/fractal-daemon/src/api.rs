@@ -21,13 +21,21 @@ pub const ROUTE_FAMILIES: &[RouteFamily] = &[mailbox::routes, client_v0::routes]
 /// Build routes only. The owner starts background publications with
 /// [`start_published_lists`]; a bare router refuses unpublished current runtime reads.
 pub fn router(state: AppState) -> Router {
-    router_with(state, ROUTE_FAMILIES)
+    with_supervisor_health(router_with(state, ROUTE_FAMILIES))
 }
 
 /// Build the loopback-only client gateway. Unlike the local Unix boundary, every ordinary
 /// client request on this router requires a paired bearer credential.
 pub fn fabric_router(state: AppState) -> Router {
-    fabric_router_with(state, ROUTE_FAMILIES)
+    with_supervisor_health(fabric_router_with(state, ROUTE_FAMILIES))
+}
+
+fn with_supervisor_health(app: Router) -> Router {
+    #[cfg(unix)]
+    let app = app.layer(axum::Extension(SupervisorHealth(std::sync::Arc::new(|| {
+        crate::service::launchd_health::snapshot().map(|health| serde_json::json!(health))
+    }))));
+    app
 }
 
 #[cfg(test)]
