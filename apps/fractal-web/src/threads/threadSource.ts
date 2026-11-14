@@ -19,6 +19,9 @@ export type ThreadSendResult =
   | { readonly _tag: 'Sent'; readonly threadId: string }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
+/** A send that never reached Fractal: nothing changed, and the advice holds only until it reconnects. */
+export const unreachableSend = 'Fractal could not be reached, so nothing changed. Try again once it reconnects.'
+
 type ThreadStartIntent = Readonly<Omit<ThreadStartParameters, 'target_id' | 'signature' | 'origin'>> & {
   readonly origin: Readonly<ThreadStartParameters['origin']>
 }
@@ -354,7 +357,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         // A failed outcome applied nothing. A gateway or network failure says so in words; a daemon refusal keeps its own reason.
         const error = outcome.error
         return reject(error instanceof ClientError && error.status < 500 ? error.response.message
-          : error instanceof ClientError || error instanceof TypeError ? 'Fractal could not be reached, so nothing changed. Try again once it reconnects.'
+          : error instanceof ClientError || error instanceof TypeError ? unreachableSend
             : error instanceof Error ? error.message : 'Fractal could not perform this action.')
       } finally {
         delete attempt.pending

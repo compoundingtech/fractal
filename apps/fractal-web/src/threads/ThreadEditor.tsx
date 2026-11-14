@@ -3,7 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom } from '@effect/atom-react'
 import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DraftMessageComposer } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DraftMessageComposer.tsx'
-import type { ThreadSendResult, ThreadSource } from './threadSource.ts'
+import { useGatewaySync } from '../data/react.tsx'
+import { unreachableSend, type ThreadSendResult, type ThreadSource } from './threadSource.ts'
 
 export function ThreadEditor({ source, destination, label, send, onSent, inputRef }: {
   readonly source: Pick<ThreadSource, 'draft'>
@@ -14,9 +15,12 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
   readonly inputRef?: React.Ref<HTMLTextAreaElement>
 }) {
   const [draft, setDraft] = useAtom(source.draft(destination))
-  const [error, setError] = React.useState<string>()
+  const gateway = useGatewaySync()?.status._tag
+  const [error, setError] = React.useState<{ readonly text: string; readonly whileDown: boolean }>()
   const [pending, setPending] = React.useState(false)
   const busy = React.useRef(false)
+  // A send that could not reach Fractal while it was down says to try again once it reconnects; once it has, that advice is spent.
+  const shownError = error === undefined || (error.whileDown && gateway === 'Live') ? undefined : error.text
   const submit = async () => {
     const content = draft.content.trim()
     if (content === '' || busy.current) return
@@ -25,7 +29,7 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
     setPending(true)
     try {
       const result = await send(content, draft.quote?.id)
-      if (result._tag === 'Refused') setError(result.detail)
+      if (result._tag === 'Refused') setError({ text: result.detail, whileDown: result.detail === unreachableSend && gateway !== 'Live' })
       else {
         setDraft(current => current === draft ? { content: '' } : current)
         onSent?.(result.threadId)
@@ -36,7 +40,7 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
     }
   }
   return <>
-    {error === undefined ? null : <p role="alert" {...stylex.props(styles.note, styles.error)}>{error}</p>}
+    {shownError === undefined ? null : <p role="alert" {...stylex.props(styles.note, styles.error)}>{shownError}</p>}
     <DraftMessageComposer label={label} draft={draft.content} onDraftChange={content => setDraft(current => ({ ...current, content }))}
       onSubmit={() => { void submit() }} pending={pending} maxContentBytes={8192}
       {...(inputRef === undefined ? {} : { inputRef })}

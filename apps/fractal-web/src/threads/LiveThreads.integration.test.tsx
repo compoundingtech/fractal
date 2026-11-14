@@ -226,3 +226,24 @@ it.each([['lost', true], ['held elsewhere', false]] as const)('focuses a thread 
     outside.remove()
   }
 })
+
+it('retires the unreachable-send advice once the gateway is live again and keeps the draft', async () => {
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    actions: ['thread.reply'],
+    reply: (url, init) => {
+      if (init?.method === 'POST') throw new TypeError('Failed to fetch')
+      return url.pathname.endsWith('/timeline') ? page([]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') })
+    },
+  })
+  const advice = 'Fractal could not be reached, so nothing changed. Try again once it reconnects.'
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('textarea')).not.toBeNull())
+    await view.setGateway({ status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 1, nextAt: 1_000, issue: 'socket closed' } }, observedAt: 1 })
+    await type(view.host.querySelector('textarea'), 'Drafted while offline')
+    await act(async () => view.button('Send')?.click())
+    await vi.waitFor(() => expect(view.host.querySelector('[role="alert"]')?.textContent).toBe(advice))
+    await view.setGateway({ status: { _tag: 'Live', since: 2 }, observedAt: 2 })
+    expect(view.host.textContent).not.toContain(advice)
+    expect(view.host.querySelector('textarea')?.value).toBe('Drafted while offline')
+  } finally { await view.dispose() }
+})
