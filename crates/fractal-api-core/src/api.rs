@@ -839,7 +839,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/reviews", get(records::list_reviews))
         .route("/v1/reviews/{*subject}", post(records::post_review))
         .route("/v1/work/delegation", post(set_delegation_policy))
-        .route("/v1/attention", get(records::list_attention).post(records::request_attention))
+        .route("/v1/attention", get(records::list_attention))
         .route("/v1/attention/resolve/{*subject}", post(records::resolve_attention))
         .route("/v1/subscription-requests", get(messages::list_subscription_requests))
         .route(

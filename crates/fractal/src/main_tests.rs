@@ -4622,17 +4622,9 @@ async fn renewal_retry_unknown_expiry_and_success_do_not_retire_a_known_bound() 
 }
 
 #[test]
-fn legacy_attention_help_directs_callers_to_person_work() {
-    let mut command = Cli::command();
-    let help = command
-        .find_subcommand_mut("attention")
-        .unwrap()
-        .find_subcommand_mut("request")
-        .unwrap()
-        .render_long_help()
-        .to_string();
-    assert!(help.contains("attention-migrated"), "{help}");
-    assert!(help.contains("work ask"), "{help}");
+fn retired_alert_spellings_are_not_commands() {
+    assert!(Cli::try_parse_from(["fractal", "attention", "ls"]).is_err());
+    assert!(Cli::try_parse_from(["fractal", "alerts", "request"]).is_err());
 }
 
 #[test]
@@ -6456,16 +6448,16 @@ fn delegated_commands_require_complete_proof_and_keep_the_agent_actor() {
             "Friday",
         ],
         vec!["conversations", "archive", "message/notice"],
-        vec!["attention", "approve", "step-run/example/build"],
+        vec!["alerts", "approve", "step-run/example/build"],
         vec![
-            "attention",
+            "alerts",
             "reject",
             "step-run/example/build",
             "--reason",
             "Stop",
         ],
         vec![
-            "attention",
+            "alerts",
             "resolve",
             "attention/update",
             "--outcome",
@@ -7239,7 +7231,7 @@ fn a_new_agent_needs_its_own_identity_inside_a_harness() {
 fn review_mutations_use_the_explicit_as_actor() {
     let cli = Cli::try_parse_from([
         "st3",
-        "attention",
+        "alerts",
         "approve",
         "attention/item",
         "--as",
@@ -7256,7 +7248,7 @@ fn review_mutations_use_the_explicit_as_actor() {
     assert!(
         Cli::try_parse_from([
             "st3",
-            "attention",
+            "alerts",
             "approve",
             "attention/item",
             "--as",
@@ -7264,7 +7256,7 @@ fn review_mutations_use_the_explicit_as_actor() {
         ])
         .is_err()
     );
-    assert!(Cli::try_parse_from(["st3", "attention", "approve", "attention/item",]).is_err());
+    assert!(Cli::try_parse_from(["st3", "alerts", "approve", "attention/item",]).is_err());
 }
 
 #[test]
@@ -7292,7 +7284,7 @@ fn human_mutations_reject_missing_or_shorthand_identity() {
     }
 
     for argv in [
-        vec!["st3", "attention", "ls", "--as", "alex"],
+        vec!["st3", "alerts", "ls", "--as", "alex"],
         vec!["st3", "devices", "--as", "alex"],
         vec!["st3", "import", "run", "session/demo", "--as", "alex"],
     ] {
@@ -7789,7 +7781,7 @@ fn work_wake_is_explicit_and_terminal_ding_is_not_a_driver() {
 #[test]
 fn review_commands_parse_a_filter_and_an_owner_target() {
     let list =
-        Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
+        Cli::try_parse_from(["st3", "alerts", "ls", "--as", "person/alex"]).unwrap();
     let Command::Attention {
         command: AttentionCommand::Ls { actor, .. },
     } = list.command
@@ -7800,7 +7792,7 @@ fn review_commands_parse_a_filter_and_an_owner_target() {
 
     let approve = Cli::try_parse_from([
         "st3",
-        "attention",
+        "alerts",
         "approve",
         "mission-run/release/one",
         "--as",
@@ -7817,9 +7809,9 @@ fn review_commands_parse_a_filter_and_an_owner_target() {
 }
 
 #[test]
-fn attention_commands_parse_list_request_and_resolution() {
+fn alert_commands_parse_list_and_resolution() {
     let list =
-        Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
+        Cli::try_parse_from(["st3", "alerts", "ls", "--as", "person/alex"]).unwrap();
     let Command::Attention {
         command: AttentionCommand::Ls { actor, .. },
     } = list.command
@@ -7828,63 +7820,9 @@ fn attention_commands_parse_list_request_and_resolution() {
     };
     assert_eq!(actor.as_deref(), Some("person/alex"));
 
-    let request = Cli::try_parse_from([
-        "st3",
-        "attention",
-        "request",
-        "--for",
-        "person/alex",
-        "--title",
-        "Fabric needs review",
-        "--reason",
-        "The queue did not recover.",
-        "--target",
-        "mission-run/fabric",
-        "--as",
-        "agent/fabric/worker",
-        "--idempotency-key",
-        "fabric-fault",
-    ])
-    .unwrap();
-    let Command::Attention {
-        command: AttentionCommand::Request(args),
-    } = request.command
-    else {
-        panic!("the attention request command did not parse");
-    };
-    assert_eq!(args.severity, "error");
-    assert_eq!(args.targets, ["mission-run/fabric"]);
-    assert_eq!(args.until, None);
-
-    let until = Cli::try_parse_from([
-        "st3",
-        "attention",
-        "request",
-        "--for",
-        "person/alex",
-        "--title",
-        "Publish this revision",
-        "--reason",
-        "Publish the prepared revision as a person.",
-        "--target",
-        "mission-run/release/one",
-        "--until",
-        "completed",
-        "--as",
-        "agent/release/worker",
-    ])
-    .unwrap();
-    let Command::Attention {
-        command: AttentionCommand::Request(args),
-    } = until.command
-    else {
-        panic!("the attention request with until did not parse");
-    };
-    assert_eq!(args.until.as_deref(), Some("completed"));
-
     let resolve = Cli::try_parse_from([
         "st3",
-        "attention",
+        "alerts",
         "resolve",
         "attention/fabric",
         "--outcome",

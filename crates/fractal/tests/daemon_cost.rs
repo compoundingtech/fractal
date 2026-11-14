@@ -592,10 +592,6 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/gate-results", "records a gate result"),
     ("POST /v1/reviews/{*subject}", "records a review"),
     (
-        "POST /v1/attention",
-        "refuses every post: attention is derived from asks",
-    ),
-    (
         "POST /v1/attention/resolve/{*subject}",
         "resolves attention",
     ),

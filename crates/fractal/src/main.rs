@@ -35,7 +35,7 @@ use fractal_daemon::api::{AppState, fabric_router, router};
 use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::config::{Config, PeerConfig, validate_unix_socket_path};
 use fractal_daemon::model::{
-    ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView, AttentionRequest,
+    ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
     AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
     ClaimRecord, ClaimsPage, CurrentHarnessView, DoctorReport, DocumentListResponse,
     DocumentPutRequest, DocumentVersion, EvalStatus, EventRecord, IntentInput,
@@ -361,10 +361,9 @@ enum Command {
     /// Show and answer alerts: asks, gates and approvals that wait on a person.
     ///
     /// Each alert belongs to the conversation of the agent behind it. Updates that ask nothing
-    /// are listed after the alerts and are not counted. `fractal attention` is the older name.
+    /// are listed after the alerts and are not counted.
     #[command(
         name = "alerts",
-        alias = "attention",
         after_help = "Messages never appear here; read them with `fractal conversations`.\nFaults never appear here; fractal sends each one to the agent that owns it, which asks a person with `fractal work ask` only if it needs to."
     )]
     Attention {
@@ -4255,8 +4254,6 @@ enum AttentionCommand {
     /// Chat about an alert: send a message to the agent whose conversation it belongs to, titled
     /// after it, with a reference to what it is about. This is what "Chat about this" does in the Fractal terminal UI.
     Discuss(AttentionDiscussArgs),
-    /// Legacy mutation: returns attention-migrated. Use work ask or remedy the source.
-    Request(AttentionRequestArgs),
     /// Read an informational update, or dismiss a denied call under exact delegation proof.
     Resolve(AttentionResolveArgs),
     /// Withdraw an informational update you sent. Use work cancel-ask for a question.
@@ -4330,39 +4327,6 @@ struct AttentionDiscussArgs {
     /// Name this message for retries, as `conversations send --idempotency-key` does.
     #[arg(long)]
     idempotency_key: Option<String>,
-}
-
-#[derive(Args)]
-struct AttentionRequestArgs {
-    #[arg(long = "for", value_parser = parse_person_subject)]
-    #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
-    reviewer: String,
-    #[arg(long)]
-    title: String,
-    #[arg(long)]
-    reason: String,
-    #[arg(long, value_parser = ["warning", "error"], default_value = "error")]
-    severity: String,
-    /// A subject this fault is about; repeat for several. Its kind decides whether it can end the
-    /// item on its own.
-    #[arg(long = "target")]
-    targets: Vec<String>,
-    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
-    #[arg(long = "as")]
-    actor: Option<String>,
-    #[arg(long)]
-    idempotency_key: Option<String>,
-    /// Resolve the item on its own once every target meets this `fractal trace wait` condition,
-    /// such as `completed` or `stopped`; it needs at least one --target.
-    #[arg(long, value_name = "CONDITION")]
-    until: Option<String>,
-    /// Resolve the item on its own once this step ends, instead of the step you have claimed.
-    #[arg(long, value_name = "STEP_RUN")]
-    #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
-    step: Option<String>,
-    /// Only a person closes the item, because nothing fractal observes can say it is done.
-    #[arg(long, conflicts_with_all = ["until", "step"])]
-    person_closes: bool,
 }
 
 #[derive(Args)]
@@ -6702,7 +6666,6 @@ fn guard_mutating_cli_actor(
             LaneCommand::Ls { .. } | LaneCommand::Show { .. } => None,
         },
         Command::Attention { command } => match command {
-            AttentionCommand::Request(args) => args.actor.as_deref(),
             AttentionCommand::Resolve(args) => Some(args.actor.as_str()),
             AttentionCommand::Withdraw(args) => Some(args.actor.as_str()),
             AttentionCommand::Approve(args) | AttentionCommand::Reject(args) => Some(args.actor.as_str()),

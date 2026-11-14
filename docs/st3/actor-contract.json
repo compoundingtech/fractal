@@ -336,15 +336,6 @@
         "actor_environment": null,
         "ignores_actor": false
       },
-      "st alerts request": {
-        "actor": "optional",
-        "accepts_person": true,
-        "can_carry_person": true,
-        "as_role": "actor",
-        "alternate_actor_option": null,
-        "actor_environment": null,
-        "ignores_actor": false
-      },
       "st alerts request-changes": {
         "actor": "required",
         "accepts_person": true,
@@ -2939,9 +2930,6 @@
       }
     },
     "aliases": {
-      "st alerts": [
-        "attention"
-      ],
       "st changes list": [
         "ls"
       ],

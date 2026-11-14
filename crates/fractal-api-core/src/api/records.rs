@@ -517,16 +517,6 @@ pub async fn list_attention(
         .map(Json)
 }
 
-pub async fn request_attention(
-    State(_state): State<AppState>,
-    Json(_post): Json<crate::model::AttentionRequestPost>,
-) -> Result<Json<AttentionRequestView>, ApiError> {
-    Err(ApiError::bad(FractalError::new(
-        "attention-migrated",
-        "attention is a derived view; use work ask/done/cancel-ask or act on its source",
-    )))
-}
-
 /// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
 /// or the fleet's fault agent, and only for a fault whose run has ended.
 pub async fn dismiss_fault(

@@ -2437,15 +2437,6 @@ pub struct AttentionRequest {
     pub idempotency_key: String,
 }
 
-/// An attention request as it is posted, with what closes it.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AttentionRequestPost {
-    #[serde(flatten)]
-    pub request: AttentionRequest,
-    #[serde(flatten)]
-    pub closing: AttentionClosing,
-}
-
 /// What closes an attention request besides a target that can end. A request names at least one
 /// of these or such a target; an agent's request that names none closes when the step that agent
 /// has claimed ends.

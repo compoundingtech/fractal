@@ -836,14 +836,6 @@
       "verification": "real CLI over private Unix socket; current source review and durable verdict"
     },
     {
-      "command": "st alerts request",
-      "description": "Legacy mutation: returns attention-migrated. Use work ask or remedy the source",
-      "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
-      ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
-    },
-    {
       "command": "st alerts request-changes",
       "description": "Ask a feedback-mode step to change its work and rerun",
       "tests": [
@@ -853,7 +845,7 @@
     },
     {
       "command": "st alerts resolve",
-      "description": "Legacy mutation: returns attention-migrated. Complete a person step with work done",
+      "description": "Read an informational update, or dismiss a denied call under exact delegation proof",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],
@@ -885,7 +877,7 @@
     },
     {
       "command": "st alerts withdraw",
-      "description": "Legacy mutation: returns attention-migrated. Cancel your ask with work cancel-ask",
+      "description": "Withdraw an informational update you sent. Use work cancel-ask for a question",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
       ],

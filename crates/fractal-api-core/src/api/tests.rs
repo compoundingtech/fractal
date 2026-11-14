@@ -14664,16 +14664,21 @@ version 2
 }
 
 #[tokio::test]
-async fn legacy_attention_mutations_report_migration_without_writes() {
+async fn retired_attention_creation_is_absent_and_source_mutations_refuse_legacy_ids() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = state.store.clone();
     let app = router(state);
+    let response = app.clone().oneshot(
+        Request::builder().method("POST").uri("/v1/attention")
+            .header("content-type", "application/json")
+            .body(Body::from("{}")).unwrap(),
+    ).await.unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let (status, items) = get_request(app.clone(), "/v1/attention").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(items, json!([]));
     for (path, body) in [
-        (
-            "/v1/attention",
-            json!({"reviewer":"person/avery","title":"Decide","reason":"Choose a date","severity":"warning","targets":[],"actor":"agent/alder.asker","idempotency_key":"legacy-ask"}),
-        ),
         (
             "/v1/attention/resolve/attention%2Flegacy",
             json!({"outcome":"resolved","actor":"person/avery","idempotency_key":"legacy-done"}),
