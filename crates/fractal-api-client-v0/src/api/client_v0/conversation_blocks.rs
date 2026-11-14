@@ -831,8 +831,11 @@ mod tests {
         state: &AppState, native: &ExternalSession, session: &ClientSession,
         snapshot: &ClientSnapshot, limit: usize,
     ) -> (Value, Vec<Value>) {
+        let messages = super::super::native_session_messages(
+            state, snapshot, session, &native.id, None,
+        ).unwrap();
         let (slice, _) = super::super::canonical_native_slice(
-            state, snapshot, native, session, &native.id, &[],
+            state, snapshot, native, session, &native.id, &messages,
             crate::external_sessions::TimelineOrder::TimestampSequence, None,
             (limit + 1).max(CLIENT_MAX_PAGE_ITEMS), None, true,
             &mut NativeReadAdmission::default(),
