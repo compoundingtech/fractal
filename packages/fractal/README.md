@@ -188,6 +188,53 @@ Every `input` field must be required and encode to a string, since each one is a
 
 A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`. `fixtures/programs/factory/land-program` is the factory's landing program; `src/program-bundle.unit.test.ts` runs its bundle against an in-memory host.
 
+### Scoped resource lanes
+
+`Fractal.resources.lane(name, options)` acquires a host-authoritative membership in an Effect
+scope, not a JavaScript semaphore. Use its native operations for admitted work:
+
+```ts
+const check = Effect.scoped(Effect.gen(function* () {
+  const lane = yield* Fractal.resources.lane('checks', {
+    host: 'executor',
+    maxMembers: 1,
+    capacity: { cores: 4, memory: 8 * 1024 ** 3 },
+    coverage: 'enforced',
+    admissionTimeout: '30m',
+  })
+  return yield* lane.exec('check', ['tools/check'], { cwd: '/source', timeout: '4h' })
+}))
+```
+
+Capacity memory is bytes. Admission timeout bounds waiting and preparation; command timeout
+starts at payload release, not at scope entry. The host shares its existing seat/step/burst fit
+accountant: assigned-agent `capacity` remains a seat raise, never a second reservation. Required
+enforcement refuses unsupported coverage rather than silently running a detached command.
+
+`lane.run(id, mission, input)` passes the exact membership to linked execution roots; a child
+workflow alone is not a memory reservation or a relocated parent harness. Arbitrary Effects in
+the scope do not inherit process containment. `lane.exec` and `lane.run` cross the daemon
+boundary; they never call the ordinary program-host `spawn`.
+Lane-bound child programs also route ordinary `Fractal.command` calls through that exact native
+membership. Their command identities include the journaled step key, so replaying an earlier
+step cannot cause a later command to adopt the wrong execution. Republish child bundles with
+the resource-capable SDK before using `lane.run`; legacy detached host `spawn` is refused in
+this context rather than silently escaping containment.
+
+`ResourceError.code` distinguishes `admission-expired`, `unsupported-coverage`,
+`impossible-capacity`, `clock-uncertain`, `execution-timeout` and exact-generation
+retirement/cancellation outcomes. Queue expiry is not a failed payload execution.
+The tagged failure retains both `code` and the host's `message` through program-result
+encoding, so admission diagnostics remain available to callers and on replay.
+
+Each acquisition reattaches and validates with the owning host even when a journal contains a
+grant-shaped result. Keep acquisition outside journaled `Fractal.step` bodies. Scope closure
+sends exact-generation release and awaits confirmed retirement; neither a command's exit nor
+a completed program journal entry alone frees capacity. Interruption withdraws the exact
+queued request, or cancels its racing admitted generation, through the same native boundary.
+Durable host holds are independent admission conditions and are not cleared by scope closure.
+
+
 ### Publishing a program
 
 `loadSubjectTree({ root, context, bundleDir })` bundles every program mission it loads with `bun build --target=bun --minify-whitespace` (`bun` on `PATH`, or the `bun` option) and writes the bundle to `<bundleDir>/<sha256>.mjs`; `bundleDir` must be absolute, and a tree with a program mission and no `bundleDir` is refused. Minified whitespace drops the comment Bun writes above each inlined module with its path from the build directory, so the same sources and lockfile give the same bytes wherever the tree and its dependencies are checked out. Before it pins the bundle the loader checks that its default export carries the entry. The mission then loads like any other, so `emit([mission(intent)])` renders it:

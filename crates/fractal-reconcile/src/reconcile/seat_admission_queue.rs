@@ -6,6 +6,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !matches!(subject.kind.as_str(), "agent" | "exec" | "pty") {
             return Ok(true); // Internal gate runners share the runtime, not seat admission.
         }
+        if resource_lanes::request(member)?.is_some() {
+            // One host admission, not a second seat permit acquired after the finite grant.
+            return self.admit_resource_lane(subject, member);
+        }
         let lane = match self.lane_fit(subject, member, request)? {
             LaneFit::Waits => return Ok(false),
             LaneFit::Fits(lane) => Some(lane),
@@ -167,19 +171,19 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The memory of this host's other laned seats that run, or were admitted to start and are not
     /// yet seen running.
     pub(super) fn held_lanes(&self, candidate: &str, now: u64) -> Result<u64> {
-        self.lanes_held(candidate, now, true)
+        self.lanes_held(candidate, now, true, true)
     }
 
     /// What [`Self::held_lanes`] would be once every step's raise and every burst were given back:
     /// each such seat at its own lane.
     pub(super) fn held_base_lanes(&self, candidate: &str, now: u64) -> Result<u64> {
-        self.lanes_held(candidate, now, false)
+        self.lanes_held(candidate, now, false, true)
     }
 
-    fn lanes_held(&self, candidate: &str, now: u64, raised: bool) -> Result<u64> {
+    pub(super) fn lanes_held(&self, candidate: &str, now: u64, raised: bool, include_finite: bool) -> Result<u64> {
         const STARTING_SECS: u64 = 600;
         let status = &self.seat_admission.status;
-        let mut held = 0;
+        let mut held = if include_finite { self.store.held_resource_membership_bytes(&self.host, candidate)? } else { 0 };
         let mut running = BTreeSet::new();
         for desired in self.store.desired_subjects()? {
             let Some(member) = desired.member.as_ref().filter(|member| member.host == self.host) else { continue };
@@ -218,6 +222,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub(super) fn cancel_invalid_admissions(&self, desired: &[DesiredSubject]) -> Result<()> {
+        self.cancel_invalid_resource_lanes(desired)?;
         {
             let mut state = self.seat_admission.status.state();
             state.replacements.retain(|name| desired.iter().any(|subject| subject.subject == *name
@@ -228,8 +233,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         // its place in line, as a pending one does below.
         let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let waits = self.seat_admission.status.state().lane_waits.clone();
+        let finite = self.store.resource_memberships_for_host(&self.host)?;
         let mut gone = BTreeSet::new();
         for wait in waits {
+            if let Some(record) = finite.iter().find(|record| record.request.id == wait.subject) {
+                if record.state == "queued" {
+                    self.seat_admission.status.lane_tried(&wait.subject, now);
+                } else {
+                    gone.insert(wait.subject);
+                }
+                continue;
+            }
             let selected = desired.iter().find(|subject| subject.subject == wait.subject
                 && subject.kind == "agent"
                 && subject.member.as_ref().is_some_and(|member| member.host == self.host && member.capacity.is_some()));
