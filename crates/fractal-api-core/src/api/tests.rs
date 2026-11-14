@@ -16686,7 +16686,7 @@ async fn invocation_artifacts_require_their_agent_or_owning_person_and_honor_del
     let artifact = invocation_artifacts::capture_input(root.path(), invocation, "safe input", now_ms()).unwrap();
     invocation_artifacts::record(&state.store, agent, &artifact).unwrap();
     let query = || Query(serde_json::from_value(json!({"invocation":invocation,"kind":"input"})).unwrap());
-    let stranger = client_v0::ClientSession::local(Some("person/stranger")).unwrap();
+    let stranger = client_v0::ClientSession::local(Some("person/other")).unwrap();
     let denied = super::agent_invocations::artifact(State(state.clone()),Extension(stranger),
         AxumPath(artifact.sha256.clone()),query(),None,None,None).await.unwrap_err();
     assert_eq!(denied.status, StatusCode::FORBIDDEN);
