@@ -1023,7 +1023,7 @@ class LaneBurstTest(unittest.TestCase):
         with mock.patch.object(st_test, 'config_blob', return_value=b'{"build": {"cores": 8}}'):
             with self.assertRaisesRegex(st_test.Failure, 'no usable build size'):
                 st_test.burst_size(['linux-gate'])
-        self.assertIn('"build"', (ROOT / '.st/lane-bursts.json').read_text())
+        self.assertIn('"build"', checkout_config('lane-bursts.json').read_text())
 
     def test_it_waits_in_line_says_each_reason_once_and_holds_until_released(self):
         burst, said = self.burst('echo "waiting burst lane 8 cores/24.0G does not fit"; echo "waiting burst lane 8 cores/24.0G does not fit"; '
@@ -6047,7 +6047,7 @@ class KeyedClippy(StTest):
         # The real linux-clippy entry, keyed by this repository's files, and its lane: the verifier judges every note by the real rules.
         inputs = ['a.txt', 'flake.lock', 'scripts']
         policy = json.loads(json.dumps(POLICY))
-        policy['checks']['linux-clippy'] = dict(json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['linux-clippy'],
+        policy['checks']['linux-clippy'] = dict(json.loads(checkout_config('evidence-skip-policy.json').read_text())['checks']['linux-clippy'],
                                                 inputs=inputs)
         (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
         (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'linux-clippy': {
@@ -6157,7 +6157,7 @@ class KeyedClippy(StTest):
         # The linux-gate shrink (dropping the clippy stage once linux-clippy is signed) must wait for the flip: a shadow linux-clippy
         # note skips nothing, so a linux-gate note from a run without the stage would leave CI to run clippy. The verifier holds each
         # signer level to its exact command, so a run without the stage signs no note that skips linux-gate's aggregate.
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']
+        policy = json.loads(checkout_config('evidence-skip-policy.json').read_text())['checks']
         if policy['linux-clippy'].get('enforce') is not True:
             self.assertIn('clippy', LOCAL['linux-gate'])
             for level, rule in policy['linux-gate']['kinds']['wrapper']['by_level'].items():
@@ -6208,7 +6208,7 @@ class KeyedFleetCompat(StTest):
         inputs = ['a.txt', 'flake.lock', 'scripts']
         policy = json.loads(json.dumps(POLICY))
         policy['checks']['linux-fleet-compat'] = dict(
-            json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['linux-fleet-compat'], inputs=inputs)
+            json.loads(checkout_config('evidence-skip-policy.json').read_text())['checks']['linux-fleet-compat'], inputs=inputs)
         (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
         (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'linux-fleet-compat': {
             'argv': LOCAL['linux-fleet-compat'], 'definition_paths': ['.st', 'scripts'], 'tree_inputs': inputs}}}))
@@ -6437,7 +6437,7 @@ class KeyedFleetCompat(StTest):
 
     def test_while_linux_fleet_compat_is_in_shadow_linux_gate_keeps_its_fleet_compat_stage(self):
         # As for clippy: the linux-gate shrink waits for the flip, since a shadow note skips nothing.
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']
+        policy = json.loads(checkout_config('evidence-skip-policy.json').read_text())['checks']
         if policy['linux-fleet-compat'].get('enforce') is not True:
             self.assertIn('fleet-compat', LOCAL['linux-gate'])
             for level, rule in policy['linux-gate']['kinds']['wrapper']['by_level'].items():
