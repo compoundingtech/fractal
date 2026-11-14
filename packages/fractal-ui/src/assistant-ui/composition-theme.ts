@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex'
-import { surfaceVars, textVars, borderVars, accentVars, interactionVars, focusRingBridgeVars, elevationVars, statusVars, colorVars, diffPanelVars } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, accentVars, interactionVars, focusRingBridgeVars, elevationVars, statusVars, colorVars, diffPanelVars, syntaxVars } from './composition-tokens.stylex'
 
 export type Scheme = 'dark' | 'light'
 
@@ -100,6 +100,16 @@ const diffPanelTheme = stylex.createTheme(diffPanelVars, {
   literal: '#92400e',
 })
 
-export const lightThemeWithoutStatus = [surfaceVarsTheme, textVarsTheme, borderVarsTheme, accentVarsTheme, interactionTheme, focusRingBridgeTheme, elevationTheme, colorTheme, diffPanelTheme] as const
+/** pierre-light (@pierre/theme 2.0.0), the light half of the chosen syntax palette. */
+const syntaxTheme = stylex.createTheme(syntaxVars, {
+  // AA 4.5:1 on white and the 7% change washes, nearest to pierre-light: keyword #d32a61 → #c8245a,
+  // string #199f43 → #137a3a, constant #1ca1c7 → #0e7490, comment and punctuation #737373 → #6b6b6b.
+  fg: '#0a0a0a', comment: '#6b6b6b', keyword: '#c8245a', string: '#137a3a', constant: '#0e7490', func: '#693acf',
+  parameter: '#636363', punctuation: '#6b6b6b', link: '#137a3a', inserted: '#18a46c', deleted: '#d52c36',
+  addition: '#18a46c', deletion: '#d52c36',
+  additionInk: '#15803d', deletionInk: '#c42530',
+})
+
+export const lightThemeWithoutStatus = [surfaceVarsTheme, textVarsTheme, borderVarsTheme, accentVarsTheme, interactionTheme, focusRingBridgeTheme, elevationTheme, colorTheme, diffPanelTheme, syntaxTheme] as const
 export const lightTheme = [...lightThemeWithoutStatus, lightStatusTheme] as const
 export const lightThemes = { color: colorTheme }

@@ -42,11 +42,13 @@
     "check:sidebar-fitting": "node scripts/check-sidebar-fitting.mjs",
     "check:transcript-skeleton-imports": "node scripts/check-transcript-skeleton-imports.mjs",
     "test:declaration": "node --test --test-force-exit src/assistant-ui/declaration/declaration-tint.unit.test.mjs src/assistant-ui/declaration/source-map-view.unit.test.mjs",
-    "test:entity": "node --experimental-strip-types src/assistant-ui/entity/entity.unit.test.ts"
+    "test:entity": "node --experimental-strip-types src/assistant-ui/entity/entity.unit.test.ts",
+    "test:diff-patch": "node --experimental-strip-types src/assistant-ui/composition/diff-patch.unit.test.ts"
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.25",
     "@effect/atom-react": "4.1.0",
+    "@pierre/diffs": "1.6.1",
     "@pierre/highlights": "0.3.0",
     "@stylexjs/stylex": "0.19.0",
     "effect": "4.1.0",

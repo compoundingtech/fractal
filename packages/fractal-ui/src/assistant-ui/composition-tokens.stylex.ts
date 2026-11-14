@@ -82,6 +82,22 @@ export const diffPanelVars = stylex.defineVars({
   literal: '#fe9a00',
 })
 
+/**
+ * The one syntax and diff palette, shared by Markdown code blocks and the kit DiffView
+ * (@pierre/diffs). The user chose Pierre's default theme: dark values from @pierre/theme 2.0.0
+ * pierre-dark (light in composition-theme.ts, from pierre-light), reduced to @pierre/diffs'
+ * CSS-variable categories (types share the function colour, as there), with the few colours that
+ * miss WCAG AA 4.5:1 on the change washes moved just far enough to pass (noted per value).
+ */
+export const syntaxVars = stylex.defineVars({
+  // AA: Pierre's #737373 greys read 4.1:1 on the change washes; #8a8a8a clears 4.5:1.
+  fg: '#fafafa', comment: '#8a8a8a', keyword: '#ff678d', string: '#5ecc71', constant: '#68cdf2', func: '#9d6afb',
+  parameter: '#a3a3a3', punctuation: '#8a8a8a', link: '#5ecc71', inserted: '#07c480', deleted: '#ff2e3f',
+  addition: '#07c480', deletion: '#ff2e3f',
+  /** +N / −M count ink: the change hue at text contrast. */
+  additionInk: '#07c480', deletionInk: '#ff2e3f',
+})
+
 /** Type scale pairs and font stacks. UI 14/20, meta 12/16, dense 11, code 13, body 14/22.75. */
 export const typeVars = stylex.defineVars({
   fontSans: `-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif`,

@@ -20,3 +20,13 @@ if (typeof window !== 'undefined' && window.matchMedia === undefined) {
     },
   })
 }
+
+// jsdom constructs CSSStyleSheet but has no replaceSync/replace, which @pierre/diffs' custom element calls in its
+// constructor before adopting the sheet (adoptedStyleSheets is a plain property in jsdom). jsdom never applies an
+// adopted sheet, so the text is accepted and dropped rather than parsed.
+if (typeof CSSStyleSheet !== 'undefined' && typeof CSSStyleSheet.prototype.replaceSync !== 'function') {
+  Object.defineProperties(CSSStyleSheet.prototype, {
+    replaceSync: { configurable: true, writable: true, value: () => {} },
+    replace: { configurable: true, writable: true, value(this: CSSStyleSheet) { return Promise.resolve(this) } },
+  })
+}
