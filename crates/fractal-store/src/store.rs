@@ -3661,7 +3661,6 @@ impl Store {
                 }
                 validate_documents(transaction, &intent.document_refs)?;
                 attention_snapshot::refuse_second_fault_agent(transaction, intent)?;
-                notice_authority::refuse_second_holder(transaction, intent)?;
                 for desired in intent
                     .subjects
                     .values()
@@ -24367,7 +24366,7 @@ pub fn append_claim_with_commit_context(
             {
                 return Ok((existing, false));
             }
-            let mut stored_fields = custom::prepare(transaction, input)?;
+            let mut stored_fields = custom::prepare(transaction, &graph.origin, input)?;
             if let Some(fields) = normalize_resource_observation(transaction, input)? {
                 stored_fields = Some(fields);
             }

@@ -2029,6 +2029,22 @@ Publication fails with `missing-document` until the exact document bytes exist i
 
 A bare document name is invalid in a host declaration. A later version needs a new hash and a new declaration.
 
+## Notice owner
+
+The fleet's notice snapshots are written by one member's daemon, the notice owner. A root declaration binds it:
+
+```kdl
+notice-owner {
+  member "always-on-host"
+  member-key "MEMBER_KEY"
+  always-on
+}
+```
+
+`member-key` is the `member_key` that member's own fleet status reports, so the binding names one incarnation of the member: a member that leaves and joins again under the same name is not the owner until the declaration names its new key. `always-on` is the author's qualification that the member does not sleep or roam; it is required.
+
+The declaration has one subject, `notice-owner/fleet`, so a handover edits it. It is refused inside a mission. Every daemon writes as `daemon/runtime`; a snapshot counts only when its origin is the bound member and that incarnation's window holds the snapshot's writer sequence. While the declaration is missing, has rival concurrent versions, or names an incarnation that has ended, every notice snapshot is unavailable: there is no election. A handover rebuilds snapshots; producer sources do not depend on the owner.
+
 ## Work selection
 
 A mission or step can declare one agent selector kind. Only a step can declare `agentless`.

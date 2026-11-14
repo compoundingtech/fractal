@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal UI's Availability tab sets and clears the person's status, interruptions and deadline clock, for 30 minutes, an hour, two hours, until tomorrow 09:00 or until changed",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No database, claim or client API change; the tab uses the existing PUT /v1/client/availability."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. Changes are sent one at a time and the tab shows each answer; a read sent before a change is not shown after it."},
+  "compatibility": {"status": "changed", "detail": "A pairing without write.availability, an agent's session, or a daemon without the route is told so in the tab and nothing changes."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "Pairings made before write.availability existed need pairing again to change availability from the terminal UI."},
+  "recovery": {"status": "none", "detail": "Return any axis to its default with its 0 key."}
+}

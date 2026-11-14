@@ -56,6 +56,24 @@ impl NoticeModel for NoticeActor {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
+pub struct NoticeAgent(pub String);
+impl TryFrom<String> for NoticeAgent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^(?:agent)/[^\\s]+$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
+impl NoticeModel for NoticeAgent {
+    const NAME: &'static str = "NoticeAgent";
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct NoticeClaimId(pub String);
 impl TryFrom<String> for NoticeClaimId {
     type Error = String;
@@ -660,24 +678,6 @@ impl NoticeModel for NoticePolicy {
     const NAME: &'static str = "NoticePolicy";
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct NoticeRuntime(pub String);
-impl TryFrom<String> for NoticeRuntime {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, String> {
-        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-            regex::Regex::new("^(?:agent)/[^\\s]+$").expect("supported pattern")
-        });
-        if !(PATTERN.is_match(&value)) {
-            return Err("pattern".into());
-        }
-        Ok(Self(value))
-    }
-}
-impl NoticeModel for NoticeRuntime {
-    const NAME: &'static str = "NoticeRuntime";
-}
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoticeSeenParameters {
     pub notice_id: NoticeSeenParametersNoticeId,
@@ -782,7 +782,21 @@ pub enum NoticeSnapshotKind {
 pub type NoticeSnapshotPolicy = NoticePolicy;
 pub type NoticeSnapshotProducer = NoticeActor;
 pub type NoticeSnapshotRevision = Revision;
-pub type NoticeSnapshotRuntime = NoticeRuntime;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSnapshotRuntime(pub String);
+impl TryFrom<String> for NoticeSnapshotRuntime {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^(?:host)/[^\\s]+$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u64")]
 pub struct NoticeSnapshotSchemaVersion(pub u64);
@@ -888,7 +902,7 @@ pub struct NoticeSource {
     )]
     pub repo: Option<NoticeSourceRepo>,
 }
-pub type NoticeSourceAgent = NoticeRuntime;
+pub type NoticeSourceAgent = NoticeAgent;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct NoticeSourceCwd(pub String);

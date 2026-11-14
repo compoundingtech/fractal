@@ -1011,6 +1011,7 @@ pub fn run(context: Context) -> Result<()> {
                     // nothing on screen is cleared. Not flashed either: it reconnects by itself,
                     // the bar says connecting meanwhile, and clicking it says why.
                     extras.live = false;
+                    ui.availability.disconnected();
                     extras.offline = None;
                     extras.offline_since = None;
                     extras.degraded = Some(reason);
@@ -1020,6 +1021,7 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Offline(error) => {
                     ui.quality.live(false);
                     extras.live = false;
+                    ui.availability.disconnected();
                     extras.degraded = None;
                     extras.offline = Some(error);
                     extras.offline_since.get_or_insert_with(Instant::now);
