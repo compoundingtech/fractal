@@ -15,7 +15,7 @@ case "$mode" in
     # Nix source closures have no .git directory. Record the locked revision and
     # the actual package path rather than requiring an external client checkout.
     printf '%s\n' "$FRACTAL_CLIENT_PATH" | tee "$out/fractal-client-path.txt"
-    nix eval --raw --expr '(builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.fractal.locked.rev' \
+    nix eval --impure --raw --expr '(builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.fractal.locked.rev' \
       | tee "$out/fractal-client-head.txt"
     /usr/bin/swift build --product AttentionTray 2>&1 | tee "$out/build-tray.txt"
     /usr/bin/swift build --product TrayGallery 2>&1 | tee "$out/build-gallery.txt"
