@@ -197,6 +197,17 @@ impl Availability {
 
     /// A new connection, perhaps to another member: a read sent before it is not shown.
     pub(crate) fn connected(&mut self) {
+        self.writes.clear();
+        self.editor = None;
+        self.generation += 1;
+        self.reading = None;
+        self.stale = true;
+    }
+
+    /// Unsent edits are never replayed after an outage; an in-flight write remains ambiguous.
+    pub(crate) fn disconnected(&mut self) {
+        self.writes.clear();
+        self.editor = None;
         self.generation += 1;
         self.reading = None;
         self.stale = true;
@@ -244,7 +255,11 @@ impl Availability {
 
     /// A key, or the button that presses it. `s`, `i` and `d` choose what to change, a digit
     /// its value or end, Enter keeps a value until changed, Esc puts the choice away.
-    pub(crate) fn press<Tz: TimeZone>(&mut self, key: char, now: &DateTime<Tz>) -> Pressed {
+    pub(crate) fn press<Tz: TimeZone>(&mut self, key: char, live: bool, now: &DateTime<Tz>) -> Pressed {
+        if !live && key != ESC && key != 'r' && (self.editor.is_some() || matches!(key, 's' | 'i' | 'd')) {
+            self.editor = None;
+            return Pressed::Say("Reconnect to Fractal before changing availability".into());
+        }
         let Some(editor) = self.editor.clone() else {
             let axis = match key {
                 'r' => {
@@ -584,7 +599,7 @@ impl super::Ui {
 
     /// A key pressed or its button clicked.
     pub(crate) fn availability_press(&mut self, key: char) -> bool {
-        match self.availability.press(key, &chrono::Local::now()) {
+        match self.availability.press(key, matches!(self.world.link, super::view::Link::Live), &chrono::Local::now()) {
             Pressed::Ignored => false,
             Pressed::Done => true,
             Pressed::Say(message) => {
@@ -820,7 +835,7 @@ mod tests {
 
     fn keys(pane: &mut Availability, keys: &str) {
         for key in keys.chars() {
-            assert_eq!(pane.press(key, &now()), Pressed::Done, "{key:?}");
+            assert_eq!(pane.press(key, true, &now()), Pressed::Done, "{key:?}");
         }
     }
 
@@ -842,7 +857,7 @@ mod tests {
 
     #[test]
     fn keys_choose_a_value_then_its_end_and_changes_go_one_at_a_time() {
-        assert_eq!(Availability::default().press('s', &now()), Pressed::Say("Your availability is not read yet: r reads it".into()));
+        assert_eq!(Availability::default().press('s', true, &now()), Pressed::Say("Your availability is not read yet: r reads it".into()));
         let mut pane = loaded();
         keys(&mut pane, "s12");
         keys(&mut pane, "i0");
@@ -871,6 +886,39 @@ mod tests {
         assert!(pane.reading.is_some(), "an answer older than a write is not taken");
         keys(&mut pane, "s\u{1b}");
         assert!(!pane.editing() && sent(&mut pane).is_empty(), "Esc sends nothing");
+    }
+
+    #[test]
+    fn disconnected_edits_are_not_replayed_and_unsent_changes_are_discarded() {
+        let mut pane = loaded();
+        keys(&mut pane, "s1");
+        assert!(matches!(pane.press(ENTER, false, &now()), Pressed::Say(_)), "an editor opened online cannot commit offline");
+        pane.disconnected();
+        for key in "s1\n".chars() {
+            let _ = pane.press(key, false, &now());
+        }
+        pane.connected();
+        assert!(sent(&mut pane).is_empty());
+        let mut pane = loaded();
+        keys(&mut pane, "s1\ni0");
+        assert_eq!(sent(&mut pane).len(), 1);
+        pane.disconnected();
+        assert!(pane.writing, "an in-flight write is neither retried nor treated as canceled");
+        pane.connected();
+        pane.done(Done::Wrote(Ok(Wrote::Availability(reading().availability))));
+        assert!(sent(&mut pane).is_empty(), "the queued second write must not cross a disconnect");
+    }
+
+    #[test]
+    fn keyboard_and_click_dispatch_refuse_edits_when_offline_or_connecting() {
+        let mut ui = super::super::Ui::new(super::super::demo::test_world());
+        for link in [super::super::view::Link::Connecting, super::super::view::Link::Offline("disconnected".into())] {
+            ui.world.link = link;
+            ui.availability = loaded();
+            assert!(ui.availability_press('s'));
+            assert!(!ui.availability.editing());
+            assert!(sent(&mut ui.availability).is_empty());
+        }
     }
 
     #[test]

@@ -39,6 +39,8 @@ used by the CLI. Its subscriptions, reconnects, snapshot model and cache come fr
 mission and fleet details without blocking keys. A private, actor-and-endpoint-scoped read-only
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
+Availability edits also require the live link: reconnecting or going offline discards choices not yet sent.
+An already-sent write is not retried by the pane after an outage.
 
 Install the repo's `.#fractal` Nix package and run `FRACTAL_PERSON=person/<your-id> fractal` in a terminal
 with a running Fractal daemon. For source development, use
