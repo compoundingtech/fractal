@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Replication repairs are applied 16 to a writer hold, in the same id order as before, instead of all in one hold; a call that stops between pages finishes on the next call, and a call with no repairs takes no writer hold",
+  "replay": {"status": "none", "detail": "No claim or projection replay. Every call still applies every recorded repair in id order; a repair already applied changes nothing."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No client, wire or CLI change. apply_replication_repairs returns the repairs it changed, summed over its pages. Between two pages of one call, readers can see the earlier pages' repairs before the later ones."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

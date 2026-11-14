@@ -91,6 +91,20 @@ fn cgroup(pid: u32) -> String {
     fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap()
 }
 
+/// The cgroup of an exec that has joined its scope `unit`. The spawn returns only once
+/// `systemd-run` has moved into its scope, so the first look must find it there.
+fn joined_cgroup(pid: u32, unit: &str) -> String {
+    let group = cgroup(pid);
+    assert!(
+        group
+            .lines()
+            .filter_map(|line| line.strip_prefix("0::"))
+            .any(|path| path.split('/').any(|part| part == unit)),
+        "the spawn returned before exec {pid} joined its scope {unit}: {group}"
+    );
+    group
+}
+
 struct Fixture {
     root: tempfile::TempDir,
     ready: UnixDatagram,
@@ -132,7 +146,7 @@ impl Fixture {
         assert_eq!(&message[..count], b"ready");
     }
 
-    fn start_parent(&mut self, test: &str) -> OwnedFd {
+    fn parent_command(&self, test: &str) -> Command {
         let mut command = Command::new("systemd-run");
         command.args([
             "--user",
@@ -155,7 +169,11 @@ impl Fixture {
                 "--nocapture",
                 "--test-threads=1",
             ]);
-        let output = command.output().unwrap();
+        command
+    }
+
+    fn start_parent(&mut self, test: &str) -> OwnedFd {
+        let output = self.parent_command(test).output().unwrap();
         assert!(
             output.status.success(),
             "parent service did not start: {}",
@@ -199,6 +217,30 @@ impl Fixture {
         pidfd(pid)
     }
 
+    /// Starts a parent service that SIGKILLs its whole unit as soon as its spawn returns, and
+    /// waits until the unit has ended.
+    fn start_parent_that_kills_itself(&mut self, test: &str) {
+        let output = self.parent_command(test).output().unwrap();
+        assert!(
+            output.status.success(),
+            "parent service did not start: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.parent_running = true;
+        for _ in 0..1500 {
+            let state = Command::new("systemctl")
+                .args(["--user", "is-active", &self.unit])
+                .output()
+                .unwrap();
+            if !matches!(String::from_utf8_lossy(&state.stdout).trim(), "active" | "activating") {
+                self.parent_running = false;
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("parent service {} never ended", self.unit);
+    }
+
     fn kill_parent(&mut self, parent: &OwnedFd) {
         let output = Command::new("systemctl")
             .args([
@@ -218,6 +260,9 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", &gate_unit(&self.unit)])
+            .output();
         if self.parent_running {
             let _ = Command::new("systemctl")
                 .args(["--user", "stop", &self.unit])
@@ -293,9 +338,8 @@ fn exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops() {
     let before = running_exec(fixture.path());
     assert_eq!(before.isolation_mode, "scope");
     assert!(before.scope_unit.as_ref().unwrap().ends_with(".scope"));
-    let group = cgroup(before.pid);
+    let group = joined_cgroup(before.pid, before.scope_unit.as_ref().unwrap());
     assert!(!group.contains(&fixture.unit));
-    assert!(group.contains(before.scope_unit.as_ref().unwrap()));
     let member = pidfd(before.pid);
 
     fixture.kill_parent(&parent);
@@ -311,6 +355,88 @@ fn exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops() {
         runtime.observe(MEMBER).unwrap(),
         Some(ExecObservation::Exited(_))
     ));
+    runtime.end_leftovers(MEMBER).unwrap();
+    runtime.remove(MEMBER).unwrap();
+    fixture.member_removed = true;
+}
+
+/// The unit that holds back the scope start of a parent service's exec.
+fn gate_unit(parent_unit: &str) -> String {
+    parent_unit.replace(".service", "-gate.service")
+}
+
+/// The parent's exec scope starts only once a gate unit ends, and the parent releases the gate
+/// 300ms after its spawn began. The parent kills its whole unit as soon as the spawn returns, so a
+/// spawn that returned before `systemd-run` joined its scope would take the exec down with it.
+#[test]
+#[ignore = "requires the dedicated real-systemd isolation VM"]
+fn exec_survives_a_parent_service_sigkill_as_soon_as_spawn_returns() {
+    if let Some(root) = std::env::var_os(ROOT_ENV) {
+        let root = PathBuf::from(root);
+        let mut environment = require_scopes(&root);
+        let unit = cgroup(std::process::id())
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .and_then(|path| path.rsplit('/').next())
+            .unwrap()
+            .to_owned();
+        let gate = gate_unit(&unit);
+        let release = root.join("release");
+        let fifo = std::ffi::CString::new(release.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let status = Command::new("systemd-run")
+            .args(["--user", "--quiet", "--no-block", "--collect", "--property=Type=oneshot"])
+            .arg(format!("--unit={gate}"))
+            .args(["sh", "-c", "read line < \"$0\""])
+            .arg(&release)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let systemd_run = environment["PATH"]
+            .split(':')
+            .map(|directory| Path::new(directory).join("systemd-run"))
+            .find(|path| path.is_file())
+            .unwrap();
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("systemd-run");
+        fs::write(
+            &wrapper,
+            format!("#!/bin/sh\nexec '{}' --property=After={gate} \"$@\"\n", systemd_run.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), environment["PATH"]);
+        environment.insert("PATH".into(), path);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            fs::write(&release, "\n").unwrap();
+        });
+        exec_runtime(&root)
+            .spawn(
+                MEMBER,
+                &Launch::Argv(vec!["sleep".into(), "300".into()]),
+                &root,
+                &environment,
+            )
+            .unwrap();
+        let _ = Command::new("systemctl")
+            .args(["--user", "kill", "--signal=SIGKILL", "--kill-whom=all", &unit])
+            .status();
+        remain_running();
+    }
+    let mut fixture = Fixture::new(false);
+    fixture.start_parent_that_kills_itself("exec_survives_a_parent_service_sigkill_as_soon_as_spawn_returns");
+    let survivor = running_exec(fixture.path());
+    let group = joined_cgroup(survivor.pid, survivor.scope_unit.as_ref().unwrap());
+    assert!(!group.contains(&fixture.unit));
+    let member = pidfd(survivor.pid);
+
+    let runtime = exec_runtime(fixture.path());
+    runtime
+        .stop_if(MEMBER, Some(&survivor.generation_id))
+        .unwrap();
+    wait_for_exit(&member);
     runtime.end_leftovers(MEMBER).unwrap();
     runtime.remove(MEMBER).unwrap();
     fixture.member_removed = true;

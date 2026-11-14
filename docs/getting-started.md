@@ -16,7 +16,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compound
 ```
 
 The installer detects your platform, downloads the latest release and its SHA256
-sidecar, checks the archive, installs `fractal`, its `fractal` link and `pty` in `~/.local/bin`,
+sidecar, checks the archive, installs `st3`, its `st` link and `pty` in `~/.local/bin`,
 and opens `fractal`. The checksum comes from the same release endpoint as the archive;
 it checks the downloaded bytes, rather than supplying an independent signature.
 
@@ -31,7 +31,7 @@ To download without opening the interface, use the same installer with `--no-run
 `--tag` chooses a release and `--bin-dir` changes the command destination; see
 [binary releases](st3/binary-releases.md).
 
-On macOS, the installer puts `fractal` in `~/Applications/Fractal.app` and links the
+On macOS, the installer puts `st3` in `~/Applications/Fractal.app` and links the
 command to that stable app path. Configure an optional persistent signing identity
 before installation using [macOS installation and signing](st3/macos-installation.md).
 The default is ad-hoc signing, which can require renewed OS approvals after an update.
@@ -93,7 +93,7 @@ one, make the command available in this shell and run:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-st setup
+fractal setup
 ```
 
 For Claude, setup offers the user-owned Fractal message channel without needing
@@ -156,7 +156,7 @@ After quitting, make the installed commands available in this shell and reopen f
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
-st
+fractal
 ```
 
 If setup reported that the login PATH lacks `~/.local/bin`, add that export to your
@@ -167,9 +167,9 @@ You can also send the Assistant a question from the shell. This example assumes 
 chose `ada`; replace `person/ada` with your configured person:
 
 ```sh
-st conversations send agent/st/assistant --from person/ada \
+fractal conversations send agent/st/assistant --from person/ada \
   --subject 'Getting started' --body 'Help me make my first mission.'
-st
+fractal
 ```
 
 Setup starts the Assistant on its own only on that first run. On a machine that already has a
@@ -183,9 +183,9 @@ Use `fractal setup --help` for scripted answers and other options.
 ## 4. Check the installation
 
 ```sh
-st --version
-st doctor
-st service status
+fractal --version
+fractal doctor
+fractal service status
 ```
 
 `doctor` should show a reachable daemon and `pty`. A machine with no fleet configured
@@ -218,7 +218,7 @@ after logout and before login after a reboot. Setup prints the needed command if
 cannot enable it. On macOS, run:
 
 ```sh
-st service permissions
+fractal service permissions
 ```
 
 Do not grant the daemon or agents Full Disk Access, Developer Tools, Accessibility,
@@ -235,12 +235,18 @@ Coordinate that restart with active work and any continuous health checks. Repla
 archive files alone does not restart running services.
 
 State lives in `~/.local/state/st3`. The local API uses a Unix socket. On Linux it
-normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/st3.sock` linking to it; on macOS
+normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/fractal.sock` linking to it; on macOS
 it lives in the state directory. An explicit `--endpoint` or `ST3_ENDPOINT` takes
 precedence. Commands wait up to 30 seconds for a restarting daemon, then exit with
 status 5; `--daemon-wait` and `ST3_DAEMON_WAIT` change that wait. Restarting the daemon
 leaves durable agents running so it can adopt them again. For foreground operation,
 use `fractal up`.
+
+Default discovery prefers `fractal.sock`.
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction -->
+During the socket-name migration it falls back to `st3.sock` when the new socket is absent.
+The daemon also serves the legacy socket aliases so older clients can reconnect.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal -->
 
 The [daemon troubleshooting guide](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md),
 [command recorder](st3/command-recorder.md) and [compatibility policy](st3/compatibility.md)
@@ -252,6 +258,6 @@ cover socket paths, recorded commands and recovery details.
 - [Talking to agents](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/talking-to-agents.md): UI, phone, CLI, attachments, and requests.
 - [Two machines](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md): create a fleet, invite another machine and check replication.
 - [Web and iOS clients](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/web-and-ios.md): follow work and pair the phone app.
-- [Runnable examples](../examples/st3/README.md): agents, other harnesses, schedules and gates.
+- [Runnable examples](../examples/fractal/README.md): agents, other harnesses, schedules and gates.
 - [Agent lifecycle](seat-lifecycle.md): restart, suspend/resume and stopped agents.
 - [GitHub integration](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/github-integration.md): optional repository intake and review.

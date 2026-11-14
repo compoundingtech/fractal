@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Default Linux worker-ingress generation checks to observation and require explicit per-daemon enforcement opt-in.",
+  "replay": {"status": "none", "detail": "No claim format or replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "The optional top-level daemon key worker_ingress_generation_check accepts observe or enforce; absent means observe. Observe logs worker authority observation would refuse without refusing requests. Unknown values are startup configuration errors. macOS remains unverified-platform with existing admission."},
+  "downtime": {"status": "changed", "detail": "Restart the daemon to apply a mode change. Deploy observe first, review at least 24 hours of journal evidence, then opt members into enforce one at a time."},
+  "manual": {"status": "changed", "detail": "Set worker_ingress_generation_check = \"enforce\" only after reviewing worker-only route observations, including worker restarts. Until then the unbound local caller authority gap remains open."},
+  "recovery": {"status": "changed", "detail": "Set observe and restart the daemon to return to logging without enforcement; no data migration is needed."}
+}

@@ -425,6 +425,8 @@ struct Record {
     support: Support,
     observed_at: u64,
     recovery: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -437,6 +439,7 @@ pub struct Failure {
     pub support: Support,
     pub observed_at: u64,
     pub evidence_age_ms: u64,
+    pub attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -539,30 +542,6 @@ pub fn path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("driver-diagnostic")
 }
 
-/// Whether this declaration has a native driver that publishes this record at all.
-pub fn expected_for(spec: &crate::AgentSpec) -> bool {
-    matches!(
-        spec.driver.as_ref(),
-        Some(
-            crate::Driver::OpenCode(_)
-                | crate::Driver::Claude(_)
-                | crate::Driver::Codex(_)
-                | crate::Driver::Omp(_)
-        )
-    )
-}
-
-/// Whether a missing record is itself a fault for this declaration.
-///
-/// Only a driver that publishes a boundary result on EVERY launch can be missing one: OpenCode's
-/// version gate publishes or clears before the provider spawns, so absence there means the native
-/// driver never ran. Claude, Codex, and omp publish this record only when the provider's own typed
-/// turn result names a rejected credential, so absence is their healthy steady state and advising
-/// on it would put a warning under every seat in the fleet.
-pub fn absence_is_a_fault(spec: &crate::AgentSpec) -> bool {
-    matches!(spec.driver.as_ref(), Some(crate::Driver::OpenCode(_)))
-}
-
 pub fn read(path: &Path) -> Observed {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
@@ -602,6 +581,7 @@ fn read_at(raw: &[u8], now: u64) -> Observed {
         support: record.support,
         observed_at: record.observed_at,
         evidence_age_ms: now.saturating_sub(record.observed_at),
+        attempt: record.attempt,
     })
 }
 
@@ -664,16 +644,25 @@ impl Publisher {
     }
 
     pub fn publish(&mut self, stage: Stage, reason: Reason, source: Source) {
+        self.publish_admission(stage, reason, source, None);
+    }
+
+    pub(crate) fn publish_admission(
+        &mut self,
+        stage: Stage,
+        reason: Reason,
+        source: Source,
+        attempt: Option<Box<crate::harness_admission::AttemptDiagnostic>>,
+    ) {
         let Some(index) = stage.index() else {
             return;
         };
         if reason.stage() != stage || !reason.accepts_source(source) {
             return;
         }
-        if self.failures[index]
-            .as_ref()
-            .is_some_and(|failure| failure.reason == reason && failure.source == source)
-        {
+        if self.failures[index].as_ref().is_some_and(|failure| {
+            failure.reason == reason && failure.source == source && failure.attempt == attempt
+        }) {
             return;
         }
         let record = Record {
@@ -686,16 +675,9 @@ impl Publisher {
             support: self.support,
             observed_at: now_ms(),
             recovery: RECOVERY.to_string(),
+            attempt,
         };
         self.failures[index] = Some(record);
-        crate::metrics::record_driver_diagnostic(
-            self.driver,
-            stage,
-            reason,
-            source,
-            self.support,
-            false,
-        );
         emit(
             self.driver,
             stage,
@@ -724,14 +706,6 @@ impl Publisher {
         let Some(cleared) = cleared else {
             return;
         };
-        crate::metrics::record_driver_diagnostic(
-            self.driver,
-            stage,
-            cleared.reason,
-            cleared.source,
-            cleared.support,
-            true,
-        );
         emit(
             self.driver,
             stage,
@@ -837,20 +811,6 @@ fn emit(
     outcome: &'static str,
     producer_version: Option<&str>,
 ) {
-    let span = crate::telemetry::tracer_export_enabled().then(|| {
-        tracing::info_span!(
-            "st.driver.diagnostic",
-            "span.label" = stage.as_str(),
-            "st.driver.name" = driver.as_str(),
-            "st.driver.stage" = stage.as_str(),
-            "st.driver.reason" = reason.as_str(),
-            "st.driver.source" = source.as_str(),
-            "st.driver.support" = support.as_str(),
-            "st.outcome" = outcome,
-            "st.driver.producer_version" = producer_version,
-        )
-    });
-    let _guard = span.as_ref().map(tracing::Span::enter);
     tracing::info!(
         driver = driver.as_str(),
         stage = stage.as_str(),
@@ -1316,6 +1276,7 @@ mod tests {
             support: Support::Supported,
             observed_at: 100,
             recovery: RECOVERY.to_owned(),
+            attempt: None,
         };
         let path = agent.join("driver-diagnostic");
         atomic_json(&path, &record).unwrap();
@@ -1368,6 +1329,7 @@ mod tests {
             support: Support::Supported,
             observed_at: 100,
             recovery: RECOVERY.to_owned(),
+            attempt: None,
         };
 
         // Write and traverse, but not read: staging and renaming still work, opening the

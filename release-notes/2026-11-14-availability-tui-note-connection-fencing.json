@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "TUI note editing preserves availability offline and reconnect fencing",
+  "replay": { "status": "none", "detail": "No graph replay." },
+  "schema": { "status": "none", "detail": "No API or claim change." },
+  "rules": { "status": "none", "detail": "No server rule change." },
+  "compatibility": { "status": "changed", "detail": "Availability and directive-note edits require a live link. Disconnecting or replacing the connection closes the editor and discards unsent changes without retrying or presuming cancellation of in-flight writes. Restores the disconnect lifecycle used by the live loop." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "Reconnect and explicitly make the desired change." }
+}

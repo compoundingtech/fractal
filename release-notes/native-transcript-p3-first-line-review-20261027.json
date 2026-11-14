@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Repair first-line transcript header alignment after design review: center every notice icon on its first text line, account for pill borders, and assert visible nonzero geometry with forced-wrap fixtures. Share stable job ordering between native projections and stories, and label error diagnostic codes.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule or digest changes." },
+  "compatibility": { "status": "changed", "detail": "Header icons retain first-line centering for all harness notice kinds. Error codes remain present with an explicit Code label. Grouped-job ordering and native facts are unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Presentation and proof changes only; nothing to recover." }
+}

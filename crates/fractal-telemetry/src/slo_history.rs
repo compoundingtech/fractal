@@ -23,6 +23,18 @@ const DAY_MS: u64 = 86_400_000;
 pub const RETENTION_MS: u64 = 7 * DAY_MS;
 const INTERVAL: Duration = Duration::from_secs(60);
 
+static UI_URL: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Remember where a person reads the exported observations, so the slo read can point to it.
+/// The daemon sets it once from `[observations.otlp] ui_url`; nothing is shown when it is unset.
+pub fn set_ui_url(url: Option<String>) {
+    *UI_URL.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = url;
+}
+
+pub fn ui_url() -> Option<String> {
+    UI_URL.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+}
+
 pub fn dir(state_dir: &Path) -> PathBuf {
     state_dir.join("slo-history")
 }

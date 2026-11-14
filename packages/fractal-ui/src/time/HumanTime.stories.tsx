@@ -43,11 +43,24 @@ function HumanTimeStory({ scheme = 'dark', width = 440, host = false, live = fal
   </main>
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Human time', component: HumanTimeStory, parameters: { scenario: { _tag: 'primitive', reason: "Frozen clock values and explicit tooltip timing isolate human-time formatting and tick behavior." }, layout: 'fullscreen' },
   args: { scheme: 'dark', width: 440, instantTooltips: true },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [440, 1440], control: 'select' }, instantTooltips: { control: 'boolean' } },
 } satisfies Meta<typeof HumanTimeStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:primitive',
+  'Dark1440:primitive',
+  'DefaultHoverDelay:primitive',
+  'HostTheme:primitive',
+  'Light1440:primitive',
+  'Light440:primitive',
+  'LiveTick:primitive',
+  'SystemTick:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 // The time is deliberately not focusable (its text is the aria-description), so this is the

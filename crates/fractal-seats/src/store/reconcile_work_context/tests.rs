@@ -452,7 +452,27 @@ fn batched_work_metadata_plan_seeks_run_generation_root_and_definition() {
 fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
     use crate::model::{WorkAcknowledgeRequest, WorkHandoffRequest};
     const PEER: &str = "agent/alder.peer";
-    let store = fixture(16);
+    let store = fixture(0);
+    let steps = (0..16)
+        .map(|n| {
+            format!("step \"task-{n:05}\" {{ assigned-to \"{ACTOR}\"; goal \"Check item {n}.\"; }}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let initial = crate::graph::parse_internal_intent(&format!("version 2\nmission \"batch-work\" state=\"ready\" {{ goal \"Process work.\"; {steps} }}"), "alder").unwrap();
+    let changed = crate::graph::parse_internal_intent(&format!("version 2\nmission \"batch-work\" state=\"ready\" {{ goal \"Process work.\"; constraint \"Retain completed work.\"; {steps} }}"), "alder").unwrap();
+    store.apply_internal(&initial, "batch-definition").unwrap();
+    // Publish both definitions before starting the old-pinned legacy adoption fixture.
+    store.apply_internal(&changed, "batch-new-revision").unwrap();
+    store.create_mission_run(&MissionRunRequest {
+        mission: "batch-work".into(),
+        revision: Some(initial.missions["batch-work"].revision.clone()),
+        workspace: "/tmp".into(),
+        requester: Some(ACTOR.into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "batch-work-run".into(),
+    }).unwrap();
     let agents = crate::graph::parse_internal_intent(
         "version 2\nagent \"alder.worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"alder.peer\" { workspace \"/tmp\"; command \"true\" }", "alder").unwrap();
     store.apply_internal(&agents, "batch-actors").unwrap();
@@ -551,16 +571,6 @@ fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
     // ordinary revision adoption emits its carried-claimant evidence.
     store
         .set_step_state(&carried.subject, "verifying", None)
-        .unwrap();
-    let steps = (0..16)
-        .map(|n| {
-            format!("step \"task-{n:05}\" {{ assigned-to \"{ACTOR}\"; goal \"Check item {n}.\"; }}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let changed = crate::graph::parse_internal_intent(&format!("version 2\nmission \"batch-work\" state=\"ready\" {{ goal \"Process work.\"; constraint \"Retain completed work.\"; {steps} }}"), "alder").unwrap();
-    store
-        .apply_internal(&changed, "batch-new-revision")
         .unwrap();
     let revised = store
         .adopt_mission_revision(
@@ -1176,10 +1186,20 @@ fn the_per_step_work_read_parses_a_runs_definition_once_for_all_its_steps() {
 
 #[test]
 fn creating_a_run_parses_its_definition_once_for_all_its_steps() {
+    let store = fixture(0);
     crate::store::DEFINITIONS_PARSED.with(|parsed| parsed.set(0));
-    let store = fixture(300);
+    // Fenced creation normally runs on the batch writer; a draining fence can instead
+    // execute on this thread. Count both execution sites, not just the caller.
+    store.connection.batched(|_| -> Result<()> {
+        crate::store::DEFINITIONS_PARSED.with(|parsed| parsed.set(0));
+        Ok(())
+    }).unwrap().unwrap();
+    add_run(&store, 300, "batch-work");
+    let writer_parses = store.connection.batched(|_| -> Result<usize> {
+        Ok(crate::store::DEFINITIONS_PARSED.with(std::cell::Cell::get))
+    }).unwrap().unwrap();
     assert_eq!(
-        crate::store::DEFINITIONS_PARSED.with(std::cell::Cell::get),
+        writer_parses + crate::store::DEFINITIONS_PARSED.with(std::cell::Cell::get),
         1,
         "the run view that creating a run returns reads the pinned definition once, not for each step"
     );

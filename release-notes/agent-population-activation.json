@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Require explicit opt-in for population export and keep raw runtime evidence out of client resources",
+  "replay": { "status": "none", "detail": "No replay or backfill is required." },
+  "schema": { "status": "none", "detail": "No persisted schema or client contract changes. Metrics-only runtime evidence uses an internal transport stripped from ordinary agent resources." },
+  "rules": { "status": "none", "detail": "Runtime and attention source authority are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Population and attention export requires agent_population_enabled = true in deployment configuration as well as the existing metrics pipeline. The default is false, including when the option is absent. While off, no population refresher or instruments start. Ordinary roster reads add no population queries in either state and do not expose raw runtime or repository metric evidence." },
+  "downtime": { "status": "none", "detail": "Ordinary binary rollout." },
+  "manual": { "status": "changed", "detail": "After satisfying the documented independent review, lifecycle coverage, ownership, repository registry and cardinality rollout gates, explicitly set agent_population_enabled = true in the exporting daemon's root TOML and restart. Existing configurations remain off; ordinary OTLP activation alone does not enable these gauges." },
+  "recovery": { "status": "changed", "detail": "Remove agent_population_enabled and agent_population_repositories before downgrading to an older strict config reader. Durable state is unchanged." }
+}

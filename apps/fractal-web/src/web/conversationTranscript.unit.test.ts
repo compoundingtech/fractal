@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
 import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
-import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
+import { frozenTranscript, mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
 
 const at = (seconds: number) => `2026-10-08T12:00:${String(seconds).padStart(2, '0').slice(-2)}.000Z`
 const sender = { kind: 'human', label: 'Reader' } as const
@@ -59,6 +59,12 @@ describe('kit transcript turn mapping', () => {
     ], { firstTurnComplete: true })
     expect(turns[0]!.work.calls[0]).toMatchObject({ kind: 'run', title: 'Checking generated output', argsSummary: undefined })
     expect(turns[0]!.items[0]).toMatchObject({ input: { command: 'echo /srv/example/private\npwd' } })
+  })
+  it('reads an event notice without its kind, and keeps the kind on notices that need it', () => {
+    const text = (kind: 'event' | 'redaction' | 'truncation') => convertConversationItem({ _tag: 'Notice', id: 'notice', kind, text: 'Words' }).content
+    expect(text('event')).toEqual([{ type: 'text', text: 'Words' }])
+    expect(text('redaction')).toEqual([{ type: 'text', text: 'redaction · Words' }])
+    expect(text('truncation')).toEqual([{ type: 'text', text: 'truncation · Words' }])
   })
   it('hides unfamiliar events after answers by default while allowing explicit event inspection', () => {
     const event: ConversationItem = { _tag: 'UnknownEvent', id: 'event', eventType: 'future', data: { payload: 'private-event' } }
@@ -246,7 +252,7 @@ describe('kit transcript turn mapping', () => {
     const turns = transcriptTurnsForItems([unconfirmed], { firstTurnComplete: true })
     expect(turns[0]!.prompt?.sendState).toEqual({
       _tag: 'Unconfirmed',
-      detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
+      detail: 'Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.',
     })
   })
 
@@ -278,6 +284,14 @@ describe('kit transcript turn mapping', () => {
   })
 })
 
+describe('frozen transcript', () => {
+  it('stops streaming thinking so no ring spins in a last-observed snapshot', () => {
+    const live = transcriptTurnsForItems([{ _tag: 'Reasoning', id: 'thinking', text: 'Still thinking', streaming: true, at: at(4) }], { firstTurnComplete: true })
+    const frozen = frozenTranscript(live).turns.flatMap(turn => turn.items)
+    expect(frozen.filter(item => item._tag === 'Reasoning').map(item => item.streaming)).toEqual([false])
+  })
+})
+
 describe('conversation feed mapping', () => {
   it.each(['ungranted', 'unsupported', 'failed'] as const)('maps Unavailable(%s) to the kit availability state', reason => {
     const state = mapConversationFeed({ _tag: 'Unavailable', reason, detail: 'Actual diagnostic' }, {})
@@ -289,6 +303,7 @@ describe('conversation feed mapping', () => {
     ['ungranted', undefined, 'ungranted', 'Conversation access not granted', 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
     ['unsupported', undefined, 'unsupported', 'Conversation not supported', 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.'],
     ['failed', 'not-found', 'not-found', 'Conversation not found', 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
+    ['failed', 'peer-too-old', 'peer-too-old', 'Host update required', 'This host runs an older Fractal version; update it to open subagent conversations. Your draft is unchanged.'],
     ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
     ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
   ] as const)('classifies Unavailable(%s, code %s) as %s with one fixed reason', (reason, code, classification, title, detail) => {

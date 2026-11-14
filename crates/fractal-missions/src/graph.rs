@@ -14,16 +14,89 @@ use crate::model::{
     NormalizedIntent, ObserverSpec, PlannerSpec, PlanningFeedbackOperation,
     PlanningSessionCreation, PlanningSessionDeclaration, QuantifiedFieldSpec,
     ReplicaRepairDeclaration, ResourceRefreshOperation, RestartIntensity, RestartType,
-    RuntimeResetOperation, ScheduleSpec, St3Error, SubscriptionConditionSpec, SubscriptionSpec,
+    RuntimeResetOperation, ScheduleSpec, FractalError, SubscriptionConditionSpec, SubscriptionSpec,
 };
 pub use fractal_delivery::graph::*;
 pub use fractal_delivery::graph::{agent_under, observer_spec, parse_execution_intent, parse_intent, parse_internal_intent, planning_planner_request, planning_planner_subject, runtime_id, runtime_proof_variables, schedule_spec, subscription_spec, validate_mission_runtimes};
 
 /// Empty membership is meaningful only on the owned-set route; apply still requires explicit intent.
-pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, St3Error> {
-    let intent = parse_intent_with_owner(source, default_host, None, true, true)?;
+pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, FractalError> {
+    let (_, intent) = resolve_mission_revision_tokens(source, default_host)?;
     validate_mission_runtimes(&intent, default_host)?;
     Ok(intent)
+}
+
+/// The token a single-shot publication uses where a schedule or subscription pins a mission of
+/// the same bundle: `MISSION@ST_REVISION[MISSION]`. Its revision exists only once the bundle is
+/// parsed, so the token resolves here, to the revision this publication stores.
+pub const REVISION_TOKEN: &str = "@ST_REVISION[";
+
+/// Resolves every `@ST_REVISION[MISSION]` token against the missions the source itself declares,
+/// returning the resolved source and its intent. A mission whose own revision depends on another
+/// token resolves once that token has; a cycle of tokens never settles and is refused.
+pub fn resolve_mission_revision_tokens(
+    source: &str,
+    default_host: &str,
+) -> Result<(String, NormalizedIntent), FractalError> {
+    fn substitute(source: &str, revisions: &BTreeMap<String, String>) -> Result<String, FractalError> {
+        let mut resolved = String::with_capacity(source.len());
+        let mut rest = source;
+        while let Some(start) = rest.find(REVISION_TOKEN) {
+            let after = &rest[start + REVISION_TOKEN.len()..];
+            let end = after.find(']').ok_or_else(|| {
+                FractalError::new("invalid-revision-token", "an ST_REVISION token needs a closing `]`")
+            })?;
+            let mission = after[..end].strip_prefix("mission/").unwrap_or(&after[..end]);
+            crate::mission::validate_mission_id(mission)?;
+            resolved.push_str(&rest[..start]);
+            resolved.push('@');
+            resolved.push_str(revisions.get(mission).map_or(UNRESOLVED_REVISION, String::as_str));
+            rest = &after[end + 1..];
+        }
+        resolved.push_str(rest);
+        Ok(resolved)
+    }
+    const UNRESOLVED_REVISION: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    if !source.contains(REVISION_TOKEN) {
+        return Ok((source.to_owned(), parse_intent_with_owner(source, default_host, None, true, true)?));
+    }
+    let mut revisions = BTreeMap::<String, String>::new();
+    // Each round settles at least one more token, so a source with N distinct tokens settles
+    // within N + 1 parses; one more round without progress is a cycle.
+    let rounds = source.matches(REVISION_TOKEN).count() + 2;
+    for _ in 0..rounds {
+        let resolved = substitute(source, &revisions)?;
+        let intent = parse_intent_with_owner(&resolved, default_host, None, true, true)?;
+        let declared: BTreeMap<&str, &str> = intent
+            .missions
+            .values()
+            .map(|spec| (spec.id.as_str(), spec.revision.as_str()))
+            .collect();
+        let mut next = BTreeMap::new();
+        let mut rest = source;
+        while let Some(start) = rest.find(REVISION_TOKEN) {
+            let after = &rest[start + REVISION_TOKEN.len()..];
+            let end = after.find(']').expect("substitute checked every token");
+            let mission = after[..end].strip_prefix("mission/").unwrap_or(&after[..end]);
+            let revision = declared.get(mission).ok_or_else(|| {
+                FractalError::new(
+                    "unresolved-revision-token",
+                    format!("ST_REVISION[{mission}] names no mission in this publication"),
+                )
+            })?;
+            next.insert(mission.to_owned(), (*revision).to_owned());
+            rest = &after[end + 1..];
+        }
+        if next == revisions {
+            return Ok((resolved, intent));
+        }
+        revisions = next;
+    }
+    Err(FractalError::new(
+        "cyclic-revision-token",
+        "ST_REVISION tokens pin each other in a cycle; no mission revision can settle",
+    ))
 }
 
 /// Each agent a mission declares, in its own declarations, its steps' declarations, or any nested
@@ -32,12 +105,12 @@ pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<Normal
 pub fn mission_declared_authority_blocks(
     mission: &crate::model::MissionSpec,
     default_host: &str,
-) -> Result<BTreeMap<String, Vec<&'static str>>, St3Error> {
+) -> Result<BTreeMap<String, Vec<&'static str>>, FractalError> {
     fn visit(
         mission: &crate::model::MissionSpec,
         default_host: &str,
         blocks: &mut BTreeMap<String, Vec<&'static str>>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         let variables = runtime_proof_variables(mission);
         let sources = mission.declarations_kdl.iter().chain(
             mission
@@ -70,10 +143,10 @@ pub fn mission_declared_authority_blocks(
 pub fn resolve_document_references(
     source: &str,
     bindings: &BTreeMap<String, String>,
-) -> Result<String, St3Error> {
+) -> Result<String, FractalError> {
     let mut document = source
         .parse::<KdlDocument>()
-        .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
+        .map_err(|error| FractalError::new("invalid-kdl", error.to_string()))?;
     for node in document.nodes_mut() {
         resolve_node_documents(node, bindings);
     }
@@ -97,7 +170,10 @@ fn resolve_node_documents(node: &mut KdlNode, bindings: &BTreeMap<String, String
     let mission = node.name().value() == "mission";
     if let Some(children) = node.children_mut() {
         for child in children.nodes_mut() {
-            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
+            // A mission's `authority` names subject patterns such as `doc/team/*`, not documents.
+            if !(gate && is_document_gate(child)
+                || mission && matches!(child.name().value(), "provenance" | "authority"))
+            {
                 resolve_node_documents(child, bindings);
             }
         }
@@ -158,20 +234,33 @@ pub fn lane_spec(value: &Value) -> Option<LaneSpec> {
 }
 
 /// Render a normalized desired tree rather than the original authored source.
-pub fn render_agent_desired_kdl(desired: &Value) -> Result<String, St3Error> {
-    if desired.get("name").and_then(Value::as_str) != Some("agent") {
-        return Err(St3Error::new(
-            "invalid-declaration",
-            "expected an agent root",
-        ));
-    }
+/// `uris` maps each resource subject the agent names to its URI; see [`declared_resources`].
+pub fn render_agent_desired_kdl(
+    desired: &Value,
+    uris: &BTreeMap<String, String>,
+) -> Result<String, FractalError> {
     let mut document = KdlDocument::new();
     let mut version = KdlNode::new("version");
     version.entries_mut().push(kdl::KdlEntry::new(2_i128));
     document.nodes_mut().push(version);
-    document.nodes_mut().push(render_desired_node(desired)?);
+    document.nodes_mut().push(render_agent_node(desired, uris)?);
     document.autoformat();
     Ok(document.to_string())
+}
+
+/// Render URI edges with their locator when available; otherwise preserve the edge as `subject=`.
+/// Explicit subject edges remain subject edges even when their resource has a URI.
+pub fn render_agent_node(
+    desired: &Value,
+    uris: &BTreeMap<String, String>,
+) -> Result<KdlNode, FractalError> {
+    if desired.get("name").and_then(Value::as_str) != Some("agent") {
+        return Err(FractalError::new(
+            "invalid-declaration",
+            "expected an agent root",
+        ));
+    }
+    render_desired_tree(desired, uris)
 }
 
 /// Preserve environment names while hiding values in a declaration read.
@@ -198,8 +287,17 @@ pub fn redact_agent_env_values(tree: &mut Value) {
     }
 }
 
-pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
-    let invalid = || St3Error::new("invalid-declaration", "malformed desired KDL node tree");
+/// Render a desired tree, preserving agent resource edges as explicit subject references.
+/// Use [`render_agent_node`] when resource URI bindings are available.
+pub fn render_desired_node(tree: &Value) -> Result<KdlNode, FractalError> {
+    render_desired_tree(tree, &BTreeMap::new())
+}
+
+fn render_desired_tree(
+    tree: &Value,
+    uris: &BTreeMap<String, String>,
+) -> Result<KdlNode, FractalError> {
+    let invalid = || FractalError::new("invalid-declaration", "malformed desired KDL node tree");
     let object = tree.as_object().ok_or_else(invalid)?;
     let name = object
         .get("name")
@@ -223,20 +321,42 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
     if let Some(children) = object.get("children") {
         let mut document = KdlDocument::new();
         for child in children.as_array().ok_or_else(invalid)? {
-            document.nodes_mut().push(render_desired_node(child)?);
+            document.nodes_mut().push(render_desired_tree(child, uris)?);
         }
         if !document.nodes().is_empty() || name == "harness" {
             node.set_children(document);
         }
     } else if name == "harness" {
-        // Older normalized trees omitted empty children. A validated harness
-        // always has a body, so recover that required syntax when rendering it.
+        // Export explicit bodies so older releases can still consume normalized declarations.
         node.set_children(KdlDocument::new());
+    }
+    if name == "agent" {
+        let references = declared_resources(tree);
+        if !references.is_empty() {
+            let body = node.ensure_children();
+            for reference in references {
+                let uri = (reference.kind == crate::model::ResourceReferenceKind::Uri)
+                    .then(|| uris.get(&reference.subject))
+                    .flatten();
+                let mut child = KdlNode::new("resource");
+                child.entries_mut().push(kdl::KdlEntry::new(reference.name));
+                child.entries_mut().push(match uri {
+                    Some(uri) => kdl::KdlEntry::new_prop("uri", uri.as_str()),
+                    None => kdl::KdlEntry::new_prop("subject", reference.subject),
+                });
+                if let Some(reason) = reference.reason {
+                    child
+                        .entries_mut()
+                        .push(kdl::KdlEntry::new_prop("reason", reason));
+                }
+                body.nodes_mut().push(child);
+            }
+        }
     }
     Ok(node)
 }
 
-fn render_desired_value(value: &Value) -> Result<KdlValue, St3Error> {
+fn render_desired_value(value: &Value) -> Result<KdlValue, FractalError> {
     match value {
         Value::Null => Ok(KdlValue::Null),
         Value::Bool(value) => Ok(KdlValue::Bool(*value)),
@@ -247,13 +367,13 @@ fn render_desired_value(value: &Value) -> Result<KdlValue, St3Error> {
             } else if let Some(float) = value.as_f64() {
                 Ok(KdlValue::Float(float))
             } else {
-                Err(St3Error::new(
+                Err(FractalError::new(
                     "invalid-declaration",
                     "desired KDL number is outside the supported range",
                 ))
             }
         }
-        _ => Err(St3Error::new(
+        _ => Err(FractalError::new(
             "invalid-declaration",
             "desired KDL entries must be scalar",
         )),
@@ -265,11 +385,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn revision_tokens_resolve_to_the_revision_the_same_bundle_stores() {
+        // `weekly` nests a schedule pinning `cycle`, and `daily` pins `weekly`: the chain settles
+        // in dependency order, so `weekly`'s own revision already contains `cycle`'s.
+        let source = r#"version 2
+mission "garden/cycle" state="ready" { goal "Grow"; step "work" { agentless; gate "done" { field "state" "mission/garden/cycle" "is" "ready" } } }
+mission "garden/weekly" state="ready" {
+  goal "Run the cycle weekly"
+  schedule "garden/weekly-cycle" { every "7d"; anchor "2026-01-05T07:00:00Z"; work { mission "garden/cycle@ST_REVISION[garden/cycle]"; workspace "/tmp"; } }
+  step "retire" { agentless; gate "retired" { field "state" "mission/garden/weekly" "is" "retired" } }
+}
+schedule "garden/daily" { every "1d"; anchor "2026-01-05T07:00:00Z"; work { mission "mission/garden/weekly@ST_REVISION[mission/garden/weekly]"; workspace "/tmp"; } }
+"#;
+        let (resolved, intent) = resolve_mission_revision_tokens(source, "node").unwrap();
+        let revision = |id: &str| {
+            intent.missions.values().find(|m| m.id == id).unwrap().revision.clone()
+        };
+        assert!(!resolved.contains("ST_REVISION"));
+        assert!(resolved.contains(&format!("garden/cycle@{}", revision("garden/cycle"))));
+        assert!(resolved.contains(&format!("garden/weekly@{}", revision("garden/weekly"))));
+        // The resolved source is a fixpoint: parsing it again yields the same revisions.
+        let reparsed = parse_intent_with_owner(&resolved, "node", None, true, true).unwrap();
+        assert_eq!(reparsed.missions, intent.missions);
+        assert_eq!(reparsed.subjects, intent.subjects);
+
+        let foreign = "version 2\nschedule \"garden/daily\" { every \"1d\"; anchor \"2026-01-05T07:00:00Z\"; work { mission \"garden/elsewhere@ST_REVISION[garden/elsewhere]\"; workspace \"/tmp\"; } }\n";
+        assert_eq!(
+            resolve_mission_revision_tokens(foreign, "node").unwrap_err().code,
+            "unresolved-revision-token"
+        );
+        let cycle = r#"version 2
+mission "garden/a" state="ready" {
+  goal "A"
+  schedule "garden/a-pins-b" { every "1d"; anchor "2026-01-05T07:00:00Z"; work { mission "garden/b@ST_REVISION[garden/b]"; workspace "/tmp"; } }
+  step "work" { agentless; gate "done" { field "state" "mission/garden/a" "is" "retired" } }
+}
+mission "garden/b" state="ready" {
+  goal "B"
+  schedule "garden/b-pins-a" { every "1d"; anchor "2026-01-05T07:00:00Z"; work { mission "garden/a@ST_REVISION[garden/a]"; workspace "/tmp"; } }
+  step "work" { agentless; gate "done" { field "state" "mission/garden/b" "is" "retired" } }
+}
+"#;
+        assert_eq!(
+            resolve_mission_revision_tokens(cycle, "node").unwrap_err().code,
+            "cyclic-revision-token"
+        );
+    }
+
+    #[test]
     fn normalized_agent_tree_round_trips_through_canonical_kdl() {
         for source in [
             r#"version 2
 agent "dotfiles/steward" {
-    host "dev3"
+    host "devbox-a"
     workspace "/srv/work"
     env { TOKEN "private"; MODE "ready" }
     harness "omp" {
@@ -278,6 +446,12 @@ agent "dotfiles/steward" {
     }
 }"#,
             "version 2\nagent \"fleet/cos/standing/cos\" { command \"true\" }",
+            r#"version 2
+agent "ada/client" {
+    resource "goal" uri="agent-goal://orchid/ada%2Fclient" reason="seat goal"
+    command "true"
+    resource "worktree" uri="worktree://orchid/workspace/work"
+}"#,
         ] {
             let parsed = parse_intent(source, "node").unwrap();
             let (subject, desired) = parsed
@@ -285,14 +459,193 @@ agent "dotfiles/steward" {
                 .iter()
                 .find(|(_, desired)| desired.kind == "agent")
                 .unwrap();
-            let rendered = render_agent_desired_kdl(&desired.desired).unwrap();
+            let uris = parsed
+                .subjects
+                .values()
+                .filter_map(|resource| {
+                    Some((resource.subject.clone(), declared_uri(&resource.desired)?.to_owned()))
+                })
+                .collect();
+            let rendered = render_agent_desired_kdl(&desired.desired, &uris).unwrap();
             let reparsed = parse_intent(&rendered, "node").unwrap();
-            assert_eq!(reparsed.subjects[subject].desired, desired.desired);
+            assert_eq!(reparsed.subjects, parsed.subjects);
             assert_eq!(
-                render_agent_desired_kdl(&reparsed.subjects[subject].desired).unwrap(),
+                render_agent_desired_kdl(&reparsed.subjects[subject].desired, &uris).unwrap(),
                 rendered
             );
         }
+    }
+
+    #[test]
+    fn a_declared_resource_is_an_edge_to_one_uri_subject() {
+        let goal = "agent-goal://orchid/ada%2Fclient";
+        let parsed = parse_intent(
+            &format!(
+                r#"version 2
+agent "ada/one" {{
+    command "true"
+    resource "goal" uri="{goal}" reason="seat goal"
+}}
+agent "ada/two" {{
+    command "true"
+    resource "shared-goal" uri="{goal}"
+}}"#
+            ),
+            "node",
+        )
+        .unwrap();
+        let subject = format!("resource/uri/{}", hex::encode(Sha256::digest(goal)));
+        let resources = parsed
+            .subjects
+            .values()
+            .filter(|desired| desired.kind == "resource")
+            .collect::<Vec<_>>();
+        assert_eq!(resources.len(), 1, "one URI is one subject");
+        assert_eq!(resources[0].subject, subject);
+        assert_eq!(declared_uri(&resources[0].desired), Some(goal));
+        assert_eq!(resources[0].owner_run, None);
+        let one = &parsed.subjects["agent/ada/one"].desired;
+        assert_eq!(
+            one["resources"],
+            json!([{ "name": "goal", "subject": subject, "kind": "uri", "reason": "seat goal" }])
+        );
+        assert!(
+            one["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|child| child["name"] != "resource"),
+            "the agent body keeps no copy of the URI"
+        );
+        assert_eq!(
+            declared_resources(&parsed.subjects["agent/ada/two"].desired)[0].subject,
+            subject
+        );
+
+        // An authored declaration of the same subject is accepted only under its URI's name.
+        let authored = format!(
+            "version 2\nresource \"{}\" {{\n  kind \"uri.reference\"\n  uri \"{goal}\"\n}}\n",
+            subject.trim_start_matches("resource/")
+        );
+        assert_eq!(
+            parse_intent(&authored, "node").unwrap().subjects[&subject],
+            *resources[0]
+        );
+        let renamed = "version 2\nresource \"uri/other\" {\n  kind \"uri.reference\"\n  uri \"https://example.com\"\n}\n";
+        assert_eq!(parse_intent(renamed, "node").unwrap_err().code, "invalid-resource-uri");
+    }
+
+    #[test]
+    fn a_declared_resource_keeps_any_absolute_uri_exactly() {
+        let parse = |uri: &str| {
+            parse_intent(
+                &format!("version 2\nagent \"ada/seat\" {{\n  command \"true\"\n  resource \"r\" uri=\"{uri}\"\n}}\n"),
+                "node",
+            )
+        };
+        for uri in [
+            "x-fractal+drawer.v1:opaque/Path%2Fwith?query=1#frag",
+            "urn:isbn:0451450523",
+            "HTTPS://Example.COM/a",
+        ] {
+            let parsed = parse(uri).unwrap();
+            let resource = parsed
+                .subjects
+                .values()
+                .find(|desired| desired.kind == "resource")
+                .unwrap();
+            assert_eq!(declared_uri(&resource.desired), Some(uri));
+            let uris = BTreeMap::from([(resource.subject.clone(), uri.to_owned())]);
+            let rendered =
+                render_agent_desired_kdl(&parsed.subjects["agent/ada/seat"].desired, &uris).unwrap();
+            let reparsed = parse_intent(&rendered, "node").unwrap();
+            assert_eq!(reparsed.subjects, parsed.subjects);
+        }
+        for uri in ["relative/path", "1scheme:x", "https:", "with space:x", "a:%zz", "a:<b>"] {
+            assert_eq!(parse(uri).unwrap_err().code, "invalid-resource-uri", "{uri}");
+        }
+        let repeated = "version 2\nagent \"ada/seat\" {\n  command \"true\"\n  resource \"r\" uri=\"a:1\"\n  resource \"r\" uri=\"a:2\"\n}\n";
+        assert_eq!(parse_intent(repeated, "node").unwrap_err().code, "duplicate-resource-name");
+        let missing = "version 2\nagent \"ada/seat\" {\n  command \"true\"\n  resource \"r\" reason=\"why\"\n}\n";
+        assert_eq!(parse_intent(missing, "node").unwrap_err().code, "invalid-resource-reference");
+    }
+
+    #[test]
+    fn missing_uri_declarations_render_as_reparseable_subject_edges() {
+        let parsed = parse_intent(
+            "version 2\nagent \"ada/seat\" {\n command \"true\"\n resource \"goal\" uri=\"urn:goal:release\" reason=\"release goal\"\n}\n",
+            "node",
+        ).unwrap();
+        let desired = &parsed.subjects["agent/ada/seat"].desired;
+        let edge = &declared_resources(desired)[0];
+        let rendered = render_agent_desired_kdl(desired, &BTreeMap::new()).unwrap();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        let reread = declared_resources(&reparsed.subjects["agent/ada/seat"].desired);
+        assert_eq!(reread[0].subject, edge.subject);
+        assert_eq!(reread[0].name, edge.name);
+        assert_eq!(reread[0].reason, edge.reason);
+        assert_eq!(reread[0].kind, crate::model::ResourceReferenceKind::Subject);
+        assert!(!reparsed.subjects.contains_key(&edge.subject));
+    }
+
+    #[test]
+    fn explicit_subject_edges_round_trip_without_declaring_resources() {
+        let source = "version 2\nagent \"ada/seat\" {\n command \"true\"\n resource \"tracker\" subject=\"resource/github/example/issue/1\" reason=\"tracking\"\n}\nmission \"ada/release\" state=\"ready\" {\n goal \"Release.\"\n resource \"tracker\" subject=\"resource/github/example/issue/1\"\n}\n";
+        let parsed = parse_intent(source, "node").unwrap();
+        assert!(!parsed.subjects.contains_key("resource/github/example/issue/1"));
+        let mission = &parsed.missions["ada/release"];
+        assert_eq!(mission.resources[0].subject, "resource/github/example/issue/1");
+        assert_eq!(mission.resources[0].kind, crate::model::ResourceReferenceKind::Subject);
+        assert!(mission.declarations_kdl.is_none());
+        let desired = &parsed.subjects["agent/ada/seat"].desired;
+        let uris = BTreeMap::from([("resource/github/example/issue/1".to_owned(), "https://example.com/issue/1".to_owned())]);
+        let rendered = render_agent_desired_kdl(desired, &uris).unwrap();
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(&reparsed.subjects["agent/ada/seat"].desired, desired);
+        assert_eq!(declared_resources(desired)[0].kind, crate::model::ResourceReferenceKind::Subject);
+        for locator in ["subject=\"agent/ada/seat\"", "subject=\"resource/\"", "uri=\"urn:goal:x\" subject=\"resource/github/x\""] {
+            let invalid = format!("version 2\nagent \"ada/seat\" {{\n command \"true\"\n resource \"r\" {locator}\n}}\n");
+            assert!(parse_intent(&invalid, "node").is_err());
+        }
+    }
+
+    #[test]
+    fn a_published_mission_names_resources_as_uri_subjects() {
+        let source = r#"version 2
+mission "ada/release" state="ready" {
+    goal "Release."
+    resource "tracker" uri="https://github.com/compoundingtech/smalltalk/issues/752" reason="tracking issue"
+    step "work" {
+        agentless
+        goal "Work."
+    }
+}"#;
+        let parsed = parse_intent(source, "node").unwrap();
+        let mission = &parsed.missions["ada/release"];
+        assert_eq!(mission.resources.len(), 1);
+        assert_eq!(mission.resources[0].name, "tracker");
+        assert_eq!(mission.resources[0].reason.as_deref(), Some("tracking issue"));
+        assert_eq!(
+            declared_uri(&parsed.subjects[&mission.resources[0].subject].desired),
+            Some("https://github.com/compoundingtech/smalltalk/issues/752")
+        );
+        assert!(mission.declarations_kdl.is_none(), "a reference is not a run-owned declaration");
+
+        let nested = r#"version 2
+mission "ada/outer" state="ready" {
+    goal "Outer."
+    step "inner" {
+        mission "ada/inner" {
+            goal "Inner."
+            resource "tracker" uri="https://example.com/1"
+            step "work" {
+                agentless
+                goal "Work."
+            }
+        }
+    }
+}"#;
+        assert_eq!(parse_intent(nested, "node").unwrap_err().code, "nested-mission-resource");
     }
 
     #[test]
@@ -347,10 +700,12 @@ mission "example/train" state="ready" {{
                 "{lane}"
             );
         }
-        let in_step = source("").replace("step \"drive\" {", "step \"drive\" {\n    lane \"app\";");
+        // A step's `lane` is a resource lane, not a workflow lane declaration.
+        let in_step = source("").replace("step \"drive\" {", &format!("step \"drive\" {{\n    {valid}\n    "));
+        let error = parse_intent(&in_step, "node").unwrap_err();
         assert_eq!(
-            parse_intent(&in_step, "node").unwrap_err().code,
-            "lane-inside-step"
+            error.code,
+            "invalid-step-lane"
         );
         assert!(parse_intent("version 2\nlane \"app\"", "node").is_err());
     }
@@ -362,7 +717,12 @@ mission "example/train" state="ready" {{
                 "version 2\nagent \"worker\" {{ workspace \"/work\"; harness {harness:?} {{}} }}\n"
             );
             let intent = parse_test_intent(&source, "node").unwrap();
-            assert!(parse_test_intent(&source.replace("{}", ""), "node").is_err());
+            let bare = parse_test_intent(&source.replace("{}", ""), "node").unwrap();
+            assert_eq!(
+                serde_json::to_value(&bare.subjects).unwrap(),
+                serde_json::to_value(&intent.subjects).unwrap(),
+                "bare and empty-body {harness} normalize identically"
+            );
             let desired = &intent.subjects["agent/node.worker"].desired;
             let body = desired["children"].as_array().unwrap()
                 .iter().find(|child| child["name"] == "harness").unwrap();
@@ -375,6 +735,14 @@ mission "example/train" state="ready" {{
                     body.as_object_mut().unwrap().insert("children".into(), json!([]));
                 }
                 let node = render_desired_node(&tree).unwrap();
+                let harness_node = render_desired_node(
+                    tree["children"].as_array().unwrap().iter()
+                        .find(|child| child["name"] == "harness").unwrap()
+                ).unwrap().to_string();
+                assert!(
+                    harness_node.contains('{') && harness_node.contains('}'),
+                    "empty harness must export explicit braces for older releases: {harness_node}"
+                );
                 let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
                 assert_eq!(restored.subjects["agent/node.worker"].desired, *desired);
             }

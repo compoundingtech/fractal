@@ -192,7 +192,7 @@ fn stale_delivery(agent: &Facts) -> bool {
     agent
         .delivery
         .as_ref()
-        .is_some_and(|delivery| delivery.state == "stale")
+        .is_some_and(|delivery| matches!(delivery.state.as_str(), "stale" | "refused"))
 }
 
 /// Why an agent in `state` needs someone, from what st says about it.
@@ -211,9 +211,9 @@ fn because(agent: &Facts, state: State) -> Option<String> {
                 agent
                     .delivery
                     .as_ref()
-                    .filter(|delivery| delivery.state == "stale")
+                    .filter(|delivery| matches!(delivery.state.as_str(), "stale" | "refused"))
                     .and_then(|delivery| delivery.reason.clone())
-                    .filter(|reason| reason.starts_with("delivery-control-unavailable:"))
+                    .filter(|reason| reason.starts_with("delivery-control-unavailable:") || reason.starts_with("delivery refused:"))
             })
             .or_else(|| {
                 (agent.blocked_on.as_deref() == Some("channel")).then(|| {

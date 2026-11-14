@@ -28,7 +28,7 @@ const conversation = (ctx: FactoryContext, mode: 'long' | 'tool-heavy' | 'failed
     const count = mode === 'long' ? 80 : mode === 'remote-only-mail' ? 3 : 1
     for (let exchange = 0; exchange < count; exchange += 1) {
       const atMs = -((count - exchange) * 30_000) - index * 1_000
-      items.push(...turn(c, cursor, { atMs, from, text: `${mode === 'remote-only-mail' && sender.id === member.id ? 'Resume' : 'Review'} migration batch ${exchange + 1}: preserve the session argument at every caller.`, steps: [{ _tag: 'say', text: 'I checked the callers and am validating the session-aware signature.' }], status: mode === 'failed-tools' ? 'waiting' : 'completed', stepMs: 1_000 }))
+      items.push(...turn(c, cursor, { atMs, from, text: `${mode === 'remote-only-mail' && sender.id === member.id ? 'Resume' : 'Review'} migration batch ${exchange + 1}: preserve the session argument at every caller.`, steps: [{ _tag: 'say', text: 'I checked the callers and am validating the session-aware signature.' }], status: mode === 'failed-tools' ? 'waiting' : mode === 'tool-heavy' ? 'running' : 'completed', stepMs: 1_000 }))
     }
     if (mode === 'tool-heavy' || mode === 'failed-tools') {
       for (let call = 0; call < 5; call += 1) items.push(...toolCall(c, cursor, { atMs: -20_000 + call * 3_000, name: 'shell', arguments: { command: call === 0 ? 'git diff -- src/session.ts' : 'pnpm typecheck' }, outcome: call === 4 ? 'pending' : mode === 'failed-tools' ? 'error' : 'ok', output: mode === 'failed-tools' ? 'error TS2554: Expected 2 arguments, but got 1.' : 'Typecheck passed.', durationMs: 500 }))

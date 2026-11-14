@@ -18,6 +18,9 @@ pub use crate::config::open_token_file;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
 
+#[path = "github_app_read.rs"]
+pub mod app_read;
+
 pub const GITHUB_AUTH_REMEDY: &str = "GitHub observers have no token; run `gh auth login` as the daemon account or export GH_TOKEN/GITHUB_TOKEN in that account's login-shell startup files. Check the daemon PATH with `st doctor`. No anonymous request was sent; failed or rejected credentials are checked again after a 30-second refresh backoff. HTTP requests are never retried.";
 
 tokio::task_local! {
@@ -48,6 +51,11 @@ pub enum GithubAuth {
         config: Arc<crate::config::Config>,
         profile: String,
     },
+    /// A selected read batch; all mutations unwrap to the original PAT route.
+    Read {
+        source: app_read::ReadSource,
+        pat: Box<GithubAuth>,
+    },
 }
 
 impl GithubAuth {
@@ -55,14 +63,7 @@ impl GithubAuth {
         match self {
             Self::Local { token, .. } => !token.trim().is_empty(),
             Self::Authorized { profile, .. } => !profile.trim().is_empty(),
-        }
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn test(token: &str) -> Self {
-        Self::Local {
-            token: Arc::new(token.into()),
-            cache: None,
+            Self::Read { source, .. } => !source.token.is_empty(),
         }
     }
 
@@ -70,6 +71,7 @@ impl GithubAuth {
     pub fn local_token(&self) -> &Arc<String> {
         match self {
             Self::Local { token, .. } => token,
+            Self::Read { source, .. } => &source.token,
             Self::Authorized { .. } => panic!("profile auth has no local token"),
         }
     }
@@ -278,18 +280,51 @@ fn token_cache() -> &'static Arc<TokenCache> {
 
 static SOURCE: OnceLock<Arc<crate::config::Config>> = OnceLock::new();
 
-pub fn configure(config: &crate::config::Config) -> Result<()> {
+/// Observes every actual HTTP response, before replay or redirect handling.
+pub struct ResponseObserver(fn(reqwest::StatusCode, &reqwest::header::HeaderMap));
+
+impl ResponseObserver {
+    pub const fn new(record: fn(reqwest::StatusCode, &reqwest::header::HeaderMap)) -> Self {
+        Self(record)
+    }
+
+    fn record(&self, status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) {
+        (self.0)(status, headers);
+    }
+}
+
+static RESPONSE_OBSERVER: OnceLock<&'static ResponseObserver> = OnceLock::new();
+
+/// Install the process-wide observer; accounting cannot be replaced after construction.
+pub fn observe_responses(observer: &'static ResponseObserver) -> Result<()> {
+    let known = RESPONSE_OBSERVER.get_or_init(|| observer);
+    anyhow::ensure!(
+        std::ptr::eq(*known, observer),
+        "GitHub response observer was already configured"
+    );
+    Ok(())
+}
+
+pub fn configure(
+    config: &crate::config::Config,
+    observer: &'static ResponseObserver,
+) -> Result<()> {
+    let mut config = config.clone();
+    if let Some(root) = std::env::var_os("ST3_GITHUB_APP_TOKEN_ROOT") {
+        config.github.app_token_root = Some(root.into());
+    }
     config.github.validate()?;
+    observe_responses(observer)?;
     if let Some(known) = SOURCE.get() {
         anyhow::ensure!(
-            known.as_ref() == config,
+            known.as_ref() == &config,
             "GitHub source was already configured for this process"
         );
         return Ok(());
     }
     crate::github_admission::configure(config.state_dir.join("github-admission.json"), config.github.observer_requests_per_hour.map(|cap| cap as usize));
     SOURCE
-        .set(Arc::new(config.clone()))
+        .set(Arc::new(config))
         .map_err(|_| anyhow::anyhow!("GitHub source was already configured"))
 }
 
@@ -392,12 +427,216 @@ fn request_resource(path: &str) -> &'static str {
     }
 }
 
-/// Send exactly once, including mutations. A 401 invalidates only the credential used here;
-/// another poll can acquire again after backoff. Never retry the original HTTP request.
+fn token_root(pat: &GithubAuth) -> Option<&std::path::Path> {
+    match pat {
+        GithubAuth::Read { source, .. } => Some(source.root.as_path()),
+        _ => SOURCE.get().and_then(|config| config.github.app_token_root.as_deref()),
+    }
+}
+
+/// Select from the supplied root only. Token files are reopened for each read batch.
+pub fn read_auth(owner: &str, app: &str, pat: &GithubAuth) -> GithubAuth {
+    app_read::select(token_root(pat), owner, app, pat.pat())
+}
+
+/// The installation that may read `owner`'s commit statuses, if its token grants them.
+pub fn statuses_auth(owner: &str, pat: &GithubAuth) -> Option<GithubAuth> {
+    let source = app_read::statuses_source(token_root(pat)?, owner)?;
+    Some(GithubAuth::Read { source, pat: Box::new(pat.pat().clone()) })
+}
+
+impl GithubAuth {
+    pub fn pat(&self) -> &Self {
+        match self { Self::Read { pat, .. } => pat.pat(), _ => self }
+    }
+
+    pub fn cache_principal(&self) -> &str {
+        match self { Self::Read { source, .. } => &source.principal, Self::Authorized { profile, .. } => profile, _ => "pat" }
+    }
+
+    pub fn used_fallback(&self) -> bool {
+        matches!(self, Self::Read { source, .. } if source.used_fallback.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn request_scope(&self) -> Self {
+        let mut auth = self.clone();
+        if let Self::Read { source, .. } = &mut auth {
+            source.used_fallback = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        }
+        auth
+    }
+}
+
+#[derive(Clone)]
+struct ReadCacheEligibility(bool);
+
+pub fn read_response_cacheable(response: &reqwest::Response) -> bool {
+    response.extensions().get::<ReadCacheEligibility>().is_none_or(|state| state.0)
+}
+
+pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
+    let Ok(url) = reqwest::Url::parse(url) else { return auth.pat().clone(); };
+    let Some((owner, app, statuses)) = app_read::route(&url) else {
+        // GitHub repository rename redirects can replace the owner/name path with
+        // its numeric repository identity. That does not change read authority.
+        let mut segments = url.path_segments().into_iter().flatten();
+        if segments.next() == Some("repositories")
+            && segments.next().is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())) {
+            return auth.clone();
+        }
+        if let GithubAuth::Read { source, .. } = auth {
+            app_read::fallback(&source.owner, &source.app, "unroutable");
+        }
+        return auth.pat().clone();
+    };
+    if statuses {
+        if let Some(selected) = statuses_auth(owner, auth) {
+            return selected;
+        }
+        if matches!(auth, GithubAuth::Read { .. }) || SOURCE.get().is_some_and(|config| config.github.app_token_root.is_some()) {
+            app_read::fallback(owner, app, "statuses");
+        }
+        return auth.pat().clone();
+    }
+    if let GithubAuth::Read { source, .. } = auth
+        && source.owner == owner && source.app == app {
+        return auth.clone();
+    }
+    read_auth(owner, app, auth)
+}
+
+/// Only callers that constructed an idempotent GraphQL query use this entrypoint.
+pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+    if request.try_clone().and_then(|request| request.build().ok()).is_some_and(|request|
+        request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD) {
+        return send(request, auth).await;
+    }
+    let request_auth = auth.request_scope();
+    let mut response = send_selected_read(request, &mut request_auth.clone()).await?;
+    response.extensions_mut().insert(ReadCacheEligibility(!request_auth.used_fallback()));
+    Ok(response)
+}
+
+/// One admitted, credentialed read hop that never follows a redirect: a 3xx comes back as itself,
+/// for a caller that maps it (the client GitHub plugin reads report `moved` and never fetch it).
+pub async fn send_read_once(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+    let url = request
+        .try_clone()
+        .and_then(|request| request.build().ok())
+        .map(|request| request.url().to_string())
+        .context("GitHub read request cannot be built")?;
+    let request_auth = auth.request_scope();
+    let mut selected = if url.ends_with("/graphql") { request_auth.clone() } else { read_auth_for_url(&url, &request_auth) };
+    let fallback = match &selected {
+        GithubAuth::Read { source, .. } => Some(source.used_fallback.clone()),
+        _ => None,
+    };
+    let principal = selected.cache_principal().to_owned();
+    let mut response = send_selected_read(request, &mut selected).await?;
+    let ineligible = request_auth.used_fallback()
+        || fallback.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        || selected.cache_principal() != principal;
+    response.extensions_mut().insert(ReadCacheEligibility(!ineligible));
+    Ok(response)
+}
+
+async fn send_selected_read(request: reqwest::RequestBuilder, auth: &mut GithubAuth) -> Result<reqwest::Response> {
+    let read = request.try_clone().and_then(|request| request.build().ok()).is_some_and(|request| {
+        request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD ||
+            (request.method() == reqwest::Method::POST && request.url().path().ends_with("/graphql") &&
+             request.body().and_then(reqwest::Body::as_bytes)
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+                .and_then(|body| body.get("query").and_then(serde_json::Value::as_str).map(str::to_owned))
+                .is_some_and(|query| query.trim_start().starts_with("query") || query.trim_start().starts_with('{')))
+    });
+    if !read { return send_once(request, auth.pat()).await; }
+    match auth {
+        GithubAuth::Read { source, pat } => {
+            let (response, effective) = app_read::send(request, source, pat).await?;
+            match effective {
+                Some(effective) => *source = effective,
+                None => *auth = pat.as_ref().clone(),
+            }
+            Ok(response)
+        }
+        _ => send_once(request, auth).await,
+    }
+}
+
+/// Send requests with separately admitted same-origin redirect hops. App reads retain
+/// their bounded credential replay; mutations retain their method and body using the PAT.
 pub async fn send(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
+    let request_auth = auth.request_scope();
+    let mut response = send_redirected(request, &request_auth).await?;
+    response.extensions_mut().insert(ReadCacheEligibility(!request_auth.used_fallback()));
+    Ok(response)
+}
+
+async fn send_redirected(
+    request: reqwest::RequestBuilder,
+    auth: &GithubAuth,
+) -> Result<reqwest::Response> {
+    let (client, request) = request.build_split();
+    let request = request?;
+    let read = request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD;
+    let mut template = request;
+    let mut redirects = 0;
+    let mut effective = auth.clone();
+    let mut cache_ineligible = auth.used_fallback();
+    loop {
+        let mut selected = if read {
+            read_auth_for_url(template.url().as_str(), &effective)
+        } else {
+            auth.pat().clone()
+        };
+        if selected.cache_principal() != effective.cache_principal() {
+            template.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+            cache_ineligible = true;
+        }
+        let fallback = match &selected {
+            GithubAuth::Read { source, .. } => Some(source.used_fallback.clone()),
+            _ => None,
+        };
+        let request = template.try_clone().context("GitHub request body cannot be replayed for a redirect")?;
+        let request = reqwest::RequestBuilder::from_parts(client.clone(), request);
+        let response = if read {
+            send_selected_read(request, &mut selected).await?
+        } else {
+            send_once(request, &selected).await?
+        };
+        cache_ineligible |= fallback.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            || selected.cache_principal() != effective.cache_principal();
+        effective = selected;
+        if cache_ineligible {
+            template.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+            if let GithubAuth::Read { source, .. } = auth {
+                source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if !matches!(response.status().as_u16(), 301 | 307 | 308)
+            && !(read && matches!(response.status().as_u16(), 302 | 303)) {
+            return Ok(response);
+        }
+        let location = response.headers().get(reqwest::header::LOCATION)
+            .context("GitHub redirect has no Location")?.to_str()?;
+        let target = template.url().join(location)?;
+        anyhow::ensure!(target.origin() == template.url().origin(), "GitHub redirect changed API origin");
+        anyhow::ensure!(redirects < 10, "GitHub redirect limit exceeded");
+        redirects += 1;
+        *template.url_mut() = target;
+    }
+}
+
+async fn send_once(
+    request: reqwest::RequestBuilder,
+    auth: &GithubAuth,
+) -> Result<reqwest::Response> {
+    let observer = RESPONSE_OBSERVER
+        .get()
+        .context("GitHub response observer was not configured; no request was sent")?;
     // Admission precedes both the credential-bearing local send and the
     // authorized RPC. A failed send remains spent; there is no HTTP retry.
     let reservation = if let Some(config) = SOURCE.get() {
@@ -415,6 +654,7 @@ pub async fn send(
         None
     };
     let result = async { match auth {
+        GithubAuth::Read { .. } => bail!("installation credentials require the read-only send boundary"),
         GithubAuth::Authorized { config, profile } => {
             send_authorized_with(
                 config.clone(),
@@ -434,12 +674,28 @@ pub async fn send(
             Ok(response)
         }
     }}.await;
+    if let Ok(response) = &result {
+        observer.record(response.status(), response.headers());
+    }
     if let Some(reservation) = reservation {
         crate::github_admission::after_send(
             reservation, result.as_ref().ok().map(|response| response.status().as_u16()),
+            result.as_ref().ok().and_then(|response| budget_sample(response.headers())),
         ).await;
     }
     result
+}
+
+fn budget_sample(headers: &reqwest::header::HeaderMap) -> Option<crate::github_admission::BudgetSample> {
+    let number = |name: &str| headers.get(name)?.to_str().ok()?.parse::<u64>().ok();
+    Some(crate::github_admission::BudgetSample {
+        at_unix_ms: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).ok()?.as_millis(),
+        resource: headers.get("x-ratelimit-resource")?.to_str().ok()?.to_owned(),
+        limit: number("x-ratelimit-limit")?,
+        used: number("x-ratelimit-used")?,
+        remaining: number("x-ratelimit-remaining")?,
+        reset_at_unix_ms: u128::from(number("x-ratelimit-reset")?).saturating_mul(1_000),
+    })
 }
 
 async fn send_authorized_with<F>(
@@ -534,6 +790,24 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn budget_header_samples_preserve_graphql_point_units() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-ratelimit-resource", "graphql"), ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-used", "37"), ("x-ratelimit-remaining", "4963"),
+            ("x-ratelimit-reset", "1793053049"),
+        ] {
+            headers.insert(reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(), value.parse().unwrap());
+        }
+        let sample = budget_sample(&headers).unwrap();
+        assert_eq!(sample.resource, "graphql");
+        assert_eq!(sample.used, 37);
+        assert_eq!(sample.reset_at_unix_ms, 1_793_053_049_000);
+        headers.remove("x-ratelimit-used");
+        assert!(budget_sample(&headers).is_none(), "never invent provider usage");
+    }
 
     #[tokio::test]
     async fn authorized_destination_body_and_header_validation_refuses_before_the_rpc() {
@@ -977,6 +1251,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthorized_mutation_is_sent_once_and_invalidates_its_cache() {
+        let _ = GithubAuth::test("fixture-observer");
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
         let app = axum::Router::new().fallback(move |request: axum::extract::Request| {

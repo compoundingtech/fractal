@@ -15,11 +15,9 @@
 //!   requires the parent to be `0700` first, one names its lock by suffixing a foreign config
 //!   path), and absorbing the disagreement here would hide it rather than resolve it.
 //! * [`open`] and [`FileLock::hold`] stay split, because the window *between* the open and the
-//!   `flock` is load-bearing: [`crate::catalog_lock`] writes its contention checkpoints there, and
-//!   [`crate::resource_profile`] proves the opened lock is a regular file there.
+//!   `flock` is load-bearing: [`crate::catalog_lock`] writes its contention checkpoints there.
 //!
-//! The defaults are [`crate::resource_profile`]'s publication lock, the one site that was already
-//! correct on every axis, so they are house style rather than invention: `O_RDWR` (a path that
+//! The defaults preserve the established publication-lock flags: `O_RDWR` (a path that
 //! cannot be opened for write is not usable as this tree's lock file, and a shared lock is still
 //! taken on a writable descriptor), `O_NOFOLLOW` so a symlink planted at the lock path cannot
 //! redirect the lock domain to a file its planter also holds, `O_CLOEXEC` — which Rust's
@@ -96,7 +94,7 @@ pub(crate) fn open(path: &Path, create: Open) -> io::Result<File> {
 /// the release to the guard's scope even if the descriptor outlives it through a `dup`.
 #[derive(Debug)]
 pub(crate) struct FileLock {
-    file: File,
+    file: Option<File>,
 }
 
 impl FileLock {
@@ -122,7 +120,7 @@ impl FileLock {
             }
             return Err(error);
         }
-        Ok(Some(Self { file }))
+        Ok(Some(Self { file: Some(file) }))
     }
 
     /// Take `mode`, queueing behind the current holder. Returns the guard directly: [`Wait::Block`]
@@ -139,16 +137,28 @@ impl FileLock {
 
     /// The locked descriptor, for a protocol that also has to `fsync` the lock file itself.
     pub(crate) fn file(&self) -> &File {
-        &self.file
+        self.file.as_ref().expect("held file lock owns its descriptor")
+    }
+
+    /// Release the lock while retaining its descriptor for the next serialized acquisition.
+    pub(crate) fn release(mut self) -> File {
+        self.unlock();
+        self.file.take().expect("held file lock owns its descriptor")
+    }
+
+    fn unlock(&self) {
+        if let Some(file) = &self.file {
+            // SAFETY: the descriptor remains owned by this guard through the syscall.
+            unsafe {
+                libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
     }
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        // SAFETY: the descriptor remains valid until after Drop returns.
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        self.unlock();
     }
 }
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show person-owned Mission steps in clients with strict Mission decoding",
+  "replay": {"status": "none", "detail": "Mission presentation is derived from existing claim fields."},
+  "schema": {"status": "none", "detail": "The presenter uses the existing person actor variant for a person claimant or assignee."},
+  "rules": {"status": "none", "detail": "The correction runs in the projection after ownership and authorization."},
+  "compatibility": {"status": "none", "detail": "Existing clients already support the person actor variant."},
+  "downtime": {"status": "none", "detail": "The correction runs during the ordinary Mission presentation refresh."},
+  "manual": {"status": "none", "detail": "The presenter derives the actor from existing claimant or assignee fields."},
+  "recovery": {"status": "none", "detail": "Mission presentation can be regenerated from durable claims."}
+}

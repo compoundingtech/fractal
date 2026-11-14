@@ -452,6 +452,41 @@ async fn a_pass_that_read_a_start_before_its_worker_finished_keeps_the_launch() 
 }
 
     #[tokio::test]
+async fn a_finished_start_sends_its_wake_before_its_waiters_go_on() {
+    use futures_util::FutureExt;
+    let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        "start-wake-order",
+    );
+    assert!(launch(&reconciler, "agent/example/worker"));
+    tokio::time::timeout(Duration::from_secs(30), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // The wake for queueing the start is not the one this test waits for.
+    let _ = reconciler.notify.notified().now_or_never();
+    // Hold the set of running starts, as a waiter for this start sees it, while the worker
+    // finishes. The worker must mark the completion and send its wake before it leaves the set:
+    // otherwise a waiter goes on first, and the wake lands later as a stray one.
+    let live = reconciler.start_jobs.live.clone();
+    let held = live.0.lock().unwrap();
+    release.0.send(()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut woke = false;
+    while !woke && std::time::Instant::now() < deadline {
+        woke = reconciler.notify.notified().now_or_never().is_some();
+        if !woke {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    drop(held);
+    assert!(woke, "the worker left the running starts before sending its completion wake");
+    workers_done(&reconciler).await;
+}
+
+    #[tokio::test]
 async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, true);
     apply_source(
@@ -1928,10 +1963,21 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     fn new() -> Self {
         use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
         fractal_runtime::initialize_isolation(&BTreeMap::new());
-        // The tree's pty from this test's PATH (the dev shell's), not the login shell's: on NixOS a
-        // login shell rebuilds PATH, so under an isolated HOME (scripts/ci-local) it has no pty.
-        let real_pty =
-            fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
+        // Resolve helpers from this test's PATH (the dev shell's), not the login shell's: on NixOS
+        // a login shell rebuilds PATH, so an isolated HOME (scripts/ci-local) loses these tools.
+        let environment = std::env::vars().collect();
+        let real_pty = fractal_runtime::resolve_executable("pty", &environment).unwrap();
+        let python3 = fractal_runtime::resolve_executable("python3", &environment)
+            .expect("native late PTY publication test requires python3 on the test process PATH");
+        let python3 = python3
+            .to_str()
+            .expect("python3 executable path must be UTF-8")
+            .replace('\'', "'\\''");
+        // macOS strips DYLD_* when entering /bin/sh. Restore the test runner's
+        // dylib search path at the real PTY invocation, after that boundary.
+        let dylib_environment = std::env::var("DYLD_FALLBACK_LIBRARY_PATH")
+            .map(|value| format!("DYLD_FALLBACK_LIBRARY_PATH='{}' ", value.replace('\'', "'\\''")))
+            .unwrap_or_default();
         let root = tempfile::tempdir().unwrap();
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
@@ -1946,15 +1992,15 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
             .open(&gate_path)
             .unwrap();
         let ready = tokio::net::UnixListener::bind(pty.with_extension("event")).unwrap();
-        std::fs::write(&pty, r#"#!/bin/sh
+        std::fs::write(&pty, format!(r#"#!/bin/sh
 (
   IFS= read -r permitted < "$0.gate" || exit 1
-  "$(cat "$0.real")" "$@"
+  {dylib_environment}"$(cat "$0.real")" "$@"
   outcome=$?
-  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall(bytes([int(sys.argv[2])]))' "$0.event" "$outcome"
+  '{python3}' -c 'import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(sys.argv[1]); s.sendall(bytes([int(sys.argv[2])]))' "$0.event" "$outcome"
 ) </dev/null >"$0.output" 2>&1 &
 exit 1
-"#).unwrap();
+"#)).unwrap();
         std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
         let state = root.path().join("state");
         std::fs::create_dir(&state).unwrap();

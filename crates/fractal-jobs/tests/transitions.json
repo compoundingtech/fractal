@@ -1,0 +1,25 @@
+{
+  "states": [
+    {"state":"queued"},{"state":"preparing"},{"state":"prepared"},{"state":"launching"},
+    {"state":"running"},{"state":"recovering"},{"state":"cancel-requested"},{"state":"recovering-cancel-requested"},
+    {"state":"unknown-after-host-loss","cancel_requested":false},{"state":"unknown-after-host-loss","cancel_requested":true},
+    {"state":"completed","outcome":{"kind":"code","value":0}},
+    {"state":"refused","refusal":{"reason":"policy-denied"}},
+    {"state":"withdrawn"},{"state":"cancelled"},{"state":"failed","failure":{"reason":"max-hold"}},
+    {"state":"failed","failure":{"reason":"holder-lost"}},{"state":"failed","failure":{"reason":"outcome-unwritten"}}
+  ],
+  "events": [
+    {"event":"prepare"},{"event":"prepared"},{"event":"launch-intent"},{"event":"started"},
+    {"event":"recover"},{"event":"host-lost"},{"event":"refuse","refusal":{"reason":"policy-denied"}},
+    {"event":"withdraw"},{"event":"cancel-request"},{"event":"exited","outcome":{"kind":"code","value":0}},
+    {"event":"whole-tree-stopped"},{"event":"failed-tree-stopped","failure":{"reason":"max-hold"}},
+    {"event":"failed-tree-stopped","failure":{"reason":"holder-lost"}},{"event":"failed-tree-stopped","failure":{"reason":"outcome-unwritten"}}
+  ],
+  "edges": [
+    [0,0,1],[1,1,2],[0,2,3],[2,2,3],[0,6,11],[1,6,11],[2,6,11],[3,6,11],[0,7,12],[1,7,12],[2,7,12],[3,7,12],[6,7,12],
+    [3,3,4],[5,3,4],[3,4,5],[4,4,5],[6,4,7],[3,8,6],[4,8,6],[5,8,6],
+    [3,5,8],[4,5,8],[5,5,8],[6,5,9],[7,5,9],[8,4,5],[9,4,7],
+    [4,9,10],[5,9,10],[6,10,13],[7,10,13],[4,11,14],[5,11,14],[6,11,14],[7,11,14],
+    [4,12,15],[5,12,15],[6,12,15],[7,12,15],[4,13,16],[5,13,16],[6,13,16],[7,13,16]
+  ]
+}

@@ -51,6 +51,7 @@ impl Ui {
             Hit::ResourceAdd(_) => "find a resource to add".into(),
             Hit::ResourceFolderMenu(_) => "rename or delete folder".into(),
             Hit::ResourceFolderDrag(_) => "drag to reorder folder".into(),
+            Hit::SidebarToggle => "show/hide sidebar · Ctrl+S".into(),
             Hit::SidebarRow(_) => "open item in tab".into(),
             Hit::SidebarSection(_) => format!("show {label}"),
             Hit::Usage => "show/hide Usage".into(),
@@ -58,7 +59,8 @@ impl Ui {
             Hit::Row(_) => "select row".into(),
             Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
-            Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
+            Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
+            Hit::Key(_) | Hit::Availability(_) | Hit::Enter | Hit::ChatEnter | Hit::Escape | Hit::Menu(_) => label,
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
@@ -67,7 +69,7 @@ impl Ui {
             Hit::Pane(PaneIntent::Send(_)) => "send message".into(),
             Hit::Pane(PaneIntent::LoadOlder) => "load older messages".into(),
             Hit::JumpLatest => "jump to latest [End]".into(),
-            Hit::Composer => "edit message [c]".into(),
+            Hit::Composer | Hit::ChatComposer => "edit message [c]".into(),
             Hit::Help => "show/hide help [F1]".into(),
             Hit::Peek(id) if self.popover.as_deref() == Some(id) && rect.height > 1 => {
                 "card already open".into()
@@ -76,19 +78,27 @@ impl Ui {
             Hit::Actions(_) => "agent actions".into(),
             Hit::Field(_) => "focus field [Tab]".into(),
             Hit::Revoke(_) => "ask to revoke; y confirms".into(),
-            Hit::Attach => "attach terminal [Ctrl+]]".into(),
+            Hit::Attach => "attach terminal [Enter on a detached terminal pane]".into(),
             Hit::Detach => "leave terminal [Ctrl+\\ c or Ctrl+T twice]".into(),
             Hit::GlassMenu => "spaces [Ctrl+G]".into(),
             Hit::PaletteSection(1) => "agents [Ctrl+2]".into(),
             Hit::PaletteSection(2) => "missions [Ctrl+3]".into(),
-            Hit::PaletteSection(3) => "fleet [Ctrl+4]".into(),
+            Hit::PaletteSection(3) => "fleet [palette: fleet]".into(),
             Hit::PaletteSection(_) => format!("open {label}"),
             Hit::Home => "open Inbox [Ctrl+H]".into(),
+            Hit::Link(url) if super::documents::openable(url).is_some() => "open document".into(),
             Hit::Link(_) => "copy link".into(),
+            Hit::Document(super::documents::Tap::Back) => "back one document [b]".into(),
+            Hit::Document(super::documents::Tap::Retry) => "read it again [r]".into(),
+            Hit::Document(super::documents::Tap::More) => "more documents [m]".into(),
             Hit::Split(true) => "split right [Ctrl+V]".into(),
             Hit::Split(false) => "split below [Ctrl+X]".into(),
-            Hit::GlassTab(..) => "show tab; drag to move/split; middle-click closes".into(),
-            Hit::GlassTabMore(..) => "more tabs: show the next hidden tab [Tab]".into(),
+            Hit::GlassTab(..) => {
+                "show tab; wheel scrolls tabs; drag to move/split; middle-click closes".into()
+            }
+            Hit::GlassTabMore(..) => {
+                "more tabs: show the next hidden tab [Tab]; wheel scrolls without selecting".into()
+            }
             Hit::GlassAdd(_) => "new tab [Ctrl+T]".into(),
             Hit::PaletteChoice(_) => format!("open {label}"),
         };
@@ -97,7 +107,7 @@ impl Ui {
             && self.context.is_none()
             && !self.home_open()
             && !self.palette_open()
-            && !matches!(hit, Hit::Composer | Hit::Resize)
+            && !matches!(hit, Hit::Composer | Hit::ChatComposer | Hit::Resize | Hit::SidebarResize)
             && self.click_focuses_split(point.0, point.1)
         {
             left = "focus split; click again to act".into();
@@ -207,7 +217,7 @@ mod tests {
 
     #[test]
     fn pointer_footer_names_both_operations_and_keeps_status_and_keyboard_hints() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.build = true;
         let before = draw(&ui);
         assert!(line(&before, 47).contains("Keys:"));
@@ -261,7 +271,7 @@ mod tests {
     #[test]
     fn unattached_terminal_button_hovers_and_runs_the_keyboard_attach_action() {
         for shell in [false, true] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             let id = if shell {
                 "terminal/example-shell".to_owned()
             } else {
@@ -270,7 +280,7 @@ mod tests {
             ui.open_in_glass(Pane::Terminal(id.clone()), glass::Open::Tab);
             let before = draw(&ui);
             assert!(ui.terminal.is_none());
-            assert!((0..48).any(|row| line(&before, row).contains("Not attached. Ctrl+] attaches")));
+            assert!((0..48).any(|row| line(&before, row).contains("Not attached. Enter attaches")));
             let button = target(&ui, |hit| matches!(hit, Hit::Attach));
             assert!(line(&before, button.y).contains("Attach"));
             pointer(&mut ui, MouseEventKind::Moved, button.x, button.y);
@@ -281,7 +291,7 @@ mod tests {
             );
             assert!(line(&hovered, 47).contains("Click: attach terminal"));
             ui.live = true;
-            ui.key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+            ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             let keyboard = ui.effects.drain(..).collect::<Vec<_>>();
             pointer(&mut ui, MouseEventKind::Down(MouseButton::Left), button.x, button.y);
             assert!(matches!(keyboard.as_slice(), [Effect::OpenTerminal { agent }] if agent == &id));
@@ -291,7 +301,7 @@ mod tests {
 
     #[test]
     fn middle_click_closes_only_on_release_over_the_pressed_tab() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         let other = ui.world.agents.items()[1].id.clone();
@@ -317,7 +327,7 @@ mod tests {
 
     #[test]
     fn message_hover_still_allows_text_selection_and_more_precise_links() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.world.conversations.insert(
             agent.clone(),
@@ -376,7 +386,7 @@ mod tests {
 
     #[test]
     fn popover_links_take_clicks_without_focusing_or_resizing_an_underlying_split() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         if let Load::Ready(agents) = &mut ui.world.agents {
             agents[0].details.progress = Some("https://example.com/notes".into());
@@ -424,7 +434,7 @@ mod tests {
 
     #[test]
     fn subject_text_and_dividers_show_their_gestures_and_unfocused_buttons_name_focus() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let mission = ui.world.missions.items()[0].id.clone();
         ui.open_in_glass(Pane::Mission(Some(mission)), glass::Open::Right);
         draw(&ui);
@@ -462,7 +472,7 @@ mod tests {
 
     #[test]
     fn host_and_person_are_status_and_inert_references_are_plain() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let buf = draw(&ui);
         let word = target(&ui, |hit| matches!(hit, Hit::Connection));
         assert!(!ui.frame.borrow().hits.iter().any(|(rect, _)| contains(
@@ -515,9 +525,9 @@ mod tests {
 
     #[test]
     fn sweeping_the_pointer_over_every_cell_of_a_busy_conversation_never_panics() {
-        // Nathan, 2026-10-07: hovering messages seemed to crash stui.
+        // Nathan, 2026-10-07: hovering messages seemed to crash the terminal UI.
         for (width, height) in [(60, 20), (100, 30), (160, 48)] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             ui.live = true;
             ui.open_in_glass(
                 Pane::Agent(Some("agent/example/atlas/builder".to_owned())),

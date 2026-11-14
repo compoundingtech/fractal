@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retire the unused driver SDK telemetry pipeline while retaining native capture and diagnostic records",
+  "replay": {
+    "status": "none",
+    "detail": "Native diagnostic records, stage ordering, recovery, persistence and observation capture are retained."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored record, claim, protocol or client schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No admission, permission, recovery or current logging rule changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Removes the unused workspace Rust driver telemetry module and SDK counter controls. Whole tracked caller and flag-writer inventories show no driver Telemetry initializer call; the deleted SDK counters and child-span branch remained disabled in current workspace paths. Native hook capture, normalized vocabulary, diagnostic transition logging and the daemon telemetry implementation remain. Unknown external Rust source consumers are not claimed absent."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon or provider restart required by this source cleanup."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or stored-state cleanup required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the Rust exports without rewriting stored data."
+  }
+}

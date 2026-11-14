@@ -216,23 +216,48 @@ fn observe(unit: &str) -> Result<ScopeRetirementProof> {
     );
     let mut proof = properties(unit, std::str::from_utf8(&output.stdout)?)?;
     if proof.load_state == "loaded" {
-        let path = group_path(unit, &proof.control_group)?;
-        let before = std::fs::metadata(&path)?;
-        ensure!(before.is_dir(), "work scope cgroup is not a directory");
-        let events = std::fs::read_to_string(path.join("cgroup.events"))?;
-        is_populated(&events)?;
-        let after = std::fs::metadata(&path)?;
-        ensure!(
-            (before.dev(), before.ino()) == (after.dev(), after.ino()),
-            "work scope cgroup changed during capture"
-        );
-        proof.cgroup = Some(CgroupEnding {
-            device: before.dev(),
-            inode: before.ino(),
-            events,
-        });
+        proof.cgroup = capture_cgroup(&group_path(unit, &proof.control_group)?)?;
     }
     Ok(proof)
+}
+
+/// The cgroup of a scope the manager just reported loaded. The manager removes an emptied scope's
+/// cgroup on its own schedule, so it can vanish between that answer and these reads (ENOENT, or
+/// ENODEV for a file opened just before): then this capture holds no cgroup evidence, so it proves
+/// no ending, and the manager's next answer reports the unit gone.
+fn capture_cgroup(path: &Path) -> Result<Option<CgroupEnding>> {
+    fn vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENODEV) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    let Some(before) = vanished(std::fs::metadata(path))? else {
+        return Ok(None);
+    };
+    ensure!(before.is_dir(), "work scope cgroup is not a directory");
+    let Some(events) = vanished(std::fs::read_to_string(path.join("cgroup.events")))? else {
+        return Ok(None);
+    };
+    is_populated(&events)?;
+    let Some(after) = vanished(std::fs::metadata(path))? else {
+        return Ok(None);
+    };
+    ensure!(
+        (before.dev(), before.ino()) == (after.dev(), after.ino()),
+        "work scope cgroup changed during capture"
+    );
+    Ok(Some(CgroupEnding {
+        device: before.dev(),
+        inode: before.ino(),
+        events,
+    }))
 }
 
 /// Read-only ending evidence for an already operation-bound work or server scope.
@@ -247,16 +272,35 @@ pub(crate) fn observe_closed_scope(unit: &str) -> Result<Option<ScopeRetirementP
 /// Independent physical worker only. The same original request is checked
 /// before each scope signal, never while holding a Store writer. Scope stop
 /// grace/escalation use the existing shutdown budget, not a start timeout.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        caller = "end_scope_with_proof",
+        recorded_scope = unit,
+        runtime_id = "unavailable",
+        operation_id = "unavailable",
+        expected_incarnation = "unavailable",
+        observed_incarnation = "unavailable",
+        registry_status = "unavailable",
+        registry_pid = "unavailable",
+        registry_created_at = "unavailable",
+        registry_exit_code = "unavailable",
+        tagged_scope = "unavailable",
+        spawn_lock = "not_applicable"
+    )
+)]
 pub fn end_scope_with_proof(
     unit: &str,
     guard: &dyn Fn() -> Result<()>,
 ) -> Result<Option<ScopeRetirementProof>> {
     if mode() != Isolation::Scope || !is_work_scope(unit) {
+        tracing::debug!(caller = "end_scope_with_proof", recorded_scope = unit, guard_decision = "skip", reason = "scope_mode_or_work_scope_guard", "scope retirement skipped");
         return Ok(None);
     }
     let before = observe(unit)?;
     if before.validate(unit).is_ok() {
-        guard()?;
+        tracing::debug!(guard_decision = "skip", reason = "scope_already_retired", "scope retirement needs no signal");
+        retirement_guard(unit, guard, "already_retired")?;
         return Ok(Some(before));
     }
     let cgroup = before
@@ -269,11 +313,36 @@ pub fn end_scope_with_proof(
     );
     let path = group_path(unit, &before.control_group)?;
     let mut events = PopulationEvents::open(&path)?;
-    guard()?;
-    kill_unit(unit, libc::SIGTERM)?;
+    retirement_guard(unit, guard, "before_sigterm")?;
+    tracing::info!(
+        caller = "end_scope_with_proof",
+        reason = "retire_populated_scope",
+        recorded_scope = unit,
+        scope_load_state = %before.load_state,
+        scope_active_state = %before.active_state,
+        control_group = %before.control_group,
+        cgroup_device = cgroup.device,
+        cgroup_inode = cgroup.inode,
+        cgroup_events = %cgroup.events,
+        guard_decision = "allow",
+        signal = libc::SIGTERM,
+        "retiring verified work scope"
+    );
+    kill_unit(unit, libc::SIGTERM, ScopeSignalCaller::Retirement)?;
     if !events.wait_empty(SCOPE_GRACE)? {
-        guard()?;
-        kill_unit(unit, libc::SIGKILL)?;
+        retirement_guard(unit, guard, "before_sigkill")?;
+        tracing::info!(
+            caller = "end_scope_with_proof",
+            reason = "retirement_grace_expired",
+            recorded_scope = unit,
+            control_group = %before.control_group,
+            cgroup_device = cgroup.device,
+            cgroup_inode = cgroup.inode,
+            guard_decision = "allow",
+            signal = libc::SIGKILL,
+            "escalating work scope retirement"
+        );
+        kill_unit(unit, libc::SIGKILL, ScopeSignalCaller::Retirement)?;
         ensure!(
             events.wait_empty(SCOPE_KILL_WAIT)?,
             "work scope survived retirement"
@@ -288,8 +357,22 @@ pub fn end_scope_with_proof(
             "work scope identity changed during retirement"
         );
     }
-    guard()?;
+    retirement_guard(unit, guard, "after_retirement")?;
     Ok(Some(after))
+}
+
+fn retirement_guard(unit: &str, guard: &dyn Fn() -> Result<()>, phase: &str) -> Result<()> {
+    guard().inspect_err(|error| {
+        tracing::debug!(
+            caller = "end_scope_with_proof",
+            recorded_scope = unit,
+            phase,
+            guard_decision = "skip",
+            reason = "retirement_guard_rejected",
+            %error,
+            "scope retirement guard rejected"
+        );
+    })
 }
 
 #[cfg(test)]
@@ -337,6 +420,35 @@ mod tests {
             empty.cgroup.as_mut().unwrap().events = events.into();
             assert!(empty.validate(UNIT).is_err(), "{events}");
         }
+    }
+
+    #[test]
+    fn a_cgroup_removed_after_the_manager_answered_proves_no_ending() {
+        let root = tempfile::tempdir().unwrap();
+        let scope = root.path().join(UNIT);
+        // The manager reported the scope loaded and then removed its emptied cgroup.
+        assert!(capture_cgroup(&scope).unwrap().is_none());
+        let mut loaded = properties(
+            UNIT,
+            &format!("LoadState=loaded\nActiveState=inactive\nControlGroup=/user.slice/{UNIT}\n"),
+        )
+        .unwrap();
+        loaded.cgroup = capture_cgroup(&scope).unwrap();
+        assert!(
+            loaded.validate_ending(UNIT, true).is_err(),
+            "no ending without its cgroup"
+        );
+        std::fs::create_dir(&scope).unwrap();
+        // A directory without its events file is also mid-removal.
+        assert!(capture_cgroup(&scope).unwrap().is_none());
+        std::fs::write(scope.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        loaded.cgroup = capture_cgroup(&scope).unwrap();
+        loaded.validate_ending(UNIT, true).unwrap();
+        std::fs::write(scope.join("cgroup.events"), "populated maybe\n").unwrap();
+        assert!(
+            capture_cgroup(&scope).is_err(),
+            "a present cgroup is still read strictly"
+        );
     }
 }
 

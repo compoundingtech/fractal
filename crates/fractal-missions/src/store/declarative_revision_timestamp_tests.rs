@@ -109,6 +109,41 @@ fn declarative_draining_revision_uses_accepted_time_on_origin_replica_and_replay
 }
 
 #[test]
+fn approved_fresh_run_cutover_preserves_dates_on_replica_and_replay() {
+    let (source, run, intent, preview, _) = fixture(true);
+    source.apply_as(
+        &intent, &preview.subject_tokens, "timestamp-reviewed-revision", Some("person/operator"),
+    ).unwrap();
+    let proposal = source.revision_proposal_for_run(&run.id).unwrap().unwrap();
+    let approved = source.approve_revision_proposal(
+        &proposal.id, "person/operator", proposal.preview_hash.as_deref().unwrap(),
+        "timestamp-reviewed-approval",
+    ).unwrap();
+    assert_eq!(approved.status, "draining");
+    assert_eq!(approved.mission_run.subject, run.subject);
+    let applied = source.apply_drained_revision(&run.id).unwrap().unwrap();
+    assert_ne!(applied.mission_run.subject, run.subject);
+    assert_eq!(applied.mission_run.revision, proposal.candidate_revision);
+    assert_eq!(applied.mission_run.supersedes.as_deref(), Some(run.subject.as_str()));
+    let original = source.mission_run(&run.id).unwrap().unwrap();
+    assert_eq!(original.generation, run.generation);
+    assert_eq!(original.revision, run.revision);
+    let rows = typed_rows(&source);
+    let digests = checked_digests(&source);
+    let replica = Store::open_memory("peer").unwrap();
+    replica.import_replication("node", &source.export_replication(0).unwrap()).unwrap();
+    assert_eq!(typed_rows(&replica), rows);
+    assert_eq!(checked_digests(&replica), digests);
+    source.replay_replication_graph().unwrap();
+    assert_eq!(typed_rows(&source), rows);
+    assert_eq!(checked_digests(&source), digests);
+    assert_eq!(
+        source.revision_proposal(&proposal.id).unwrap().unwrap().successor_generation,
+        Some(applied.mission_run.generation),
+    );
+}
+
+#[test]
 fn declarative_pending_approval_and_repeated_operation_do_not_retime_the_run() {
     for reviewed in [false, true] {
         let (store, run, intent, preview, source) = fixture(reviewed);

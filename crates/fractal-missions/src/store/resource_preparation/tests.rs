@@ -287,6 +287,7 @@ fn observation_preparation_history_decodes_are_independent_of_history_length() {
                 resource,
                 facts: &facts,
                 subscriptions: &[],
+                mirrored: None,
             })
         });
         let inputs = prepared.value.expect("file-backed preparation is available").unwrap();
@@ -326,7 +327,7 @@ fn canonical_observer_fallback_history_reads_are_bounded() {
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
         // This is the exact None-preparation branch in record_resource_observation_attempt.
         let prepared = inputs(&transaction, "observer/fixture", &revision, None,
-            "resource/fixture", &facts, &[]).unwrap();
+            "resource/fixture", &facts, &[], None).unwrap();
         assert!(prepared.active_subscriptions.is_empty());
         let decoded = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
         measurements.push((history, decoded));

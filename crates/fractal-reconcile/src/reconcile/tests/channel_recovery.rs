@@ -85,19 +85,23 @@ fn attachment(store: &Store, incarnation: &str, attached: bool) -> u128 {
         .accepted_at_unix_ms
 }
 
+/// Whether recovery acted: it parked the seat, or it recorded a restart request, which it leaves
+/// to the ordinary restart path in the same evaluation. These tests call that path themselves.
 fn recover(
     reconciler: &Reconciler<FakeRuntime>,
     desired: &DesiredSubject,
     incarnation: &str,
     at: u128,
 ) -> Result<bool> {
-    reconciler.reconcile_claude_channel_recovery(
+    let requested = attempts(&reconciler.store).len();
+    let parked = reconciler.reconcile_claude_channel_recovery(
         desired,
         desired.member.as_ref().unwrap(),
         Some(&claude_seat_pty("orchid", "running", incarnation)),
         None,
         at,
-    )
+    )?;
+    Ok(parked || attempts(&reconciler.store).len() > requested)
 }
 
 fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
@@ -109,6 +113,153 @@ fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
             claim.body["fields"]["operation"] == super::super::channel_recovery::POLICY_OPERATION
         })
         .collect()
+}
+
+const POLICY_BANNER: &str = "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)\nInbound messages will be silently dropped\nHave an administrator set channelsEnabled: true in managed settings to enable";
+
+fn policy_launch(store: &Store, incarnation: &str) {
+    let token = store.selected_desired_token(SEAT).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.succeeded".into(), actor: None,
+        fields: BTreeMap::from([
+            ("action".into(), json!("start")),
+            ("desired_token".into(), json!(token)),
+            ("incarnation_id".into(), json!(incarnation)),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+#[test]
+fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_restart() {
+    let (store, runtime, reconciler, mut desired) = setup();
+    desired.member.as_mut().unwrap().restart = RestartType::Always;
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = format!("Claude Code v2.1.306\n{POLICY_BANNER}\n❯ ");
+    let error = recover(&reconciler, &desired, "orchid-one", since).unwrap_err();
+    assert!(error.to_string().contains("channelsEnabled: true"), "{error}");
+    reconciler.record_member_reconcile_result(SEAT, Err(error)).unwrap();
+    assert!(store.member_reconcile_fault(SEAT, None).unwrap().unwrap().contains("channelsEnabled"));
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    assert!(attempts(&store).is_empty());
+    let fault = store.latest_observation(SEAT, "runtime.action.failed").unwrap().unwrap();
+    assert_eq!(fault.body["fields"]["action"], "claude-channel-policy-blocked");
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    // No screen or running process is needed to retain the permanent failure.
+    runtime.screen.lock().unwrap().clear();
+    assert!(restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_000,
+    ).unwrap_err().to_string().contains("channelsEnabled"));
+    assert!(attempts(&store).is_empty());
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.requested".into(),
+        actor: Some(SEAT.into()),
+        fields: BTreeMap::from([("action".into(), json!("restart"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert!(!restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_001,
+    ).unwrap());
+}
+
+#[test]
+fn channel_policy_banner_does_not_stop_an_attached_or_stale_incarnation() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    assert!(!recover(&reconciler, &desired, "predecessor", since).unwrap());
+    attachment(&store, "orchid-one", true);
+    assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
+#[test]
+fn quoted_channel_policy_banner_is_not_a_provider_refusal() {
+    for screen in [
+        format!("❯ Please explain this error:\n> {}", POLICY_BANNER.replace('\n', "\n> ")),
+        format!("❯ Please explain this error:\n```\n{POLICY_BANNER}\n```"),
+        format!("❯ {POLICY_BANNER}"),
+        format!("❯ Please explain this error:\n{POLICY_BANNER}"),
+        format!("● This is the error you quoted:\n{POLICY_BANNER}"),
+        format!("```\n{POLICY_BANNER}\n```"),
+    ] {
+        let (store, runtime, reconciler, desired) = setup();
+        let since = attachment(&store, "orchid-one", false);
+        policy_launch(&store, "orchid-one");
+        *runtime.screen.lock().unwrap() = screen;
+        assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    }
+}
+
+// The quotation in #3999 is one line and includes a period after "dropped".
+const REPORTED_POLICY_BANNER: &str = /* sqlite-large-value: allow-for-now lv-h72967be8c2d9 owner=fractal_reconcile::reconcile::tests::channel_recovery TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-drivers/tests/fixtures/blocking-screens/claude-channel-policy-reported.txt");
+
+#[test]
+fn verbatim_and_wrapped_policy_banners_stop_only_in_provider_startup_chrome() {
+    for source in [POLICY_BANNER, REPORTED_POLICY_BANNER] {
+        for width in [usize::MAX, 80, 60, 40, 20] {
+            // Both fixture sources are ASCII. A PTY soft-wrap may split a word at
+            // the right edge, whereas Claude can also wrap at a space.
+            let wrapped = source.lines()
+                .flat_map(|line| line.as_bytes().chunks(width))
+                .map(|line| std::str::from_utf8(line).unwrap())
+                .collect::<Vec<_>>().join("\n");
+            for (screen, refusal) in [
+                (format!("Claude Code v2.1.306\n{wrapped}\n❯ "), true),
+                (format!("❯ Explain this error:\n{wrapped}"), false),
+                (format!("● You quoted:\n{wrapped}"), false),
+                (format!("> {}", wrapped.replace('\n', "\n> ")), false),
+                (format!("```\n{wrapped}\n```"), false),
+            ] {
+                let (store, runtime, reconciler, desired) = setup();
+                let since = attachment(&store, "orchid-one", false);
+                policy_launch(&store, "orchid-one");
+                *runtime.screen.lock().unwrap() = screen;
+                assert_eq!(
+                    recover(&reconciler, &desired, "orchid-one", since).is_err(),
+                    refusal, "width={width}, source={source:?}",
+                );
+                assert_eq!(runtime.stops.lock().unwrap().len(), usize::from(refusal));
+                assert!(attempts(&store).is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn predecessor_policy_banner_does_not_fence_the_replacement_declaration() {
+    let (store, runtime, reconciler, desired) = setup();
+    reconciler.reconcile_once().unwrap();
+    let initial_starts = runtime.starts.lock().unwrap().len();
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    apply_source(
+        &store,
+        "version 2\nagent \"orchid\" { workspace \"/var/tmp\"; restart \"always\"; harness \"claude\" {} }",
+        "policy-replacement",
+    );
+    let replacement = store.desired_subjects().unwrap().remove(0);
+    assert_ne!(desired.member.as_ref().unwrap().workspace, replacement.member.as_ref().unwrap().workspace);
+    assert!(!recover(&reconciler, &replacement, "orchid-one", since).unwrap());
+    assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    // The normal launch-change path remains authoritative; no policy stop or fence is minted.
+    assert!(reconciler.declared_launch_changes(
+        &replacement, &claude_seat_pty("orchid", "running", "orchid-one"),
+    ).unwrap().is_some());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "exited", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(runtime.starts.lock().unwrap().len(), initial_starts + 1);
 }
 
 #[test]
@@ -154,6 +305,84 @@ fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation(
         Arc::new(Notify::new()),
     );
     assert!(!recover(&restarted, &desired, "orchid-one", since + 30_000).unwrap());
+}
+
+/// A restart that recovery requests is carried out in the pass that requests it, as a changed
+/// declaration is. Left to the next pass, it waited for the rest of the pass that wrote it, which
+/// took minutes on a loaded daemon.
+#[test]
+fn a_recovery_restart_is_carried_out_in_the_pass_that_requests_it() {
+    let (store, runtime, reconciler, _) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    smallclaims::store::set_thread_clock(Some(since + 10_000));
+    let pass = reconciler.reconcile_once();
+    smallclaims::store::set_thread_clock(None);
+    pass.unwrap();
+    assert_eq!(attempts(&store).len(), 1);
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+}
+
+/// A park still ends its evaluation. The ordinary restart path does not run after it, so the last
+/// attempt is not completed as if its replacement had been observed, and nothing is stopped
+/// until the parked seat's next evaluation.
+#[test]
+fn a_recovery_park_still_ends_its_evaluation() {
+    let (store, runtime, reconciler, desired) = setup();
+    for (index, backoff) in [10_000, 20_000, 40_000].into_iter().enumerate() {
+        let incarnation = format!("orchid-{index}");
+        let since = attachment(&store, &incarnation, false);
+        assert!(recover(&reconciler, &desired, &incarnation, since + backoff).unwrap());
+    }
+    let last = attempts(&store).pop().unwrap();
+    attachment(&store, "orchid-parked", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-parked")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().len(), 1);
+    let completion = format!("agent-restart-completed:{}", last.id);
+    assert!(store.operation_claim(&completion).unwrap().is_none());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+}
+
+/// After a deploy each driver has to reach the new daemon again before its channel reads as
+/// attached, and a loaded daemon can take minutes to answer. A seat that was attached before
+/// this daemon started is charged no attempt inside the startup grace; after it, an unattached
+/// seat recovers as before.
+#[test]
+fn a_seat_attached_before_the_daemon_started_waits_out_the_startup_grace() {
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-one", true);
+    reconciler.started_at_unix_ms = attached_at + 1;
+    let since = attachment(&store, "orchid-one", false);
+    let grace_ends = attached_at + 1 + 10 * 60 * 1_000;
+    let (result, deadline) = smallclaims::touched::record_due(|| {
+        recover(&reconciler, &desired, "orchid-one", since + 10_000)
+    });
+    assert!(!result.unwrap());
+    assert_eq!(deadline, Some(grace_ends));
+    assert!(!recover(&reconciler, &desired, "orchid-one", grace_ends - 1).unwrap());
+    assert!(attempts(&store).is_empty());
+    assert!(recover(&reconciler, &desired, "orchid-one", grace_ends).unwrap());
+    assert_eq!(attempts(&store).len(), 1);
+}
+
+#[test]
+fn the_startup_grace_is_only_for_a_channel_attached_under_an_earlier_daemon() {
+    // Attached only after this daemon started: the usual ten seconds.
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-one", true);
+    reconciler.started_at_unix_ms = attached_at - 1;
+    let since = attachment(&store, "orchid-one", false);
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+
+    // A predecessor's attachment proves nothing about this incarnation's channel.
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-zero", true);
+    let since = attachment(&store, "orchid-one", false);
+    reconciler.started_at_unix_ms = attached_at + 1;
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
 }
 
 #[test]
@@ -337,7 +566,7 @@ fn a_brief_automatic_recovery_does_not_reset_the_durable_attempt_budget() {
     let since = attachment(&store, "orchid-one", false);
     recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap();
     let request = attempts(&store).pop().unwrap();
-    attachment(&store, "orchid-two", true);
+    let attached_at = attachment(&store, "orchid-two", true);
     store
         .append_claim(&ClaimInput {
             subject: SEAT.into(),
@@ -350,14 +579,17 @@ fn a_brief_automatic_recovery_does_not_reset_the_durable_attempt_budget() {
         })
         .unwrap();
     let since = attachment(&store, "orchid-two", false);
-    let fresh = Reconciler::new(
+    let mut fresh = Reconciler::new(
         store.clone(),
         runtime,
         "node".into(),
         Arc::new(Notify::new()),
     );
-    assert!(!recover(&fresh, &desired, "orchid-two", since + 10_000).unwrap());
-    assert!(recover(&fresh, &desired, "orchid-two", since + 20_000).unwrap());
+    // The daemon restarted after the replacement attached, so it first waits out its startup
+    // grace; the attempt it then charges is still the second.
+    fresh.started_at_unix_ms = attached_at + 1;
+    assert!(!recover(&fresh, &desired, "orchid-two", since + 20_000).unwrap());
+    assert!(recover(&fresh, &desired, "orchid-two", attached_at + 1 + 10 * 60 * 1_000).unwrap());
     assert!(
         attempts(&store).last().unwrap().body["fields"]["reason"]
             .as_str()
@@ -601,6 +833,98 @@ fn rolling_expiry_and_explicit_reset_reopen_zero_through_three_attempts() {
     }
 }
 
+fn explicit_restart(store: &Store, incarnation: &str) {
+    store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some("person/eval".into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!("restart")),
+                ("operation".into(), json!(crate::handoff::RESTART_NOW_OPERATION)),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            evidence: vec![store.selected_desired_token(SEAT).unwrap().unwrap()],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+}
+
+/// #5523: an operator's restart of a blocked seat opens a new budget, and the incarnation it is
+/// replacing, still running until that restart stops it, is not the new budget's first failure.
+#[test]
+fn an_explicit_restart_in_flight_owns_the_incarnation_it_replaces() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    explicit_restart(&store, "orchid-one");
+    assert!(!recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    assert!(attempts(&store).is_empty());
+    assert!(
+        reconciler
+            .reconcile_requested_restart(
+                &desired,
+                desired.member.as_ref().unwrap(),
+                Some(&claude_seat_pty("orchid", "running", "orchid-one")),
+                None
+            )
+            .unwrap()
+    );
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    // The replacement's own failure is the budget's first.
+    let since = attachment(&store, "orchid-two", false);
+    assert!(recover(&reconciler, &desired, "orchid-two", since + 10_000).unwrap());
+    let claims = attempts(&store);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claim_incarnation(&claims[0]), Some("orchid-two"));
+    assert!(claims[0].body["fields"]["reason"].as_str().unwrap().contains("attempt 1 of 3"));
+}
+
+/// An explicit restart that completed without replacing the incarnation owns it no longer.
+#[test]
+fn a_failed_explicit_restart_leaves_its_incarnation_to_recovery() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    explicit_restart(&store, "orchid-one");
+    let failure = reconciler
+        .reconcile_requested_restart(
+            &desired,
+            desired.member.as_ref().unwrap(),
+            Some(&claude_seat_pty("orchid", "running", "orchid-one")),
+            Some(&anyhow::anyhow!("rendering failed")),
+        );
+    assert!(failure.is_err());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    assert_eq!(claim_incarnation(&attempts(&store)[0]), Some("orchid-one"));
+}
+
+/// Nor does one a newer restart-when-idle superseded: the restart path carries out only the newest
+/// request, and a blocked seat may never reach the idle boundary that one waits for.
+#[test]
+fn a_superseded_explicit_restart_leaves_its_incarnation_to_recovery() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    explicit_restart(&store, "orchid-one");
+    store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some(SEAT.into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!(crate::restart::WHEN_IDLE)),
+                ("incarnation_id".into(), json!("orchid-one")),
+            ]),
+            evidence: vec![store.selected_desired_token(SEAT).unwrap().unwrap()],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    assert_eq!(claim_incarnation(&attempts(&store)[0]), Some("orchid-one"));
+    assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
 #[test]
 fn adopting_the_window_never_spends_historical_requests_or_uses_their_park_fault() {
     for same_incarnation in [false, true] {
@@ -763,4 +1087,135 @@ fn ownership_launch_choice_comes_only_from_the_install_and_defaults_off() {
             );
         }
     }
+}
+
+/// A blocked or stalled diagnostic whose reason ends with `cause`, as the driver publishes them (#4789).
+fn unattached_with(store: &Store, incarnation: &str, status: &str, cause: serde_json::Value) -> u128 {
+    attachment(store, incarnation, false);
+    store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(SEAT.into()),
+            fields: BTreeMap::from([
+                ("code".into(), json!("claude-channel-unattached")),
+                ("status".into(), json!(status)),
+                ("reason".into(), json!(format!("claude-channel-unattached: test cause={cause}"))),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    // Recovery's backoff counts from the harness view's `since`, which the fold may set from an
+    // earlier observation of the same state.
+    store.current_harness(SEAT).unwrap().unwrap().since_unix_ms
+}
+
+fn uncharged(store: &Store) -> Vec<crate::model::ClaimRecord> {
+    store
+        .claims_for(SEAT, Some("runtime.action.requested"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| claim.body["fields"]["operation"] == super::super::channel_recovery::UNCHARGED_OPERATION)
+        .collect()
+}
+
+fn recover_any(reconciler: &Reconciler<FakeRuntime>, desired: &DesiredSubject, incarnation: &str, at: u128) -> usize {
+    reconciler.reconcile_claude_channel_recovery(
+        desired, desired.member.as_ref().unwrap(), Some(&claude_seat_pty("orchid", "running", incarnation)), None, at,
+    ).unwrap();
+    uncharged(&reconciler.store).len()
+}
+
+fn cause(kind: &str, route: &str, at: u64) -> serde_json::Value {
+    json!({"kind": kind, "route": route, "plugin_check_error": null, "project_st_server": false,
+        "plugin_check_ms": 12_300, "driver_started_at_ms": at, "launched_at_ms": at + 33_000, "session_started_at_ms": null})
+}
+
+/// A Claude that never started is no channel failure: it is restarted on a long backoff that
+/// doubles, never charged, and after three in a row for one cause the seat's fault names it.
+#[test]
+fn a_claude_that_never_starts_restarts_on_a_long_backoff_without_charging_and_its_cause_surfaces() {
+    let (store, _runtime, reconciler, desired) = setup();
+    let fault = || store.operational_failure(&super::super::channel_recovery::channel_cause_attention(SEAT)).unwrap()
+        .map(|failure| (failure.status, failure.reason));
+    let mut expected = 0;
+    for (incarnation, backoff_min) in [("one", 5), ("two", 10), ("three", 20)] {
+        // Each restart's start times differ; its cause signature does not.
+        let since = unattached_with(&store, incarnation, "stalled", cause("claude-not-started", "approved-plugin", expected as u64 * 1_000));
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + 60_000), expected, "{incarnation}: no short backoff");
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + backoff_min * 60_000 - 1), expected);
+        expected += 1;
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + backoff_min * 60_000), expected, "{incarnation} after {backoff_min} min");
+        assert!(attempts(&store).is_empty(), "never charged to the budget");
+        if incarnation != "three" {
+            assert!(fault().is_none(), "{incarnation}");
+        }
+    }
+    let request = uncharged(&store).pop().unwrap();
+    let reason = request.body["fields"]["reason"].as_str().unwrap();
+    assert!(reason.contains("not charged to the channel recovery budget: Claude did not start; restart 3 in a row"), "{reason}");
+    let (status, reason) = fault().expect("the cause surfaces after three in a row");
+    assert_eq!(status, "pending");
+    assert!(reason.contains("restarted 3 times in a row for the same cause") && reason.contains(r#""kind":"claude-not-started""#), "{reason}");
+    // The fourth waits the cap, 30 minutes.
+    let since = unattached_with(&store, "four", "stalled", cause("claude-not-started", "approved-plugin", 9));
+    assert_eq!(recover_any(&reconciler, &desired, "four", since + 30 * 60_000 - 1), 3);
+    assert_eq!(recover_any(&reconciler, &desired, "four", since + 30 * 60_000), 4);
+    // The channel attaches: the fault clears.
+    attachment(&store, "five", true);
+    recover_any(&reconciler, &desired, "five", since + 31 * 60_000);
+    assert_eq!(fault().map(|(status, _)| status).as_deref(), Some("resolved"));
+}
+
+/// A channel that fails again for the cause the last charged attempt named is not charged again;
+/// another cause is.
+#[test]
+fn a_repeat_of_the_last_charged_cause_is_not_charged_but_another_cause_is() {
+    let (store, _runtime, reconciler, desired) = setup();
+    let since = unattached_with(&store, "one", "blocked", cause("channel-not-initialized", "approved-plugin", 1));
+    assert!(recover(&reconciler, &desired, "one", since + 10_000).unwrap());
+    assert_eq!(attempts(&store).len(), 1);
+    assert!(attempts(&store)[0].body["fields"]["reason"].as_str().unwrap().contains(r#"cause={"kind":"channel-not-initialized""#));
+    let since = unattached_with(&store, "two", "blocked", cause("channel-not-initialized", "approved-plugin", 2));
+    assert_eq!(recover_any(&reconciler, &desired, "two", since + 20_000), 0, "no short backoff for a repeat");
+    assert_eq!(recover_any(&reconciler, &desired, "two", since + 5 * 60_000), 1);
+    assert_eq!(attempts(&store).len(), 1, "a repeat is not charged");
+    let since = unattached_with(&store, "three", "blocked", cause("channel-not-initialized", "inline-development", 3));
+    assert!(recover(&reconciler, &desired, "three", since + 20_000).unwrap());
+    assert_eq!(attempts(&store).len(), 2, "another cause is charged");
+}
+
+/// A charged attempt between uncharged restarts ends their run: the count, its backoff and the
+/// fault start again.
+#[test]
+fn a_charged_attempt_ends_a_run_of_uncharged_restarts() {
+    let (store, _runtime, reconciler, desired) = setup();
+    for incarnation in ["one", "two"] {
+        let since = unattached_with(&store, incarnation, "stalled", cause("claude-not-started", "approved-plugin", 1));
+        let before = uncharged(&store).len();
+        let backoff = if before == 0 { 5 } else { 10 };
+        assert_eq!(recover_any(&reconciler, &desired, incarnation, since + backoff * 60_000), before + 1);
+    }
+    let since = unattached_with(&store, "three", "blocked", cause("channel-not-initialized", "inline-development", 1));
+    assert!(recover(&reconciler, &desired, "three", since + 10_000).unwrap());
+    // Stalled again: the first of a new run, 5 min, no fault.
+    let since = unattached_with(&store, "four", "stalled", cause("claude-not-started", "approved-plugin", 1));
+    assert_eq!(recover_any(&reconciler, &desired, "four", since + 5 * 60_000), 3);
+    assert!(uncharged(&store).pop().unwrap().body["fields"]["reason"].as_str().unwrap().contains("restart 1 in a row"));
+    assert!(store.operational_failure(&super::super::channel_recovery::channel_cause_attention(SEAT)).unwrap().is_none());
+}
+
+#[test]
+fn a_cause_marker_inside_the_cause_is_part_of_its_json() {
+    let (store, _runtime, reconciler, desired) = setup();
+    let tricky = json!({"kind": "channel-not-initialized", "route": "inline-development", "plugin_check_error": "x cause={y}",
+        "project_st_server": false, "plugin_check_ms": 1, "driver_started_at_ms": 1, "launched_at_ms": 1, "session_started_at_ms": 1});
+    let since = unattached_with(&store, "one", "blocked", tricky.clone());
+    assert!(recover(&reconciler, &desired, "one", since + 10_000).unwrap());
+    let since = unattached_with(&store, "two", "blocked", tricky);
+    assert_eq!(recover_any(&reconciler, &desired, "two", since + 20_000), 0, "the same cause, read whole, is a repeat");
+    assert_eq!(attempts(&store).len(), 1);
 }

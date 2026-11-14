@@ -1,6 +1,6 @@
 # Push registration
 
-A paired phone stores its APNs device token on st so a later sender can reach it. This slice
+A paired phone stores its APNs device token on Fractal so a later sender can reach it. This slice
 only stores and removes the token. Nothing sends a push yet: there is no APNs sender, no alert
 trigger and no APNs key on any member.
 
@@ -33,7 +33,7 @@ A registration body has exactly four fields:
 
 - `token`: the APNs device token as hex, 2–512 characters in whole bytes.
 - `environment`: `development` (APNs sandbox) or `production`. The app reports which
-  environment its build's entitlement gave it; st does not guess.
+  environment its build's entitlement gave it; Fractal does not guess.
 - `bundle_id`: 1–255 ASCII letters, digits, `.` or `-`. A sender uses it as the APNs topic.
 - `app_version`: 1–64 printable ASCII characters.
 

@@ -1,19 +1,20 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
+import { clientReadAuthorization, credentialExpiredMessage } from '../data/source.ts'
 
 /**
- * One read of an st document by name (the newest version) or by its immutable `name@hash`
+ * One read of a Fractal document by name (the newest version) or by its immutable `name@hash`
  * reference: its text, or why it cannot be shown.
  */
 export type DocumentRead =
   | { readonly _tag: 'Text'; readonly reference: string; readonly text: string }
   | { readonly _tag: 'Binary'; readonly reference: string; readonly size: number }
-  | { readonly _tag: 'Unavailable'; readonly reason: 'not-found' | 'ungranted' | 'failed'; readonly detail: string }
+  | { readonly _tag: 'Unavailable'; readonly reason: 'not-found' | 'unauthorized' | 'ungranted' | 'failed'; readonly detail: string }
 
 export interface DocumentPort {
   readonly read: (name: string) => Promise<DocumentRead>
 }
 
-/** A document name or reference as st writes one: `doc/` and a path, optionally `@` its hash. */
+/** A document name or reference as Fractal writes one: `doc/` and a path, optionally `@` its hash. */
 export const DOCUMENT_REF = /^doc\/[A-Za-z0-9._~\-/]+(?:@[0-9a-f]{6,64})?$/
 
 /** `doc/name` and the short version from a `doc/name@hash` reference. */
@@ -24,7 +25,7 @@ export const documentVersion = (reference: string): { readonly name: string; rea
 
 const utf8 = new TextDecoder('utf-8', { fatal: true })
 
-/** Reads through `GET /v1/client/documents/content`, the route stui and the phone read. */
+/** Reads through `GET /v1/client/documents/content`, the route the Fractal terminal UI and the phone read. */
 export const gatewayDocuments = (client: FractalClient): DocumentPort => ({
   read: async (name) => {
     try {
@@ -39,8 +40,9 @@ export const gatewayDocuments = (client: FractalClient): DocumentPort => ({
       if (error instanceof ClientError && error.response.code === 'not-found') {
         return { _tag: 'Unavailable', reason: 'not-found', detail: `There is no document ${name}.` }
       }
-      if (error instanceof ClientError && (error.response.code === 'forbidden' || error.status === 403)) {
-        return { _tag: 'Unavailable', reason: 'ungranted', detail: 'Reading documents has not been granted to this device.' }
+      const reason = clientReadAuthorization(error)
+      if (reason !== undefined || (error instanceof ClientError && error.response.code === 'forbidden')) {
+        return { _tag: 'Unavailable', reason: reason ?? 'ungranted', detail: reason === 'unauthorized' ? credentialExpiredMessage : 'Reading documents has not been granted to this device.' }
       }
       return { _tag: 'Unavailable', reason: 'failed', detail: `The document could not be read: ${plainError(error)}.` }
     }

@@ -116,8 +116,13 @@ pub(crate) fn own_unsigned_envelopes(
     } else {
         "FROM replica_envelopes AS envelopes WHERE envelopes.writer=?1 AND envelopes.rowid>?2 AND envelopes.rowid<=?4"
     };
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9a397347cb41 owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h900c9ea8feaa owner=smallclaims::store::prepared_seal TODO=trace-statement-and-value-representation */ &format!(
         "SELECT envelopes.sequence, envelopes.envelope_hash {from}
+           AND NOT EXISTS (
+             SELECT 1 FROM replica_restore_quarantine AS quarantine
+             WHERE quarantine.writer=envelopes.writer AND quarantine.sequence=envelopes.sequence
+               AND quarantine.envelope_hash=envelopes.envelope_hash
+           )
            AND NOT EXISTS (
              SELECT 1 FROM replica_envelope_signatures AS signatures
              WHERE signatures.writer=envelopes.writer
@@ -378,11 +383,13 @@ fn sealed_batch_current(connection: &Connection, sealed: &SealedBatch) -> Result
     Ok(true)
 }
 
-/// What sealing read to sign envelopes: the member key's public half and the fleet id.
+/// What sealing read to sign envelopes: the member key's public half, the fleet id and the
+/// shard the envelopes belong to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EnvelopeSigner {
     member_key: String,
     fleet_id: Option<String>,
+    shard: Option<String>,
 }
 
 /// The next chunk of this node's batches, sealed and signed without the writer.
@@ -417,10 +424,11 @@ impl Store {
         else {
             return Ok(None);
         };
-        let fleet_id = fleet_meta(connection, "fleet_id")?;
+        let fleet_id = self.signing_fleet_id(connection)?;
         let signer = EnvelopeSigner {
             member_key: key.public().to_owned(),
             fleet_id,
+            shard: fleet_meta(connection, "shard_id")?,
         };
         Ok(Some((key, signer)))
     }
@@ -479,6 +487,7 @@ impl Store {
             key,
             EnvelopeSigner {
                 fleet_id: Some(fleet_id),
+                shard,
                 ..
             },
         )) = &signer
@@ -498,7 +507,8 @@ impl Store {
                     .map(|sealed| (sealed.batch.sequence, sealed.envelope_hash.clone())),
             );
             for (sequence, envelope_hash) in unsigned {
-                let signature = key.sign(&crate::fleet::envelope_signature_message(
+                let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+                    shard.as_deref(),
                     fleet_id,
                     &self.origin,
                     sequence,

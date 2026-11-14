@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The attention refresher reads a prompt card's transcript on this node again only after the transcript changes, or once a minute, instead of in every fold, so a host with many prompt cards publishes attention as fast as one with few",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Cards show the same calls. The transcript watcher that already wakes the refresher now also records which followed transcript changed. A transcript is read again after a change to it, after the watcher lost events or what it watches changed, when a card reads it again after a refresh in which none did, and at least once a minute in case an event was lost unreported, so a new prompt shows within a minute even then."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "An older build reads every card's transcript in every fold again."}
+}

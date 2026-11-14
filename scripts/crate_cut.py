@@ -7,9 +7,13 @@ The functions, types and constants the fold, the schema and the open path reach 
 depends on) must stay in the lower crate; everything else only calls down and can move up. This tool
 computes that partition and applies it:
 
-    crate_cut.py plan  --src crates/fractal-store/src --config .st/crate-cut.json [--pins FILE] [--json OUT]
-    crate_cut.py apply --src crates/fractal-store/src --config .st/crate-cut.json --layer evidence \\
+    crate_cut.py plan  --src crates/fractal-store/src --config CONFIG.json [--pins FILE] [--json OUT]
+    crate_cut.py apply --src crates/fractal-store/src --config CONFIG.json --layer evidence \\
                        --crate fractal-evidence --lower fractal-store [--pins FILE]
+
+CONFIG.json is explicit: select .fractal/crate-cut.json when present, otherwise .st/crate-cut.json.
+An unreadable/malformed new config must not be replaced with the old one.
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config
 
 Items are the unit: free fns, types, consts, statics, traits, macros and inline modules; the fns of
 an `impl Store` block (each moves on its own and becomes a method of an extension trait implemented for
@@ -2412,24 +2416,6 @@ def cmd_sweep(args):
 
 
 
-def _manifest_text(m):
-    out = ["{"]
-    keys = list(m)
-    for i, k in enumerate(keys):
-        v = m[k]
-        comma = "," if i < len(keys) - 1 else ""
-        if isinstance(v, list):
-            if not v:
-                out.append(f"  {json.dumps(k)}: []{comma}")
-                continue
-            out.append(f"  {json.dumps(k)}: [")
-            for j, e in enumerate(v):
-                out.append("    " + json.dumps(e, ensure_ascii=False) + ("," if j < len(v) - 1 else ""))
-            out.append("  ]" + comma)
-        else:
-            out.append(f"  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}{comma}")
-    out.append("}")
-    return "\n".join(out) + "\n"
 
 
 def _reanchor_inventory(slv, root, manifest):
@@ -2482,7 +2468,7 @@ def _reanchor_inventory(slv, root, manifest):
     cache = {}
     sites, _ = slv.scan(root, cache)
     accepted = {r["id"] for r in records if r}
-    manifest["sites"] = sorted((slv.record(x) for x in sites if x.id in accepted), key=lambda e: (e["path"], e["id"]))
+    manifest["sites"] = sorted((slv.record(x) for x in sites if x.id in accepted), key=lambda e: e["id"])
 
 
 def cmd_inventory(args):
@@ -2490,7 +2476,7 @@ def cmd_inventory(args):
 
     A site's id and owner come from its path, so moving code changes them; the adjacent marker comment still
     names the old id, which says which record the site is. This rewrites the marker and the record (id, path,
-    owner, line_hint), re-derives the declaration catalog and the dependency-crate list, and moves the manual
+    owner), re-derives the declaration catalog and the dependency-crate list, and moves the manual
     flows that follow their function. Nothing is accepted that the guard (scripts/check-sqlite-large-values)
     does not accept; a site without a marker, or whose fingerprint changed, is reported and left alone."""
     import bisect
@@ -2533,11 +2519,11 @@ def cmd_inventory(args):
     for e in manifest["sites"]:
         s = remap.get(e["id"])
         if s is not None:
-            e = dict(e, id=s.id, path=s.path, owner=s.owner, line_hint=s.line)
+            e = dict(e, id=s.id, path=s.path, owner=s.owner)
         entries.append(e)
     for oid, s in copies:
-        entries.append(dict(old[oid], id=s.id, path=s.path, owner=s.owner, line_hint=s.line))
-    manifest["sites"] = sorted(entries, key=lambda e: (e["path"], e["id"]))
+        entries.append(dict(old[oid], id=s.id, path=s.path, owner=s.owner))
+    manifest["sites"] = sorted(entries, key=lambda e: e["id"])
     # manual flows follow their function
     flows = []
     for flow in manifest.get("flows", []):
@@ -2576,7 +2562,7 @@ def cmd_inventory(args):
     sites, _ = slv.scan(root, cache)
     manifest["declarations"] = slv.declarations(root, sites, {p: v[0] for p, v in cache.items()})
     manifest["sqlite_crates"] = slv.sqlite_crates(root)
-    mpath.write_text(_manifest_text(manifest))
+    mpath.write_text(slv.manifest_text(manifest))
     problems = slv.findings(root, manifest)
     print("inventory: %d sites moved, %d copied, %d unmatched, %d problems left" % (len(remap), len(copies), len(unmatched), len(problems)))
     for p in problems[:12]:

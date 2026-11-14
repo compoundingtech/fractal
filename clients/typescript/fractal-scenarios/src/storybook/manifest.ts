@@ -31,6 +31,10 @@ export const worldNames: readonly { readonly id: string; readonly title: string 
     "title": "Release candidate polish"
   },
   {
+    "id": "transcript-families",
+    "title": "Transcript families"
+  },
+  {
     "id": "empty",
     "title": "Empty fleet"
   },
@@ -112,6 +116,7 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "empty",
     "loading",
     "one-agent",
+    "sidebar-tabs",
     "all-states",
     "huge"
   ],
@@ -126,7 +131,9 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "default",
     "none",
     "one-of-each-kind",
-    "many"
+    "many",
+    "sidebar-tabs",
+    "answerable"
   ],
   "conversation": [
     "default",
@@ -170,5 +177,11 @@ export const defaultVariants: Readonly<Record<SliceKind, readonly string[]>> = {
     "page-cursor-expired",
     "evicted",
     "progress-absent"
+  ],
+  "objectives": [
+    "default",
+    "none",
+    "loading",
+    "unsafe-link"
   ]
 }

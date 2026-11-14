@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Drain never-offered mailbox backlog in oldest-first batches of five, opening the next batch only after every member is delivered or withdrawn",
+  "replay": {"status": "changed", "detail": "Stream connections and recipient polling boot sessions recover one outstanding batch of at most five backlog messages. The next batch opens when every member has delivered/read evidence or is terminally closed (withdrawn); staging, offering and elapsed time do not settle a member, so a stuck harness never holds more than five. Withdrawal creates no delivered/read receipt. Stream receipt changes trigger refill without reconnecting. The seven-day cutoff, one-hour recent exemption, silent waits, existing intake holds and prior uncertain-attempt holds are unchanged."},
+  "schema": {"status": "none", "detail": "No database schema or stored-format changes; outstanding batches remain daemon-local."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or fleet coordination changes."},
+  "compatibility": {"status": "none", "detail": "No wire or harness protocol changes. Receipts remain per message; both recovery paths share one settlement predicate."},
+  "downtime": {"status": "none", "detail": "No migration or restart-time rebuild."},
+  "manual": {"status": "none", "detail": "No required operator action."},
+  "recovery": {"status": "none", "detail": "Rollback restores the five-message session cap without refill. Existing staging, receipt and withdrawal history remains authoritative and does not authorize replay of uncertain offers."}
+}

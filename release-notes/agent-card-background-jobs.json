@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The agent card shows how many background jobs the current harness reports, so clients can show a seat that waits on its jobs",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, columns, indexes or triggers."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged. No claim kind or claim field changes; st reads the background_jobs field that omp already reports."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Agent cards get an optional background_jobs field. It is a count from the current harness incarnation. 0 means the harness reported no jobs. null means unknown: the harness does not report jobs, the current incarnation did not report yet, or the harness ended. Older daemons omit the field, and older clients ignore it. The Rust, TypeScript and Swift clients decode it."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}

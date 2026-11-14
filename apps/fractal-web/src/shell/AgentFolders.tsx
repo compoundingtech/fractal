@@ -3,7 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
-import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, openAgentRowMenu, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '@fractal/ui/assistant-ui/shell'
+import { SidebarTree, SidebarTreeDisclosure, SidebarTreeRowAction, type SidebarTreeHandle, type SidebarTreeItem, type SidebarTreeProps } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTree.tsx'
+import { openAgentRowMenu } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/MilestoneAgentRow.tsx'
 import {
   Button as AriaButton,
   useDragAndDrop,
@@ -24,7 +25,7 @@ import {
   useFleetSelection,
   useSubjectSelection,
 } from '../data/react.tsx'
-import type { Feed, Fleet } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed, type Fleet } from '../data/source.ts'
 import { folders } from '../folders/client.ts'
 import { liveAncestor, project, type ProjectedFolder } from '../folders/core.mts'
 import { refusalText } from '../folders/edit.ts'
@@ -35,6 +36,7 @@ import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.t
 import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
 import { useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
+import { sameFolderFleet } from './sameFolderFleet.ts'
 import type { SidebarFilters } from './sidebar/state.ts'
 import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
 import { SidebarToolbar } from './sidebar/Toolbar.tsx'
@@ -534,7 +536,7 @@ const LegacyAgentFolders = React.memo(
           <p {...stylex.props(styles.notice)}>No agents match these filters.</p>
         ) : null}
         <div role="status" {...stylex.props(styles.notice)}>
-          {snapshot.phase === 'fixture' ? (
+          {snapshot.reason === 'unauthorized' ? credentialExpiredMessage : snapshot.phase === 'fixture' ? (
             'Fixture folders · local preview'
           ) : snapshot.phase === 'synced' ? (
             snapshot.detail
@@ -564,48 +566,6 @@ const LegacyAgentFolders = React.memo(
 const descendantCount = (folder: ProjectedFolder): number =>
   folder.members.length + folder.folders.reduce((total, child) => total + descendantCount(child), 0)
 
-/** Ignore presentation-only fields when deciding whether React Aria must rebuild its collection. */
-// oxlint-disable-next-line overeng/named-args -- Fixed positional (feed, feed, filters) comparator ABI.
-export const sameFolderFleet = (
-  left: Feed<Fleet>,
-  right: Feed<Fleet>,
-  filters: SidebarFilters,
-): boolean => {
-  if (left._tag !== 'Observed' || right._tag !== 'Observed') return left._tag === right._tag
-  const status =
-    filters.hideEnded ||
-    filters.hideRetired ||
-    filters.statuses.length > 0 ||
-    filters.sort === 'status'
-  // Facet predicates read raw reported facts; hideEnded also reads the raw lifecycle state.
-  const facets = parseSidebarQuery(filters.query).facets
-  const repo = facets.some((facet) => facet.field === 'repo')
-  const tool = facets.some((facet) => facet.field === 'tool')
-  const state = filters.hideEnded || facets.some((facet) => facet.field === 'state')
-  return (
-    left.value.agents.length === right.value.agents.length &&
-    left.value.agents.every((agent, index) => {
-      const next = right.value.agents[index]
-      return (
-        next !== undefined &&
-        agent.ref === next.ref &&
-        (!(status || state) ||
-          agentStatus({ agent, fleet: left }) === agentStatus({ agent: next, fleet: right })) &&
-        (!state || (agent.state === next.state && agent.status === next.status && agent.activity === next.activity)) &&
-        (!tool || agent.harness === next.harness) &&
-        (!repo ||
-          (agent.checkout._tag === 'Known' ? agent.checkout.value.repository : undefined) ===
-            (next.checkout._tag === 'Known' ? next.checkout.value.repository : undefined)) &&
-        (filters.query.trim() === '' || agent.description === next.description) &&
-        (filters.sort !== 'activity' ||
-          (agent.lastActivityAt._tag === next.lastActivityAt._tag &&
-            (agent.lastActivityAt._tag === 'Unknown' ||
-              (next.lastActivityAt._tag === 'Known' && agent.lastActivityAt.value === next.lastActivityAt.value))))
-      )
-    })
-  )
-}
-
 type AgentRowWorkspace = Pick<Workspace, 'id' | 'title' | 'host' | 'unread'>
 interface AgentFolderTreeItem extends SidebarTreeItem<AgentFolderTreeItem> {
   readonly render: (state: Parameters<SidebarTreeProps<AgentFolderTreeItem>['renderRow']>[1]) => React.ReactNode
@@ -632,6 +592,13 @@ const sameElements = (
   left.length === right.length && left.every((element, index) => element === right[index])
 
 // Presentation changes (query highlights, spend and selection) must not replace RAC items.
+/** What the row's disclosure reveals, in its accessible name. */
+const disclosureNoun = (node: SidebarNode): string => {
+  const children = node.children ?? []
+  const missions = children.some(child => child._tag === 'Agent' && child.missionId !== undefined)
+  const subagents = children.some(child => child._tag === 'Agent' && child.missionId === undefined)
+  return missions ? subagents ? 'missions and subagents' : 'missions' : 'subagents'
+}
 const BoundFolderPresentation = React.createContext<AgentFoldersProps | null>(null)
 const BoundFolderRow = ({ node, touchDisclosure }: { readonly node: SidebarNode; readonly touchDisclosure?: React.ReactNode }) => {
   const props = React.useContext(BoundFolderPresentation)
@@ -722,7 +689,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     return { ...nativeDragHooks, useDraggableItem: useSidebarDraggableItem }
   }, [nativeDragHooks, foldersById])
   // Status names replace only their owning RAC item, retaining sibling measurement keys.
-  const elements = React.useMemo(() => new Map<string, CachedBoundElement>(), [props.onSelect])
+  const elements = React.useMemo(() => new Map<string, CachedBoundElement>(), [props.onSelect, props.onOpenMission])
   const items = React.useMemo(() => {
     const retained = new Set<string>()
     const render = (node: SidebarNode, depth: number): AgentFolderTreeItem => {
@@ -731,18 +698,21 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
       const children = node.children?.map(child => render(child, depth + 1))
       const accessibleName = props.accessibleNames?.get(node.id)
       const agentRef = node._tag === 'Agent' ? node.subject : undefined
+      const rowHeight = node._tag === 'Agent' && props.rowStatus?.get(node.id) === undefined ? props.agentRowHeight?.(node) : undefined
       const sameChildren = children === undefined ? cached?.element.children === undefined
         : cached?.element.children !== undefined && sameElements(cached.element.children, children)
       if (cached !== undefined && cached.node._tag === node._tag && cached.element.depth === depth &&
         cached.element.textValue === node.label && cached.element.accessibleName === accessibleName &&
-        cached.element.agentRef === agentRef && sameChildren &&
+        cached.element.agentRef === agentRef && cached.element.rowHeight?.compact === rowHeight?.compact && cached.element.rowHeight?.touch === rowHeight?.touch && sameChildren &&
         cached.node.collapsed === node.collapsed) return cached.element
       const element: AgentFolderTreeItem = {
-        id: node.id, depth, textValue: node.label, accessibleName, agentRef, children,
-        isDisabled: node._tag === 'Agent' && node.parent !== undefined,
+        id: node.id, depth, textValue: node.label, accessibleName, agentRef, children, rowHeight,
+        isDisabled: node._tag === 'Agent' && node.parent !== undefined && node.missionId === undefined,
         disclosurePlacement: node._tag === 'Agent' ? 'trailing' : 'leading',
-        onAction: node._tag === 'Agent' && node.parent === undefined ? () => props.onSelect?.(node.id) : undefined,
-        render: state => <BoundFolderRow node={node} touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} /> : undefined} />,
+        onAction: node._tag !== 'Agent' ? undefined
+          : node.missionId !== undefined ? () => props.onOpenMission?.(node.missionId!)
+          : node.parent === undefined ? () => props.onSelect?.(node.id) : undefined,
+        render: state => <BoundFolderRow node={node} touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} noun={disclosureNoun(node)} /> : undefined} />,
       }
       elements.set(node.id, { node, element })
       return element
@@ -750,7 +720,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     const next = props.tree.map(node => render(node, 0))
     for (const key of elements.keys()) if (!retained.has(key)) elements.delete(key)
     return next
-  }, [props.tree, props.onSelect, props.accessibleNames, elements])
+  }, [props.tree, props.onSelect, props.onOpenMission, props.accessibleNames, props.agentRowHeight, props.rowStatus, elements])
   const expandAncestors = (selected: string) => {
     const path: SidebarNode[] = []
     const find = (nodes: readonly SidebarNode[]): boolean => {

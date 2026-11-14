@@ -77,7 +77,7 @@ try {
       }
       const crumb = header.querySelector('[aria-label="Breadcrumb"]').getBoundingClientRect()
       if (controls.some(r => r.left < crumb.right && r.right > crumb.left && r.top < crumb.bottom && r.bottom > crumb.top)) failures.push('breadcrumb overlaps controls')
-      const gear = controls.find(r => r.name === 'Conversation menu'), terminal = controls.find(r => r.name === 'Toggle terminal drawer')
+      const gear = controls.find(r => r.name === 'Conversation menu'), terminal = controls.find(r => r.name === 'Show terminal')
       const clusterGap = gear && terminal ? terminal.left - gear.right : undefined
       if (clusterGap !== undefined && clusterGap > 16 && !header.querySelector('[data-sync-state="Failed"]')) failures.push(`empty native cluster gap ${clusterGap}`)
       return { laneWidth: lane.width, height: lane.height, controls, clusterGap, failures }

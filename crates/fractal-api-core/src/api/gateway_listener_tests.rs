@@ -36,6 +36,7 @@ async fn reserved_addresses_refuse_connections_until_initialized_serving() {
         reserved,
         axum::Router::new().fallback(|| async { "initialized" }),
         None,
+        None,
         move || ready.send(()).unwrap(),
     ));
     serving.await.unwrap();

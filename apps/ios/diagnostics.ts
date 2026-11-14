@@ -4,7 +4,7 @@ import { requireOptionalNativeModule } from 'expo';
 import { AppState, Linking, Platform } from 'react-native';
 import type { Capabilities, ClientDiagnosticEvent, FractalClient } from '../../clients/typescript/fractal-client';
 import { ClientError } from '../../clients/typescript/fractal-client/Client.generated.ts';
-import StDiagnostics from './modules/st-diagnostics';
+import FractalDiagnostics from './modules/fractal-diagnostics';
 import app from './app.json';
 import { DIAGNOSTICS_KEY, DiagnosticsQueue } from './diagnosticsQueue';
 import { redactJsError, safeOsVersion, safeRuntime, safeUpdateId, safeVersion } from './diagnosticsRedaction';
@@ -24,7 +24,7 @@ const fallbackLaunch = () => ({
   native_build: 'unknown', os_version: String(Platform.Version),
 });
 // A native disk/data-protection failure must not abort app startup.
-const launch = (() => { try { return StDiagnostics?.launchContext() ?? fallbackLaunch(); } catch { return fallbackLaunch(); } })();
+const launch = (() => { try { return FractalDiagnostics?.launchContext() ?? fallbackLaunch(); } catch { return fallbackLaunch(); } })();
 let sequence = 0x80000000;
 let initialized = false;
 let capturing = false;
@@ -121,11 +121,11 @@ export const captureRootMounted = (): void => capture({ kind: 'launch', breadcru
 export const drainNativeDiagnostics = (): Promise<void> => {
   if (draining) return draining;
   draining = (async () => {
-    if (!StDiagnostics) return;
-    const reports = await StDiagnostics.getPendingReports();
+    if (!FractalDiagnostics) return;
+    const reports = await FractalDiagnostics.getPendingReports();
     const ids = await queue.enqueue(reports);
     // Native ownership transfers only after the JS storage write succeeds.
-    if (ids.length) await StDiagnostics.acknowledge(ids);
+    if (ids.length) await FractalDiagnostics.acknowledge(ids);
     scheduleUpload();
   })().catch(() => {}).finally(() => { draining = undefined; });
   return draining;

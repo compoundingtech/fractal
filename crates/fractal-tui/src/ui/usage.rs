@@ -23,16 +23,20 @@ pub enum By {
     Agent,
     Mission,
     Step,
+    Attempt,
+    Invocation,
     Model,
     Account,
     Host,
 }
 
 impl By {
-    const ALL: [By; 6] = [
+    const ALL: [By; 8] = [
         By::Agent,
         By::Mission,
         By::Step,
+        By::Attempt,
+        By::Invocation,
         By::Model,
         By::Account,
         By::Host,
@@ -43,6 +47,8 @@ impl By {
             By::Agent => "agent",
             By::Mission => "mission",
             By::Step => "step",
+            By::Attempt => "attempt",
+            By::Invocation => "invocation",
             By::Model => "model",
             By::Account => "account",
             By::Host => "host",
@@ -61,6 +67,8 @@ impl By {
             "agent" => By::Agent,
             "mission" => By::Mission,
             "step-run" => By::Step,
+            "step-attempt" => By::Attempt,
+            "invocation" => By::Invocation,
             "model" => By::Model,
             "account" => By::Account,
             "machine" => By::Host,
@@ -98,6 +106,7 @@ pub struct Total {
     pub cached: u64,
     pub cost_microusd: u64,
     pub unpriced: u64,
+    pub unpriced_responses: u64,
 }
 
 impl Total {
@@ -109,6 +118,7 @@ impl Total {
         self.cached += row.cached_tokens;
         self.cost_microusd += row.cost_microusd;
         self.unpriced += row.unpriced_tokens;
+        self.unpriced_responses += row.unpriced_responses;
     }
 
     /// What the tokens were: re-read from the cache, written to it, fresh input, or output, as
@@ -123,10 +133,9 @@ impl Total {
         )
     }
 
-    /// The cost, with a `+` when some tokens had no price: the true cost is higher, never
-    /// lower.
+    /// The known cost, with a `+` when any usage has no price.
     pub fn money(&self) -> String {
-        let plus = if self.unpriced > 0 { "+" } else { "" };
+        let plus = if self.unpriced > 0 || self.unpriced_responses > 0 { "+" } else { "" };
         format!("{}{plus}", money(self.cost_microusd))
     }
 }
@@ -185,6 +194,9 @@ pub fn key(row: &UsageRow, by: By) -> String {
         By::Agent => row.agent.clone(),
         By::Mission => known(&row.mission_run).map_or_else(none, mission_of),
         By::Step => known(&row.step).map_or_else(none, str::to_owned),
+        By::Attempt => known(&row.step).zip(row.attempt)
+            .map_or_else(none, |(step, attempt)| format!("step-attempt/{step}/{attempt}")),
+        By::Invocation => known(&row.invocation_id).map_or_else(none, str::to_owned),
         By::Model => known(&row.model).map_or_else(none, |model| format!("model/{model}")),
         By::Account => {
             known(&row.account).map_or_else(none, |account| format!("account/{account}"))
@@ -215,7 +227,18 @@ pub fn groups<'a>(rows: impl Iterator<Item = &'a UsageRow>, by: By) -> Vec<(Stri
 
 /// A group as a person reads it: an agent's or mission's name, a step with its mission.
 pub fn label(world: &World, id: &str) -> String {
+    if let Some(attempt) = id.strip_prefix("step-attempt/").and_then(|rest| rest.rsplit_once('/')) {
+        return format!("{} · attempt {}", label(world, attempt.0), attempt.1);
+    }
     if let Some(account) = id.strip_prefix("account/") {
+        // An account a person declared reads by its name alone.
+        if let Some(declared) = world
+            .usage_accounts
+            .iter()
+            .find(|declared| declared.account.as_deref() == Some(account))
+        {
+            return declared.name.clone();
+        }
         // An account a person declared reads by its name; the digest still tells two apart.
         let declared = world
             .usage_limits
@@ -302,14 +325,14 @@ pub fn list(world: &World, by: By, hours: u64) -> Listing {
             count: accounts.len(),
             color: theme::ACCENT,
         });
-        for (id, spent, limit) in accounts {
+        for (id, spent, limit, declared) in accounts {
             // Each limit on a line of its own beneath the account, so a narrow pane reads whole.
             items.push(Item::Row {
                 index: ids.len(),
                 first: vec![span(format!(" {}", label(world, &id)), theme::bold())],
                 right: vec![span(spent.money(), theme::fg(theme::ACCENT))],
                 second: Vec::new(),
-                children: limit_lines(&id, limit, &spent),
+                children: limit_lines(&id, limit, &spent, declared),
             });
             ids.push(id.clone());
         }
@@ -408,7 +431,8 @@ pub fn list(world: &World, by: By, hours: u64) -> Listing {
             if rows.is_empty()
                 && world.usage_limits.is_empty()
                 && world.agent_messages.is_none()
-                && world.slo.ready().is_none_or(|slo| slo.is_empty()) =>
+                && matches!(&world.slo, Load::Ready(slo) if slo.is_empty())
+                && world.slo_stale.is_none() =>
         {
             ListState::Empty("No spend recorded in this period.")
         }
@@ -457,7 +481,7 @@ fn estimate_lines(estimate: &fractal_client::AgentMessageEstimate) -> Vec<Line<'
         let share = match (day.low_percent, day.high_percent) {
             (Some(low), Some(high)) => format!(
                 "{low:.1}–{high:.1}%{}",
-                if day.unpriced_tokens > 0 { "*" } else { "" }
+                if day.unpriced_tokens > 0 || day.unpriced_responses > 0 { "*" } else { "" }
             ),
             _ => "share unknown".into(),
         };
@@ -486,41 +510,119 @@ fn estimate_lines(estimate: &fractal_client::AgentMessageEstimate) -> Vec<Line<'
     lines
 }
 
-/// Every account that spent in the period or reported its limits, the largest spender first,
-/// with spend st could not tie to an account last.
-fn accounts(world: &World) -> Vec<(String, Total, Option<&UsageLimit>)> {
-    let mut accounts = groups(world.usage.items().iter(), By::Account)
-        .into_iter()
-        .map(|(id, spent)| {
-            let limit = world
-                .usage_limits
+/// One account in the list: its id, what it spent, its limits reading and its declaration.
+type AccountEntry<'a> = (
+    String,
+    Total,
+    Option<&'a UsageLimit>,
+    Option<&'a fractal_client::UsageAccount>,
+);
+
+/// Every declared account in name order, whether or not it spent or reported limits; then any
+/// account that spent or reported limits without a declaration, the largest spender first, with
+/// spend st could not tie to an account last. Nothing st recorded is left out.
+fn accounts(world: &World) -> Vec<AccountEntry<'_>> {
+    let spent = groups(world.usage.items().iter(), By::Account);
+    let limit_of = |id: &str| {
+        world
+            .usage_limits
+            .iter()
+            .find(|limit| id == format!("account/{}", limit.account))
+    };
+    let mut accounts = world
+        .usage_accounts
+        .iter()
+        .map(|declared| {
+            let id = format!(
+                "account/{}",
+                declared.account.as_deref().unwrap_or(declared.name.as_str())
+            );
+            let total = spent
                 .iter()
-                .find(|limit| id == format!("account/{}", limit.account));
-            (id, spent, limit)
+                .find(|(known, _)| *known == id)
+                .map(|(_, total)| total.clone())
+                .unwrap_or_default();
+            let limit = limit_of(&id);
+            (id, total, limit, Some(declared))
+        })
+        .collect::<Vec<_>>();
+    let mut others = spent
+        .into_iter()
+        .filter(|(id, _)| !accounts.iter().any(|(known, _, _, _)| known == id))
+        .map(|(id, total)| {
+            let limit = limit_of(&id);
+            (id, total, limit, None)
         })
         .collect::<Vec<_>>();
     for limit in &world.usage_limits {
         let id = format!("account/{}", limit.account);
-        if !accounts.iter().any(|(known, _, _)| *known == id) {
-            accounts.push((id, Total::default(), Some(limit)));
+        if !accounts.iter().chain(&others).any(|(known, _, _, _)| *known == id) {
+            others.push((id, Total::default(), Some(limit), None));
         }
     }
-    accounts.sort_by_key(|(id, _, _)| id.starts_with("usage/"));
+    others.sort_by_key(|(id, _, _, _)| id.starts_with("usage/"));
+    accounts.extend(others);
     accounts
 }
 
-/// An account's limits, a line each: weekly first, since that is the one that stops seats.
-fn limit_lines(id: &str, limit: Option<&UsageLimit>, spent: &Total) -> Vec<Line<'static>> {
+/// An account's limits, a line each: weekly first, since that is the one that stops seats. An
+/// api-key account has no limits to report; it shows its credits used this month instead.
+fn limit_lines(
+    id: &str,
+    limit: Option<&UsageLimit>,
+    spent: &Total,
+    declared: Option<&fractal_client::UsageAccount>,
+) -> Vec<Line<'static>> {
+    if let Some(credits) = declared.and_then(|declared| declared.credits.as_ref()) {
+        return vec![credits_line(credits)];
+    }
     let Some(limit) = limit else {
         let note = if id == "usage/no-account" {
-            format!("   {} tokens · from before st kept accounts", tokens(spent.tokens))
+            format!("   {} tokens · from before Fractal kept accounts", tokens(spent.tokens))
         } else {
             format!("   {} tokens · no limits reported", tokens(spent.tokens))
         };
         return vec![Line::from(span(note, theme::dim()))];
     };
     let now = now_ms();
-    let share = |percent: Option<f64>| match percent {
+    let (weekly, weekly_color) = limit_share(limit.weekly_percent);
+    let resets = limit
+        .weekly_resets_at_unix_ms
+        .map(|at| format!(" · resets {}", span_of(at.saturating_sub(now))))
+        .unwrap_or_default();
+    let mut lines = vec![Line::from(vec![
+        span("   weekly   ", theme::dim()),
+        span(weekly, theme::strong(weekly_color)),
+        span(resets, theme::dim()),
+    ])];
+    // A harness with no 5-hour window (Codex) has nothing to show on its own line.
+    if limit.five_hour_percent.is_some() {
+        let (five, five_color) = limit_share(limit.five_hour_percent);
+        lines.push(Line::from(vec![
+            span("   5-hour   ", theme::dim()),
+            span(five, theme::strong(five_color)),
+            span(
+                format!(
+                    " · as of {} ago",
+                    span_of(now.saturating_sub(limit.measured_at_unix_ms))
+                ),
+                theme::dim(),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(span(
+            format!(
+                "   as of {} ago",
+                span_of(now.saturating_sub(limit.measured_at_unix_ms))
+            ),
+            theme::dim(),
+        )));
+    }
+    lines
+}
+
+fn limit_share(percent: Option<f64>) -> (String, ratatui::style::Color) {
+    match percent {
         Some(percent) => (
             format!("{percent:.0}%"),
             if percent >= 90.0 {
@@ -532,31 +634,29 @@ fn limit_lines(id: &str, limit: Option<&UsageLimit>, spent: &Total) -> Vec<Line<
             },
         ),
         None => ("?".into(), theme::OVERLAY1),
+    }
+}
+
+/// An api-key account's spend this month against its budget, coloured as limits are.
+fn credits_line(credits: &fractal_client::UsageCredits) -> Line<'static> {
+    let percent = if credits.budget_microusd == 0 {
+        None
+    } else {
+        Some(credits.used_microusd as f64 * 100.0 / credits.budget_microusd as f64)
     };
-    let (weekly, weekly_color) = share(limit.weekly_percent);
-    let (five, five_color) = share(limit.five_hour_percent);
-    let resets = limit
-        .weekly_resets_at_unix_ms
-        .map(|at| format!(" · resets {}", span_of(at.saturating_sub(now))))
-        .unwrap_or_default();
-    vec![
-        Line::from(vec![
-            span("   weekly   ", theme::dim()),
-            span(weekly, theme::strong(weekly_color)),
-            span(resets, theme::dim()),
-        ]),
-        Line::from(vec![
-            span("   5-hour   ", theme::dim()),
-            span(five, theme::strong(five_color)),
-            span(
-                format!(
-                    " · as of {} ago",
-                    span_of(now.saturating_sub(limit.measured_at_unix_ms))
-                ),
-                theme::dim(),
-            ),
-        ]),
-    ]
+    let (_, color) = limit_share(percent);
+    let plus = if credits.unpriced_tokens > 0 || credits.unpriced_responses > 0 { "+" } else { "" };
+    Line::from(vec![
+        span("   credits  ", theme::dim()),
+        span(
+            format!("{}{plus}", money(credits.used_microusd)),
+            theme::strong(color),
+        ),
+        span(
+            format!(" of {} this month", money(credits.budget_microusd)),
+            theme::dim(),
+        ),
+    ])
 }
 
 fn now_ms() -> u64 {
@@ -710,8 +810,28 @@ pub fn detail(world: &World, id: Option<&str>, hours: u64, width: usize) -> Doc 
         .iter()
         .filter(|limit| id.is_none_or(|id| id == format!("account/{}", limit.account)))
         .collect::<Vec<_>>();
-    if !limits.is_empty() {
+    // An api-key account reports credits, not limits.
+    let credits = world
+        .usage_accounts
+        .iter()
+        .filter(|declared| declared.credits.is_some())
+        .filter(|declared| {
+            id.is_none_or(|id| {
+                id == format!(
+                    "account/{}",
+                    declared.account.as_deref().unwrap_or(declared.name.as_str())
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if !limits.is_empty() || !credits.is_empty() {
         let mut card = Doc::new();
+        for declared in credits {
+            card.line(Line::from(span(declared.name.clone(), theme::bold())));
+            if let Some(credits) = &declared.credits {
+                card.line(credits_line(credits));
+            }
+        }
         for limit in limits {
             let spent = mine
                 .iter()
@@ -724,7 +844,16 @@ pub fn detail(world: &World, id: Option<&str>, hours: u64, width: usize) -> Doc 
                 label(world, &format!("account/{}", limit.account)),
                 theme::bold(),
             )));
-            for line in limit_lines(&format!("account/{}", limit.account), Some(limit), &spent) {
+            let declared = world
+                .usage_accounts
+                .iter()
+                .find(|declared| declared.account.as_deref() == Some(limit.account.as_str()));
+            for line in limit_lines(
+                &format!("account/{}", limit.account),
+                Some(limit),
+                &spent,
+                declared,
+            ) {
                 card.line(line);
             }
             card.line(Line::from(span(
@@ -754,7 +883,7 @@ mod tests {
 
     #[test]
     fn daily_estimate_is_visible_in_the_list_and_whole_period_pane() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.agent_messages = Some(
             serde_json::from_value(serde_json::json!({
                 "source":"dated audit", "method":"count times allowance",
@@ -808,7 +937,7 @@ mod tests {
 
     #[test]
     fn groups_rank_by_cost_and_name_what_st_does_not_know() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let rows = world.usage.items();
         let by_agent = groups(rows.iter(), By::Agent);
         assert_eq!(by_agent[0].0, "agent/example/atlas/builder");
@@ -826,8 +955,74 @@ mod tests {
     }
 
     #[test]
+    fn invocation_and_attempt_groupings_preserve_unknown_and_step_scope() {
+        let world = super::super::demo::test_world();
+        let mut row = world.usage.items()[0].clone();
+        row.invocation_id = None;
+        row.attempt = None;
+        assert_eq!(key(&row, By::Invocation), "usage/no-invocation");
+        assert_eq!(key(&row, By::Attempt), "usage/no-attempt");
+        row.invocation_id = Some("invocation/launch".into());
+        row.attempt = Some(2);
+        row.step = Some("step-run/one/build".into());
+        assert_eq!(key(&row, By::Invocation), "invocation/launch");
+        assert_eq!(key(&row, By::Attempt), "step-attempt/step-run/one/build/2");
+        row.step = Some("step-run/two/build".into());
+        assert_ne!(key(&row, By::Attempt), "step-attempt/step-run/one/build/2");
+        assert_eq!(By::of("invocation/launch"), Some(By::Invocation));
+        assert_eq!(By::of("step-attempt/step-run/one/build/2"), Some(By::Attempt));
+    }
+
+    #[test]
+    fn every_declared_account_is_listed_by_name_with_its_limits_or_credits() {
+        let mut world = super::super::demo::test_world();
+        let declared = |name: &str, label: &str, kind: &str, credits: Option<serde_json::Value>| {
+            serde_json::from_value::<fractal_client::UsageAccount>(serde_json::json!({
+                "name": name, "account": label, "provider": "anthropic", "kind": kind, "credits": credits,
+            }))
+            .unwrap()
+        };
+        world.usage_limits[0].account = "claude/aaaaaaaaaaaaaaaa".into();
+        world.usage_limits[0].account_ref = Some("ada/claude-1".into());
+        world.usage_limits[1].account = "codex/cccccccccccccccc".into();
+        world.usage_limits[1].account_ref = Some("ada/codex".into());
+        world.usage_accounts = vec![
+            declared("ada/claude-1", "claude/aaaaaaaaaaaaaaaa", "subscription", None),
+            declared("ada/claude-2", "claude/bbbbbbbbbbbbbbbb", "subscription", None),
+            declared("ada/codex", "codex/cccccccccccccccc", "subscription", None),
+            declared(
+                "ada/key",
+                "omp/dddddddddddddddd",
+                "api-key",
+                Some(serde_json::json!({"budget_microusd": 200_000_000_u64, "used_microusd": 154_000_000_u64,
+                    "unpriced_tokens": 0, "period_start_ms": 0})),
+            ),
+        ];
+        // Spend under a label no declaration claims stays listed, after the declared accounts.
+        let mut spent = world.usage.items().to_vec();
+        spent[0].account = Some("claude/ffffffffffffffff".into());
+        world.usage = super::super::view::Load::Ready(spent);
+        let listed = accounts(&world);
+        let names = listed.iter().map(|(id, ..)| label(&world, id)).collect::<Vec<_>>();
+        assert_eq!(&names[..4], ["ada/claude-1", "ada/claude-2", "ada/codex", "ada/key"]);
+        assert!(names[4..].iter().all(|name| name != "ada/key"), "{names:?}");
+        assert!(names.len() > 4, "undeclared spend is not hidden: {names:?}");
+        let (_, spent, limit, entry) = &listed[3];
+        let lines = limit_lines("account/omp/dddddddddddddddd", *limit, spent, *entry);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].to_string(), "   credits  $154 of $200 this month");
+        let (_, spent, limit, entry) = &listed[2];
+        let lines = limit_lines("account/codex/cccccccccccccccc", *limit, spent, *entry);
+        assert!(lines[0].to_string().contains("weekly"), "{lines:?}");
+        assert!(
+            lines.iter().all(|line| !line.to_string().contains("5-hour")),
+            "a harness with no 5-hour window shows none: {lines:?}"
+        );
+    }
+
+    #[test]
     fn an_account_a_person_declared_reads_by_its_name() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.usage_limits[0].account = "claude/0123456789abcdef".into();
         world.usage_limits[0].account_ref = Some("ada/claude-1".into());
         world.usage_limits[1].account = "claude/fedcba9876543210".into();
@@ -857,6 +1052,8 @@ mod tests {
             ..Total::default()
         };
         assert_eq!(unpriced.money(), "$1.00+");
+        assert_eq!(Total { unpriced_responses: 1, ..Total::default() }.money(), "$0+");
+        assert_eq!(Total::default().money(), "$0");
         assert_eq!(next_period(24), 168);
         assert_eq!(next_period(720), 24);
         assert_eq!(period_name(168), "the last 7 days");
@@ -882,7 +1079,7 @@ mod tests {
             "98% cached · 0.9% written to cache · 0.6% fresh input · 0.2% output"
         );
         // The summary shows it under the total.
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let summary = list(&world, By::Agent, 24)
             .items
             .iter()
@@ -898,7 +1095,7 @@ mod tests {
 
     #[test]
     fn a_groups_detail_shows_only_its_rows() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let plain = |doc: &Doc| {
             doc.lines
                 .iter()

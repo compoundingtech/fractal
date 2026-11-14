@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "host": "fixture-both-cpu-fields",
+  "platform": "linux-systemd",
+  "mem_available_floor": {
+    "coverage": "not-enforced",
+    "reason": "host-budget admission off"
+  },
+  "slice_psi": {
+    "memory": {
+      "coverage": "not-enforced",
+      "reason": "no slice-PSI admission active; heavy-short uses host memory some avg60 only"
+    },
+    "cpu": {
+      "coverage": "not-enforced",
+      "reason": "no slice-PSI admission active; heavy-short uses host memory some avg60 only"
+    }
+  },
+  "slices": [
+    {
+      "name": "app-capped.slice",
+      "memory": {
+        "max": {
+          "coverage": "enforced",
+          "value": "75161927680"
+        },
+        "high": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "swap": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      },
+      "cpu": {
+        "max": {
+          "coverage": "enforced",
+          "value": {
+            "quota_micros": 2000000,
+            "period_micros": 100000
+          }
+        },
+        "weight": {
+          "coverage": "enforced",
+          "value": 10001
+        }
+      },
+      "io": {
+        "coverage": "not-enforced",
+        "reason": "scheduler none; weight `default 100`; io.max unset"
+      },
+      "tasks": {
+        "max": {
+          "coverage": "not-enforced",
+          "reason": "unset (`max`)"
+        }
+      }
+    }
+  ]
+}

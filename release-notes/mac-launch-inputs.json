@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep launch dependency coverage portable across symlinked temporary directories and exercise missing transitive imports through a workspace alias.",
+  "replay": { "status": "none", "detail": "No claims or projections change." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "Launch evidence and dependency observation are unchanged." },
+  "compatibility": { "status": "none", "detail": "Only regression fixtures change; existing interfaces and behavior are unchanged." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "None." },
+  "recovery": { "status": "none", "detail": "Revert the change." }
+}

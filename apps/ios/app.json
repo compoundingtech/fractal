@@ -24,6 +24,7 @@
       "supportsTablet": true,
       "infoPlist": {
         "UIViewControllerBasedStatusBarAppearance": true,
+        "NSCameraUsageDescription": "Scan a pairing QR code shown by fractal devices pair.",
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
             "100.64.0.0/10": {
@@ -44,7 +45,7 @@
             }
           }
         },
-        "NSLocalNetworkUsageDescription": "Fractal connects to your paired st gateway on your local network when you enter a .local name or private LAN address.",
+        "NSLocalNetworkUsageDescription": "Fractal connects to your paired gateway on your local network when you enter a .local name or private LAN address.",
         "NSMicrophoneUsageDescription": "Fractal listens while you dictate a message, and transcribes it on this phone.",
         "NSSpeechRecognitionUsageDescription": "Fractal transcribes your dictated messages on this phone."
       }

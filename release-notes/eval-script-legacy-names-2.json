@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use the fractal executable in onboarding-play, planning-mode, poisoned-pr, pty-send-peek, queue-revision, replication-convergence, resource-cold-start, resource-handoff, resource-retarget, restart-continuity, review-escalation, run-generation-revision, runtime-readiness-recovery, seat-queue eval shell commands without renaming protected bridges, paths or durable identifiers.",
+  "replay": {"status":"none","detail":"No claim or projection replay."},
+  "schema": {"status":"none","detail":"No schema or durable identifier changes."},
+  "rules": {"status":"none","detail":"No checkpoint, retention or digest changes."},
+  "compatibility": {"status":"none","detail":"Current command prose accepts fractal; historical onboarding fixture command text remains accepted. Legacy bridges and aliases remain unchanged."},
+  "downtime": {"status":"none","detail":"Nothing runs at upgrade."},
+  "manual": {"status":"none","detail":"No manual step."},
+  "recovery": {"status":"none","detail":"Revert this change."}
+}

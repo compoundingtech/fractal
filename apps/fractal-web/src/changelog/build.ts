@@ -1,5 +1,4 @@
-import { buildIdentity } from 'virtual:build-identity'
-import { changelogDeployment, changelogSources } from '../extensions/build.ts'
+import { changelogDeployment, changelogSources } from '../../.changelog/mod.ts'
 import { compileChangelog } from './compiler.ts'
 import { changelogAudienceByDeployment } from './contract.ts'
 
@@ -8,8 +7,8 @@ import { changelogAudienceByDeployment } from './contract.ts'
  * bundling (scripts/extensions-build.mjs), so registries and private prose never reach a bundle
  * through it. Load lazily; the unseen dot reads ./metadata.ts.
  */
-export const changelogManifest = compileChangelog({
-  build: { machineVersion: buildIdentity.machineVersion },
+export const getChangelogManifest = (machineVersion: string) => compileChangelog({
+  build: { machineVersion },
   sources: changelogSources,
   audience: changelogAudienceByDeployment[changelogDeployment],
 })

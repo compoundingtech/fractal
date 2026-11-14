@@ -19,8 +19,9 @@ const DELTA_LIMIT: usize = 10_000;
 
 /// Claim kinds that no attention source reads, whatever their subject: harness timelines and
 /// usage, messages (attention leaves messages to conversations), transport and workspace
-/// observations, daemon diagnostics, and a person's glasses and arrangements. Lease renewals
-/// move no step's status, run or ask. These are most of a busy host's claims.
+/// observations, daemon diagnostics, a person's glasses, arrangements and read positions, and
+/// their status, interruptions and presence (only their deadline clock moves ask deadlines).
+/// Lease renewals move no step's status, run or ask. These are most of a busy host's claims.
 const UNREAD_KINDS: &[&str] = &[
     "harness.timeline",
     "harness.usage",
@@ -35,7 +36,11 @@ const UNREAD_KINDS: &[&str] = &[
     "glass.upserted",
     "glass.deleted",
     "arrangement.edited",
+    "read-position.advanced",
     "work.renewed",
+    fractal_schema::availability::STATUS_KIND,
+    fractal_schema::availability::INTERRUPTIONS_KIND,
+    fractal_schema::availability::PRESENCE_KIND,
 ];
 
 /// Runtime observations a seat writes over and over that attention reads only as the actual
@@ -446,6 +451,12 @@ impl AttentionListStore for Store {
         ) -> Result<AttentionDelta> {
         if index < previous.cut {
             return Ok(AttentionDelta::Refold("older cut".into()));
+        }
+        // Deadlines turned on or off, or a new default: no claim says so.
+        if fractal_store::store::person_work::ask_deadline_policy(&self.readers.get())?
+            != previous.ask_deadline_policy
+        {
+            return Ok(AttentionDelta::Refold("ask deadline policy".into()));
         }
         let mut seats = SeatChecks::new(self, previous);
         let projection = self.attention_projection_frontier()?;

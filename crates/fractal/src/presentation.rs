@@ -11,6 +11,7 @@ use fractal_daemon::model::{
     AttentionItemView, MissionInputKind, MissionRunView, RevisionCutover, RevisionProposalView,
     RunGenerationView, StepRunView,
 };
+use fractal_daemon::program_journal::ProgramRunView;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OutputStyle {
@@ -113,6 +114,21 @@ pub(crate) fn render_mission_run(
         short_subject(&selected.mission, "mission/")
     );
     let _ = writeln!(output, "RUN       {}", selected.subject);
+    if let Some(source) = &selected.retry_of {
+        let _ = writeln!(output, "RETRY OF  {source}");
+    }
+    for retry in &selected.retried_by {
+        let _ = writeln!(output, "RETRIED BY {retry}");
+    }
+    if let Some(source) = &selected.supersedes {
+        let _ = writeln!(output, "SUPERSEDES {source}");
+    }
+    if let Some(replacement) = &selected.superseded_by {
+        let _ = writeln!(output, "SUPERSEDED BY {replacement}");
+    }
+    if let Some(reason) = &selected.supersession_fault {
+        let _ = writeln!(output, "{} {reason}", style.status_value("blocked", "SUPERSESSION FAULT"));
+    }
     let _ = writeln!(
         output,
         "STATE     {} · {}",
@@ -170,6 +186,11 @@ pub(crate) fn render_mission_run(
         if let Some(fault) = &run.scheduler_fault {
             let _ = writeln!(output, "SCHEDULER FAULT  {fault}");
         }
+        for program in &run.programs {
+            if let Some(fault) = &program.fault {
+                let _ = writeln!(output, "PROGRAM FAULT  {} ({}): {}", program.path, fault.scope, fault.reason);
+            }
+        }
     }
     if !selected.inputs.is_empty() {
         let _ = writeln!(output);
@@ -187,7 +208,7 @@ pub(crate) fn render_mission_run(
     if selected.steps.is_empty() {
         let _ = writeln!(output, "  {}", style.muted("No steps."));
     } else {
-        render_run_steps(&mut output, selected, &children, "  ", style);
+        render_run_steps(&mut output, selected, &children, "  ", style, now_unix_ms);
     }
     output
 }
@@ -441,6 +462,15 @@ fn render_object_fields(
         {
             continue;
         }
+        if key == "declared_admission" && let Value::Object(nested) = value {
+            if !nested.is_empty() {
+                let padding = " ".repeat(indent);
+                let _ = writeln!(output, "{padding}{}", style.heading("Declared admission — declared, not enforced."));
+                let _ = writeln!(output, "{padding}st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+                render_object_fields(output, nested, indent + 2, style, None);
+            }
+            continue;
+        }
         let padding = " ".repeat(indent);
         let label = field_label(key);
         match value {
@@ -578,16 +608,11 @@ pub(crate) fn render_attention_list(
         let _ = writeln!(output, "    subject: {}", item.subject);
         let _ = writeln!(
             output,
-            "    inspect: st alerts show {} --as {}",
+            "    inspect: fractal alerts show {} --as {}",
             item.subject, item.person
         );
         for action in &item.actions {
-            let command = action
-                .argv
-                .iter()
-                .map(|argument| shell_argument(argument))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let command = shell_command(&action.argv);
             let _ = writeln!(output, "    {}: {command}", action.label);
         }
     }
@@ -630,7 +655,7 @@ pub(crate) fn render_attention_show(
     if let Some(step) = &item.step {
         let _ = writeln!(output, "STEP      {step}");
     }
-    let _ = writeln!(output, "\n{}\n{}", style.heading("DETAIL"), item.detail);
+    let _ = writeln!(output, "\n{}\n{}", style.heading("DETAIL"), human_command_hints(&item.detail));
     if let Some(request) = &item.request {
         output.push_str(&render_structured_request(request, style));
     }
@@ -643,12 +668,7 @@ pub(crate) fn render_attention_show(
     if !item.actions.is_empty() {
         let _ = writeln!(output, "\n{}", style.heading("ACTIONS"));
         for action in &item.actions {
-            let command = action
-                .argv
-                .iter()
-                .map(|argument| shell_argument(argument))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let command = shell_command(&action.argv);
             let _ = writeln!(output, "  {}: {command}", action.label);
         }
     }
@@ -761,6 +781,60 @@ fn render_request_subjects(request: &Value, style: OutputStyle) -> String {
     output
 }
 
+/// Render legacy command hints without changing their structured or stored source.
+pub(crate) fn human_command_hints(text: &str) -> std::borrow::Cow<'_, str> {
+    let mut output = None::<String>;
+    let mut copied = 0;
+    for (start, _) in text.match_indices("st") {
+        if start > 0 && (text.as_bytes()[start - 1].is_ascii_alphanumeric()
+            || matches!(text.as_bytes()[start - 1], b'_' | b'/' | b'-' | b'.')) {
+            continue;
+        }
+        let tail = &text[start..];
+        let length = if tail.starts_with("st ") {
+            2
+        } else if tail.starts_with("st3 ") {
+            3
+        } else {
+            continue;
+        };
+        let command = tail[length..].split_whitespace().next().unwrap_or_default();
+        if !matches!(command.trim_end_matches(['`', '.', ',', ';', ')']),
+            "admission" | "agents" | "alerts" | "blobs" | "claude-channel" |
+            "conversations" | "devices" | "doctor" | "documents" | "fleet" |
+            "gh" | "lanes" | "launch" | "missions" | "repair" | "replication" |
+            "replication-worker" | "sekrets" | "service" | "setup" | "slo" |
+            "subject" | "terminals" | "tiles" | "uninstall" | "up" | "usage" | "work")
+        {
+            continue;
+        }
+        let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
+        output.push_str(&text[copied..start]);
+        output.push_str("fractal");
+        copied = start + length;
+    }
+    if let Some(mut output) = output {
+        output.push_str(&text[copied..]);
+        std::borrow::Cow::Owned(output)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+fn shell_command(argv: &[String]) -> String {
+    argv.iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            shell_argument(if index == 0 && matches!(argument.as_str(), "st" | "st3") {
+                "fractal"
+            } else {
+                argument
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(crate) fn shell_argument(value: &str) -> String {
     if !value.is_empty()
         && value.bytes().all(|byte| {
@@ -772,7 +846,50 @@ pub(crate) fn shell_argument(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_ms: u128) -> String {
+pub(crate) fn render_claim_lease(
+    subject: &str,
+    claimant: Option<&str>,
+    incarnation: Option<&str>,
+    expires: u128,
+    driver_held: Option<bool>,
+) -> String {
+    if driver_held == Some(true) {
+        return "The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop.".into();
+    }
+    if driver_held.is_none() {
+        return "Lease renewal ownership is unavailable. A managed Fractal driver renews its claims; do not start a renewal loop without checking ownership.".into();
+    }
+    let expiry = i64::try_from(expires)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || format!("{expires} milliseconds since the Unix epoch"),
+            |at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        );
+    let mut output = format!("The lease expires at {expiry}.");
+    if let Some(claimant) = claimant {
+        let _ = write!(
+            output,
+            " Renew it with: fractal work renew {} --as {}",
+            shell_argument(subject),
+            shell_argument(claimant)
+        );
+        if let Some(incarnation) = incarnation {
+            let _ = write!(output, " --incarnation {}", shell_argument(incarnation));
+        }
+    }
+    output
+}
+
+/// `source` is the step's SOURCE row (`source_cli::render_step_source`), printed under its
+/// definition when its run's revision has a source map.
+pub(crate) fn render_step_run(
+    step: &StepRunView,
+    style: OutputStyle,
+    now_unix_ms: u128,
+    driver_held: Option<bool>,
+    source: Option<&str>,
+) -> String {
     let mut output = String::new();
     let title = step.title.as_deref().unwrap_or(&step.step);
     let _ = writeln!(output, "{}  {title}", style.heading("STEP"));
@@ -786,6 +903,9 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
     let _ = writeln!(output, "MISSION RUN {}", step.run);
     let _ = writeln!(output, "GENERATION {}", step.generation);
     let _ = writeln!(output, "DEFINITION {}", step.definition_hash);
+    if let Some(source) = source {
+        output.push_str(source);
+    }
     let _ = writeln!(
         output,
         "UPDATED    {}",
@@ -835,7 +955,13 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
         let _ = writeln!(
             output,
             "  Lease        {}",
-            relative_time(expires, now_unix_ms)
+            render_claim_lease(
+                &step.subject,
+                step.claimant.as_deref(),
+                step.claim_incarnation.as_deref(),
+                expires,
+                driver_held,
+            )
         );
     }
     if let Some(timeout_ms) = step.timeout_ms {
@@ -909,9 +1035,16 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
         let _ = writeln!(output, "{}", style.heading("PERSON ANSWERS"));
         for response in &step.person_answers {
             let answer = response.answer.as_ref();
-            let outcome = answer
-                .and_then(|answer| answer["outcome"].as_str())
-                .unwrap_or(response.status.as_str());
+            let by_deadline = response.resolved_by.as_deref() == Some("deadline");
+            // A deadline's default carries the outcome of the answer it stands for; the line
+            // says it timed out, and the id names the default that applied.
+            let outcome = if by_deadline {
+                "timed_out"
+            } else {
+                answer
+                    .and_then(|answer| answer["outcome"].as_str())
+                    .unwrap_or(response.status.as_str())
+            };
             let id = answer
                 .and_then(|answer| answer["id"].as_str())
                 .map(|id| format!(" {id}"))
@@ -921,6 +1054,9 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
                 "  • {outcome}{id}: {}  ({}, {})",
                 response.summary, response.respondent, response.ask
             );
+            if by_deadline {
+                let _ = writeln!(output, "    Resolved by its deadline, not by the person");
+            }
             if let Some(sender_class) = &response.sender_class {
                 let _ = writeln!(output, "    Sender class: {sender_class}");
             }
@@ -1163,6 +1299,7 @@ fn render_run_steps(
     children: &BTreeMap<&str, Vec<&MissionRunView>>,
     indent: &str,
     style: OutputStyle,
+    now_unix_ms: u128,
 ) {
     let base_depth = run
         .steps
@@ -1218,6 +1355,9 @@ fn render_run_steps(
                 let _ = writeln!(output, "{indent}    {reason}");
             }
         }
+        if let Some(program) = run.programs.iter().find(|program| program.step_run == step.subject) {
+            render_program(output, program, indent, style, now_unix_ms);
+        }
         let prefix = format!("{}/", step.step);
         let nested = run
             .steps
@@ -1262,9 +1402,70 @@ fn render_run_steps(
                 child.steps.len()
             );
             if !matches!(child.status.as_str(), "completed" | "cancelled") {
-                render_run_steps(output, child, children, &format!("{indent}    "), style);
+                render_run_steps(output, child, children, &format!("{indent}    "), style, now_unix_ms);
             }
         }
+    }
+}
+
+/// How many of a program's newest keys `missions show` lists; `--json` carries every key read.
+const PROGRAM_KEYS_SHOWN: usize = 12;
+
+/// A program step's journal: the innermost open key, then each key's latest status, newest last.
+fn render_program(
+    output: &mut String,
+    program: &ProgramRunView,
+    indent: &str,
+    style: OutputStyle,
+    now_unix_ms: u128,
+) {
+    let journal = &program.journal;
+    let current = match journal.innermost() {
+        Some(entry) => format!("running {}", entry.key),
+        None => "idle".to_owned(),
+    };
+    let _ = write!(output, "{indent}  ↳ program · {current} · {} keys", journal.entries.len());
+    if journal.truncated {
+        let _ = write!(output, "+");
+    }
+    if let Some(at) = journal.last_entry_at_unix_ms {
+        let _ = write!(output, " · last entry {}", relative_time(at, now_unix_ms));
+    }
+    let _ = writeln!(output);
+    let hidden = journal.entries.len().saturating_sub(PROGRAM_KEYS_SHOWN);
+    if hidden > 0 {
+        let _ = writeln!(output, "{indent}    … {hidden} earlier keys");
+    }
+    for entry in &journal.entries[hidden..] {
+        let mut line = format!(
+            "{indent}    {} {}",
+            style.status_value(&entry.status, format!("{:<9}", entry.status)),
+            entry.key
+        );
+        match (entry.ms, entry.started_at_unix_ms) {
+            (Some(ms), _) => {
+                let _ = write!(line, " · {}", program_duration(u128::from(ms)));
+            }
+            (None, Some(started)) if entry.status == "started" => {
+                let _ = write!(line, " · running {}", program_duration(now_unix_ms.saturating_sub(started)));
+            }
+            _ => {}
+        }
+        if let Some(child) = &entry.child {
+            let _ = write!(line, " · waits on {child}");
+        }
+        if let Some(error) = &entry.error {
+            let _ = write!(line, " · {}", glance(error));
+        }
+        let _ = writeln!(output, "{line}");
+    }
+}
+
+fn program_duration(ms: u128) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else {
+        fractal_daemon::waiting_on::describe_age(ms)
     }
 }
 
@@ -1475,50 +1676,48 @@ mod tests {
     use fractal_daemon::model::{LoopRunView, MissionRunInput, UnderSpec};
 
     fn step(subject: &str, path: &str, status: &str) -> StepRunView {
-        StepRunView {
-            subject: subject.into(),
-            run: "mission-run/demo/run".into(),
-            generation: "run-generation/demo-generation".into(),
-            step: path.into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition-hash".into(),
-            status: status.into(),
-            attempt: 1,
-            assigned_to: Some("agent/demo/worker".into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: Some(path.replace('/', " ")),
-            goals: vec!["Complete the work.".into()],
-            constraints: vec!["Keep the proof.".into()],
-            under: Vec::<UnderSpec>::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: None,
-            wake: None,
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 1_000,
-            updated_at_unix_ms: 2_000,
-            person_answers: Vec::new(),
-        }
+        StepRunView { executions: None, subject: subject.into(),
+        run: "mission-run/demo/run".into(),
+        generation: "run-generation/demo-generation".into(),
+        step: path.into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition-hash".into(),
+        status: status.into(),
+        attempt: 1,
+        assigned_to: Some("agent/demo/worker".into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: Some(path.replace('/', " ")),
+        goals: vec!["Complete the work.".into()],
+        constraints: vec!["Keep the proof.".into()],
+        under: Vec::<UnderSpec>::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: None,
+        wake: None,
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 1_000,
+        updated_at_unix_ms: 2_000,
+        person_answers: Vec::new(), }
     }
 
     #[test]
@@ -1532,18 +1731,23 @@ mod tests {
             assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
             ask: "step-run/demo/ask".into(),
             status: "completed".into(),
-            summary: "Proceed".into(),
+            summary: "Proceed\nNote on hold (not selected): Revisit after launch.".into(),
             respondent: "assistant/chatgpt".into(),
             answered_at_unix_ms: 2_000,
-            answer: None,
+            answer: Some(serde_json::json!({
+                "type": "decision", "outcome": "accept", "id": "proceed", "label": "Proceed",
+                "option_notes": [{"id": "hold", "text": "Revisit after launch."}]
+            })),
+            resolved_by: None,
             evidence: vec![],
         });
-        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000);
+        let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false), None);
         assert!(rendered.contains("Sender class: external-assistant"));
         assert!(rendered.contains("Assistant grant: assistant-grant/test"));
         assert!(rendered.contains("(assistant/chatgpt, step-run/demo/ask)"));
         assert!(rendered.contains("Assistant owner: person/avery"));
         assert!(rendered.contains("Assistant session actor: assistant/chatgpt/session/test"));
+        assert!(rendered.contains("Note on hold (not selected): Revisit after launch."));
     }
 
     fn run(subject: &str, parent: Option<&str>, steps: Vec<StepRunView>) -> MissionRunView {
@@ -1561,6 +1765,11 @@ mod tests {
             root_revision: "root-revision".into(),
             root_mission_run: "mission-run/demo/run".into(),
             parent_step_run: parent.map(str::to_owned),
+            retry_of: None,
+            retried_by: Vec::new(),
+            supersedes: None,
+            superseded_by: None,
+            supersession_fault: None,
             workspace: "/workspace".into(),
             requester: "person/tester".into(),
             inputs: BTreeMap::from([(
@@ -1583,9 +1792,46 @@ mod tests {
             updated_at_unix_ms: 2_000,
             steps,
             loops: Vec::new(),
+            programs: Vec::new(),
             stuck_gates: Vec::new(),
             scheduler_fault: None,
         }
+    }
+
+    #[test]
+    fn mission_show_displays_exact_retry_links() {
+        let mut selected = run("mission-run/demo/retry", None, Vec::new());
+        selected.retry_of = Some("mission-run/demo/original".into());
+        selected.retried_by = vec![
+            "mission-run/demo/retry-again".into(),
+            "mission-run/demo/another-retry".into(),
+        ];
+        let rendered = render_mission_run_page(
+            &selected, std::slice::from_ref(&selected), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains("RETRY OF  mission-run/demo/original"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/retry-again"));
+        assert!(rendered.contains("RETRIED BY mission-run/demo/another-retry"));
+        let plain = run("mission-run/demo/original", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("RETRY OF"));
+        assert!(!rendered.contains("RETRIED BY"));
+    }
+
+    #[test]
+    fn mission_show_displays_supersession_links_and_admission_fault() {
+        let mut selected = run("mission-run/demo/current", None, Vec::new());
+        selected.supersedes = Some("mission-run/demo/previous".into());
+        selected.superseded_by = Some("mission-run/demo/replacement".into());
+        selected.supersession_fault = Some("revision old -> new: input branch changed kind from Text to Resource".into());
+        let rendered = render_mission_run_page(&selected, &[], OutputStyle::plain(), 3_000);
+        assert!(rendered.contains("SUPERSEDES mission-run/demo/previous"));
+        assert!(rendered.contains("SUPERSEDED BY mission-run/demo/replacement"));
+        assert!(rendered.contains("SUPERSESSION FAULT revision old -> new: input branch changed kind from Text to Resource"));
+        let plain = run("mission-run/demo/ordinary", None, Vec::new());
+        let rendered = render_mission_run_page(&plain, &[], OutputStyle::plain(), 3_000);
+        assert!(!rendered.contains("SUPERSED"));
+        assert!(!rendered.contains("SUPERSESSION FAULT"));
     }
 
     fn terminal(subject: &str, status: &str) -> SubjectStatus {
@@ -1641,6 +1887,19 @@ mod tests {
     }
 
     #[test]
+    fn declared_admission_group_uses_the_non_enforcement_contract() {
+        let rendered = render_human_value(&serde_json::json!({
+            "mission": {"declared_admission": {"lane": "check"}}
+        }), OutputStyle::plain());
+        assert!(rendered.contains("Declared admission — declared, not enforced."));
+        assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits."));
+        assert!(rendered.contains("check"));
+        assert!(!render_human_value(&serde_json::json!({
+            "declared_admission": {}
+        }), OutputStyle::plain()).contains("Declared admission"));
+    }
+
+    #[test]
     fn generic_human_output_renders_objects_without_json_syntax() {
         let value = serde_json::json!({
             "subject": "claim/example",
@@ -1687,8 +1946,33 @@ mod tests {
     }
 
     #[test]
+    fn human_command_hints_preserve_wire_text_and_noncommands() {
+        let wire = "close them with `st conversations cleanup --all --older-than 1h`; use st fleet join";
+        assert_eq!(human_command_hints(wire),
+            "close them with `fractal conversations cleanup --all --older-than 1h`; use fractal fleet join");
+        assert!(wire.contains("`st conversations cleanup"));
+        assert_eq!(human_command_hints("`st3 subject show daemon/node`"), "`fractal subject show daemon/node`");
+        for unchanged in ["first work", "st cannot retry", "ST_AGENT", "st3/fleet/id", "/usr/bin/st work"] {
+            assert!(matches!(human_command_hints(unchanged), std::borrow::Cow::Borrowed(_)));
+        }
+    }
+
+    #[test]
+    fn action_commands_only_rename_the_displayed_executable() {
+        for program in ["st", "st3", "fractal", "other"] {
+            let argv = vec![program.into(), "subject".into(), "st".into(), "two words".into()];
+            let expected = if program == "other" { "other" } else { "fractal" };
+            assert_eq!(shell_command(&argv), format!("{expected} subject st 'two words'"));
+            assert_eq!(argv[0], program);
+        }
+        assert_eq!(shell_command(&[]), "");
+    }
+
+    #[test]
     fn attention_list_shows_kind_age_targets_and_safe_commands() {
         let item = AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             kind: "fault".into(),
             episode: "failure-one".into(),
             priority: "high".into(),
@@ -1701,7 +1985,7 @@ mod tests {
             message_id: None, answers: Vec::new(), conversation: None,
             prompt_call: None,
             title: "Fabric needs review".into(),
-            detail: "The queue did not recover.".into(),
+            detail: "The queue did not recover. Inspect `st subject show daemon/node`.".into(),
             mission: Some("mission/fabric".into()),
             mission_run: Some("mission-run/fabric/one".into()),
             step: None,
@@ -1734,13 +2018,19 @@ mod tests {
         assert!(rendered.contains("--reason 'It is fixed'"));
         assert!(!rendered.contains("The queue did not recover."));
         assert!(
-            rendered.contains("inspect: st alerts show attention/fabric --as person/alex")
+            rendered.contains("inspect: fractal alerts show attention/fabric --as person/alex")
         );
+        assert!(rendered.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
+        assert_eq!(item.actions[0].argv[0], "st3");
 
         let shown = render_attention_show(&item, OutputStyle::plain(), 180_000);
         assert!(shown.contains("ALERT  Fabric needs review"));
         assert!(shown.contains("The queue did not recover."));
+        assert!(shown.contains("Inspect `fractal subject show daemon/node`."));
+        assert_eq!(serde_json::to_value(&item).unwrap()["detail"],
+            "The queue did not recover. Inspect `st subject show daemon/node`.");
         assert!(shown.contains("TARGETS\n  doc/fabric/report@abc"));
+        assert!(shown.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
     }
 
     #[test]
@@ -1844,6 +2134,40 @@ mod tests {
         assert!(rendered.contains("loop best-of-n · running · round 2/5"));
         assert!(rendered.contains("2 parallel · 3 candidates · winner 2"));
         assert!(rendered.contains("best quality=0.75"));
+    }
+
+    #[test]
+    fn mission_view_shows_each_program_key_and_the_program_fault() {
+        use fractal_daemon::program_journal::{ProgramFault, ProgramJournal};
+        let program_step = step("step-run/demo-generation/land", "land", "working");
+        let mut root = run("mission-run/demo/run", None, vec![program_step]);
+        let rows = [
+            (serde_json::json!({"key": "review", "status": "started", "child": "mission-run/demo/review"}), 2_000),
+            (serde_json::json!({"key": "merge", "status": "failed", "ms": 900, "error": {"_tag": "Conflict"}}), 1_500),
+            (serde_json::json!({"key": "merge", "status": "started"}), 1_400),
+            (serde_json::json!({"key": "render", "status": "completed", "ms": 2_500}), 1_200),
+        ];
+        root.programs.push(ProgramRunView {
+            step_run: "step-run/demo-generation/land".into(),
+            path: "land".into(),
+            attempt: 1,
+            bundle_hash: "a".repeat(64),
+            stalled_after_ms: 600_000,
+            journal: ProgramJournal::fold(rows.iter().map(|(fields, at)| (fields, *at)), false),
+            fault: Some(ProgramFault {
+                scope: "program/stalled".into(),
+                reason: "no journal entry for 10m; open key `review`".into(),
+            }),
+        });
+
+        let rendered = render_mission_run(&root, &[root.clone()], OutputStyle::plain(), 62_000);
+
+        assert!(rendered.contains("PROGRAM FAULT  land (program/stalled): no journal entry for 10m; open key `review`\n"), "{rendered}");
+        assert!(rendered.contains("  ↳ program · running review · 3 keys · last entry 1m ago\n"), "{rendered}");
+        assert!(rendered.contains("    completed render · 2s\n"), "{rendered}");
+        assert!(rendered.contains("    failed    merge · 900ms · {\"_tag\":\"Conflict\"}\n"), "{rendered}");
+        assert!(rendered.contains("    started   review · running 1m · waits on mission-run/demo/review\n"), "{rendered}");
+        assert!(!rendered.contains("watching"), "{rendered}");
     }
 
     #[test]
@@ -1984,13 +2308,33 @@ mod tests {
         claimed.execution_elapsed_ms = 1_000;
         claimed.timeout_ms = Some(60_000);
 
-        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000);
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), None);
 
         assert!(rendered.contains("SUBJECT    step-run/demo-generation/build"));
         assert!(rendered.contains("GENERATION run-generation/demo-generation"));
-        assert!(rendered.contains("Lease        in 1m"));
+        assert!(rendered.contains("Lease        The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop."));
+        assert!(!rendered.contains("fractal work renew"));
         assert!(rendered.contains("Execution    1000ms / 60000ms · active 1s ago"));
         assert!(rendered.contains("• Complete the work."));
+        assert!(!rendered.contains("SOURCE"));
+
+        let source = "SOURCE     schickling/factory@2e047be graph/demo/mission.ts:7-11\n  via      graph/demo/steps.ts:6-10\n";
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(true), Some(source));
+        assert!(rendered.contains(&format!("DEFINITION {}\n{source}UPDATED", claimed.definition_hash)), "{rendered}");
+    }
+
+    #[test]
+    fn unmanaged_claim_shows_exact_expiry_and_fenced_renewal_command() {
+        let mut claimed = step("step-run/demo-generation/build", "build", "claimed");
+        claimed.claimant = Some("person/operator".into());
+        claimed.claim_expires_at_unix_ms = Some(62_001);
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
+        assert!(rendered.contains("Lease        The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew step-run/demo-generation/build --as person/operator\n"));
+        assert!(!rendered.contains("st driver renews"));
+
+        claimed.claim_incarnation = Some("incarnation/manual".into());
+        let rendered = render_step_run(&claimed, OutputStyle::plain(), 2_000, Some(false), None);
+        assert!(rendered.contains("--as person/operator --incarnation incarnation/manual\n"));
     }
 
     #[test]

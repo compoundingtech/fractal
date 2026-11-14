@@ -50,8 +50,8 @@ export interface TurnInput {
   readonly from: { readonly _tag: 'person'; readonly person: CastPerson } | { readonly _tag: 'mail'; readonly agent: CastAgent; readonly title: string }
   readonly text: string
   readonly steps: readonly TurnStep[]
-  /** Final status; omitted while the turn is still running. */
-  readonly status?: 'completed' | 'failed' | 'waiting'
+  /** Status after the steps; omitted when no status update is needed. */
+  readonly status?: 'completed' | 'failed' | 'waiting' | 'running'
   /** Milliseconds between consecutive entries. */
   readonly stepMs?: number
 }

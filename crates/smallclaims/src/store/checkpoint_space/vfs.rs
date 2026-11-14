@@ -155,6 +155,15 @@ impl ProofVfs {
         {
             bail!("checkpoint proof VFS unavailable: incomplete default VFS methods");
         }
+        // The Unix VFS resolves symlinks in xFullPathname before xOpen. Compare its
+        // filenames with physical admission roots too (not /tmp versus /private/tmp).
+        let mut normalized = guard.clone();
+        normalized.live = guard.live.canonicalize()?;
+        normalized.scratch = guard.scratch.canonicalize()?;
+        normalized.temp = guard.temp.canonicalize()?;
+        let mut wal = normalized.live.as_os_str().to_owned();
+        wal.push("-wal");
+        normalized.live_wal = wal.into();
         // SQLite allocates file storage aligned for its default VFS. Our header is followed by
         // the default VFS file, aligned to max_align_t, within the advertised size.
         let name = CString::new(format!(
@@ -170,7 +179,7 @@ impl ProofVfs {
             vfs,
             base,
             name,
-            guard: guard.clone(),
+            guard: normalized,
             files: AtomicUsize::new(0),
             self_test_refuse: AtomicBool::new(false),
             self_test_hits: AtomicUsize::new(0),
@@ -269,16 +278,17 @@ impl ProofVfs {
         })();
         data.self_test_refuse.store(false, Ordering::Release);
         let hits = data.self_test_hits.load(Ordering::Acquire);
-        *data
+        let refusal = data
             .guard
             .failure
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         let cleanup = owner.finish(path);
         cleanup?;
         if hits == 0 || attempt.is_ok() {
             bail!(
-                "checkpoint proof VFS self-test failed before copy at {}: over-budget SQLite write was not refused",
+                "checkpoint proof VFS self-test failed before copy at {}: over-budget SQLite write was not refused (write hits={hits}, attempt={attempt:?}, refusal={refusal:?})",
                 path.display()
             );
         }
@@ -317,13 +327,8 @@ impl Data {
     fn refuse(&self, message: String) -> c_int {
         let scratch_state = filesystem(&self.guard.scratch);
         let live_state = filesystem(&self.guard.live);
-        let scratch_required = self.guard.budget
-            + if self.guard.shared_device {
-                self.guard.reserve
-            } else {
-                0
-            }
-            + REACTION_MARGIN;
+        // The budget is what admission left of the free bytes it measured after the live reserve
+        // and the margin, not a requirement: free space below it at a refusal is space used since.
         let scratch_available = scratch_state
             .as_ref()
             .map(|state| state.available.to_string())
@@ -331,10 +336,6 @@ impl Data {
         let scratch_allocated = super::existing_scratch_bytes(&self.guard.scratch)
             .map(|value| value.to_string())
             .unwrap_or_else(|error| format!("UNKNOWN ({error})"));
-        let scratch_deficit = scratch_state
-            .as_ref()
-            .map(|state| scratch_required.saturating_sub(state.available).to_string())
-            .unwrap_or_else(|_| "UNKNOWN".into());
         let live_available = live_state
             .as_ref()
             .map(|state| state.available.to_string())
@@ -345,12 +346,11 @@ impl Data {
             .map(|state| required_live.saturating_sub(state.available).to_string())
             .unwrap_or_else(|_| "UNKNOWN".into());
         let reason = format!(
-            "checkpoint scratch refused before SQLite write: {message}; scratch={} observed_st_blocks_bytes={} available={} required={} deficit={} budget={}; live={} available={} reserve={} reaction_margin={} required={} deficit={}; controlling component=proof VFS",
+            "checkpoint scratch refused before SQLite write: {message}; scratch={} observed_st_blocks_bytes={} available={} available_at_admission={} budget={}; live={} available={} reserve={} reaction_margin={} required={} deficit={}; controlling component=proof VFS",
             self.guard.scratch.display(),
             scratch_allocated,
             scratch_available,
-            scratch_required,
-            scratch_deficit,
+            self.guard.initial_available,
             self.guard.budget,
             self.guard.live.display(),
             live_available,
@@ -419,11 +419,6 @@ impl Data {
             return self
                 .refuse("checkpoint proof VFS refused an unclassified or live-file write".into());
         }
-        if amount > WINDOW {
-            return self.refuse(format!(
-                "checkpoint proof VFS write request {amount} exceeds {WINDOW} byte bound"
-            ));
-        }
         let mut window = self
             .window
             .lock()
@@ -481,6 +476,9 @@ impl Data {
         window.max_request = window.max_request.max(amount);
         window.total_requested = window.total_requested.saturating_add(amount);
         let temp_separate = self.guard.temp_device != self.guard.scratch_device;
+        // Free space is measured again after each WINDOW of requests. A request larger than
+        // the window, such as the size hint for a large commit's new pages, is measured just
+        // before it and charged in full below.
         if !window.ready || window.requests_since_refresh.saturating_add(amount) > WINDOW {
             let started = Instant::now();
             if let Err(error) = self.guard.check_now() {
@@ -1042,6 +1040,26 @@ mod tests {
     }
 
     #[test]
+    fn symlinked_admission_roots_still_reach_the_write_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let physical = dir.path().join("physical");
+        fs::create_dir(&physical).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let live = alias.join("live.sqlite3");
+        fs::write(&live, [0; 4096]).unwrap();
+        let scratch = alias.join("scratch");
+        let owner = ProofOwnership::acquire(&scratch).unwrap();
+        let vfs = ProofVfs::register(&guard(&live, &scratch, 1024 * 1024)).unwrap();
+        let probe = scratch.join("proof-vfs-test.sqlite3");
+        vfs.self_test(&owner, &probe).unwrap();
+        assert!(vfs.data.as_ref().unwrap().self_test_hits.load(Ordering::Acquire) > 0);
+        vfs.check_closed().unwrap();
+        assert!(!probe.exists());
+        assert!(!PathBuf::from(format!("{}.owner", probe.display())).exists());
+    }
+
+    #[test]
     fn unavailable_write_guard_refuses_the_proof_before_copy() {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("live.sqlite3");
@@ -1416,7 +1434,9 @@ mod tests {
         let vfs = ProofVfs::register(&guard).unwrap();
         let copy = scratch.join("proof-mmap-control.sqlite3");
         owner.mark(&copy).unwrap();
-        let name = CString::new(copy.as_os_str().as_bytes()).unwrap();
+        // Direct xOpen callers must provide the resolved name SQLite normally supplies.
+        let resolved = scratch.canonicalize().unwrap().join(copy.file_name().unwrap());
+        let name = CString::new(resolved.as_os_str().as_bytes()).unwrap();
         let data = vfs.data.as_ref().unwrap();
         // SAFETY: SQLite's allocator supplies an aligned szOsFile allocation. The wrapped
         // xOpen initializes it; xClose runs before sqlite3_free.
@@ -1535,5 +1555,55 @@ mod tests {
         drop(db);
         vfs.check_closed().unwrap();
         owner.finish(&copy).unwrap();
+    }
+
+    /// One commit of 24 MiB of new pages makes SQLite hint the whole growth in one request.
+    fn commit_one_large_transaction(vfs: &ProofVfs, copy: &Path) -> rusqlite::Result<()> {
+        let db = Connection::open_with_flags_and_vfs(
+            copy,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            vfs.name(),
+        )?;
+        db.execute_batch(
+            "PRAGMA mmap_size=0; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-65536;
+             CREATE TABLE payload(bytes BLOB);
+             BEGIN;
+             WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<6144)
+             INSERT INTO payload SELECT zeroblob(4000) FROM seq;
+             COMMIT;",
+        )
+    }
+
+    #[test]
+    fn a_request_larger_than_the_measurement_window_is_charged_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        fs::write(&live, [0; 4096]).unwrap();
+        for (budget, fits) in [(1024 * 1024 * 1024, true), (20 * 1024 * 1024, false)] {
+            let scratch = dir.path().join(format!("scratch-{budget}"));
+            let owner = ProofOwnership::acquire(&scratch).unwrap();
+            let space = guard(&live, &scratch, budget);
+            let vfs = ProofVfs::register(&space).unwrap();
+            vfs.self_test(&owner, &scratch.join("proof-vfs-test.sqlite3"))
+                .unwrap();
+            let copy = scratch.join("proof-large-request.sqlite3");
+            owner.mark(&copy).unwrap();
+            let result = space.explain(
+                commit_one_large_transaction(&vfs, &copy).map_err(anyhow::Error::from),
+            );
+            let (_, refreshes, max_request, ..) = vfs.metrics();
+            if fits {
+                result.unwrap();
+                assert!(max_request > WINDOW, "no request over {WINDOW}: {max_request}");
+                assert!(refreshes > 1, "the large request was charged without measuring again");
+            } else {
+                // A request is still charged in full: one that would cross the budget refuses.
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains("scratch budget refused"), "{message}");
+                assert!(allocated(&copy).unwrap() <= budget, "{message}");
+            }
+            vfs.check_closed().unwrap();
+            owner.finish(&copy).unwrap();
+        }
     }
 }

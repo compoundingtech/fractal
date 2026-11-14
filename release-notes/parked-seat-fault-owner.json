@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A parked seat raises one fault to its owner per park, and its card reads failed until it runs again",
+  "replay": { "status": "none", "detail": "The fault and the card are derived on read from existing crash-loop decisions and runtime observations." },
+  "schema": { "status": "none", "detail": "No persisted schema or migration changes." },
+  "rules": { "status": "none", "detail": "No checkpoint, retention or replication rule changes." },
+  "compatibility": { "status": "changed", "detail": "The parked-seat fault no longer names a fixed person reviewer. Its owner is the agent that declared the seat when no mission run owns it, else the run's requester, else the fleet's fault agent, as other faults route. Its episode is the first crash-loop raise since the seat last ran, so failed retries within one park send no further fault messages; it clears when the seat runs again, and a raise for an earlier launch of the same presentation lineage now counts. A parked seat's card reads state failed with the park reason as its fault, so clients group it with faults rather than stopped seats." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "A seat already parked raises its fault to its owner once after the upgrade, under a new episode." },
+  "recovery": { "status": "none", "detail": "Rolling back restores the earlier routing; no durable state changes shape." }
+}

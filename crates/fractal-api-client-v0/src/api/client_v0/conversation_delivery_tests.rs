@@ -129,6 +129,8 @@ impl AnnotatedPage {
             crate::external_sessions::TimelineOrder::TimestampSequence,
             None,
             CLIENT_MAX_PAGE_ITEMS,
+            true,
+            &mut conversation_blocks::NativeReadAdmission::default(),
         )
         .unwrap()
         .items

@@ -27,7 +27,7 @@ pub fn claim(
         kind: &str,
         id: &str,
         extra: &[(&str, Value)],
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         let mut fields = BTreeMap::from([("subagent_id".into(), json!(id))]);
         for (name, value) in extra {
             fields.insert((*name).into(), value.clone());
@@ -43,7 +43,7 @@ pub fn claim(
         })
     }
 
-pub fn appear(store: &Store, id: &str, lease: u64) -> Result<(ClaimRecord, bool), St3Error> {
+pub fn appear(store: &Store, id: &str, lease: u64) -> Result<(ClaimRecord, bool), FractalError> {
         claim(
             store,
             "subagent.appeared",

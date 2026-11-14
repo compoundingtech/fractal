@@ -36,7 +36,7 @@ fn adapter_route(state: &AppState, actor: &str) -> Result<(Vec<String>, String),
         })
         .and_then(|(sources, target)| sources.zip(target));
     let Some((sources, target)) = route else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "an adapter requires an enrolled program seat",
         )));
@@ -52,7 +52,7 @@ fn adapter_route(state: &AppState, actor: &str) -> Result<(Vec<String>, String),
             != sources.len()
         || !target.starts_with("agent/")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "enrollment requires up to sixteen distinct external accounts and one agent destination",
         )));
@@ -94,7 +94,7 @@ pub async fn deliveries(
         let (items, frontier, through) = blocking_store(move || {
             let through = store.index()?;
             if after > through {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "adapter-resync-required",
                     "the local delivery frontier moved backwards; reload retained delivery state",
                 )
@@ -139,14 +139,14 @@ pub async fn import_message(
     let source = &request.from;
     if !actor.starts_with("agent/") || !external_source(source) || !request.to.starts_with("agent/")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "an adapter import needs its agent actor and an external provider account",
         )));
     }
     let (sources, target) = adapter_route(&state, actor)?;
     if !sources.contains(source) || target != request.to {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "the program-seat declaration does not authorize this exact external sender and destination",
         )));

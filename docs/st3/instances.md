@@ -1,14 +1,14 @@
-# Instances: a second st on one machine
+# Instances: a second Fractal on one machine
 
-`st --instance NAME` (or `ST_INSTANCE=NAME` in the environment) runs a second, fully separate
+`fractal --instance NAME` (or `ST_INSTANCE=NAME` in the environment) runs a second, fully separate
 Fractal next to the default one. Use it to try a build without risking your working install, and
 to see the first run again from a clean start.
 
 ```sh
-st --instance trial setup
-st --instance trial service install
-st --instance trial agents ls
-st --instance trial uninstall --yes --erase-local-graph
+fractal --instance trial setup
+fractal --instance trial service install
+fractal --instance trial agents ls
+fractal --instance trial uninstall --yes --erase-local-graph
 ```
 
 After instance startup, `agents ls` may report that its initial roster is still being
@@ -16,7 +16,7 @@ prepared. After changing an agent it can show the previous publication. A client
 its own write uses that instance daemon's receipt `store_index` as `min_cut` and checks the
 served snapshot; a receipt from the default install or another host is not interchangeable.
 
-`st --instance NAME setup` runs the first-run questions for the instance: it installs `st3`, `st` and
+`fractal --instance NAME setup` runs the first-run questions for the instance: it installs `st3`, `st` and
 `pty` into the instance's own `bin/` (nothing goes on your login PATH or into `~/.local/bin`), and
 the built-in Fractal Assistant works in the instance's work folder, `work/agents/`. Run the instance's commands from
 there, or with `--instance`.
@@ -65,7 +65,8 @@ an existing migrated root, except that `work/` stays at its legacy location):
 | `bin/` | the `st3`, `st` and `pty` that the installer puts there | |
 | `claude/` | the instance's Claude account, plugins and `st` skill | `CLAUDE_CONFIG_DIR` |
 | `codex/` | the instance's Codex account and `st` skill | `CODEX_HOME` |
-| `home/` | the skill copy for pi, omp and opencode (`home/.agents/skills`) | |
+| `pi/` | the instance's shared pi/omp profile, login and native sessions | `PI_CODING_AGENT_DIR` |
+| `home/` | shared skills (`home/.agents/skills`) | |
 | `work/` | the instance's work root: default workspaces for new agents in `work/agents/NAME`, including the Fractal Assistant | |
 | `app/` | the macOS app bundle | |
 
@@ -73,6 +74,20 @@ The instance is applied to the environment once, at startup, before any thread e
 and everything it starts (seats, harnesses, hooks) inherit it, so code that reads `XDG_*_HOME`
 itself lands in the instance without knowing about instances. Seats of an instance sign in to
 Claude and Codex separately from your own; that is what makes the first run clean.
+
+Native-session inventory, search, session lists and conversation timelines use a discovery-only
+view at `state/native-sessions/`, never the login user's HOME. Checked `.claude`, `.codex` and
+`.omp/agent` aliases point to this instance's `claude/`, `codex/` and `pi/` directories. No other
+login-home native stores are scanned. The shared pi/omp profile is exposed once as omp;
+distinct saved-session labels for pi and omp within a named instance are not supported.
+`PI_CODING_AGENT_DIR` selects that same `pi/` profile for launched agents. Managed sessions with
+explicit driver-owned transcript paths retain those paths.
+
+HOME is unchanged for the daemon, drivers, hooks and their children: git, ssh, gh and shell rc
+files retain the login environment. The default instance keeps its existing discovery behavior.
+Before upgrading a named instance that uses omp, sign in to the instance's `pi/` profile or
+explicitly migrate its existing pi/omp credentials and configuration there while agents are
+stopped. Login-home profiles and sessions are not copied or deleted automatically.
 
 Beyond directories, an instance has its own names:
 
@@ -103,32 +118,33 @@ scripts/install --instance trial            # from a source build
 ```
 
 `--bin-dir` still wins over the instance's directory. After the install the instance runs through
-`~/.st-instance/NAME/bin/st`, or any `st` with `--instance NAME`. Your login `PATH` is not changed.
+`~/.st-instance/NAME/bin/st`, or any `fractal` with `--instance NAME`. Your login `PATH` is not changed.
 
 ## Uninstalling
 
-`st --instance NAME uninstall` removes the instance's service definitions and the one directory, except
+`fractal --instance NAME uninstall` removes the instance's service definitions and the one directory, except
 the work folder (`work/`) when anything is in it: that holds what your agents made, so uninstall
 keeps it, says so, and removes everything else. An empty work folder goes with the
 instance. Then the empty `~/.st-instance` goes when it was the last. It refuses to run if anything it would remove lies
 outside that directory (for example a `state_dir` set elsewhere in the instance's `config.toml`).
 `--dry-run` lists what it would remove.
 
-`st uninstall` on the default install also removes: the copies of
+`fractal uninstall` on the default install also removes: the copies of
 the `st` skill that seats install into `~/.claude/skills` and `~/.agents/skills` (only when
-unchanged), st's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
+unchanged), Fractal's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
 still leaves the work folder (`~/st`, see below) and what is in it, the account-wide lingering
-setting, and the managed Claude Code policy, which needs root (`st3 claude-channel
+setting, and the managed Claude Code policy, which needs root (`fractal claude-channel
 uninstall-policy`).
 
 ## Proof
 
-`scripts/st3-instance-isolation/run ST3 PTY [OUT]` starts the default st in a throwaway `HOME` with a
+`scripts/fractal-instance-isolation/run ST3 PTY [OUT]` starts the default Fractal in a throwaway `HOME` with a
 scrubbed environment and installs its skill, snapshots every path, mode, link target and file hash,
 then starts an instance, installs its skill, uninstalls it and snapshots again. The snapshots must be
 identical and `~/.st-instance` gone. It then removes the default install and requires no file to
 remain. It uses no service manager and never reads or writes the machine's real install. Run it
-outside a seat's process tree, because a daemon refuses a process that descends from another seat.
+outside a seat's process tree because it acts as a person; a daemon refuses a mutation from a seat's
+process tree whose actor is not that seat (`foreign-agent-actor`).
 
 `scripts/install-macos-test` covers an instance install beside a default one whose plists,
 app and commands stay byte-identical.
@@ -142,12 +158,12 @@ that instance home.
 
 Every install has one work root, the folder agents work in unless you point one at another folder.
 It is `~/st` for the default install and `~/.st-instance/NAME/work` for an instance. New agents get
-a folder inside it, `agents/NAME`, never the home folder. `st setup` creates the work
+a folder inside it, `agents/NAME`, never the home folder. `fractal setup` creates the work
 root and prints it once. Change it with `work_root = "/absolute/path"` in `config.toml`.
 On macOS, keep every agent's work folder outside Desktop, Documents, Downloads,
 iCloud Drive and removable volumes, including explicitly named agent or mission
 folders. Existing agents retain their folders; move protected work into an
 unprotected workspace rather than granting broad daemon or agent access. Touching
 a protected folder may produce `Operation not permitted` or a macOS privacy prompt.
-`st uninstall` never removes work-root contents: it prints `kept` with the path
+`fractal uninstall` never removes work-root contents: it prints `kept` with the path
 (and `--dry-run` prints `keep`).

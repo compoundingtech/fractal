@@ -7,13 +7,13 @@ pub fn plan_completed_agents_tx(
     next: &MissionSpec,
     compatible: &BTreeSet<String>,
     generation: &str,
-) -> Result<Vec<(DesiredSubject, Option<String>)>, St3Error> {
+) -> Result<Vec<(DesiredSubject, Option<String>)>, FractalError> {
     let selected_run = mission_run_view_tx(transaction, &current.id).map_err(internal)?;
     if selected_run.generation != current.generation
         || selected_run.status != current.status
         || selected_run.phase != current.phase
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "stale-run-generation",
             "the run changed before revision seat carry",
         ));
@@ -33,7 +33,7 @@ pub fn plan_completed_agents_tx(
             .values()
             .any(|view| specs[view.step.as_str()].declarations_kdl.is_some())
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unsafe-completed-declaration-carry",
             "a failed run's cleanup may have ended completed declarations; change the declaring step explicitly to execute it again when reopening",
         ));
@@ -72,7 +72,7 @@ pub fn plan_completed_agents_tx(
         }
         let spec = specs[view.step.as_str()];
         let refuse = || {
-            St3Error::new(
+            FractalError::new(
                 "unsafe-completed-declaration-carry",
                 format!(
                     "completed step `{}` owns `{}`; revision can carry only unchanged agent declarations with stable names and launch configuration. Change the declaring step explicitly to execute it again",
@@ -161,7 +161,7 @@ pub fn carry_completed_agents_tx(
     compatible: &BTreeSet<String>,
     generation: &str,
     batch_id: Option<&str>,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let planned = plan_completed_agents_tx(transaction, current, next, compatible, generation)?;
     let mut claims = Vec::new();
     for (desired, previous_step) in planned {

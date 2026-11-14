@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The iOS offline banner's reconnect action retries a failed or refused Fabric carrier as well as any existing collections feed, so restored grants can reconnect without leaving the foreground.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or claim-fold changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored data or wire schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Fabric admission, route fallback, retry timers and the first-collections-snapshot definition of live are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The existing carrier retry and collections reconnect operations are reused; no server change is required."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No migration or configuration change is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting the app change restores the previous reconnect behavior without changing persisted state."
+  }
+}

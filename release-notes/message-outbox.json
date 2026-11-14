@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The graph gains a member-local outbox for messages a graph write sends, and the daemon drains it to the messages shard after each commit; nothing queues a message in this build, so the outbox stays empty and the drainer idle (db break-up step 4c, the outbox)",
+  "replay": {"status": "none", "detail": "No claim is written differently: nothing queues a message yet, so every message is appended where it was before. A queued message, once a later release queues them, drains to the shard through the shard's own append path, or to the graph as an ordinary message.sent claim when the shard refuses it three times or did not open."},
+  "schema": {"status": "changed", "detail": "New member-local table local_message_outbox with its order index, created empty; no user_version change and no change to any replicated table. It never replicates and is in no digest."},
+  "rules": {"status": "none", "detail": "No admission or eligibility rule changes. The shard admits a drained message as it admits any append: an agent's or the daemon's message.sent, never a person's or an external assistant's."},
+  "compatibility": {"status": "changed", "detail": "Idle in this build: the daemon checks the outbox once at startup and after commits with one read of the table, and finds it empty. A later release fills it from graph transactions; a rollback from that release to this build drains what it left, exactly once by subject. Archives are byte-identical while the outbox is empty; a live backup export drains the outbox first, and an export, live or offline, refuses while a message remains in it rather than leave pending mail out."},
+  "downtime": {"status": "none", "detail": "No migration: the table is created empty."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "Rolling back to an earlier build leaves the empty table unread, which loses nothing because this build queues nothing."}
+}

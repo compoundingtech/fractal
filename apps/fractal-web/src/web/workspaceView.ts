@@ -1,20 +1,35 @@
+import { isMissionRef } from '../missions/missionTitle.ts'
+
 /**
- * What the workspace body shows for the selected pane. The thread, terminal and document subjects have web surfaces; any
- * other pane states its own unavailability instead of repeating the transcript under a different tab.
+ * What the workspace body shows for the selected pane. Supported subjects and app screens have web surfaces;
+ * an unknown pane states its own unavailability instead of repeating the transcript under a different tab.
  */
 export type WorkspaceView =
   | { readonly _tag: 'Thread' }
   | { readonly _tag: 'Terminal'; readonly ref: TerminalRef }
-  | { readonly _tag: 'Missions' }
+  | { readonly _tag: 'Missions'; readonly mission?: string }
+  | { readonly _tag: 'Usage' }
+  | { readonly _tag: 'Alert'; readonly id: string }
   | { readonly _tag: 'Document'; readonly ref: `doc/${string}` }
   | { readonly _tag: 'ViewUnavailable'; readonly ref: string; readonly reason: string }
 
 /** A terminal subject address, as `terminalSubjectForAgent` and the fleet projection produce it. */
 export type TerminalRef = `terminal/${string}`
-const isTerminalRef = (ref: string): ref is TerminalRef => ref.startsWith('terminal/')
+export const isTerminalRef = (ref: string): ref is TerminalRef => ref.startsWith('terminal/')
 /** The Missions screen's tab, opened from the sidebar. */
 export const MISSIONS_REF = 'missions'
 const isDocumentRef = (ref: string): ref is `doc/${string}` => ref.startsWith('doc/')
+
+/**
+ * An alert's details view is reached by its URL alone (`?open=alert/<id>:detail`): a passing view over a list that
+ * empties as it is worked through, so it never accumulates in the workspace's tabs.
+ */
+const ALERT_PREFIX = 'alert/'
+export const isAlertRef = (ref: string): boolean => ref.startsWith(ALERT_PREFIX)
+export const alertPaneId = (id: string): string => `${ALERT_PREFIX}${id}:detail`
+/** The alert a selected pane id shows, if it shows one. */
+export const alertIdOfPane = (pane: string): string | undefined =>
+  isAlertRef(pane) && pane.endsWith(':detail') ? pane.slice(ALERT_PREFIX.length, -':detail'.length) : undefined
 
 export const workspaceView = (pane: { readonly ref: string } | undefined): WorkspaceView =>
   pane === undefined
@@ -23,6 +38,12 @@ export const workspaceView = (pane: { readonly ref: string } | undefined): Works
       ? { _tag: 'Terminal', ref: pane.ref }
       : pane.ref === MISSIONS_REF
         ? { _tag: 'Missions' }
+      : isMissionRef(pane.ref)
+        ? { _tag: 'Missions', mission: pane.ref }
+      : isAlertRef(pane.ref)
+        ? { _tag: 'Alert', id: pane.ref.slice(ALERT_PREFIX.length) }
+      : pane.ref === 'monitor/quota'
+        ? { _tag: 'Usage' }
         : isDocumentRef(pane.ref)
           ? { _tag: 'Document', ref: pane.ref }
         : { _tag: 'ViewUnavailable', ref: pane.ref, reason: 'This web client does not render this view yet.' }
@@ -35,6 +56,7 @@ const SCREEN_LABELS: Readonly<Record<string, string | undefined>> = { [MISSIONS_
  * screen's name, else the ref's last segment in sentence case like "Thread".
  */
 export const paneTabLabel = (ref: string, title: string | undefined): string => {
+  if (isMissionRef(ref)) return 'Missions'
   if (title !== undefined) return title
   const label = SCREEN_LABELS[ref] ?? ref.split('/').at(-1) ?? ref
   return label.charAt(0).toUpperCase() + label.slice(1)
@@ -67,8 +89,10 @@ export const retainPane = ({ panes, ref, name, limit }: {
 export const workspaceHref = (ref: string, pane: string, search: string): string => {
   const path = `/w/${ref.split('/').map(encodeURIComponent).join('/')}?open=${encodeURIComponent(pane)}`
   if (import.meta.env.DEV) {
-    const scenario = new URLSearchParams(search).get('scenario')
-    if (scenario !== null) return `${path}&scenario=${encodeURIComponent(scenario)}`
+    const params = new URLSearchParams(search)
+    const scenario = params.get('scenario')
+    const attention = params.get('attention')
+    if (scenario !== null) return `${path}&scenario=${encodeURIComponent(scenario)}${attention === null ? '' : `&attention=${encodeURIComponent(attention)}`}`
   }
   return path
 }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Remove the optional diagnostic-code data-model change after code review. Keep only the shared notice icon-size constant and top-aligned harness story content; retain main's existing Notice projection, rendering and revision behavior.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "Notice schemas are unchanged from main; no storage or wire schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule or digest changes." },
+  "compatibility": { "status": "none", "detail": "Diagnostic codes remain in detail exactly as on main, preserving stranded rendering and code-only content revisions. Icon dimensions remain 14px." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "No persisted data changes; nothing to recover." }
+}

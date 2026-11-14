@@ -6,3 +6,7 @@ assert.equal(ago('2026-09-25T08:24:30Z', now), '30s');
 assert.equal(ago('2026-09-25T07:25:00Z', now), '1h');
 assert.equal(ago('2026-09-22T08:25:00Z', now), '3d');
 assert.equal(ago('not a time', now), 'unknown');
+
+import { within } from '@fractal/views/time';
+assert.equal(within('2026-09-25T11:25:00Z', now), '3h');
+assert.equal(within('2026-09-25T08:24:00Z', now), '0s', 'a deadline that passed reads as now');

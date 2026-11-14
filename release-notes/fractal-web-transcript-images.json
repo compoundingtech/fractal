@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fractal web: show transcript images on request through authorized attachment chunk reads, with bounded viewer URL caching, clear read states and retryable failures",
+  "replay": { "status": "none", "detail": "No storage or replay change." },
+  "schema": { "status": "none", "detail": "Uses existing Attachment size metadata, TimelineMessageBody attachments and blob chunk read contract. No generated wire contract changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "Image bytes are read only after Show image. Reads retain the native message carrier and viewer authorization; upload preview URLs are never reused. Unknown native content size remains unavailable." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step required." },
+  "recovery": { "status": "none", "detail": "Revert the change; image attachments remain available as deferred cards." }
+}

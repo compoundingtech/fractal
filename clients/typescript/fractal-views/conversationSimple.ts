@@ -10,7 +10,7 @@ export type SimpleRow =
   | { kind: 'call'; entry: ConversationEntry; tool: Tool }
   | { kind: 'bundle'; id: string; calls: Array<{ entry: ConversationEntry; tool: Tool }>; ok: number; failed: number; running: number; last: string; open: boolean };
 
-/** The id that opens a run of calls starting at `first`, as stui's `bundle_id`. */
+/** The id that opens a run of calls starting at `first`, as the Fractal terminal UI's `bundle_id`. */
 export const bundleId = (first: string) => `bundle:${first}`;
 
 /** Entries, oldest first, as simplified rows; `open` holds the ids of opened runs. */

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test keeps cargo's intermediates beside each check's target. Every check that builds runs with CARGO_BUILD_BUILD_DIR set to the target it builds in, and ci-local's fleet-compat stage moves it along with its own target. On a build host whose cargo config set build-dir to a build disk, the units' rmeta and dep-info files lived outside the pool, with nothing holding them for the run. One host's were removed between a run's clippy build and its dep-info check, so linux-clippy was refused with 'no dep-info, units 0'. A host's build-dir setting no longer changes what a signing reads.",
+  "replay": {"status": "none", "detail": "Signing tooling only; nothing in the daemon changes."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or migrations."},
+  "rules": {"status": "none", "detail": "No checkpoint rule, registry or coordinated member upgrade change."},
+  "compatibility": {"status": "none", "detail": "Notes, keys and lanes are unchanged. On a host with a build-dir, st-test's intermediates move from the build disk into its pool targets, which the pool cap already counts."},
+  "downtime": {"status": "none", "detail": "No service change."},
+  "manual": {"status": "none", "detail": "On a host that set build-dir for disk space, check that the pool's disk can hold the intermediates; ST_TEST_POOL_MAX_GB still caps them. Builds outside st-test keep the host's build-dir."},
+  "recovery": {"status": "none", "detail": "Reverting puts st-test's intermediates back under the host's build-dir."}
+}

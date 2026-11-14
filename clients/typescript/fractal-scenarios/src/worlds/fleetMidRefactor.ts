@@ -5,6 +5,7 @@ import type { CastAgent, CastPerson } from '../kit/cast.ts'
 import { child, type FactoryContext } from '../kit/context.ts'
 import { agent } from '../kit/factories/agent.ts'
 import { diff } from '../kit/factories/diff.ts'
+import { fleetObjectives } from '../kit/factories/objectives.ts'
 import { terminalRun } from '../kit/factories/terminalRun.ts'
 import { terminalRecord } from '../kit/factories/terminalRecord.ts'
 import { toolCall } from '../kit/factories/toolCall.ts'
@@ -21,7 +22,7 @@ const synthetic = (seed: number) => ({ _tag: 'synthetic' as const, seed })
 export const SEED = 1
 
 /** Four agents rename an API across a monorepo: blocked, waiting for review, streaming diffs, idle. */
-export const syntheticFleetMidRefactor: WorldDefinition = {
+export const syntheticFleetMidRefactor = {
   id: 'fleet-mid-refactor',
   title: 'Fleet mid-refactor',
   narrative:
@@ -47,7 +48,7 @@ export const syntheticFleetMidRefactor: WorldDefinition = {
     ],
   },
   slices: (ctx) => build(ctx),
-}
+} satisfies WorldDefinition
 
 const build = (ctx: FactoryContext): Slices => {
   const [builder, reviewer, migrator, docs] = ctx.cast.agents as [CastAgent, CastAgent, CastAgent, CastAgent]
@@ -103,7 +104,16 @@ const build = (ctx: FactoryContext): Slices => {
     source,
     decode: 'strict',
     loading: false,
-    state: { agents: agents.map((value) => value.agent), runtimes, machines, order: agents.map((value) => value.agent.id!) },
+    state: {
+      agents: agents.map((value) => value.agent), runtimes, machines, order: agents.map((value) => value.agent.id!),
+      sessions: [
+        resources.session(ctx, builder, 'running', -38 * 60_000),
+        resources.session(ctx, reviewer, 'waiting', -12 * 60_000),
+        resources.session(ctx, migrator, 'running', -21 * 60_000),
+        resources.session(ctx, docs, 'waiting', -55 * 60_000),
+      ],
+      devices: [resources.device(ctx, ada, 'Review phone'), resources.device(ctx, robin, 'Fleet tablet')],
+    },
     timeline: [
       {
         _tag: 'changes',
@@ -125,6 +135,8 @@ const build = (ctx: FactoryContext): Slices => {
   }
 
   // details
+  const launchDraft = resources.launch(ctx, mission, reviewer, [])
+  const launchVariants = [0, 1].map((ordinal) => resources.launchVariant(ctx, mission, launchDraft.id, ordinal))
   const details: Slice<'details'> = {
     kind: 'details',
     variant: 'default',
@@ -132,6 +144,8 @@ const build = (ctx: FactoryContext): Slices => {
     decode: 'strict',
     loading: false,
     state: {
+      launches: [{ ...launchDraft, variants: launchVariants.map((variant) => variant.id) }],
+      launch_variants: launchVariants,
       missions: [resources.mission(ctx, mission, 'running', -95_000)],
       work: [
         resources.work(ctx, { mission, step: 0, state: 'completed', updatedMs: -30 * 60_000, claimant: builder, goals: ['Rename the export and its tests'] }),
@@ -302,7 +316,8 @@ const build = (ctx: FactoryContext): Slices => {
     timeline: [],
   }
 
-  return { roster, details, attention, conversation, terminal, sync: { ...liveSync(ctx, { conversation }), variant: 'default', source } }
+  const objectives: Slice<'objectives'> = { kind: 'objectives', variant: 'default', source, decode: 'strict', loading: false, state: fleetObjectives(ctx.cast.people), timeline: [] }
+  return { roster, details, attention, conversation, terminal, sync: { ...liveSync(ctx, { conversation }), variant: 'default', source }, objectives }
 }
 
 

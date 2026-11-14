@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep mission revision evaluation in one read snapshot.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or backfill. Previously recorded mission outcomes are not rewritten."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored field, schema, checkpoint or digest format changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Read the mission run header, steps and pinned definition from one SQLite snapshot so a concurrent revision cutover cannot combine an old generation header with cancelled predecessor steps and prematurely select cleanup. No checkpoint or fleet admission rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, wire, CLI or declaration format change. Nested readers use the existing snapshot helper."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No interruption beyond the existing normal binary update procedure."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No data conversion or additional operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Ordinary binary rollback remains available with unchanged stored formats."
+  }
+}

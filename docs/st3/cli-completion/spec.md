@@ -1,6 +1,6 @@
-# st shell completion specification
+# Fractal shell completion specification
 
-This document specifies how st completes command lines and resolves short entity names.
+This document specifies how Fractal completes command lines and resolves short entity names.
 
 ## Status
 
@@ -16,14 +16,14 @@ Does not define: the entity model (see [../design.md](../design.md)) or the clie
 
 ## Mechanism
 
-st uses clap_complete's dynamic engine (`unstable-dynamic`, pinned with `=` in
-`crates/fractal/Cargo.toml`). st pins the exact version and reviews the unstable API on
-each upgrade. The shell stub passes the command line back to st on every TAB:
+Fractal uses clap_complete's dynamic engine (`unstable-dynamic`, pinned with `=` in
+`crates/fractal/Cargo.toml`). Fractal pins the exact version and reviews the unstable API on
+each upgrade. The shell stub passes the command line back to Fractal on every TAB:
 
 ```
 shell TAB
-  └─ stub: COMPLETE=<shell> <st path> -- <words…>
-       └─ st main(): CompleteEnv::complete()      before config, tokio, or daemon work
+  └─ stub: COMPLETE=<shell> <fractal path> -- <words…>
+       └─ fractal main(): CompleteEnv::complete() before config, tokio, or daemon work
             ├─ subcommands, flags, value sets     from the clap command tree
             └─ entity argument                    Complete(Entity) value completer
                  └─ private current-thread runtime, 300 ms deadline
@@ -32,7 +32,7 @@ shell TAB
 
 The engine prints one candidate per line in the shell's format. Values and descriptions are
 separated by a tab (fish) or a colon (zsh). Bash receives values only. Every TAB starts the
-st executable once.
+Fractal executable once.
 
 `CompleteEnv::complete()` runs early in `main`, after the recorder and contract-inventory
 checks and `--instance` activation, and before any config, runtime or daemon work. It returns
@@ -76,7 +76,7 @@ items per page) until the collection ends or 5,000 items are read, subject to th
 | `Failed` | state `failed` |
 | `Claimed` | state `claimed`; when the caller is an agent, only steps it claimed |
 
-The caller is `ST_AGENT` (prefixed with `agent/` when needed), else `person` from the st config.
+The caller is `ST_AGENT` (prefixed with `agent/` when needed), else `person` from the Fractal config.
 Without a caller, `Message` offers nothing. Without a configured person, `Device` and `Session`
 offer nothing.
 
@@ -121,7 +121,7 @@ replaces the struct's `Work(Any)` completer with its own through `mut_arg`.
 These arguments have no entity completer:
 
 - Arguments that name any subject kind: `subject show`, `trace`, `trace wait`, `claim`,
-  `schema`, `alerts request --target`, and review targets.
+  `claims ls --subject` and `--subject-prefix`, `schema`, `alerts request --target`, and review targets.
 - Arguments whose candidates depend on another argument on the same line: lane entries, launch
   variants and decisions, mission requests, and revision proposals. The completion engine passes
   a completer only the word being completed.
@@ -137,7 +137,7 @@ differently per shell.
 
 `terminals attach, peek, send, signal`, `agents stop`, `missions cancel`, and `alerts show`
 resolve their subject before they act. A word that contains `/` is used as typed. For a bare word,
-st lists **all subjects of the kind**, without completion's running/unfinished filters or
+Fractal lists **all subjects of the kind**, without completion's running/unfinished filters or
 description joins. `agents stop`, `terminals send/signal`, and `missions cancel` use only steps
 1–2 below: destructive commands never accept prefix or substring matches. `attach`, `peek`, and
 `show` use all four steps. The first step that matches anything decides:
@@ -155,8 +155,8 @@ subject. Consultation gets only the remaining budget and either attaches a local
 session or fails when no such session exists. Full subjects retain offline attach behavior.
 
 ```
-$ st terminals attach ci-w         → agent/host-a.ci-watcher
-$ st terminals attach interactive
+$ fractal terminals attach ci-w         → agent/host-a.ci-watcher
+$ fractal terminals attach interactive
 st: `interactive` matches 9 subjects; name one exactly:
   agent/interactive/host-a/43b16cd2-ec69-44  running · host-a · omp · idle · up 2h
   …
@@ -183,7 +183,7 @@ st: `interactive` matches 9 subjects; name one exactly:
 
 ## Installation
 
-`st completions <shell>` writes clap_complete's registration stub for the PATH-resolved `st`.
+`fractal completions <shell>` writes clap_complete's registration stub for the PATH-resolved `fractal`.
 It never embeds the generating executable's store path, so manual installations survive package
 upgrades and garbage collection. The Nix package runs it at build time for bash, zsh, and fish
 (`flake.nix` `postInstall`) and installs the results with `installShellCompletion`.
@@ -196,7 +196,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
 - `crates/fractal/tests/completion_shells.rs` serves an in-process daemon with 205 running terminals
   and one stopped terminal. It checks that completion offers every running terminal across pages
   with descriptions; that a missing or silent daemon yields no entity candidates, nothing on
-  stderr, and an answer within seconds; and that the stubs from `st completions` complete a live
+  stderr, and an answer within seconds; and that the stubs from `fractal completions` complete a live
   terminal in real fish (`complete -C`), bash (the stub's completion function), and zsh (TAB in an
   interactive zsh under `zpty`). The shells come from `nativeCheckInputs` and the dev shell; a
   missing shell fails the test. The interactive zsh phase is temporarily skipped on the
@@ -204,7 +204,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
   ([#1344](https://github.com/compoundingtech/fractal/issues/1344)); other phases still run,
   and the zsh phase runs locally and on other runners.
 - `checks.st3-help` runs `scripts/check-installed-completions` against the built package with its
-  `bin` directory on PATH: fish and bash complete a subcommand through `st`, zsh registers it,
+  `bin` directory on PATH: fish and bash complete a subcommand through `fractal`, zsh registers it,
   and with no daemon no entity is offered.
 - Regression scenarios in `completion_shells.rs` cover stopping the same bare name twice without
   targeting a prefix neighbor, non-running exact targets, ambiguity status 2, the bare attach

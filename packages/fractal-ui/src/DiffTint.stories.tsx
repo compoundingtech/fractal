@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { colorVars as color, statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -15,13 +15,14 @@ const themes = { neutral: baselineTheme, composition: [], embrace: [...baselineT
 function DiffTintCanvas({ theme = 'neutral', scheme = 'dark', captured = false }: { theme?: keyof typeof themes; scheme?: 'dark' | 'light'; captured?: boolean }) {
   return <div data-scheme={scheme} {...stylex.props(styles.canvas, ...themes[theme], ...(scheme === 'light' ? lightTheme : []))}><DiffPanel open width={captured ? 440 : '100%'} diff={diff} path="sample/rows.ts" added={1} removed={1} scopeLabel={captured ? 'Captured' : undefined} showSurfaceTabs={!captured} info={captured ? <p>Successful-tool captures · loaded transcript window. Reported sender unknown · Tool: Edit · Call: call/edit. Counts cover captured lines, not current repository contents.</p> : undefined} onOpenFile={captured ? () => document.querySelector<HTMLElement>('[data-testid="diff-code"]')?.focus() : undefined} /></div>
 }
-const meta = { title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: { theme: 'neutral', scheme: 'dark' }, parameters: { scenario: { _tag: 'primitive', reason: "Measures diff token contrast and captured diff presentation independently of domain state." }, layout: 'fullscreen' }, play: async ({ canvasElement, args }) => {
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: { theme: 'neutral', scheme: 'dark' }, parameters: { scenario: { _tag: 'primitive', reason: "Measures diff token contrast and captured diff presentation independently of domain state." }, layout: 'fullscreen' }, play: async ({ canvasElement, args }) => {
+  await waitFor(() => expect(canvasElement.querySelector('[data-syntax-token="keyword"]')).not.toBeNull())
   const receipt = assertDiffTint(canvasElement)
   canvasElement.dataset.diffTintReceipt = JSON.stringify(receipt)
   await expect(receipt.minimumTextContrast).toBeGreaterThanOrEqual(4.5)
   await expect(receipt.minimumGutterContrast).toBeGreaterThanOrEqual(4.5)
   for (const token of ['constant', 'number', 'boolean']) {
-    await expect(canvasElement.querySelector(`[data-diff-kind="added"] [data-syntax-token="${token}"]`)).not.toBeNull()
+    await waitFor(() => expect(canvasElement.querySelector(`[data-diff-kind="added"] [data-syntax-token="${token}"]`)).not.toBeNull())
   }
   const counts = [...canvasElement.querySelectorAll('span')].filter(element => /^[-−+]1$/.test(element.textContent ?? ''))
   await expect(counts.length).toBeGreaterThan(0)
@@ -95,6 +96,18 @@ const meta = { title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: {
   await expect(assertDiffTint(canvasElement)).toEqual(receipt)
 } } satisfies Meta<typeof DiffTintCanvas>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Captured:primitive',
+  'CapturedLight:primitive',
+  'Composition:primitive',
+  'CompositionLight:primitive',
+  'Embrace:primitive',
+  'EmbraceLight:primitive',
+  'Neutral:primitive',
+  'NeutralLight:primitive',
+]
 type Story = StoryObj<typeof meta>
 export const Neutral: Story = {}
 export const NeutralLight: Story = { args: { scheme: 'light' } }

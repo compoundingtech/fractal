@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound iOS collections WebSocket handshakes, retain native failure codes, and keep Share sheet connections alive",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "No persistent schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "The collections client retains its existing queued-command and onOpen contract. Native socket failures include only NSError domain and code; generic socket errors remain supported."},
+  "downtime": {"status": "none", "detail": "No service restart required; the native error metadata requires an updated iOS build."},
+  "manual": {"status": "none", "detail": "No manual action required. Transient inactive states preserve the previous foreground state; background still suspends the feed until active."},
+  "recovery": {"status": "none", "detail": "Revert this change to restore the previous opening deadline and inactive-state behavior."}
+}

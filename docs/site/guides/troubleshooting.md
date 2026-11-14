@@ -6,7 +6,7 @@ order: 8
 
 # When something is wrong
 
-Start with the smallest question: is the daemon reachable, is the agent ready, or is work waiting on a dependency?
+Start with the smallest question: is the daemon reachable, is the agent ready, or is work waiting on a dependency? The agent and run examples below come from [Your first agent](../getting-started/first-agent.md) and [Missions in practice](missions-in-practice.md); substitute an agent or run you actually created.
 
 **Preserve first:** if historical signing, unsealed claims, or store consistency is in doubt, preserve raw state and keys before doctor, restart, or export. Maintenance may change the evidence. Do not delete databases or identities to make a failure disappear.
 
@@ -37,7 +37,7 @@ Repeated failed starts can park the agent. Fix the cause before one deliberate r
 ## Work and review
 
 ```sh
-fractal missions show mission-run/garden/first-note/one
+fractal missions show mission-run/garden/readme/one
 fractal work ls
 fractal alerts ls --as person/ada
 ```

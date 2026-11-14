@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "An exec gate that says not yet checks again after 5 s instead of 1 min, still doubling up to every 15 min",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change; gate results keep their shape and check numbers."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "No rule or authority change."},
+  "compatibility": {"status": "changed", "detail": "Recheck waits after not yet are 5, 10, 20, 40, 80, 160, 320, 640, then 900 s (were 60, 120, 240, 480, then 900 s). An exec gate answers about state the graph does not observe, so nothing else wakes it; a host-deploy admit gate waiting for a remote host to go idle measured 129 s of dead time after the condition held. Starting at 5 s keeps the unseen wait within about the time already waited. A gate that keeps saying not yet runs 4 more checks in its first ~10 minutes (each a supervised exec plus gate.requested, runtime.observed and gate.result claims, the result keeping up to 4 KB of output); after that it checks every 15 min as before, so a long wait costs the same per day. Conditions the graph observes should use field or exists gates, which a change wakes at once."},
+  "downtime": {"status": "none", "detail": "No restart or migration beyond a normal deploy."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "A gate already waiting is judged against the new schedule at its next evaluation, which a pass or a change triggers; its armed timer can still fire at the old time."}
+}

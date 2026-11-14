@@ -58,12 +58,21 @@ const TreeBindingSurface = ({ scheme, variant = 'default' }: { readonly scheme: 
   </main>
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'wf/Sidebar/Live tree binding',
   component: TreeBindingSurface,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed fixture agents projected through the live sidebarRow binding into the production tree, frame and row.' } },
   args: { scheme: 'dark', variant: 'default' },
 } satisfies Meta<typeof TreeBindingSurface>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Dark:contract-fixture',
+  'Light:contract-fixture',
+  'LongNamesManyFolders:contract-fixture',
+  'LongNamesManyFoldersLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const rowFor = (canvasElement: HTMLElement, ref: string) => canvasElement.querySelector<HTMLElement>(`[data-wf-agent-ref="${ref}"] [data-testid="taste-agent-row"]`)
 const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
@@ -74,7 +83,8 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(canvasElement.querySelector('[data-row-context-ring]')).toBeNull()
   await userEvent.hover(first.querySelector<HTMLElement>('[data-row-column="title"]')!)
   const context = await waitFor(() => { const element = document.querySelector('[data-testid="agent-hover-card"] [data-context-observation]'); expect(element).not.toBeNull(); return element! })
-  await expect(context).toHaveTextContent(`Reported main-session context: 18%; as of ${new Date(now).toISOString()}`)
+  await expect(context).toHaveTextContent('Reported main-session context: 18%; as of')
+  await expect(context.querySelector('time')).toHaveAttribute('datetime', new Date(now).toISOString())
   await expect(context.closest('[data-milestone-row]')).toBeNull()
   await userEvent.unhover(first.querySelector<HTMLElement>('[data-row-column="title"]')!)
   await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')).toBeNull())

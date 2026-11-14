@@ -16,6 +16,15 @@ pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
 /// missing or old: st is catching up with a peer, or stopped serving the list or its live stream.
 pub const HOME_UNKNOWN_TEXT: &str = "No alerts known — this view is out of date.";
 
+fn human_mission_label(mission: &Mission) -> String {
+    let mut label = mission.label();
+    if let Some(state) = label.strip_suffix(" · st does not say") {
+        let end = state.len();
+        label.replace_range(end.., " · Fractal does not say");
+    }
+    label
+}
+
 /// Whether the alerts shown (or their absence) can be out of date, and why.
 fn alerts_out_of_date(world: &World) -> Option<String> {
     let stale: Vec<&str> = world
@@ -101,7 +110,7 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
 /// st reports, marked so.
 pub fn agent_shown_word(agent: &Agent) -> String {
     match &agent.reported {
-        Some(state) => format!("{state} · older st"),
+        Some(state) => format!("{state} · older Fractal"),
         None => agent_word(agent.state).to_owned(),
     }
 }
@@ -206,18 +215,14 @@ fn legend(entries: &[(&str, Color, &str)]) -> Vec<Line<'static>> {
 
 // --------------------------------------------------------------------- home
 
-pub fn home_list(
-    world: &World,
-    snoozed: &std::collections::HashSet<String>,
-    closed: &std::collections::HashSet<String>,
-) -> Listing {
+pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
     let mut attention = world
         .attention
         .items()
         .iter()
-        .filter(|item| !snoozed.contains(&item.id))
+        .filter(|item| !item.snoozed(world.at))
         .collect::<Vec<_>>();
     // What st closed while it was shown stays, in a section of its own below what needs you, so
     // the two are never mistaken for each other (Nathan, 2026-10-07: "2 need you", 4 listed).
@@ -232,7 +237,9 @@ pub fn home_list(
                 .items()
                 .iter()
                 .filter(|other| {
-                    closed.contains(&other.id) == is_closed && (is_closed || other.tier == item.tier)
+                    !other.snoozed(world.at)
+                        && closed.contains(&other.id) == is_closed
+                        && (is_closed || other.tier == item.tier)
                 })
                 .count();
             items.push(Item::Header {
@@ -272,11 +279,11 @@ pub fn home_list(
         .attention
         .items()
         .iter()
-        .filter(|item| snoozed.contains(&item.id))
+        .filter(|item| item.snoozed(world.at))
         .count();
     if later > 0 {
         items.push(Item::Note(Line::from(span(
-            format!(" {later} put off until later · demo, this machine only"),
+            format!(" {later} put off until later"),
             theme::dim(),
         ))));
     }
@@ -306,12 +313,20 @@ pub struct Drafts<'a> {
     pub cursor: usize,
     pub editing: bool,
     pub confirm: Option<char>,
-    /// The named answer chosen on a structured request, before Enter sends it.
+    /// The highlighted row on a structured request: a named answer, or `answers.len()` for the
+    /// custom answer entry. Enter acts on it.
     pub answering: Option<usize>,
-    /// The chosen answer that needs the person's words, while they write them.
-    pub needs_words: Option<String>,
+    /// The named answer (its id) the open note belongs to. Independent of the highlight: moving
+    /// the highlight keeps the note bound to the answer it was written for.
+    pub note_answer: Option<String>,
+    /// Every named answer (by id) that has a saved note on this request.
+    pub noted_answers: Vec<String>,
+    /// Why the last answer to this request was not sent; stays until the next attempt.
+    pub answer_error: Option<&'a str>,
     /// "Chat about this": who it goes to, the draft, and the thread so far.
     pub chat: Option<Chat<'a>>,
+    /// A prompt's form: its mark, whether it has the keys, and a question's choices.
+    pub form: super::alerts::FormState<'a>,
 }
 
 pub struct Chat<'a> {
@@ -396,11 +411,6 @@ fn structured_request(
     drafts: &Drafts<'_>,
     inner: usize,
 ) {
-    card.line(Line::from(vec![
-        span("asks  ", theme::dim()),
-        span(from.to_owned(), theme::strong(theme::PERSON)),
-    ]));
-    card.blank();
     let label_of = |id: &str| {
         request
             .answers
@@ -500,154 +510,246 @@ fn structured_request(
         .recommendation
         .as_ref()
         .map(|wanted| wanted.answer.as_str());
-    if !request.answers.is_empty() {
+    let named = request.answers.len();
+    // Beside named answers a free answer is a row of its own; alone, words are the answer.
+    let custom_row = request.custom && named > 0;
+    let has_text = drafts.text.is_some_and(|text| !text.is_empty());
+    let editor_open = drafts.editing || has_text;
+    // The answer the open note belongs to, whatever row is highlighted now.
+    let bound = drafts
+        .note_answer
+        .as_deref()
+        .and_then(|id| request.answers.iter().find(|answer| answer.id == id));
+    // With nothing highlighted, the row the editor writes for stays lifted.
+    let lifted = drafts.answering.or_else(|| {
+        if !editor_open {
+            return None;
+        }
+        match drafts.note_answer.as_deref() {
+            Some(id) => request.answers.iter().position(|answer| answer.id == id),
+            None => custom_row.then_some(named),
+        }
+    });
+    if named > 0 {
         card.section("choose one", None, inner);
     }
     for (index, answer) in request.answers.iter().enumerate() {
-        let chosen = drafts.answering == Some(index)
-            || drafts.needs_words.as_deref() == Some(answer.label.as_str());
-        // A radio row: the dot says it is a choice, the filled one is the choice, and the chosen
-        // row is lifted off the card so it cannot be missed.
-        let fill = |style: Style| {
-            if chosen {
-                style.bg(theme::SURFACE0)
-            } else {
-                style
-            }
-        };
-        let mut head = vec![
-            text::run(
-                if chosen { " ◉ " } else { " ○ " },
-                fill(theme::strong(if chosen {
-                    theme::ACCENT
-                } else {
-                    theme::OVERLAY1
-                })),
-            ),
-            text::run(
-                answer.label.clone(),
-                fill(if chosen {
-                    theme::strong(theme::ACCENT)
-                } else {
-                    theme::strong(theme::TEXT)
-                }),
-            ),
-        ];
+        let mut tags: Vec<(&str, Color)> = Vec::new();
         if recommended == Some(answer.id.as_str()) {
-            head.push(text::run("  recommended", fill(theme::fg(theme::GREEN))));
+            tags.push(("recommended", theme::GREEN));
         }
         if answer.outcome.as_deref() == Some("request_changes") {
-            head.push(text::run(
-                "  needs your words",
-                fill(theme::fg(theme::YELLOW)),
-            ));
+            tags.push(("needs your words", theme::YELLOW));
         }
-        head.push(text::run(
-            format!("  {}", answer.consequence),
-            fill(theme::dim()),
-        ));
-        let from_line = card.lines.len();
-        let mut wrapped = text::wrap(
-            &head,
+        // Every answer that has a saved note says so, highlighted or not.
+        let noted = drafts.noted_answers.contains(&answer.id)
+            || (has_text && drafts.note_answer.as_deref() == Some(answer.id.as_str()));
+        if noted {
+            tags.push(("✎ note", theme::LAVENDER));
+        }
+        answer_row(
+            card,
+            Hit::Answer(index),
+            &answer.label,
+            &tags,
+            &answer.consequence,
+            lifted == Some(index),
             inner,
-            &[],
-            &[text::run("    ", fill(theme::dim()))],
-            None,
         );
-        if chosen {
-            for line in &mut wrapped {
-                let used: usize = line.spans.iter().map(|span| span.width()).sum();
-                line.spans.push(Span::styled(
-                    " ".repeat(inner.saturating_sub(used)),
-                    Style::default().bg(theme::SURFACE0),
-                ));
-            }
+    }
+    if custom_row {
+        let mut tags: Vec<(&str, Color)> = Vec::new();
+        if has_text && drafts.note_answer.is_none() {
+            tags.push(("✎ draft", theme::LAVENDER));
         }
-        card.lines(wrapped);
-        card.targets.push(crate::ui::doc::Target {
-            line: from_line,
-            column: 0,
-            width: inner as u16,
-            hit: Hit::Answer(index),
-        });
+        answer_row(
+            card,
+            Hit::Answer(named),
+            "Custom answer",
+            &tags,
+            "write your own answer instead of these",
+            lifted == Some(named),
+            inner,
+        );
     }
     card.blank();
-    if drafts.editing || drafts.text.is_some_and(|text| !text.is_empty()) {
-        let hint = drafts.needs_words.as_ref().map(|label| {
-            format!("what should change? Enter sends it with “{label}” · Esc cancels")
-        });
-        card.section("in your own words", None, inner);
-        text_box(
-            card,
-            &format!("answer {from}"),
-            drafts,
-            hint.as_deref().unwrap_or(""),
+    // A refused answer says why on the card until the next try, not in a passing flash.
+    if let Some(error) = drafts.answer_error {
+        card.lines(text::wrap(
+            &[
+                text::run("✕ Not sent  ", theme::strong(theme::RED)),
+                text::run(error.to_owned(), theme::fg(theme::RED)),
+            ],
             inner,
-        );
-        card.buttons(&[
-            ("enter", "Send the answer", Hit::Enter, theme::ACCENT),
-            ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
-        ]);
-    } else if drafts.answering.is_some() {
-        // An option that needs the person's words opens a box for them instead of sending.
-        let needs_words = drafts
-            .answering
-            .and_then(|index| request.answers.get(index))
-            .is_some_and(|answer| answer.outcome.as_deref() == Some("request_changes"));
-        // The box for them is on the card from the moment the option is chosen: typing starts it.
-        if needs_words {
-            let label = drafts
-                .answering
-                .and_then(|index| request.answers.get(index))
-                .map(|answer| answer.label.clone())
-                .unwrap_or_default();
-            card.section("in your own words", None, inner);
+            &[],
+            &[text::run("            ", theme::dim())],
+            None,
+        ));
+        card.blank();
+    }
+    let highlighted = drafts.answering;
+    let choosing = highlighted.is_some() && !drafts.editing;
+    if editor_open {
+        match bound {
+            Some(answer) => {
+                let outcome = outcome_word(answer);
+                let required = answer.outcome.as_deref() == Some("request_changes");
+                card.section("your note", None, inner);
+                text_box(
+                    card,
+                    &format!("Note for “{}” · {outcome}", answer.label),
+                    drafts,
+                    if required {
+                        "what should change? Enter sends it with this answer · Esc cancels"
+                    } else {
+                        "add context for this answer · Enter sends it · Esc cancels"
+                    },
+                    inner,
+                );
+                let others = noted_labels(request, &drafts.noted_answers, Some(&answer.id));
+                let line = if choosing {
+                    format!("This note stays with “{}” · {outcome}.", answer.label)
+                } else {
+                    match others {
+                        Some(others) => format!(
+                            "Enter sends “{}” · {outcome} with this note, plus your notes on {others}.",
+                            answer.label
+                        ),
+                        None => format!("Enter sends “{}” · {outcome} with this note.", answer.label),
+                    }
+                };
+                card.wrap(&[text::run(line, theme::dim())], inner);
+                if !choosing {
+                    let send = format!("Send “{}” · {outcome}", answer.label);
+                    card.buttons_fit(
+                        &[
+                            ("enter", send.as_str(), Hit::Enter, theme::ACCENT),
+                            ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
+                        ],
+                        inner,
+                    );
+                }
+            }
+            None => {
+                let (section, title, send) = if custom_row {
+                    ("custom answer", "Custom answer", "Send custom answer")
+                } else {
+                    ("in your own words", "Answer in words", "Send the answer")
+                };
+                card.section(section, None, inner);
+                text_box(card, &format!("{title} to {from}"), drafts, "", inner);
+                if !choosing
+                    && let Some(others) = noted_labels(request, &drafts.noted_answers, None)
+                {
+                    card.wrap(
+                        &[text::run(
+                            format!("Enter sends this answer, plus your notes on {others}."),
+                            theme::dim(),
+                        )],
+                        inner,
+                    );
+                }
+                if !choosing {
+                    card.buttons_fit(
+                        &[
+                            ("enter", send, Hit::Enter, theme::ACCENT),
+                            ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
+                        ],
+                        inner,
+                    );
+                }
+            }
+        }
+    }
+    if choosing {
+        let answer = highlighted.and_then(|index| request.answers.get(index));
+        let required =
+            answer.is_some_and(|answer| answer.outcome.as_deref() == Some("request_changes"));
+        // An answer that needs words has its box on the card from the moment it is highlighted:
+        // typing starts it.
+        if let Some(answer) = answer.filter(|_| required && !editor_open) {
+            card.section("your note", None, inner);
             text_box(
                 card,
-                &format!("answer {from}"),
+                &format!("Note for “{}” · {}", answer.label, outcome_word(answer)),
                 drafts,
-                &format!("what should change? Start typing; Enter sends it with “{label}”"),
+                &format!(
+                    "what should change? Start typing; Enter sends it with “{}”",
+                    answer.label
+                ),
                 inner,
             );
         }
-        card.buttons(&[
-            (
-                "enter",
-                if needs_words { "Write your words" } else { "Send this answer" },
-                Hit::Enter,
-                theme::ACCENT,
-            ),
-            ("↑↓", "Another", Hit::Key('a'), theme::OVERLAY1),
-            ("esc", "Not now", Hit::Escape, theme::OVERLAY1),
-        ]);
-    } else if request.answers.is_empty() {
+        // What Enter sends: the highlighted answer and every note on the other answers.
+        let own = answer.is_some_and(|answer| drafts.noted_answers.contains(&answer.id));
+        let others = noted_labels(request, &drafts.noted_answers, answer.map(|answer| answer.id.as_str()));
+        let send = match (answer, others) {
+            (None, Some(others)) => {
+                Some(format!("Enter writes a custom answer; your notes on {others} go with it."))
+            }
+            (Some(answer), Some(others)) if required => Some(format!(
+                "Your notes on {others} go with “{}” once you write what should change.",
+                answer.label
+            )),
+            (Some(answer), Some(others)) => Some(format!(
+                "Enter sends “{}” · {}{}, plus your notes on {others}.",
+                answer.label,
+                outcome_word(answer),
+                if own { " with its note" } else { "" }
+            )),
+            (Some(answer), None) if own && !required => Some(format!(
+                "Enter sends “{}” · {} with its note.",
+                answer.label,
+                outcome_word(answer)
+            )),
+            _ => None,
+        };
+        if let Some(send) = send {
+            card.wrap(&[text::run(send, theme::dim())], inner);
+        }
+        let enter = match answer {
+            None => "Write custom answer",
+            Some(_) if required => "Write your words",
+            Some(_) => "Send this answer",
+        };
+        let mut buttons = vec![("enter", enter, Hit::Enter, theme::ACCENT)];
+        if can_note(request, highlighted) {
+            buttons.push(("c", if answer.is_some() { "Add note" } else { "Write custom answer" }, Hit::Key('c'), theme::ACCENT));
+        }
+        buttons.push(("↑↓", "Another", Hit::Key('a'), theme::OVERLAY1));
+        buttons.push(("esc", "Not now", Hit::Escape, theme::OVERLAY1));
+        card.buttons_fit(&buttons, inner);
+    } else if editor_open {
+        // The editor above carries its own Send and Cancel.
+    } else if named == 0 {
         // A feedback ask has no answers to choose: words are the answer, and it can be set
         // aside, with word to its asker, when there is nothing to say (Nathan, 2026-10-05: a
         // feedback card offered "Choose an answer" and no way to answer or dismiss it).
         let label = format!("Close this: tell {from} there is nothing for you to do");
         if !confirm_row(card, drafts, &label) {
-            card.buttons(&[
-                ("c", "Answer in words", Hit::Key('c'), theme::ACCENT),
-                (
-                    "x",
-                    "Dismiss: nothing to do",
-                    Hit::Key('x'),
-                    theme::OVERLAY1,
-                ),
-            ]);
+            let mut buttons = Vec::new();
+            if can_note(request, None) {
+                buttons.push(("c", "Answer in words", Hit::Key('c'), theme::ACCENT));
+            }
+            buttons.push((
+                "x",
+                "Dismiss: nothing to do",
+                Hit::Key('x'),
+                theme::OVERLAY1,
+            ));
+            card.buttons(&buttons);
         }
     } else {
+        // A free answer is the custom row above: it is highlighted like any other answer.
         let mut buttons = vec![("a", "Choose an answer", Hit::Key('a'), theme::ACCENT)];
-        if request.custom {
-            buttons.push(("c", "Answer in words", Hit::Key('c'), theme::ACCENT));
-        }
-        card.buttons(&buttons);
-        // A person can always set a request aside, whatever its answers: the asker is told it
-        // was dismissed (Nathan, 2026-10-11). It asks first.
-        card.blank();
-        let label = format!("Dismiss this: tell {from} you set it aside without answering");
-        if !confirm_row(card, drafts, &label) {
-            card.buttons(&[("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1)]);
+        if drafts.confirm.is_some() {
+            card.buttons_fit(&buttons, inner);
+            card.blank();
+            let label = format!("Dismiss this: tell {from} you set it aside without answering");
+            confirm_row(card, drafts, &label);
+        } else {
+            buttons.push(("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1));
+            card.buttons_fit(&buttons, inner);
         }
     }
     if !request.why_person.is_empty() {
@@ -657,6 +759,112 @@ fn structured_request(
             inner,
         );
     }
+}
+
+/// Whether `c` opens a note for the highlighted row: a named answer, the custom answer entry,
+/// or, on a request without named answers, the words that are its answer.
+pub(super) fn can_note(
+    request: &fractal_client::StructuredRequest,
+    highlighted: Option<usize>,
+) -> bool {
+    let named = request.answers.len();
+    highlighted.is_some_and(|index| index < named)
+        || (highlighted == Some(named) && request.custom)
+        || (named == 0 && (request.entry_type == "feedback" || request.custom))
+}
+
+/// The answers with a saved note, except `except`, in the request's order, as the send line
+/// names them: “A”, “A” and “B”, or “A”, “B” and “C”. None when there are none.
+fn noted_labels(
+    request: &fractal_client::StructuredRequest,
+    noted: &[String],
+    except: Option<&str>,
+) -> Option<String> {
+    let labels = request
+        .answers
+        .iter()
+        .filter(|answer| Some(answer.id.as_str()) != except && noted.contains(&answer.id))
+        .map(|answer| format!("“{}”", answer.label))
+        .collect::<Vec<_>>();
+    match labels.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        [rest @ .., last] => Some(format!("{} and {last}", rest.join(", "))),
+    }
+}
+
+/// What a named answer does, in words for its note and send line. A choice only selects.
+fn outcome_word(answer: &fractal_client::RequestAnswerOption) -> String {
+    match answer.outcome.as_deref() {
+        None => "selected".to_owned(),
+        Some(outcome) => outcome.replace('_', " "),
+    }
+}
+
+/// A radio row: the dot says it is a choice, the filled one is the choice, and the chosen row
+/// is lifted off the card so it cannot be missed.
+fn answer_row(
+    card: &mut Doc,
+    hit: Hit,
+    label: &str,
+    tags: &[(&str, Color)],
+    consequence: &str,
+    chosen: bool,
+    inner: usize,
+) {
+    let fill = |style: Style| {
+        if chosen {
+            style.bg(theme::SURFACE0)
+        } else {
+            style
+        }
+    };
+    let mut head = vec![
+        text::run(
+            if chosen { " ◉ " } else { " ○ " },
+            fill(theme::strong(if chosen {
+                theme::ACCENT
+            } else {
+                theme::OVERLAY1
+            })),
+        ),
+        text::run(
+            label.to_owned(),
+            fill(if chosen {
+                theme::strong(theme::ACCENT)
+            } else {
+                theme::strong(theme::TEXT)
+            }),
+        ),
+    ];
+    for (tag, color) in tags {
+        head.push(text::run(format!("  {tag}"), fill(theme::fg(*color))));
+    }
+    head.push(text::run(format!("  {consequence}"), fill(theme::dim())));
+    let from_line = card.lines.len();
+    let mut wrapped = text::wrap(
+        &head,
+        inner,
+        &[],
+        &[text::run("    ", fill(theme::dim()))],
+        None,
+    );
+    if chosen {
+        for line in &mut wrapped {
+            let used: usize = line.spans.iter().map(|span| span.width()).sum();
+            line.spans.push(Span::styled(
+                " ".repeat(inner.saturating_sub(used)),
+                Style::default().bg(theme::SURFACE0),
+            ));
+        }
+    }
+    card.lines(wrapped);
+    card.targets.push(crate::ui::doc::Target {
+        line: from_line,
+        column: 0,
+        width: inner as u16,
+        hit,
+    });
 }
 
 /// A question as agents write one, "Recommend: …⏎Why: …⏎Answer …", given room to read: a blank
@@ -885,6 +1093,11 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             .map(|candidate| candidate.name.clone())
             .unwrap_or_else(|| agent.trim_start_matches("agent/").to_owned());
         link(&mut card, "agent    ", &label, agent);
+    }
+    if let AttentionKind::Request { from, from_id, .. } = &item.kind
+        && item.agent.as_deref() != Some(from_id.as_str())
+    {
+        card.field("from", from, inner, theme::soft());
     }
     card.blank();
     match &item.kind {
@@ -1237,11 +1450,6 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         } => structured_request(&mut card, from, request, images, drafts, inner),
         AttentionKind::Request { from, question, .. } => {
             let custom = item.actions.iter().any(|action| action == "custom.reply");
-            card.line(Line::from(vec![
-                span("asks  ", theme::dim()),
-                span(from.clone(), theme::strong(theme::PERSON)),
-            ]));
-            card.blank();
             // A report pasted in as JSON shows its telling fields, not a wall of braces.
             match report(question, inner) {
                 Some(lines) => card.lines(lines),
@@ -1303,35 +1511,28 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             );
         }
         AttentionKind::Prompt {
-            seat,
-            text: prompt,
-            answers,
-            ..
+            seat, text: prompt, ..
         } => {
             card.line(Line::from(vec![
                 span("waits  ", theme::dim()),
                 span(seat.clone(), theme::strong(theme::PERSON)),
             ]));
             card.blank();
-            card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
-            card.blank();
-            if answers.is_empty() {
-                card.wrap(
-                    &text::inline(
-                        "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
-                        theme::dim(),
-                    ),
-                    inner,
-                );
-            } else {
-                card.wrap(
-                    &text::inline(
-                        "The call it would make is the pending one in the seat's conversation: open the conversation to read it in full, then allow or deny it there. This clears when the prompt is gone, however it was answered.",
-                        theme::dim(),
-                    ),
-                    inner,
-                );
+            // A prompt the form asks in its own words is said once, as the form's question.
+            if !super::alerts::form_asks(world, item, prompt) {
+                card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
+                card.blank();
             }
+            // The same form the band in its conversation expands to, with the call in full.
+            super::alerts::prompt_form(
+                &mut card,
+                world,
+                item,
+                drafts.form,
+                inner,
+                None,
+                super::alerts::Place::Inbox,
+            );
         }
         AttentionKind::Login { text: login, seats } => {
             card.lines(text::markdown(&spaced(login), inner, theme::text()));
@@ -1345,7 +1546,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             card.blank();
             card.wrap(
                 &text::inline(
-                    "One sign-in in the seat's terminal (Ctrl+]) fixes every seat; this clears when the next authenticated turn succeeds.",
+                    &format!("One sign-in in the seat's terminal ({}) fixes every seat; this clears when the next authenticated turn succeeds.", terminal_route()),
                     theme::dim(),
                 ),
                 inner,
@@ -1396,7 +1597,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         AttentionKind::Unplaced { text: body, why, .. } => {
             card.lines(text::markdown(body, inner, theme::text()));
             card.blank();
-            card.wrap(&text::inline(why, theme::dim()), inner);
+            card.wrap(&text::inline(&super::adapt::human_presentation(why), theme::dim()), inner);
             // Only the answers st lists for the row: a request's answer, never one guessed from
             // its kind, so a gate here is answered with st.
             if let Some(answer) = unplaced_answer(&item.actions) {
@@ -1435,12 +1636,6 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 card.buttons(&[
                     ("c", "Reply", Hit::Key('c'), theme::ACCENT),
                     ("x", "Dismiss: mark read", Hit::Key('x'), theme::GREEN),
-                    (
-                        "l",
-                        "Remind me later · demo",
-                        Hit::Key('l'),
-                        theme::OVERLAY1,
-                    ),
                 ]);
             }
         }
@@ -1456,7 +1651,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     }
     if item.related.is_empty() && item.mission.is_none() && item.agent.is_none() {
         card.line(Line::from(span(
-            "st names no agent, mission or step for this item.",
+            "Fractal names no agent, mission or step for this item.",
             theme::dim(),
         )));
     }
@@ -1501,10 +1696,14 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             cursor: chat.cursor,
             editing: chat.editing,
             answering: None,
-            needs_words: None,
+            note_answer: None,
+            noted_answers: Vec::new(),
+            answer_error: None,
             confirm: None,
             chat: None,
+            form: Default::default(),
         };
+        let first_target = card.targets.len();
         text_box(
             &mut card,
             &format!("message {}", chat.to),
@@ -1516,6 +1715,14 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             ("enter", "Send", Hit::Enter, theme::ACCENT),
             ("esc", "Close chat", Hit::Escape, theme::OVERLAY1),
         ]);
+        // The chat's box and Send are its own: a click on them never reaches a request's note.
+        for target in &mut card.targets[first_target..] {
+            target.hit = match target.hit {
+                Hit::Composer => Hit::ChatComposer,
+                Hit::Enter => Hit::ChatEnter,
+                ref other => other.clone(),
+            };
+        }
     } else if !drafts.editing && drafts.confirm.is_none() {
         let mut buttons = vec![("t", "Chat about this", Hit::Key('t'), theme::SAPPHIRE)];
         if item.mission.is_some() || item.agent.is_some() {
@@ -1530,6 +1737,12 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 theme::OVERLAY1,
             ));
         }
+        // Put off on every device of the person (`attention.snooze`), or brought back.
+        buttons.push(if item.snoozed(world.at) {
+            ("l", "Bring back now", Hit::Key('l'), theme::OVERLAY1)
+        } else {
+            ("l", super::SNOOZE_LABEL, Hit::Key('l'), theme::OVERLAY1)
+        });
         card.buttons(&buttons);
     }
     card.blank();
@@ -1573,7 +1786,7 @@ pub fn agent_order(world: &World) -> Vec<&Agent> {
 
 fn agent_group(agent: &Agent) -> &'static str {
     if agent.unmanaged {
-        return "found running · not started by st";
+        return "found running · not started by Fractal";
     }
     match agent.state {
         AgentState::NeedsYou => "waiting on you",
@@ -1615,6 +1828,40 @@ fn subagent_lines(agent: &Agent, indent: &str, width: usize) -> Vec<Line<'static
         .collect()
 }
 
+/// Reserve the standing marker before the shell truncates the row against its right columns.
+/// The last span is the name; tree callers include their final folder indent before fitting it.
+fn mark_standing(
+    agent: &Agent,
+    first: &mut Vec<Span<'static>>,
+    right: &[Span<'static>],
+    width: usize,
+) {
+    if agent.lifecycle != Some(fractal_client::AgentLifecycle::Standing) {
+        return;
+    }
+    const MARKER: &str = " \u{F0031}";
+    let prefix_width = first[..first.len() - 1].iter().map(Span::width).sum::<usize>();
+    let right_width = right.iter().map(Span::width).sum::<usize>();
+    let room = width.saturating_sub(prefix_width + right_width + 2 + text::width(MARKER));
+    if let Some(name) = first.last_mut() {
+        name.content = text::truncate(&name.content, room).into();
+    }
+    first.push(span(MARKER, theme::dim()));
+}
+
+/// The right of an agent's row: `•` first when it said something since the person last read its
+/// conversation here (st's `last_prose_at` against the read position), as the web and the phone
+/// mark it; then its harness and how long ago it was active.
+fn agent_row_right(world: &World, agent: &Agent) -> Vec<Span<'static>> {
+    let mut right = Vec::with_capacity(3);
+    if world.unread.contains(&agent.id) {
+        right.push(span("• ", theme::strong(theme::ACCENT)));
+    }
+    right.push(span(agent.harness.name(), theme::fg(harness_color(agent.harness))));
+    right.push(span(format!(" {:>4}", agent.activity), theme::dim()));
+    right
+}
+
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
@@ -1645,19 +1892,16 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
         }
         let (glyph, color) = agent_glyph(agent.state, spinner);
         let path = agent.id.strip_prefix("agent/").unwrap_or(&agent.id);
+        let mut first = vec![
+            span(format!(" {glyph} "), theme::strong(color)),
+            span(agent.name.clone(), theme::bold()),
+        ];
+        let right = agent_row_right(world, agent);
+        mark_standing(agent, &mut first, &right, width);
         items.push(Item::Row {
             index: ids.len(),
-            first: vec![
-                span(format!(" {glyph} "), theme::strong(color)),
-                span(agent.name.clone(), theme::bold()),
-            ],
-            right: vec![
-                span(
-                    agent.harness.name(),
-                    theme::fg(harness_color(agent.harness)),
-                ),
-                span(format!(" {:>4}", agent.activity), theme::dim()),
-            ],
+            first,
+            right,
             // What its step last reported leads; the path says who it is when nothing was said.
             second: match &agent.details.progress {
                 Some(progress) => vec![span(
@@ -1684,11 +1928,12 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             ("✕", theme::FAULT, "broken"),
             ("○", theme::QUIET, "stopped"),
             ("?", theme::QUIET, "unmanaged"),
+            ("•", theme::ACCENT, "new since you read"),
         ])
         .into_iter()
         .chain(world.agents.items().iter().any(|agent| agent.reported.is_some()).then(|| {
             Line::from(span(
-                "This host's st is older: agent states show as st reports them.",
+                "This host's Fractal is older: agent states show as Fractal reports them.",
                 theme::dim(),
             ))
         }))
@@ -1701,9 +1946,9 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
 /// state once the harness is signed in again, on the same run: no restart (Nathan, 2026-10-04).
 pub fn login_guidance(agent: &Agent) -> String {
     let how = match agent.harness {
-        Harness::Claude => "open its terminal (ctrl+]) and run /login".to_owned(),
+        Harness::Claude => format!("open its terminal ({}) and run /login", terminal_route()),
         Harness::Codex => format!("run `codex login` on {} (or in its terminal)", agent.host),
-        _ => "open its terminal (ctrl+]) and log it in".to_owned(),
+        _ => format!("open its terminal ({}) and log it in", terminal_route()),
     };
     let provider = match agent.harness {
         Harness::Claude => "Claude",
@@ -1880,7 +2125,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
             current = Some(mission.word);
             let (_, color) = word_style(mission.word, spinner);
             items.push(Item::Header {
-                title: mission.label(),
+                title: human_mission_label(mission),
                 count: missions
                     .iter()
                     .filter(|other| other.word == mission.word)
@@ -1939,7 +2184,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
                 .count()
         };
         let kinds = [
-            (count(|mission| mission.system), "from st"),
+            (count(|mission| mission.system), "from Fractal"),
             (
                 count(|mission| !mission.system && mission.word == Word::NotStarted),
                 "not started",
@@ -2010,7 +2255,7 @@ pub fn mission_detail(
     let inner = width.saturating_sub(4);
     doc.line(Line::from(vec![
         span(
-            format!(" {glyph} {} ", mission.label()),
+            format!(" {glyph} {} ", human_mission_label(mission)),
             Style::default()
                 .fg(theme::CRUST)
                 .bg(color)
@@ -2028,7 +2273,7 @@ pub fn mission_detail(
     ]));
     doc.line(Line::from(vec![
         span(format!(" {}", mission.id), theme::dim()),
-        span(format!("  ·  {}", mission.word.explain()), theme::fg(color)),
+        span(format!("  ·  {}", super::adapt::human_presentation(mission.word.explain())), theme::fg(color)),
     ]));
     if let Some(outcome) = &mission.outcome {
         doc.lines(text::wrap(
@@ -2180,7 +2425,7 @@ pub fn mission_kdl(world: &World, id: Option<&str>, width: usize) -> Doc {
         }
         None => doc.wrap(
             &[run(
-                "st does not send mission declarations to clients yet. Until it does, read it with: st missions show",
+                "Fractal does not send mission declarations to clients yet. Until it does, read it with: fractal missions show",
                 theme::dim(),
             )],
             width,
@@ -2409,9 +2654,9 @@ pub fn fleet_detail(world: &World, id: Option<&str>, width: usize, spinner: &'st
     if links.lines.is_empty() {
         links.line(Line::from(span(
             if machine.you_are_here {
-                "This is the machine Fractal TUI is talking to."
+                "This is the machine the Fractal terminal UI is talking to."
             } else {
-                "st reports no link to this machine."
+                "Fractal reports no link to this machine."
             },
             theme::dim(),
         )));
@@ -2655,7 +2900,7 @@ pub fn worktree_detail(
             });
             missions.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(mission.label(), theme::fg(color)),
+                span(human_mission_label(mission), theme::fg(color)),
             ]));
         }
     }
@@ -2673,7 +2918,7 @@ pub fn worktree_detail(
 fn demo_banner(doc: &mut Doc, width: usize) {
     doc.lines(text::wrap(
         &[run(
-            "st does not track worktrees yet. Everything on this tab is invented.",
+            "Fractal does not track worktrees yet. Everything on this tab is invented.",
             theme::fg(theme::YELLOW),
         )],
         width,
@@ -2694,6 +2939,21 @@ fn demo_banner(doc: &mut Doc, width: usize) {
 }
 
 // ------------------------------------------------------------------ popovers
+
+/// The chord (with Ctrl) that opens an agent's actions menu from its conversation.
+pub const ACTIONS_CHORD: char = 'a';
+/// The actions menu's key for attaching the agent's terminal in its tab.
+pub const TERMINAL_ACTION: char = 't';
+
+/// How to get to an agent's terminal from where its conversation shows, said as the keys that
+/// do it: the actions menu, then its Terminal row. The Attach button lives only on a detached
+/// terminal pane, where Enter does the same.
+pub fn terminal_route() -> String {
+    format!(
+        "Ctrl+{} then {TERMINAL_ACTION} from the conversation",
+        ACTIONS_CHORD.to_ascii_uppercase()
+    )
+}
 
 /// The small card a clicked reference opens: enough to recognise the subject, and a way
 /// to go to it.
@@ -2723,7 +2983,11 @@ pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
     if agent.terminal {
-        rows.push(row('t', "Terminal", "attach its terminal (ctrl+] too)"));
+        rows.push(row(
+            TERMINAL_ACTION,
+            "Terminal",
+            "attach its terminal in this tab",
+        ));
     }
     rows.push(row('d', "Details", "what it is doing and what is queued (ctrl+d too)"));
     rows.push(row('f', "Find", "find in its conversation (ctrl+f too)"));
@@ -2837,10 +3101,10 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
         doc.line(Line::from(vec![
             span(format!("{glyph} "), theme::strong(color)),
             span(mission.title.clone(), theme::bold()),
-            span(format!("  {}", mission.label()), theme::fg(color)),
+            span(format!("  {}", human_mission_label(mission)), theme::fg(color)),
         ]));
         doc.line(Line::from(span(mission.id.clone(), theme::dim())));
-        doc.line(Line::from(span(mission.word.explain(), theme::fg(color))));
+        doc.line(Line::from(span(super::adapt::human_presentation(mission.word.explain()).into_owned(), theme::fg(color))));
         doc.blank();
         let (done, total) = mission.progress();
         doc.field(
@@ -2866,7 +3130,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
                 span(format!("{} ", step.name), theme::text()),
                 span(word, theme::fg(color)),
                 span(
-                    format!("  {}", step.owner.as_deref().unwrap_or("nobody")),
+                    format!("  {}", step.owner_identity().as_deref().unwrap_or("nobody")),
                     theme::dim(),
                 ),
             ]));
@@ -2918,7 +3182,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
 pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str) -> Doc {
     let mut doc = Doc::new();
     let details = &agent.details;
-    let unknown = || span("st has not said", theme::dim());
+    let unknown = || span("Fractal has not said", theme::dim());
     // A close control on the pane itself, not only on the header rule.
     let close = "× close";
     doc.targets.push(super::doc::Target {
@@ -2937,7 +3201,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     ]));
     if let Some(fault) = &details.fault {
         let mut inner = Doc::new();
-        inner.wrap(&text::inline(fault, theme::text()), width.saturating_sub(4));
+        inner.wrap(&text::inline(&super::adapt::human_presentation(fault), theme::text()), width.saturating_sub(4));
         doc.card("broken", theme::FAULT, true, inner, width);
         doc.blank();
     }
@@ -3199,13 +3463,7 @@ pub fn agents_tree(world: &World, spinner: &'static str, width: usize) -> Listin
                     span(format!("{glyph} "), theme::strong(color)),
                     span(agent.name.clone(), theme::bold()),
                 ],
-                vec![
-                    span(
-                        agent.harness.name(),
-                        theme::fg(harness_color(agent.harness)),
-                    ),
-                    span(format!(" {:>4}", agent.activity), theme::dim()),
-                ],
+                agent_row_right(world, agent),
             )
         })
         .collect();
@@ -3220,12 +3478,14 @@ pub fn agents_tree(world: &World, spinner: &'static str, width: usize) -> Listin
         if let Item::Row {
             index,
             first,
+            right,
             children,
             ..
         } = item
             && let Some(agent) = agents.iter().find(|agent| agent.id == listing.ids[*index])
         {
             let indent = format!("{}  ", first.first().map_or("", |span| &*span.content));
+            mark_standing(agent, first, right, width);
             *children = subagent_lines(agent, &indent, width);
         }
     }
@@ -3253,7 +3513,7 @@ pub fn missions_tree(world: &World, spinner: &'static str, system: bool) -> List
                     span(path.last().cloned().unwrap_or_default(), theme::bold()),
                 ],
                 vec![span(
-                    format!("{} {done}/{total}", mission.label()),
+                    format!("{} {done}/{total}", human_mission_label(mission)),
                     theme::fg(color),
                 )],
             )
@@ -3415,8 +3675,193 @@ mod tree_tests {
     use super::*;
 
     #[test]
+    fn attention_identity_labels_named_st_are_not_product_names() {
+        let mut world = crate::ui::demo::test_world();
+        let Load::Ready(items) = &mut world.attention else {
+            panic!("the demo world has attention items");
+        };
+        let item = items.first_mut().unwrap();
+        item.raised_by = Some("st".into());
+        item.kind = AttentionKind::Message { from: "st".into(), body: "hello".into() };
+        let id = item.id.clone();
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
+            chat: None, form: Default::default(),
+        };
+        let shown = home_detail(&world, Some(&id), 120, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("raised by st"), "{shown}");
+        assert!(shown.contains("from  st"), "{shown}");
+    }
+
+    #[test]
+    fn launch_assignee_labels_named_st_are_not_product_names() {
+        let mut world = crate::ui::demo::test_world();
+        let Load::Ready(items) = &mut world.attention else {
+            panic!("the demo world has attention items");
+        };
+        let item = items.first_mut().unwrap();
+        item.kind = AttentionKind::Launch {
+            planner: "planner".into(),
+            name: "audit".into(),
+            preview: Load::Ready(MissionPreview {
+                name: "audit".into(), goals: vec![], agents: vec![], workspace: String::new(),
+                steps: vec![PreviewStep {
+                    name: "scan".into(), assignee: "st".into(), after: vec![], asks_you: false,
+                }],
+            }),
+        };
+        let id = item.id.clone();
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
+            chat: None, form: Default::default(),
+        };
+        let shown = home_detail(&world, Some(&id), 120, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains(&format!("  {:<12}{:<18}", "scan", "st")), "{shown}");
+    }
+
+    #[test]
+    fn mission_copy_is_fractal_only_at_the_rendering_boundary() {
+        let mut world = crate::ui::demo::test_world();
+        let Load::Ready(missions) = &mut world.missions else {
+            panic!("the demo world has missions");
+        };
+        let mission = missions.iter_mut().find(|mission| !mission.steps.is_empty()).unwrap();
+        mission.word = Word::Watching;
+        mission.steps[0].owner = Some("st".into());
+        mission.steps[0].owner_is_system = true;
+        let id = mission.id.clone();
+        let serialized = serde_json::to_value(&*mission).unwrap();
+        assert_eq!(serialized["steps"][0]["owner"], "st");
+        let shown = mission_detail(&world, Some(&id), 120, "", None, &Default::default())
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("Fractal keeps this open"), "{shown}");
+        assert!(shown.contains(" Fractal "), "{shown}");
+        let Load::Ready(missions) = &world.missions else {
+            unreachable!();
+        };
+        let mission = missions.iter().find(|mission| mission.id == id).unwrap();
+        assert_eq!(serde_json::to_value(mission).unwrap(), serialized);
+    }
+
+    #[test]
+    fn identity_labels_in_mission_steps_show_fallback_ids_only_once() {
+        for (owner_id, label) in [
+            ("person/ada", "person/ada"),
+            ("agent/example/unnamed", "agent/example/unnamed"),
+            ("agent/example/maintainer", "Maintainer"),
+        ] {
+            let mut world = crate::ui::demo::world();
+            let Load::Ready(missions) = &mut world.missions else {
+                panic!("the demo world has missions");
+            };
+            let mission = missions.iter_mut().find(|mission| !mission.steps.is_empty()).unwrap();
+            mission.steps.truncate(1);
+            let step = &mut mission.steps[0];
+            step.owner = Some(label.into());
+            step.owner_id = Some(owner_id.into());
+            step.owner_is_system = false;
+            let expected = if label == owner_id {
+                owner_id.to_owned()
+            } else {
+                format!("{label} · {owner_id}")
+            };
+            assert_eq!(step.owner_identity().as_deref(), Some(expected.as_str()));
+            let id = mission.id.clone();
+            for width in [80, 120] {
+                let shown = mission_detail(&world, Some(&id), width, "", None, &Default::default())
+                    .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+                assert!(shown.contains(&expected), "{shown}");
+                assert_eq!(shown.matches(owner_id).count(), 1, "{shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_standing_seats_have_a_dim_anchor_in_both_agent_views() {
+        use fractal_client::AgentLifecycle::{Bounded, Owner, Standing, Unknown};
+
+        for lifecycle in [Some(Standing), Some(Owner), Some(Bounded), Some(Unknown), None] {
+            let mut world = super::super::demo::test_world();
+            let mut agent = world.agents.items()[0].clone();
+            agent.lifecycle = lifecycle;
+            agent.state = AgentState::Idle;
+            world.agents = Load::Ready(vec![agent]);
+            for listing in [agents_list(&world, "⠋", 60), agents_tree(&world, "⠋", 60)] {
+                let first = listing
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        Item::Row { first, .. } => Some(first),
+                        _ => None,
+                    })
+                    .unwrap();
+                let shown = first
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                assert_eq!(
+                    shown.contains('\u{F0031}'),
+                    lifecycle == Some(Standing),
+                    "{shown}"
+                );
+                if lifecycle == Some(Standing) {
+                    assert!(shown.ends_with("Atlas Builder \u{F0031}"), "{shown}");
+                    assert_eq!(first.last().unwrap().style, theme::dim());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrow_agent_row_truncates_its_name_before_its_standing_marker() {
+        let mut world = super::super::demo::test_world();
+        let mut agent = world.agents.items()[0].clone();
+        agent.lifecycle = Some(fractal_client::AgentLifecycle::Standing);
+        agent.name = "Atlas Builder 界界界".into();
+        world.agents = Load::Ready(vec![agent]);
+        for width in [20, 24, 28] {
+            for listing in [agents_list(&world, "⠋", width), agents_tree(&world, "⠋", width)] {
+                let (first, right) = listing
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        Item::Row { first, right, .. } => Some((first, right)),
+                        _ => None,
+                    })
+                    .unwrap();
+                let right_width = right.iter().map(Span::width).sum::<usize>();
+                // Exercise the shell's final truncation, not only the screen's name budget.
+                let fitted =
+                    super::super::truncate_spans(first, width.saturating_sub(right_width + 2));
+                let shown = fitted
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                assert!(shown.ends_with("… \u{F0031}"), "{width}: {shown}");
+                assert!(
+                    text::width(&shown) + right_width + 2 <= width,
+                    "{width}: {shown}"
+                );
+                let padding = " ".repeat(width.saturating_sub(text::width(&shown) + right_width + 1));
+                let row = format!(
+                    "{shown}{padding}{}",
+                    right
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                );
+                assert_eq!(text::width(&row), width - 1, "{row}");
+            }
+        }
+    }
+
+    #[test]
     fn a_working_step_says_when_its_idle_holder_was_nudged() {
-        let mut world = crate::ui::demo::world();
+        let mut world = crate::ui::demo::test_world();
         let Load::Ready(missions) = &mut world.missions else {
             panic!("the demo world has missions");
         };
@@ -3510,7 +3955,7 @@ mod tree_tests {
 
     #[test]
     fn an_agents_subagents_hang_beneath_its_row_and_are_never_selectable() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         for listing in [agents_list(&world, "⠋", 60), agents_tree(&world, "⠋", 60)] {
             let builder = listing
                 .ids
@@ -3548,7 +3993,7 @@ mod tree_tests {
 
     #[test]
     fn a_tree_has_one_line_per_folder_and_leaf_in_path_order() {
-        let listing = agents_tree(&super::super::demo::world(), "⠋", 40);
+        let listing = agents_tree(&super::super::demo::test_world(), "⠋", 40);
         let kinds = listing
             .items
             .iter()
@@ -3581,9 +4026,11 @@ mod mission_golden {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    // Regenerate after intended rendering changes with:
+    // FRACTAL_TUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui mission_golden
     #[test]
     fn mission_stories_golden() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let mut actual = String::new();
         for mission in world.missions.items() {
             for width in [40, 80, 120] {
@@ -3612,9 +4059,357 @@ mod mission_golden {
                 }
             }
         }
+        if std::env::var_os("FRACTAL_TUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                test_env!("CARGO_MANIFEST_DIR", "/tests/fixtures/mission-stories.golden"),
+                &actual,
+            )
+            .unwrap();
+            return;
+        }
         assert_eq!(
             actual,
             include_str!("../../tests/fixtures/mission-stories.golden")
+        );
+    }
+}
+
+#[cfg(test)]
+mod request_notes {
+    use super::*;
+    use fractal_client::{RequestAnswerOption, StructuredRequest};
+
+    fn option(id: &str, label: &str, outcome: Option<&str>) -> RequestAnswerOption {
+        RequestAnswerOption {
+            id: id.into(),
+            label: label.into(),
+            consequence: format!("then {label}"),
+            outcome: outcome.map(Into::into),
+            conditions: Vec::new(),
+        }
+    }
+
+    fn request(kind: &str, answers: Vec<RequestAnswerOption>, custom: bool) -> StructuredRequest {
+        StructuredRequest {
+            version: 1,
+            entry_type: kind.into(),
+            question: "How should this go?".into(),
+            answers,
+            custom,
+            ..Default::default()
+        }
+    }
+
+    fn decision() -> StructuredRequest {
+        request(
+            "decision",
+            vec![
+                option("ship", "Ship it", Some("accept")),
+                option("hold", "Hold it", Some("decline")),
+                option("revise", "Revise first", Some("request_changes")),
+            ],
+            true,
+        )
+    }
+
+    fn choice() -> StructuredRequest {
+        request(
+            "choice",
+            vec![option("a", "Option A", None), option("b", "Option B", None)],
+            true,
+        )
+    }
+
+    struct Case {
+        name: &'static str,
+        request: StructuredRequest,
+        text: Option<&'static str>,
+        editing: bool,
+        answering: Option<usize>,
+        note: Option<&'static str>,
+        noted: &'static [&'static str],
+        error: Option<&'static str>,
+        shows: &'static [&'static str],
+        hides: &'static [&'static str],
+    }
+
+    fn case(name: &'static str, request: StructuredRequest) -> Case {
+        Case {
+            name,
+            request,
+            text: None,
+            editing: false,
+            answering: None,
+            note: None,
+            noted: &[],
+            error: None,
+            shows: &[],
+            hides: &[],
+        }
+    }
+
+    fn cases() -> Vec<Case> {
+        vec![
+            Case {
+                answering: Some(0),
+                shows: &["Custom answer", "Send this answer", "c  Add note", "Another"],
+                ..case("decision accept highlighted", decision())
+            },
+            Case {
+                text: Some("after lunch"),
+                editing: true,
+                note: Some("ship"),
+                noted: &["ship"],
+                shows: &[
+                    "NOTE FOR “SHIP IT” · ACCEPT",
+                    "Enter sends “Ship it” · accept with this note.",
+                    "Send “Ship it” · accept",
+                    "✎ note",
+                ],
+                hides: &["unsent", "plus your notes"],
+                ..case("decision accept note", decision())
+            },
+            Case {
+                text: Some("not this week"),
+                editing: true,
+                note: Some("hold"),
+                noted: &["hold", "ship"],
+                shows: &[
+                    "NOTE FOR “HOLD IT” · DECLINE",
+                    "Send “Hold it” · decline",
+                    "Enter sends “Hold it” · decline with this note, plus your notes on “Ship it”.",
+                ],
+                hides: &["unsent"],
+                ..case("decision decline note beside another note", decision())
+            },
+            Case {
+                editing: true,
+                note: Some("revise"),
+                shows: &[
+                    "NOTE FOR “REVISE FIRST” · REQUEST CHANGES",
+                    "Send “Revise first” · request changes",
+                    "what should change?",
+                ],
+                ..case("decision changes note", decision())
+            },
+            Case {
+                answering: Some(2),
+                shows: &[
+                    "NOTE FOR “REVISE FIRST” · REQUEST CHANGES",
+                    "Start typing",
+                    "Write your words",
+                    "Add note",
+                ],
+                ..case("decision changes highlighted", decision())
+            },
+            Case {
+                text: Some("the cheaper one"),
+                editing: true,
+                note: Some("a"),
+                noted: &["a"],
+                shows: &["NOTE FOR “OPTION A” · SELECTED", "Send “Option A” · selected"],
+                ..case("choice note", choice())
+            },
+            Case {
+                answering: Some(2),
+                shows: &["Custom answer", "Write custom answer"],
+                hides: &["Add note"],
+                ..case("choice custom highlighted", choice())
+            },
+            Case {
+                text: Some("neither"),
+                editing: true,
+                shows: &["CUSTOM ANSWER TO PLANNER", "Send custom answer", "✎ draft"],
+                hides: &["NOTE FOR"],
+                ..case("choice custom answer", choice())
+            },
+            Case {
+                text: Some("neither"),
+                editing: true,
+                noted: &["a", "b"],
+                shows: &["Enter sends this answer, plus your notes on “Option A” and “Option B”."],
+                ..case("choice custom answer beside notes", choice())
+            },
+            Case {
+                answering: Some(3),
+                noted: &["ship", "hold", "revise"],
+                shows: &[
+                    "Enter writes a custom answer; your notes on “Ship it”, “Hold it” and “Revise first” go with it.",
+                ],
+                ..case("decision custom highlighted beside notes", decision())
+            },
+            Case {
+                answering: Some(0),
+                noted: &["hold"],
+                shows: &["Enter sends “Ship it” · accept, plus your notes on “Hold it”."],
+                hides: &["with its note"],
+                ..case("decision unnoted answer beside a note", decision())
+            },
+            Case {
+                answering: Some(2),
+                noted: &["ship"],
+                shows: &[
+                    "what should change? Start typing; Enter sends it with “Revise first”",
+                    "Your notes on “Ship it” go with “Revise first” once you write what should change.",
+                ],
+                hides: &["Enter sends “Revise first”"],
+                ..case("decision changes highlighted beside a note", decision())
+            },
+            Case {
+                editing: true,
+                shows: &["ANSWER IN WORDS TO PLANNER", "Send the answer"],
+                hides: &["Custom answer"],
+                ..case("feedback answer in words", request("feedback", Vec::new(), false))
+            },
+            Case {
+                shows: &["c  Answer in words", "Dismiss: nothing to do"],
+                hides: &["Custom answer"],
+                ..case("feedback resting", request("feedback", Vec::new(), false))
+            },
+            Case {
+                text: Some("after lunch"),
+                answering: Some(1),
+                note: Some("ship"),
+                noted: &["ship", "hold"],
+                error: Some("the asker already closed this request"),
+                shows: &[
+                    "✕ Not sent  the asker already closed this request",
+                    "NOTE FOR “SHIP IT” · ACCEPT",
+                    "This note stays with “Ship it” · accept.",
+                    "Enter sends “Hold it” · decline with its note, plus your notes on “Ship it”.",
+                    "c  Add note",
+                ],
+                hides: &["Enter sends “Ship it”"],
+                ..case("decision error after highlight moved", decision())
+            },
+            Case {
+                error: Some("the asker already closed this request"),
+                shows: &["✕ Not sent  the asker already closed this request", "Choose an answer"],
+                hides: &["Add note", "c  Answer in words"],
+                ..case("decision error resting", decision())
+            },
+        ]
+    }
+
+    fn render(case: &Case, width: usize) -> Doc {
+        let drafts = Drafts {
+            text: case.text,
+            cursor: case.text.map_or(0, str::len),
+            editing: case.editing,
+            confirm: None,
+            answering: case.answering,
+            note_answer: case.note.map(Into::into),
+            noted_answers: case.noted.iter().map(|id| (*id).to_owned()).collect(),
+            answer_error: case.error,
+            chat: None,
+            form: Default::default(),
+        };
+        let mut card = Doc::new();
+        structured_request(&mut card, "planner", &case.request, &[], &drafts, width);
+        card
+    }
+
+    #[test]
+    fn notes_name_their_answer_and_outcome() {
+        for case in cases() {
+            let shown = render(&case, 120)
+                .lines
+                .iter()
+                .map(text::plain)
+                .collect::<Vec<_>>()
+                .join("\n");
+            for wanted in case.shows {
+                assert!(shown.contains(wanted), "{}: {wanted}\n{shown}", case.name);
+            }
+            for unwanted in case.hides {
+                assert!(!shown.contains(unwanted), "{}: {unwanted}\n{shown}", case.name);
+            }
+        }
+    }
+
+    #[test]
+    fn every_noted_answer_is_marked_whatever_is_highlighted() {
+        let all = cases();
+        let case = all
+            .iter()
+            .find(|case| case.name == "decision error after highlight moved")
+            .unwrap();
+        let doc = render(case, 120);
+        let marked = doc
+            .lines
+            .iter()
+            .map(text::plain)
+            .filter(|line| line.contains("✎ note"))
+            .collect::<Vec<_>>();
+        assert_eq!(marked.len(), 2, "{marked:?}");
+        assert!(marked[0].contains("Ship it") && marked[1].contains("Hold it"), "{marked:?}");
+    }
+
+    #[test]
+    fn the_custom_entry_is_its_own_answer_row_only_beside_named_answers() {
+        let targets = |request: StructuredRequest| {
+            render(&case("targets", request), 120)
+                .targets
+                .into_iter()
+                .filter_map(|target| match target.hit {
+                    Hit::Answer(index) => Some(index),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(targets(decision()), [0, 1, 2, 3]);
+        let mut fixed = decision();
+        fixed.custom = false;
+        assert_eq!(targets(fixed), [0, 1, 2]);
+        assert!(targets(request("choice", Vec::new(), true)).is_empty());
+    }
+
+    #[test]
+    fn can_note_follows_the_highlighted_row() {
+        let decision = decision();
+        assert!(can_note(&decision, Some(0)));
+        assert!(can_note(&decision, Some(2)));
+        assert!(can_note(&decision, Some(3)), "the custom entry");
+        assert!(!can_note(&decision, Some(4)));
+        assert!(!can_note(&decision, None));
+        let mut fixed = decision.clone();
+        fixed.custom = false;
+        assert!(!can_note(&fixed, Some(3)));
+        assert!(can_note(&request("feedback", Vec::new(), false), None));
+        assert!(can_note(&request("choice", Vec::new(), true), None));
+        assert!(!can_note(&request("choice", Vec::new(), false), None));
+    }
+
+    /// The answer rows, the refusal and the key bar of a card whose note stayed with “Ship it”
+    /// while the highlight moved to “Hold it”, exactly as a person reads them.
+    #[test]
+    fn a_moved_highlight_keeps_notes_and_the_refusal_in_view() {
+        let all = cases();
+        let case = all
+            .iter()
+            .find(|case| case.name == "decision error after highlight moved")
+            .unwrap();
+        let shown = render(case, 120)
+            .lines
+            .iter()
+            .map(|line| text::plain(line).trim_end().to_owned())
+            .filter(|line| {
+                line.starts_with("○")
+                    || line.starts_with("◉")
+                    || line.starts_with("✕")
+                    || line.starts_with(" enter")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            [
+                "○ Ship it  ✎ note  then Ship it",
+                "◉ Hold it  ✎ note  then Hold it",
+                "○ Revise first  needs your words  then Revise first",
+                "○ Custom answer  write your own answer instead of these",
+                "✕ Not sent  the asker already closed this request",
+                " enter  Send this answer    c  Add note    ↑↓  Another    esc  Not now",
+            ]
         );
     }
 }

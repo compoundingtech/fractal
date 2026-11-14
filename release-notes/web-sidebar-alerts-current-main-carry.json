@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry current main and generated build metadata into the Alerts sidebar branch",
+  "replay": {"status": "none", "detail": "No replay changes from this carry."},
+  "schema": {"status": "none", "detail": "No additional schema changes."},
+  "rules": {"status": "none", "detail": "No additional rule changes."},
+  "compatibility": {"status": "none", "detail": "Merge current main without rewriting the sidebar stack and regenerate the repository's generated outputs."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No additional persistent state or recovery changes."}
+}

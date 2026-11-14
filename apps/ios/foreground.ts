@@ -1,5 +1,5 @@
-// Loops that follow the gateway must stop while iOS has the app in the background. Waiting for the
-// foreground is event-driven: no timer or poll runs until AppState reports `active` again.
+// Background suspends gateway loops; active resumes them. Transient inactive states (a Share sheet,
+// Control Center or an interruption) preserve the last state rather than tearing down live sockets.
 export class ForegroundGate {
   private isActive: boolean;
   private waiters: Array<() => void> = [];
@@ -10,6 +10,7 @@ export class ForegroundGate {
   get active(): boolean { return this.isActive; }
 
   update(state: string | null | undefined): void {
+    if (state !== 'active' && state !== 'background') return;
     const active = state === 'active';
     if (active === this.isActive) return;
     this.isActive = active;

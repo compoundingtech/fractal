@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Align the run ETA proposal with landed lifecycle timing and the ETA implementation stack",
+  "replay": {"status": "none", "detail": "Documentation only; replay behavior is unchanged."},
+  "schema": {"status": "none", "detail": "No schema change; the proposal describes the existing timing contract and ETA stack."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "No wire changes; documents integer Unix-millisecond timestamps, selected-attempt timing, and optional nullable ETA semantics."},
+  "downtime": {"status": "none", "detail": "No deployment or restart required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Documentation-only change; runtime recovery is unchanged."}
+}

@@ -67,6 +67,7 @@ impl Ui {
         // Terminal-body motion stays with its program. The rendered frame caches its body,
         // avoiding focus/pane allocations and preventing motion through a floating overlay.
         if let Some(body) = self.frame.borrow().terminal_motion
+            && !self.terminal_details_focused.get()
             && contains(body, point.0, point.1)
             && !self.terminal_selecting
             && !self.terminal_selection_mode
@@ -93,6 +94,7 @@ impl Ui {
             .and_then(|point| self.hover_target(point));
         self.hover.target.set(target);
         let terminal_motion = if self.terminal_focused()
+            && !self.terminal_details_focused.get()
             && !self.help
             && self.popover.is_none()
             && !self.palette_open()
@@ -229,7 +231,7 @@ mod tests {
     #[test]
     fn quality_adds_no_allocations_to_a_warmed_draw() {
         use ratatui::{Terminal, backend::TestBackend};
-        let ui = Ui::new(demo::world());
+        let ui = Ui::new(demo::test_world());
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         let mut quality = super::super::slo::Draw::new(Instant::now());
         for _ in 0..4 {
@@ -270,7 +272,7 @@ mod tests {
 
     #[test]
     fn hover_paints_the_topmost_target_and_links_without_acting() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.frame.borrow_mut().area = Rect::new(0, 0, 20, 6);
         ui.hit(Rect::new(0, 0, 10, 1), Hit::Key('s'));
         ui.hit(
@@ -300,7 +302,7 @@ mod tests {
 
     #[test]
     fn opaque_layers_hide_hits_and_clip_a_partly_covered_highlight() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.frame.borrow_mut().area = Rect::new(0, 0, 20, 6);
         ui.hit(Rect::new(0, 0, 10, 1), Hit::Usage);
         ui.cover(Rect::new(5, 0, 5, 2));
@@ -322,7 +324,7 @@ mod tests {
 
     #[test]
     fn overlays_drags_focus_loss_and_frame_changes_cannot_keep_old_hover() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
         assert!(ui.input_event(motion(1, 0)));
@@ -397,7 +399,7 @@ mod tests {
 
     #[test]
     fn a_full_frame_motion_script_allocates_nothing_and_redraws_per_target_change() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         for _ in 0..2 {
             terminal.draw(|frame| ui.render(frame)).unwrap();

@@ -3,7 +3,8 @@ import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { AgentHoverCard, SidebarAgentRow, sidebarRowDescription, type RowVariant } from './SidebarAgentRow'
+import { SidebarAgentRow, sidebarRowDescription, type RowVariant } from './SidebarAgentRow'
+import { AgentHoverCard } from './DeferredRowActions.tsx'
 import type { SidebarAgentRow as Row } from './model'
 import { accentVars as accent, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
 import { baselineTheme } from '../neutral-theme'
@@ -12,37 +13,53 @@ import { ThemePortal } from '../taste/ThemePortal'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 const storyNow = Date.UTC(2026, 9, 8, 12, 0, 0)
-/** Fully reported synthetic identity; every optional fact the card can render is present. */
+/** Fully reported synthetic identity; every optional fact the card can render is present, including Claude's explicit (empty) subagent list. */
 const knownRow: Row = {
   ref: 'agent/sample', id: 'sample', title: 'Sample session', description: 'Reviews the selection model',
-  status: 'working', statusLabel: 'Working', host: 'host-1', harness: 'seat-1', model: 'glm-5',
+  status: 'working', statusLabel: 'Working', host: 'host-1', harness: 'claude', model: 'glm-5',
   statusSince: storyNow - 90_000, lastActivityAt: storyNow - 30_000, needsMe: true, unread: 2, freshness: 'live',
   usage: { _tag: 'Known', scope: '24h-root-and-subagents', usd: 1.84, tokens: 412_000 },
   duration: { _tag: 'Known', scope: '24h-activity-span', ms: 3_600_000 },
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 300_000 },
   branch: 'feat/rows', worktree: '~/rows',
   pullRequest: { ref: 'agent/sample/pr', title: 'Align row cohort', number: 42, state: 'open' },
+  subagentCount: 0, subagentObservation: { _tag: 'Reported' },
   children: [],
 }
-/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted. */
-const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined }
-/** Synthetic cohort: every second row carries no last-turn fact, so its time slot renders empty while the shared metric track keeps every title aligned. */
+/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted, and without a known driver the missing subagent roster is conservatively not reported by the harness. */
+const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } }
+/** Child rows never carry their own subagent report on the wire, so each is explicitly not reported by its harness. */
+const childObservation = { subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } } as const satisfies Partial<Row>
+/**
+ * Synthetic cohort: every second row carries no last-turn fact, so its time slot renders empty while the shared metric
+ * track keeps every title aligned. The cohort also carries each subagent cause: Claude reports (zero), a running Codex
+ * session on an older daemon omits the field, an OpenCode session is not reported by its harness, a starting OMP
+ * session awaits its first report, and a child row is not reported by its harness.
+ */
 const cohortRows: readonly Row[] = [
   { ...knownRow, ref: 'agent/first', id: 'first', title: 'First session' },
-  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0 },
-  { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Needs you' },
-  { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
-  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session' },
-  { ...knownRow, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
+  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', harness: 'codex', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } },
+  { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Waiting' },
+  { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', harness: 'opencode', subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
+  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session', harness: 'omp', status: 'pending', statusLabel: 'Pending', subagentObservation: { _tag: 'Unavailable' } },
+  { ...knownRow, ...childObservation, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
 ]
 /** Synthetic parent with two subagents, for collapsed and expanded child rows. */
-const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, children: [
-  { ...knownRow, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
-  { ...unreportedRow, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
+const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, subagentCount: 2, children: [
+  { ...knownRow, ...childObservation, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
+  { ...unreportedRow, ...childObservation, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
 ] }
 /** Phone fixtures: a title too long for the narrowed title track, and a desktop copy of the parent for the dense control. */
 const longRow: Row = { ...cohortRows[2]!, ref: 'agent/long', id: 'long', title: 'Long session title that has to truncate before the touch columns' }
 const desktopParentRow: Row = { ...parentRow, ref: 'agent/parent/desktop' }
+/** The exact subagent sentence each fixture's description carries just before its ID, by title: every cause appears. */
+const subagentFacts: Readonly<Record<string, string>> = {
+  'Sample session': 'Subagents: 0', 'Unreported session': 'Not reported by this harness',
+  'First session': 'Subagents: 0', 'Second session': 'Not reported by this daemon version', 'Third session': 'Subagents: 0',
+  'Fourth session': 'Not reported by this harness', 'Fifth session': 'Not reported yet', 'Check output': 'Not reported by this harness',
+  'Parent session': 'Subagents: 2', 'Subagent one': 'Not reported by this harness', 'Subagent two': 'Not reported by this harness',
+  [longRow.title]: 'Subagents: 0',
+}
 
 function CardPair({ row }: { readonly row: Row }) {
   return <div {...stylex.props(styles.spread)}>
@@ -92,6 +109,9 @@ async function assertRowNames(canvasElement: HTMLElement) {
     await expect(described).not.toBeNull()
     await expect(row.contains(described)).toBe(true)
     await expect(described!.textContent).toBe(sidebarRowDescription(fixture))
+    const subagentFact = subagentFacts[fixture.title]
+    await expect(subagentFact, `${fixture.title}: no expected subagent fact`).toBeDefined()
+    await expect(described!.textContent).toContain(`. ${subagentFact}. ID: ${fixture.ref}.`)
     await expect(row.parentElement!.querySelectorAll('[title]')).toHaveLength(0)
     await expect(row.parentElement!.querySelectorAll('[aria-description]')).toHaveLength(0)
   }
@@ -126,6 +146,7 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
     for (let node: HTMLElement | null = target; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
     await userEvent.hover(target)
     await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
+    await expect(within(document.body).getByRole('tooltip')).toHaveAccessibleName(`Reported details for ${row.querySelector('[data-row-column="title-text"]')!.textContent}`)
   }
   await userEvent.unhover(row)
   await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(0), { timeout: hoverSettleTimeout })
@@ -135,14 +156,13 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
 async function paintedText(card: HTMLElement): Promise<string> {
   const painted = card.cloneNode(true) as HTMLElement
   const carriers = [...card.querySelectorAll('[aria-describedby]')].flatMap(described => described.getAttribute('aria-describedby')!.split(' '))
-  await expect(carriers.length).toBeGreaterThan(0)
   for (const id of carriers) painted.querySelector(`#${CSS.escape(id)}`)!.parentElement!.remove()
   return painted.textContent!
 }
 
 async function assertCompactCard(canvasElement: HTMLElement) {
   await assertRowNames(canvasElement)
-  const cards = within(canvasElement).getAllByTestId('agent-hover-card')
+  const cards = await within(canvasElement).findAllByTestId('agent-hover-card')
   await expect(cards).toHaveLength(1)
   const card = cards[0]!
   await expect(card.getBoundingClientRect().width).toBeLessThanOrEqual(400)
@@ -213,18 +233,66 @@ function PhoneRows() {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar/Agent Row',
   component: SidebarAgentRow,
   // label-content-name-mismatch is an experimental axe rule, so the strict a11y check enables it explicitly for every row story.
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'controlled agent-row contracts: exact names, descriptions, geometry and interactions are asserted against module-local row fixtures' }, layout: 'fullscreen', a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } }, docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
 } satisfies Meta
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'DensitiesAndChildren:contract-fixture',
+  'FrozenWorkingVersusIdle:contract-fixture',
+  'HoverCardKnown:contract-fixture',
+  'HoverCardMissions:contract-fixture',
+  'HoverCardRetainedMissions:contract-fixture',
+  'HoverCardUnknown:contract-fixture',
+  'PhoneFocusNoHover:contract-fixture',
+  'PhoneTouchTargets:contract-fixture',
+  'QuickOpenAction:contract-fixture',
+  'ThemedOverlaysAndFocus:contract-fixture',
+  'TimeCohort:contract-fixture',
+]
 type Story = StoryObj
 export const HoverCardKnown: Story = { tags: ['critical'], name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
+const missionsRow: Row = { ...knownRow, ref: 'agent/missions', id: 'missions', title: 'Mission session', description: 'Fix the review gate',
+  mission: 'mission/example/review', missionContext: {
+    _tag: 'Mission', id: 'mission/example/review', slug: 'review', title: 'example/review', progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Fix the review gate' },
+    queued: Array.from({ length: 7 }, (_, index) => ({ id: `mission/person-ask/${index}`, slug: `0123456789abcdef${index}`, title: `Queued goal ${index + 1}` })),
+  } }
+export const HoverCardMissions: Story = { tags: ['critical'], name: 'Hover card · current and queued missions', render: () => <main {...stylex.props(styles.root)}><CardPair row={missionsRow} /></main>, play: async ({ canvasElement }) => {
+  // The card's module loads on demand.
+  const missions = within(await within(canvasElement).findByTestId('hover-missions', {}, { timeout: hoverSettleTimeout }))
+  const items = missions.getAllByRole('listitem')
+  await expect(items[0]).toHaveTextContent('example/review2/5Fix the review gate')
+  // About five rows: the current mission and four queued, then the remainder as a count.
+  await expect(items).toHaveLength(5)
+  await expect(missions.getByText('+3 more')).toBeVisible()
+  await expect(canvasElement.textContent).not.toContain('0123456789abcdef')
+  // The goal is the current step here, so the card does not say it twice.
+  await expect(within(canvasElement).getByTestId('hover-facts').textContent?.match(/Fix the review gate/g)).toHaveLength(1)
+} }
+export const HoverCardRetainedMissions: Story = { tags: ['critical'], name: 'Hover card · retained missions say so under a live agent', render: () => <main tabIndex={0} {...stylex.props(styles.root)}>
+  <div data-testid="stale-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Stale', updatedAt: storyNow - 5 * 60_000 } }} now={storyNow} /></div>
+  <div data-testid="failed-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Failed' } }} now={storyNow} /></div>
+  <div data-testid="live-card"><AgentHoverCard row={{ ...missionsRow, missionInfo: { _tag: 'Live' } }} now={storyNow} /></div>
+</main>, play: async ({ canvasElement }) => {
+  const card = (id: string) => within(within(canvasElement).getByTestId(id))
+  const stale = await card('stale-card').findByTestId('hover-missions-note', {}, { timeout: hoverSettleTimeout })
+  await expect(stale).toHaveTextContent('Mission info may be out of date. Updated 5m ago.')
+  await expect(card('stale-card').getByTestId('hover-missions')).toContainElement(stale)
+  await expect(card('failed-card').getByTestId('hover-missions-note')).toHaveTextContent('Couldn\u2019t refresh mission info.')
+  await expect(card('failed-card').getByTestId('hover-missions-note').textContent).not.toContain('Updated')
+  await expect(card('live-card').queryByTestId('hover-missions-note')).toBeNull()
+} }
 export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
   await expect(await paintedText(card)).not.toMatch(/unknown|unavailable|—/i)
+  await expect(card.querySelectorAll('[aria-describedby]')).toHaveLength(0)
   for (const label of ['Spend', 'Duration', 'Last turn', 'Model', 'PR', 'Branch']) await expect(within(card).queryByText(label)).toBeNull()
 } }
 export const TimeCohort: Story = { tags: ['critical'], name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
@@ -242,18 +310,35 @@ const frozenRows: readonly Row[] = [
   { ...unreportedRow, ref: 'agent/frozen-idle', id: 'frozen-idle', title: 'Frozen idle session', status: 'idle', statusLabel: 'Last verified · idle', freshness: 'stale', needsMe: false, unread: 0 },
   { ...unreportedRow, ref: 'agent/frozen-stale', id: 'frozen-stale', title: 'Frozen stale session', status: 'stale', statusLabel: 'Stale observation', freshness: 'stale', needsMe: false, unread: 0 },
 ]
-export const FrozenWorkingVersusIdle: Story = { tags: ['critical'], name: 'Frozen observation · working vs idle', render: () => <main {...stylex.props(styles.root)}><div {...stylex.props(styles.list)}>{frozenRows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} />)}</div></main>, play: async ({ canvasElement }) => {
-  const glyphs = [...canvasElement.querySelectorAll<HTMLElement>('[data-row-column="status"] [data-status]')]
+export const FrozenWorkingVersusIdle: Story = { tags: ['critical'], name: 'Frozen observation · working vs idle', render: () => <main {...stylex.props(styles.root)}><div data-frozen-rows {...stylex.props(styles.list)}>{frozenRows.map(row => <SidebarAgentRow key={row.ref} item={row} now={storyNow} />)}</div><div data-vocabulary {...stylex.props(styles.list)}>{vocabularyRows.map(item => <SidebarAgentRow key={item.ref} item={item} now={storyNow} />)}</div></main>, play: async ({ canvasElement }) => {
+  const glyphs = [...canvasElement.querySelectorAll<HTMLElement>('[data-frozen-rows] [data-row-column="status"] [data-status]')]
   await expect(glyphs.map(glyph => glyph.dataset.status)).toEqual(['working', 'idle', 'stale'])
   for (const glyph of glyphs) await expect(glyph).toHaveAttribute('data-frozen', 'true')
   // One muted tone: a frozen observation never reads as live and stale is never the danger red.
   await expect(new Set(glyphs.map(glyph => getComputedStyle(glyph).color)).size).toBe(1)
-  // Nothing spins.
-  for (const svg of canvasElement.querySelectorAll('[data-row-column="status"] svg')) await expect(getComputedStyle(svg).animationName).toBe('none')
-  // Without color, shape tells working from idle: working keeps its static ring, idle is the plain disc.
-  const [working, idle] = glyphs.map(glyph => glyph.querySelector('svg')!)
-  await expect(working!.querySelectorAll('circle, path').length).toBeGreaterThan(idle!.querySelectorAll('circle, path').length)
+  const marks = glyphs.map(glyph => glyph.querySelector('[data-agent-glyph]')!)
+  for (const mark of marks) await expect(getComputedStyle(mark).animationName).toBe('none')
+  // Retained activity keeps its exact glyph; an observation-only legacy state invents none.
+  await expect(marks.map(mark => mark.textContent)).toEqual(['●', '○', ''])
+  const rows = within(canvasElement.querySelector<HTMLElement>('[data-vocabulary]')!).getAllByTestId('taste-agent-row')
+  await expect(rows.map(row => row.querySelector('[data-agent-glyph]')?.textContent))
+    .toEqual(['●', '○', '○', '×', '×', '!', '~', '○', '', '●', '●'])
+  await expect(rows.slice(0, 9).every(row => row.querySelector('[data-row-column="attention"]') === null)).toBe(true)
+  const needs = rows[9]!.querySelector('[data-row-column="attention"]')!
+  const question = rows[10]!.querySelector('[data-row-column="attention"]')!
+  await expect(needs).toHaveTextContent('◆')
+  await expect(needs).toHaveAttribute('aria-label', 'Needs your attention')
+  await expect(question).toHaveTextContent('?')
+  await expect(question).toHaveAttribute('aria-label', 'Open question')
+  for (const row of rows.slice(9)) await expect(row.querySelector('[data-row-trailing-signals]')!.contains(row.querySelector('[data-row-column="attention"]'))).toBe(true)
 } }
+const vocabularyRows: readonly Row[] = [
+  ...(['working', 'idle', 'waiting', 'ended', 'retired', 'failed', 'pending', 'suspended', 'unobserved'] as const)
+    .map(status => ({ ...unreportedRow, ref: `agent/vocabulary-${status}`, id: status, title: status,
+      status, statusLabel: status, needsMe: false, unread: 0 })),
+  { ...unreportedRow, ref: 'agent/needs-you', id: 'needs-you', title: 'Needs you', needsMe: true, unread: 0 },
+  { ...unreportedRow, ref: 'agent/question', id: 'question', title: 'Question', asking: true, needsMe: true, unread: 0 },
+]
 export const QuickOpenAction: Story = { tags: ['critical'], name: 'Row hover · quick Open', render: () => <main {...stylex.props(styles.root)}><QuickOpenCohort /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const rows = canvas.getAllByTestId('taste-agent-row')
@@ -284,7 +369,7 @@ export const AllStates: Story = { tags: ['critical'], render: () => <main {...st
   probe.removeAttribute('title')
   await assertRowNames(canvasElement)
 } }
-export const DensitiesAndChildren: Story = { tags: ['critical'], name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
+export const DensitiesAndChildren: Story = { tags: ['critical', 'both-widths'], name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   await assertSingleHoverDisclosure(canvasElement)
   const toggle = within(canvasElement).getByRole('button', { name: 'Expand 2 subagents' })
@@ -408,6 +493,7 @@ export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
     await userEvent.keyboard('{Shift}')
     await waitFor(() => expect(rowButton).toHaveAttribute('data-focus-visible'))
     await assertNeutralRing(rowButton, focus)
+    await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveAccessibleName(`Reported details for ${row.querySelector('[data-row-column="title-text"]')!.textContent}`))
   },
 }
 

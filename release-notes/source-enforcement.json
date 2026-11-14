@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Owned sets enforce their source: ad hoc desired-state writes to members are refused or forced with source debt that the next publication reverts, with an audit mode",
+  "replay": {"status": "none", "detail": "Existing owned-set receipts without a policy replay unchanged as enforce=off; new source.* claims fold into the same projections on every replica."},
+  "schema": {"status": "changed", "detail": "No SQL migration; new claim kinds source.debt.recorded, source.debt.closed and source.audited, owned-set.revised may carry a policy, and set-managed-subject becomes a client-v0 error code."},
+  "rules": {"status": "changed", "detail": "Sets with an audit or enforce policy gate apply, create in a claimed namespace, stop, start, mission publish and retire, hold, suspend, resume and retire of their members; --force --reason records debt in the same transaction, and publication closes all debt and reverts forced changes."},
+  "compatibility": {"status": "changed", "detail": "Publishing a policy or subscription members blocks until every admitted fleet member advertises features.source_enforcement=1; only listed publishers may revise a set with a policy."},
+  "downtime": {"status": "none", "detail": "No downtime; sets without a policy behave as before."},
+  "manual": {"status": "none", "detail": "No user action is required; operators opt a set in with --enforce or --source-policy."},
+  "recovery": {"status": "none", "detail": "Publishing the set with enforce off removes enforcement; open debt is closed by that publication."}
+}

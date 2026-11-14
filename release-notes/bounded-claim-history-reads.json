@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The reconciler reads only as much of a subject's claim history as each decision needs: the newest or oldest claim that matches, whether one exists, or the claims after a point, instead of every claim of that kind; the profile names the kind and caller of each history read",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change. The new reads use the existing claims_subject_kind_accepted_index."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Every changed read returns the same claims, in the same canonical order, as the whole-history read it replaces, up to where its caller stops; decisions are unchanged. Under ST3_PROFILE_DIR, history reads appear in the profile as their SQL followed by `-- claims_for KIND at FILE:LINE` or `-- claims_in_order KIND at FILE:LINE`."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "An older build reads each whole history, as before."}
+}

@@ -60,6 +60,10 @@ fn now_ms() -> Option<u128> {
 /// Read a private, matching snapshot no older than seven days, with transcript content removed.
 /// Cached fences are for display only; the caller must await live data before enabling actions.
 pub fn load(path: &Path, actor: &str) -> Option<Model> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let path = fractal_client::product_dirs::tui_read_path(path);
+    let path = path.as_ref();
+    // LIVE-MIGRATION END
     let metadata = fs::metadata(path).ok()?;
     if metadata.len() > MAX_BYTES || metadata.permissions().mode() & 0o077 != 0 {
         return None;
@@ -111,6 +115,21 @@ pub fn save(path: &Path, actor: &str, model: &Model) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    #[test]
+    fn target_cache_is_read_without_changing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("stui/snapshot.json");
+        let new = root.path().join("tui/snapshot.json");
+        save(&new, "person/one", &Model::default()).unwrap();
+        let bytes = fs::read(&new).unwrap();
+        assert!(load(&old, "person/one").is_some());
+        save(&old, "person/one", &Model::default()).unwrap();
+        fs::write(&old, b"invalid").unwrap();
+        assert!(load(&old, "person/one").is_none());
+        assert_eq!(fs::read(&new).unwrap(), bytes);
+    }
+    // LIVE-MIGRATION END
 
     #[test]
     fn cache_identity_is_scoped_to_endpoint_and_actor() {

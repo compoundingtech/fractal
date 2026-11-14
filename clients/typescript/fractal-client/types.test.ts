@@ -1,5 +1,30 @@
-import type { ActionOf, ConversationSearchHit, TimelineMessageBody } from './Models.generated.ts';
+import type { ActionOf, ActionRequest, ConversationSearchHit, NoticeSnapshot, Resource, TimelineMessageBody } from './Models.generated.ts';
 import type { ClientOptions, RequestOptions, FractalClient, TraceContext } from './Client.generated.ts';
+import type { FabricClientOptions, FabricTransport, FabricEndpoint } from './fabric.mjs';
+
+type InternalNoticeAssert<T extends true> = T;
+type InternalNoticeBoundary = [
+    InternalNoticeAssert<Extract<Resource, { kind: 'attention-notice' }> extends never ? true : false>,
+    InternalNoticeAssert<Extract<ActionRequest, { type: 'notice.seen' | 'notice.dismiss' | 'notice.snooze' }> extends never ? true : false>,
+    InternalNoticeAssert<NoticeSnapshot['kind'] extends 'attention-notice' ? true : false>,
+];
+declare const internalNoticeBoundary: InternalNoticeBoundary;
+void internalNoticeBoundary;
+
+const nativeOptions: FabricClientOptions = {
+    endpoint: 'fabric://studio/st3-client-v0',
+    credential: async () => 'paired-token',
+    traceContext: () => undefined,
+};
+declare const nativeTransport: FabricTransport;
+declare const nativeEndpoint: FabricEndpoint;
+void nativeEndpoint.dial({ signal: new AbortController().signal });
+const nativeCarrier: ClientOptions = {
+    baseUrl: 'http://fabric.local',
+    fetchImpl: nativeTransport.fetchImpl,
+    socket: nativeTransport.socket,
+};
+void [nativeOptions, nativeCarrier];
 
 const traceContext: TraceContext = {
     traceparent: '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',
@@ -17,6 +42,17 @@ void cancellationClient.notesList(cancellationOptions);
 void cancellationClient.customSubjectsList({}, cancellationOptions);
 void cancellationClient.publicationDefinition('mission/example', cancellationOptions);
 void cancellationClient.conversationContentChunk('session/example', 'reference', 0, cancellationOptions);
+void cancellationClient.availabilityList(undefined, cancellationOptions);
+void cancellationClient.availabilityList('person/ada', cancellationOptions);
+void cancellationClient.availabilitySet({ status: { value: null } }, cancellationOptions);
+void cancellationClient.presenceReport({ state: 'active', last_input_at: '2026-11-12T09:57:30Z', observed_at: '2026-11-12T09:58:00Z' }, cancellationOptions);
+// @ts-expect-error a client reports raw device state, never derived presence
+void cancellationClient.presenceReport({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' });
+// @ts-expect-error interruptions are all, urgent or none
+void cancellationClient.availabilitySet({ interruptions: { value: 'focus' } });
+void cancellationClient.notesSet({ text: null }, cancellationOptions);
+// @ts-expect-error a note write always names its text, even to clear it
+void cancellationClient.notesSet({ expires_at: '2026-11-16T09:00:00Z' });
 
 const valid: ActionOf<'launch.approve'> = {
     api_version: 'st3.client.v0',
@@ -111,6 +147,60 @@ const missingTerminalCapability: CollectionCommand = { kind: 'subscribe', id: 't
 const extraResyncProperty: CollectionFrame = { kind: 'resync', id: 'agents', undeclared: true };
 void [missingTerminalCapability, extraResyncProperty];
 
+// Ordered-membership windows carry membership rows, never resources; the collection picks the type.
+import { applyWindow, type CollectionStreamOptions, type CollectionWindow } from './Client.generated.ts';
+import type { OrderedMembership, OrderedMembershipState, Snapshot } from './Models.generated.ts';
+const frameSnapshot: Snapshot = { id: 'snapshot/host-a/1842/2fc9', host_id: 'host/host-a', store_index: 1842, projection_version: 'client-projection.v0', created_at: '2026-09-20T12:00:00.000Z' };
+const sidebarRow: OrderedMembership = { id: 'agent/ada/worker', container: 'arrangement/person/ada/019a0000-0000-7000-8000-000000000001', member: 'agent/ada/worker', position: { bucket: null, key: 'a0' }, revision: 'claim/place' };
+const sidebarState: OrderedMembershipState = { container: 'arrangement/person/ada/019a0000-0000-7000-8000-000000000001', live_count: 1, changed_index: 1842 };
+const membershipSnapshot: CollectionFrame = { kind: 'snapshot', id: 'sidebar', collection: 'ordered-memberships', snapshot: frameSnapshot, membership: sidebarState, items: [sidebarRow], order: ['agent/ada/worker'], has_more: false };
+const membershipChanges: CollectionFrame = { kind: 'changes', id: 'sidebar', collection: 'ordered-memberships', snapshot: frameSnapshot, membership: { ...sidebarState, changed_index: 1843 }, upserts: [{ ...sidebarRow, position: { bucket: '019a0000-0000-7000-8000-000000000010', key: 'a1' } }], removes: [], order: ['agent/ada/worker'], has_more: false };
+// @ts-expect-error A membership row states its bucket, null for the root.
+const missingBucket: OrderedMembership = { ...sidebarRow, position: { key: 'a0' } };
+// @ts-expect-error Membership windows do not carry resources.
+const membershipResources: CollectionFrame = { kind: 'snapshot', id: 'sidebar', collection: 'ordered-memberships', snapshot: frameSnapshot, membership: sidebarState, items: [machine], order: [], has_more: false };
+// @ts-expect-error Resource windows do not carry membership rows.
+const resourceMemberships: CollectionFrame = { kind: 'snapshot', id: 'agents', collection: 'agents', snapshot: frameSnapshot, items: [sidebarRow], order: [], has_more: false };
+// @ts-expect-error Membership windows always carry the container's state.
+const missingState: CollectionFrame = { kind: 'changes', id: 'sidebar', collection: 'ordered-memberships', snapshot: frameSnapshot, upserts: [], removes: [], order: [], has_more: false };
+// @ts-expect-error The state counts live members.
+const partialState: OrderedMembershipState = { container: sidebarState.container, changed_index: 1842 };
+// @ts-expect-error Resource windows carry no membership state.
+const resourceState: CollectionFrame = { kind: 'changes', id: 'agents', collection: 'agents', snapshot: frameSnapshot, membership: sidebarState, upserts: [], removes: [], order: [], has_more: false };
+void [membershipSnapshot, membershipChanges, missingBucket, membershipResources, resourceMemberships, missingState, partialState, resourceState];
+let sidebar: CollectionWindow<OrderedMembership> | undefined;
+let agentsWindow: CollectionWindow | undefined;
+const onFrame: CollectionStreamOptions['onFrame'] = frame => {
+    if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return;
+    if (frame.collection === 'ordered-memberships') {
+        const rows: OrderedMembership[] = frame.kind === 'snapshot' ? frame.items : frame.upserts;
+        const placed: (string | null)[] = rows.map(row => row.position.bucket);
+        void placed;
+        sidebar = applyWindow(sidebar, frame);
+        const first = sidebar?.items[0];
+        const member: string | undefined = first?.member;
+        const key: string | undefined = first?.position.key;
+        const changedIndex: number | undefined = sidebar?.membership.changed_index;
+        void [member, key, changedIndex];
+    } else {
+        agentsWindow = applyWindow(agentsWindow, frame);
+        const kind: string | undefined = agentsWindow?.items[0]?.kind;
+        void kind;
+        // @ts-expect-error A resource window holds no membership state.
+        void agentsWindow?.membership;
+        // @ts-expect-error A resource window is not a membership window.
+        sidebar = applyWindow(sidebar, frame);
+    }
+};
+onFrame(membershipSnapshot);
+onFrame(membershipChanges);
+const revisionedCommand: CollectionCommand = { kind: 'subscribe', id: 'roster', collection: 'agents', agents_publication_version: 1 };
+// @ts-expect-error The revisioned branch has no limit or filters.
+const revisionedWindow: CollectionCommand = { kind: 'subscribe', id: 'roster', collection: 'agents', agents_publication_version: 1, limit: 100 };
+// @ts-expect-error Only version one is defined.
+const unsupportedPublication: CollectionCommand = { kind: 'subscribe', id: 'roster', collection: 'agents', agents_publication_version: 2 };
+void [revisionedCommand, revisionedWindow, unsupportedPublication];
+
 // Error metadata remains open alongside the typed terminal-send refusal.
 import type { ErrorEnvelope } from './Models.generated.ts';
 const genericRefusal: ErrorEnvelope = {
@@ -123,3 +213,32 @@ const terminalRefusal: ErrorEnvelope = {
     details: { scope: 'control.messages', applied: 'none', refusal: { variant: 'Retired', recipient: 'agent/example/worker' } },
 };
 void [genericRefusal, terminalRefusal];
+
+import type { DeviceCommand, DeviceCommandRequest, DeviceResult } from './Models.generated.ts';
+const inspectPhone: DeviceCommandRequest = { api_version: 'st3.client.v0', device: 'device/phone', kind: 'phone.inspect', args: {} };
+const navigatePhone: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Conversation', params: { target: 'agent/worker', sessionId: 'session/chat' } } };
+const readPhoneMessage: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.message.read', args: { message_id: 'message/example' }, ttl_ms: 30000 };
+const reportPhoneResult: DeviceResult = { command_id: 'device-command/example', outcome: 'completed', result: { route: 'Conversation' } };
+const phoneWindow: CollectionCommand = { kind: 'subscribe', id: 'commands', collection: 'commands' };
+void cancellationClient.deviceCommand(inspectPhone, cancellationOptions);
+void cancellationClient.deviceCommand(navigatePhone, cancellationOptions);
+void cancellationClient.deviceCommand(readPhoneMessage, cancellationOptions);
+void cancellationClient.deviceCommandGet('device-command/example', { wait: true }, cancellationOptions);
+void cancellationClient.deviceResult(reportPhoneResult, cancellationOptions);
+declare const phoneCommand: DeviceCommand;
+const phoneResourceKind: 'device-command' = phoneCommand.kind;
+if (phoneCommand.command_kind === 'phone.message.read') {
+    const messageID: string = phoneCommand.args.message_id;
+    void messageID;
+}
+// @ts-expect-error Message-read arguments are required for the selected command kind.
+const missingMessageID: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.message.read', args: {} };
+// @ts-expect-error A Conversation route requires its target, not another route's id.
+const wrongRouteParams: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Conversation', params: { id: 'agent/worker' } } };
+// @ts-expect-error Arbitrary phone screens are not a command surface.
+const unknownPhoneScreen: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.navigate', args: { screen: 'Settings' } };
+// @ts-expect-error A phone may report terminal outcomes only.
+const pendingPhoneResult: DeviceResult = { command_id: 'device-command/example', outcome: 'pending' };
+// @ts-expect-error Inspection accepts an empty argument object, not navigation arguments.
+const nonemptyInspect: DeviceCommandRequest = { ...inspectPhone, kind: 'phone.inspect', args: { screen: 'NowRoot' } };
+void [phoneWindow, phoneResourceKind, missingMessageID, wrongRouteParams, unknownPhoneScreen, pendingPhoneResult, nonemptyInspect];

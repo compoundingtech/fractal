@@ -2,19 +2,58 @@
 
 The four-tab Expo app uses the generated `st3.client.v0` TypeScript client. Its tabs are Now, Resources, Fleet and Spaces. It connects only to a paired gateway: over HTTPS; over plain HTTP to a Tailscale IPv4 address (100.64.0.0/10), which Tailscale encrypts; or over plain HTTP on the local network to a `*.local` name or an RFC1918 address (10/8, 172.16/12, 192.168/16). LAN HTTP is not encrypted: anyone on that network can read the paired credential and data, and the app says so. App Transport Security allows HTTP only for those ranges and `.local`; any other HTTP gateway URL is rejected. The gateway URL and tab order stay in local app preferences; the paired bearer credential stays in iOS Keychain through `expo-secure-store`. No private endpoint or credential is built into the app.
 
+Status, compatibility and connection notices call the daemon Fractal. An “older Fractal” label means the paired host does not serve the current presentation fields; its reported state is shown without inferring a newer state. These human labels do not rename protocol actor kinds, error codes or stored conversation events.
+
+The TypeScript human error helpers match Rust's explicit `human()` / `human_message()` renderers through `fixtures/clients/plain-errors-v1.json`. Rust's legacy `plain()` / `plain_message()` wording is retained for gate reports, because those report strings also enter durable claims and gate-check JSON. The CLI resolves one presentation mode per process: native drivers and exec-gate subprocesses keep stable error and stream-resync wording; other CLI output uses human wording. Neither human path mutates the original error envelope.
+
 ## Connect
 
-1. On a trusted st3 machine, begin device pairing for the intended person with `st devices pair --as person/ada --full-control "iPhone"` if this trusted device should send messages and use mission/work, runtime, and terminal controls. Without `--full-control`, pairing intentionally grants the limited default projection, glasses, arrangement, terminal-output, attention, and launch scopes; an existing limited device must be re-paired to gain controls.
+1. On a trusted Fractal machine, begin device pairing for the intended person with `fractal devices pair --as person/ada --full-control "iPhone"` if this trusted device should send messages and use mission/work, runtime, and terminal controls. Without `--full-control`, pairing intentionally grants the limited default projection, glasses, arrangement, terminal-output, attention, and launch scopes; an existing limited device must be re-paired to gain controls.
 2. On the iPhone, connect Tailscale, enter the **paired-only gateway** URL (HTTPS; `http://100.x.y.z:port` for a paired-only listener bound to the host's Tailscale address; or `http://host.local:port` / a private LAN address for one bound to its LAN address), then enter the pairing ID and code, plus the person-root fingerprint copied separately from the trusted machine. A missing fingerprint is refused unless you deliberately choose the warned unpinned override. Never publish the privileged `st3.sock`.
 3. Open Now, Resources, Fleet and Spaces. The app shows offline/reconnect state; actions require a live connection. It does not queue offline mutations.
 
-The app holds one WebSocket to the gateway, the collections socket (`docs/st3/client-v0/collections.md`). It subscribes to three windows (up to 200 each of the person's attention, missions, and agents, as stui does), and st pushes each change to them. Missions carry their runs' steps and agents carry their current and queued steps, so the app joins nothing and reads no work or runtime lists. The same socket carries the open conversation and the open terminal. A dropped socket reconnects after 1, 2, 5, 10, then 30 seconds, and the delay resets once a snapshot arrives. Leaving the foreground closes the socket; returning opens a fresh one and shows the new snapshots first. The server’s eight-second WebSocket protocol pings are answered natively and reset a twenty-four-second receive deadline without an HTTP capability probe. If frames and pings stop, the phone closes the socket and keeps the existing offline wording and reconnect delays. The autolinked `StCollections` module exposes pings through SocketRocket for both gateway and Fabric-loopback sockets; Expo Go uses its ordinary WebSocket and cannot observe protocol heartbeats. No inventory read is sent while nothing changes.
+An already paired phone can use **Fleet › this connection › re-pair this device**, including in Release, to open the form on its saved gateway. Cancel leaves the profile untouched. Replacement first confirms notification cleanup, then verifies the new grant before the single SecureStore commit; a failed replacement retains the old profile.
+Re-pairing refuses before sending the code if Fabric is connected to another member. URL gateways receive pairing directly at their saved URL, never through an unrelated Fabric bridge. A Fabric-only gateway requires the connected member's exact node and service. The replacement credential and the gateway used for that pairing are saved together.
+Begin the replacement pairing on the member served by that saved gateway (or the selected
+Fabric member), not another trusted fleet machine. Completion is origin-bound even when the
+pending challenge has replicated. With QR pairing, run the pair command on the member served
+by `--gateway`; a configured different member is refused offline before begin. The CLI then
+checks the gateway's public health node and refuses a different member; an unreachable gateway
+or health response without a node prints a warning. Neither the QR nor a gateway forwarder
+changes where pairing begins.
+
+For a staged device renewal, simply open the app (or bring it back to the foreground).
+The phone checks its saved paired gateway and reachable Fabric member profiles using its
+existing device key, not its old bearer. A saved person-root pin is required: the app
+verifies that pin and the signed request before showing the member, person, and exact scopes.
+Tap **Approve** and authenticate with Face ID, Touch ID, or the device passcode. There is
+no code, QR scan, fingerprint entry, or settings step in this renewal flow.
+Renewal creates a separate non-exportable Secure Enclave candidate and uses a fresh native
+device-owner authentication immediately before its approval signature. Ordinary message
+signing remains prompt-free. Renewal has no software-key fallback; a simulator or phone
+without an available Secure Enclave cannot approve it. After notification cleanup, both
+the old key and candidate sign the same bound request; the app checks the returned grants
+against its saved root pin and candidate before one SecureStore profile replacement.
+Failures retain the old profile and delete the uncommitted candidate. Saved routing is unchanged.
+`deviceRenewal.test.mjs` covers protocol binding, pinned proof verification, cancellation,
+and atomic replacement; `nativeDeviceKey.test.mjs` covers the native bridge contract.
+Run these on Linux with `node --experimental-transform-types --import ./testHooks.mjs --test deviceRenewal.test.mjs nativeDeviceKey.test.mjs`.
+Swift compilation and physical-device authentication require macOS and a phone.
+
+Terminal creation failures, including an answer without a terminal ID, appear in the error banner. Feed live/recovery transitions and successful background reads do not dismiss action feedback; dismiss the banner or complete a successful action to clear it.
+Alternatively, start `fractal devices pair` with its explicit `--gateway` URL and select **Scan pairing QR code** on the phone's pairing screen. Scanning only fills a candidate gateway, pairing ID and code; copy the person-root fingerprint separately, then tap **Pair this device**. A change of gateway (including its base path) requires confirmation before the form changes. Cancelling the scan or that confirmation preserves the existing draft and saved profile. The saved credential and root pin are replaced only after successful pairing. Expired or invalid QR codes are rejected without showing their contents; camera denial leaves manual entry on the same screen. QR scanning requires a fresh native build with the local `fractal-pairing-scanner` Expo module and camera permission; it does not work in Expo Go.
+
+Scanned pairings always require the independently copied fingerprint: the manual unpinned override is unavailable and refused by the store. A successful QR pairing selects the scanned gateway's saved-gateway route and clears all Fabric `device` bindings. Other members retain their independently paired profiles, but none inherits the newly scanned gateway's credential. The carrier and member bindings are committed in the same Keychain profile replacement as the bearer; startup uses that snapshot rather than stale carrier preferences. Subsequent carrier/member changes update the profile's authoritative routing snapshot. Existing profiles without a snapshot keep their saved settings until re-pairing.
+
+The app holds one WebSocket to the gateway, the collections socket (`docs/st3/client-v0/collections.md`). It subscribes to three windows (up to 200 each of the person's attention, missions, and agents, as Fractal terminal UI does), and Fractal pushes each change to them. Missions carry their runs' steps and agents carry their current and queued steps, so the app joins nothing and reads no work or runtime lists. The same socket carries the open conversation and the open terminal. A dropped socket reconnects after 1, 2, 5, 10, then 30 seconds, and the delay resets once a snapshot arrives. Leaving the foreground closes the socket; returning opens a fresh one and shows the new snapshots first. The server’s eight-second WebSocket protocol pings are answered natively and reset a twenty-four-second receive deadline without an HTTP capability probe. If frames and pings stop, the phone closes the socket and keeps the existing offline wording and reconnect delays. The autolinked `FractalCollections` module exposes pings through SocketRocket for both gateway and Fabric-loopback sockets; Expo Go uses its ordinary WebSocket and cannot observe protocol heartbeats. No inventory read is sent while nothing changes.
+
+The fifteen-second collections opening deadline includes the WebSocket handshake, not just creation of its carrier. The receive-heartbeat deadline starts after the handshake; only a base-window snapshot marks the feed live and resets retry backoff. Opening attempts close their pending carrier when timed out, superseded, or backgrounded. Native socket failures retain only the NSError domain and numeric code, never its localized message. Transient iOS `inactive` states such as the Share sheet preserve the previous foreground state: a live feed keeps receiving and retrying, while a backgrounded feed waits for `active` before resuming.
 
 Observation reporting holds one send slot during both batch preparation and transport. Closing a measured minute can synchronously notify the reporter; that notification cannot prepare a second batch while the first is being formed. A null or empty batch releases the slot without delaying the next measurement.
 
 ## Layout
 
-The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Other tabs retain the stui-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
+The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
 | Piece | Native component | Package |
 | --- | --- | --- |
@@ -30,14 +69,16 @@ The chrome uses native tabs and stacks. Now and alert detail use system typograp
 
 Each tab holds its own native stack, and every detail (a conversation, terminal, mission, attention item, launch, past sessions) can be pushed in any tab, so the back button returns where the person came from. A conversation and a terminal hide the tab bar while they are on top, as Messages does.
 
-- **Now** lists what stui's Home lists: every unresolved request, review, approval, native harness prompt and provider sign-in for the paired person, plus the updates they asked for, grouped by tier (somebody is stopped on you, today, when there is time) with stui's glyphs and a legend. The first thing it prints is the alert count: nothing at zero, `1 alert`, `N alerts` otherwise; the tab's badge shows the same number. An alert is whatever blocks or waits on the person (an update asks nothing and is not one). The app reads `alert` on each attention row, and a daemon that predates alerts is read as everything but an update or an unread message. The wire names (`attention`, `/attention`) are unchanged, so older and newer builds keep working. An item opens its detail, with resolve when st offers it; a long press offers the agent's conversation and the mission.
+- **Now** lists what Fractal terminal UI's Home lists: every unresolved request, review, approval, native harness prompt and provider sign-in for the paired person, plus the updates they asked for, grouped by tier (somebody is stopped on you, today, when there is time) with Fractal terminal UI's glyphs and a legend. The first thing it prints is the alert count: nothing at zero, `1 alert`, `N alerts` otherwise; the tab's badge shows the same number. An alert is whatever blocks or waits on the person (an update asks nothing and is not one). The app reads `alert` on each attention row, and a daemon that predates alerts is read as everything but an update or an unread message. The wire names (`attention`, `/attention`) are unchanged, so older and newer builds keep working. An item opens its detail, with resolve when Fractal offers it; a long press offers the agent's conversation and the mission.
+- **Availability** heads Now, above the alert count, as `fractal now` prints it: the person's status (available or away), whether they set it or it follows their devices' presence, and until when; the interruptions they accept (all, urgent only, none) and the deadline clock (running, routine asks held, every ask held), each with its start and end; and their directive note with its expiry. When no device has reported for a day, status reads Available with "No device reporting": agents ask as usual. Every word Fractal answers is open, so a word this build does not know (a later daemon's status, source, presence, interruptions or deadline clock) reads as itself rather than hiding the row. Availability is not on the collections socket, so the app reads it (`availabilityList` and `notesList`) each time a connection goes live (opening, returning to the foreground, reconnecting) and on pull to refresh. A member that predates availability shows no section. Tapping a row changes it while connected: an action sheet offers the values, where Follow my devices, All and Run clear their axis, then how long the change holds (30 minutes, 1 hour, 2 hours, until 09:00 tomorrow in local time, a typed time such as `17:30` or span such as `1h30m`, or until changed). The note row writes or clears the note with the same ends. Each write's answer replaces what is shown. Changing these needs the `write.availability` and `write.notes` scopes, which pairing grants; a phone paired without them says to re-pair it, before and instead of a refused write. `availability.ts` holds the rows, ends and refusals; `availability.test.mjs` covers them.
+- **Presence.** While a connection is live and the pairing grants `write.presence`, the phone reports its raw state to `presenceReport`: `active` when the app comes to the foreground, `inactive` when it leaves (iOS gives an app no lock signal, so the phone never reports `locked` or `sleeping`), each with the person's last input. The last input is the latest touch anywhere in the app (the root view's responder capture records its time and declines the touch) or the moment the app came forward. Fractal derives presence; the phone applies no idle threshold and sends no heartbeat. It reports on every change of state, and when an answer names a `report_again_at` (the moment the phone would turn idle) and nothing has changed by then, it reports again at that time with its newer last input. An answer without one leaves the next report to the next change of state, or to the first touch after it. A refused report (403) stops reporting for that connection; after any other failure, the next change of state or touch reports. Each report's answer replaces the availability shown. `presence.ts` holds the schedule; `presence.test.mjs` covers it.
 - **Resources** keeps the Agents and Missions lists one tap away, with their search, list/tree controls, conversation results and mission cards. It opens on the person's own folders, then Everything else grouped into Agents, Missions, Terminals and Machines. The filter stays on top. Agent and mission status glyphs and needs-you dots remain visible, including sessions found running. A row opens its conversation, mission or terminal; long-press offers Move to. New folder, folder rename and confirmed deletion use `arrangement.edit`; each folder's + finds a resource not already in it. Drag handles move resources or reorder rows and folders; tapping a handle changes nothing. The stream supplies the winning registers after edits. Collapse choices and unavailable resource names stay on this phone.
-- **Documents** (a row under Resources, beside Agents and Missions) lists documents under a prefix a page at a time, each with its name, short version and changed time; type `doc/NAME` and **Open** to read one by name. A document opens read-only, as its author wrote it: Markdown with tables, code and lists, its version (twelve characters), whether it is the latest, and when it changed. A `doc/…` reference in a message, a step's goal or a document opens that document in the same tab; a mission lists the documents it and its latest run name, with the step that pinned each. Inside a document, its links are listed once at the end (including those in tables and code), and following one already on the trail goes back to it, so a link cycle never grows the stack. A document that cannot be shown says why: not found, not synced to this host yet, the host did not answer, or not text. An older st without the `documents` capability is named as such. Reads go through `document.get`, `documents.list` and `document-references.get` and the shared `@fractal/views` document view (`docs/clients/ui-contract.md#documents`); nothing edits or publishes.
+- **Documents** (a row under Resources, beside Agents and Missions) lists documents under a prefix a page at a time, each with its name, short version and changed time; type `doc/NAME` and **Open** to read one by name. A document opens read-only, as its author wrote it: Markdown with tables, code and lists, its version (twelve characters), whether it is the latest, and when it changed. A `doc/…` reference in a message, a step's goal or a document opens that document in the same tab; a mission lists the documents it and its latest run name, with the step that pinned each. Inside a document, its links are listed once at the end (including those in tables and code), and following one already on the trail goes back to it, so a link cycle never grows the stack. A document that cannot be shown says why: not found, not synced to this host yet, the host did not answer, or not text. An older Fractal without the `documents` capability is named as such. Reads go through `document.get`, `documents.list` and `document-references.get` and the shared `@fractal/views` document view (`docs/clients/ui-contract.md#documents`); nothing edits or publishes.
 - **Fleet** shows machines, sessions found running on the gateway machine, this connection, paired devices, and the tab order.
-- **Alerts in a conversation.** Each alert shows above the conversation of the agent it belongs to (`conversation_id`; a provider sign-in shared by several seats shows in each, once, naming the others), a line that opens to its question and its answers, and starts open when it is the only one. Requests are answered there as they are on Now. A native prompt (`prompt.respond`) shows the pending tool call in full, from the conversation where the harness records it before asking, beside the answers st offers for it: Allow and Deny for a permission or a Codex approval, Approve plan and Deny for a plan, the question's options for a Claude question (any number for a multi-select, sent together with Send, or Decline), and a screen prompt's own answers (Use it, Use all, Skip; Trust, Exit or Quit). The prompt names no call, so Allow and Approve plan are offered only when exactly one call is unanswered and shown; with several, all are listed with a pointer to the terminal. Deny and a screen prompt's answers are always offered, and an answer in the terminal still wins. Now, where the conversation is not loaded, says to open it to see the call. A refusal because the prompt is gone says so in st's words and is not sent again. A prompt st cannot deliver an answer to says to answer it in the terminal. A seat whose harness is compacting its conversation reads `compacting` in the agent strip and the Agents list: a status, never an alert.
+- **Alerts in a conversation.** Each alert shows above the conversation of the agent it belongs to (`conversation_id`; a provider sign-in shared by several seats shows in each, once, naming the others), a line that opens to its question and its answers, and starts open when it is the only one. Requests are answered there as they are on Now. A native prompt (`prompt.respond`) shows the pending tool call in full, from the conversation where the harness records it before asking, beside the answers Fractal offers for it: Allow and Deny for a permission or a Codex approval, Approve plan and Deny for a plan, the question's options for a Claude question (any number for a multi-select, sent together with Send, or Decline), and a screen prompt's own answers (Use it, Use all, Skip; Trust, Exit or Quit). The prompt names no call, so Allow and Approve plan are offered only when exactly one call is unanswered and shown; with several, all are listed with a pointer to the terminal. Deny and a screen prompt's answers are always offered, and an answer in the terminal still wins. Now, where the conversation is not loaded, says to open it to see the call. A refusal because the prompt is gone says so in Fractal's words and is not sent again. A prompt Fractal cannot deliver an answer to says to answer it in the terminal. A seat whose harness is compacting its conversation reads `compacting` in the agent strip and the Agents list: a status, never an alert.
 - **Spaces** is always one of the four tabs. It lists the person's spaces by name, followed live when the gateway grants `glasses`; selecting a space shows its tabs grouped by pane in the computer's order. A pane opens its conversation, mission, resource, terminal or Fleet for a machine. An unavailable subject stays marked. The phone reads spaces and never changes them. Saved spaces and sidebar folders remain available offline, with the age of the cached data shown.
 
-New agent offers a repository from the selected machine’s agents, or an absolute path you type. Selecting a repository creates a Git worktree using the agent’s safe simple name as its default branch, with `origin/main` as the editable base. An empty repository uses a plain workspace. Workspace is optional in either case; st chooses a new directory when it is empty. The conversation header shows the requested worktree and branch, and any checkout failure remains visible as the agent’s fault.
+New agent offers a repository from the selected machine’s agents, or an absolute path you type. Selecting a repository creates a Git worktree using the agent’s safe simple name as its default branch, with `origin/main` as the editable base. An empty repository uses a plain workspace. Workspace is optional in either case; Fractal chooses a new directory when it is empty. The conversation header shows the requested worktree and branch, and any checkout failure remains visible as the agent’s fault.
 
 Conversation and session views, Home rows, requests and answers, device-signing data and client naming live in the shared [`@fractal/views`](../../clients/typescript/fractal-views/README.md) package. The phone imports it through a `workspace:*` dependency; its tests check the same transcript and signing fixtures as Rust. Other pure phone logic lives in tested modules (`agentsView.ts`, `missionsView.ts`, `markdown.ts`, `tabs.ts`). A transcript entry the app does not understand is shown as a dim event line, never dropped silently, and never breaks the rest of the conversation. Launches retain their explicit reads. When the member grants `inventory-collections` version 1, clients, usage, machines, devices, native sessions and terminal lists follow screen-scoped windows on the same socket, up to 200 rows each. Shared screens share a slot, including each of the three selected usage periods; a window leaves thirty seconds after its last focused screen leaves. At most fifteen total subscriptions fit the sixteen-slot bound. Pull to refresh resubscribes for authoritative snapshots. An older member retains reads on focus and explicit pull, with a Fleet note that inventories are read, not followed; no automatic inventory timer remains. A collection that fails is named instead of appearing empty.
 
@@ -77,7 +118,14 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
-With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.7.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.17.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+
+Before installing from a fresh checkout without devenv, run
+`python3 scripts/prepare-pnpm-source-inputs.py prepare` from the repository
+root. This requires `nix`, Python 3, Node and Git on `PATH`: it runs the
+flake-pinned megarepo CLI in commit mode, with lock synchronization disabled,
+then publishes the root-owned source inputs declared in `pnpm-source-inputs.json`.
+CI and the web shell use the same preparation command.
 
 `app.config.js` selects the installed identity with `APP_VARIANT`:
 
@@ -85,10 +133,11 @@ With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lock
 | --- | --- | --- | --- |
 | `dev` (default) | Fractal Dev, amber DEV-badged icon | `com.compoundingtech.fractal.starter` | Debug with Metro, simulator and device smoke tests |
 | `daily` | Fractal, ordinary icon | `com.compoundingtech.fractal` | Release build used every day on a phone |
+| `test` | Fractal Test, ordinary icon | `com.compoundingtech.fractal.test` | Isolated client-control Release app; never the everyday pairing |
 
-The two apps coexist on one phone and keep separate Keychain profiles, so each is paired on its own. Any other value fails the configuration. Changing variants requires a clean prebuild, and the same `APP_VARIANT` must stay exported for the Xcode build that embeds the bundle. The EAS simulator profile selects dev; preview selects daily.
+The apps coexist and keep separate Keychain profiles, so each is paired on its own. Any other value fails the configuration. Changing variants requires a clean prebuild, and the same `APP_VARIANT` must stay exported for the Xcode build that embeds the bundle. The EAS simulator profile selects dev; preview selects daily.
 
-The Expo name `fractal` and slug `fractal-starter` generate `ios/fractal.xcodeproj`, `ios/fractal.xcworkspace`, and the `fractal` target/scheme for both variants. Each variant's URL scheme matches its bundle identifier. Device signing keys use the Keychain service `com.compoundingtech.fractal.device-key`, isolated by the app's bundle identity.
+The Expo name `fractal` and slug `fractal-starter` generate `ios/fractal.xcodeproj`, `ios/fractal.xcworkspace`, and the `fractal` app target/scheme for every variant. Device signing keys use the Keychain service `com.compoundingtech.fractal.device-key`, isolated by the app's bundle identity. The test variant additionally declares its own explicit keychain access group and app group; neither is shared with daily or dev.
 
 When moving from the former app identity, install the new app, pair it once, delete the old app by hand, and revoke the old device's grant. The new bundle identifier cannot read the old app's Keychain; there is deliberately no fallback to the former service.
 
@@ -117,13 +166,40 @@ ref must support `APP_VARIANT=daily`; a ref without that variant is refused
 rather than replacing the separate Debug app. First prepare a signed artifact
 without phone access:
 
+For the isolated test app, select `--variant test` (or `FRACTAL_IOS_VARIANT=test`)
+and supply `--test-app-profile` / `FRACTAL_IOS_TEST_APP_PROFILE`, the installed
+Apple Development profile name that Johannes prepared. `--test-runner-profile` /
+`FRACTAL_IOS_TEST_RUNNER_PROFILE` supplies the separate XCUITest runner profile
+when building the observation scheme. The lane uses manual signing for test,
+never requests provisioning updates, and appends `ios-test-variant` to the
+supplied state directory, isolating checkout, caches, version floor and artifacts.
+Normal remains the default and keeps its existing state path and automatic
+signing policy. Both variants run the same #6207 Fabric build and pre-install
+guard; a snapshot with another bundle identifier is refused before installation.
+The test app can bootstrap from an absent installed bundle; the normal lane
+still requires its existing app readback. No lane configuration grants pairing,
+enrollment, installation or process-launch consent.
+
 ```sh
 python3 apps/ios/scripts/release_delivery.py \
   --repo "$SOURCE_REPO" --state "$DELIVERY_STATE" \
   --expected-origin "$TRUSTED_ORIGIN_URL" --trusted-commit "$REVIEWED_FULL_SHA" \
-  --device "$ST_IOS_DEVICE" --team "$ST_IOS_TEAM" \
+  --device "$FRACTAL_IOS_DEVICE" --team "$FRACTAL_IOS_TEAM" \
   --developer-dir "$DEVELOPER_DIR" --build-only
 ```
+
+The delivery worker prepares locked megarepo members and republishes source
+inputs before checking its frozen-install cache. A missing `nix` or a failed
+member/publisher command fails closed as `build_failed` with reason
+`source_inputs_preparation_failed`; the build log contains the failing command.
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+Delivery options and push configuration prefer `FRACTAL_IOS_*` variables, with
+the corresponding `ST_IOS_*` spelling as a fallback only when the preferred name
+is absent. Explicitly empty delivery values remain empty (and are rejected where
+the option requires a value); an empty push flag disables push. Command-line
+delivery options still win.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 
 The script starts nothing by itself: delivery runs only when a separately
 configured host scheduler invokes it, and this repository ships no scheduler.
@@ -131,9 +207,9 @@ configured host scheduler invokes it, and this repository ships no scheduler.
 The default ref is protected `origin/main`. The device owner must approve
 the tracked branch and its protection before scheduling delivery; repository
 maintainers own branch protection. Supply the exact approved origin URL with
-`--expected-origin` / `ST_IOS_EXPECTED_ORIGIN`, and an independently reviewed
+`--expected-origin` / `FRACTAL_IOS_EXPECTED_ORIGIN`, and an independently reviewed
 full 40-character bootstrap commit with `--trusted-commit` /
-`ST_IOS_TRUSTED_COMMIT`. These must come from trusted operator configuration,
+`FRACTAL_IOS_TRUSTED_COMMIT`. These must come from trusted operator configuration,
 not the fetched ref. The script refuses an origin mismatch before fetching,
 and refuses any fetched commit not descended from its persisted `trusted_head`
 (initially the bootstrap commit), before inspecting manifests or running code.
@@ -145,7 +221,7 @@ This deliberately refuses historical ref rewinds and divergent branch
 switches. Rollback must be a new reviewed revert commit descended from the
 last trusted head. There is no signature check; the origin pin and ancestry
 boundary do not make a malicious maintainer-approved fast-forward safe.
-Do not point the script at a contributor branch. `--ref` / `ST_IOS_REF`
+Do not point the script at a contributor branch. `--ref` / `FRACTAL_IOS_REF`
 accepts a valid branch (`origin/<branch>` or local) or a full commit SHA,
 subject to that same ancestry boundary. Remote branches are fetched directly
 from the source repository's approved `origin`; the source checkout is never
@@ -160,7 +236,7 @@ drops the workspace setting; it does not sandbox tracked `.pnpmfile.cjs`,
 `.npmrc`, or explicitly invoked build scripts. Persistent `node_modules`,
 native inputs, and DerivedData can be poisoned by an untrusted ref; clear
 those caches before resuming trusted builds after such exposure.
-Use `--build-only` or `ST_IOS_BUILD_ONLY=1` to prepare a signed artifact while
+Use `--build-only` or `FRACTAL_IOS_BUILD_ONLY=1` to prepare a signed artifact while
 phone access is held. Installation and launch require the caller to supply
 `AGENT_ACTION_APPROVAL=deploy`; without it, the signed artifact is retained
 and no phone command runs. Remove `--build-only` and supply that approval
@@ -169,13 +245,14 @@ reused without rebuilding. Before signing, the generated app's `Info.plist` rece
 Git revision as `StBuildCommit` and the revision's commit count as
 `CFBundleVersion`. The artifact's `success.json` records both. Compare its
 `build_version` with `devicectl device info apps --bundle-id
-com.compoundingtech.fractal --device "$ST_IOS_DEVICE" --json-output -` to
+com.compoundingtech.fractal --device "$FRACTAL_IOS_DEVICE" --json-output -` to
 verify the installed build independently of pairing or proof-only UI.
 <!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
 also appears in connected-client diagnostics.
 
-Prerequisites are Python 3, Git, Node 24, pnpm 12.7.0, CocoaPods, Xcode, and `gate-slot`
+Prerequisites are Python 3, Git, Node 24, pnpm 12.17.0, CocoaPods, Xcode, Rust
+with the `aarch64-apple-ios` and `aarch64-apple-ios-sim` targets, and `gate-slot`
 in the scheduler's PATH. The build takes a heavy admission slot, runs under
 `taskpolicy -c utility` and `nice -n 19`, and caps Xcode parallelism at four jobs.
 Utility QoS yields to interactive work without restricting a native build to
@@ -196,11 +273,22 @@ including partial compilation from unsuccessful attempts. The frozen workspace
 install reruns only when a package manifest, root lock/workspace configuration,
 or Node/pnpm path changes, or `node_modules` is missing. Native generation and CocoaPods rerun only when
 the package locks/manifests, evaluated app configuration, config plugins,
-native modules, assets, or immutable toolchain paths change, or their generated
-workspace/lock is missing. JS-only changes reuse the native cache.
+native modules, compiled Fabric framework, assets, or immutable toolchain paths
+change, or their generated workspace/lock is missing. JS-only changes reuse the
+native cache when the framework content is unchanged.
+The worker runs `sh modules/fractal-fabric/build.sh` from `apps/ios` before
+CocoaPods, reusing the module's documented Rust XCFramework builder inside the
+same gated worker. Its sorted relative file names and file contents determine
+the framework SHA-256; timestamps and absolute paths do not. Missing or empty
+framework output fails closed before linking. The hash participates in the
+build and native-generation identities and is recorded as
+`fabric_framework_hash` in `success.json`. A changed framework invalidates reuse.
 The worker uses `pnpm exec expo config` and clean `pnpm exec expo prebuild`,
-then `pnpm run export:ios`, all with `APP_VARIANT=daily` and the daily fabric
-settings pinned before invoking Xcode.
+then `pnpm run export:ios`, with the selected variant (`APP_VARIANT=daily` by
+default, `test` only when explicitly selected) and the daily Fabric
+settings pinned before invoking Xcode. Before publishing the signed snapshot,
+it requires defined Rust bridge symbols in the app executable: the real module
+and disabled stub share the same Swift class name, so that name alone is not proof.
 Metro inlines `EXPO_PUBLIC_*` values into each transformed module, so the build runs
 with a delivery-scoped `TMPDIR` under `build-cache/tmp` and resets that
 transform cache whenever the inlined values change; a successful build also
@@ -224,22 +312,26 @@ from the last successful fetch, updated on every fetch, including reverts and
 app-irrelevant commits. Its content key hashes the Git trees of `apps/ios` and
 its local-package closure together with the inputs outside the revision: the
 Xcode directory, Node/pnpm/CocoaPods paths, inherited `EXPO_PUBLIC_*` values,
-and the pinned native environment. Builds always run with the daily Release
-values `APP_VARIANT=daily`, `ST3_FABRIC_PROOF=0` (read by `StFabric.podspec`),
-and `ST3_FABRIC_OFFLINE_DEBUG=0` (read by `metro.config.js`), so an inherited
-value never reaches prebuild, CocoaPods, Metro, or Xcode; the pins are also part
-of the native-generation cache key. A signed artifact is installed only if its
+the compiled Fabric framework hash, and the pinned native environment. Test
+profile selections are also build inputs. Builds always run with the selected
+`APP_VARIANT` and `FRACTAL_FABRIC=1`,
+`FRACTAL_FABRIC_PROOF=0` (read by `FractalFabric.podspec`), and
+`FRACTAL_FABRIC_OFFLINE_DEBUG=0` (read by `metro.config.js`), with the legacy
+`ST3_` counterparts pinned to the same respective values. Inherited settings
+never override these pins in prebuild, CocoaPods, Metro, or Xcode; the pins are
+also part of the native-generation cache key. A signed artifact is installed only if its
 key equals the observed head's key under the current inputs. A build runs only
 when no retained artifact or installed app has that key; a revert to retained
-content reuses its artifact if that does not lower the installed version.
+content reuses its artifact only if it is newer than the installed version.
 `CFBundleVersion` comes from a persisted counter, the larger of the commit
 count and the last assigned version plus one, so it never decreases across
-reviewed revert commits and forward branch switches. Every install checks it against the
-installed version; an artifact with a lower version is rebuilt instead.
+reviewed revert commits and forward branch switches. Before installing, an approved
+tick reads the device's daily bundle version and refuses any artifact at or below
+the reconciled version floor. A stale cached floor cannot authorize a downgrade.
 A pending artifact for other content is dropped, never installed.
 An unsuccessful build cannot be installed. A failed content key is retried
 after 15 minutes, then after 30, doubling up to six hours (`--build-backoff`
-or `ST_IOS_BUILD_BACKOFF` sets the first delay in seconds); new content, such
+or `FRACTAL_IOS_BUILD_BACKOFF` sets the first delay in seconds); new content, such
 as a fix, revert, or input change, builds on the next tick. A successful build is retained
 until installation and launch both succeed; an unreachable or locked phone
 is retried on the next tick without rebuilding. While the ref cannot be
@@ -263,7 +355,7 @@ delivery takes priority even if the app is running. With five-minute polling,
 this leaves time within the one-hour delivery target for installation; build,
 admission, provisioning, and device failures remain visible rather than being
 reported as delivered. No launch uses `--terminate-existing`.
-Use `--max-deferral` or `ST_IOS_MAX_DEFERRAL` to configure that courtesy window;
+Use `--max-deferral` or `FRACTAL_IOS_MAX_DEFERRAL` to configure that courtesy window;
 zero is appropriate for a coordinated proof when the phone is not being used.
 
 Every invocation records outcomes to `outcomes.jsonl` and stdout; each build
@@ -287,15 +379,30 @@ and removes the receipt after parsing. An exact daily bundle ID and numeric
 `bundleVersion` (not the marketing version) establish whether installation
 already completed, so launch can resume without a second install. A higher
 device version raises the version floor and refuses the older artifact.
-Query failure, malformed JSON, duplicate daily entries, or invalid versions
-defer delivery without assuming success or mutating the phone. An absent
-daily app permits retry; any previously persisted version floor is retained.
-A readback contradicting the cached installed version also invalidates the
+Query failure, malformed JSON, duplicate daily entries, invalid versions, or an
+absent daily app defer delivery without assuming success or mutating the phone.
+A readback contradicting the cached installed version invalidates the
 cached installed-content identity, while retaining the monotonic version floor.
-No device query runs under `--build-only` or without caller deploy approval.
+A contradictory readback also clears a pending artifact's installed claim,
+including an install whose launch failed. Finalizing any artifact never lowers
+the version floor, and a superseded installed claim cannot restore stale identity.
+Ordinary ticks query the device only with caller deploy approval, never under
+`--build-only`.
+
+For an initialized delivery state, run the usual configured command with
+`--reconcile-installed` to reconcile a build installed outside the updater.
+This mode makes exactly one `devicectl device info apps` query and writes an
+`installed_reconciled` outcome. It only raises `installed_version` to the maximum
+of the cached floor and the observed numeric build; it clears stale installed
+content identity using the same readback path as interrupted-install recovery.
+It never fetches, builds, installs, or launches. Deploy approval is not required:
+the device operation is read-only and the only state mutation tightens the
+version floor. Missing/unreadable bundle information fails closed without
+changing that floor. After repinning the updater, an operator can run this mode
+once before allowing scheduled delivery to resume.
 Optionally set both `--notify-from` and `--notify-to` (or
-`ST_IOS_NOTIFY_FROM`/`ST_IOS_NOTIFY_TO`) to send state changes with
-`st conversations send`: each newly installed commit, a new build failure,
+`FRACTAL_IOS_NOTIFY_FROM`/`FRACTAL_IOS_NOTIFY_TO`) to send state changes with
+`fractal conversations send`: each newly installed commit, a new build failure,
 or device unavailability lasting over one hour (once until recovery).
 A notification carries only the outcome, time, commit, build version, and
 exit status; raw tool errors and log paths, which can name the device or
@@ -325,8 +432,13 @@ preferred value masks the legacy value. This also applies to `FABRIC_PROOF_LINK`
 precedence for `FRACTAL_FABRIC_OFFLINE_DEBUG` and legacy `ST3_FABRIC_OFFLINE_DEBUG`;
 the offline Debug preparation script exports both names.
 
-For screenshots without a real st, `node demoGateway.mjs 8791` serves invented data: attention, missions, agents, one conversation, and one terminal. Pair a Debug simulator with `com.compoundingtech.fractal.starter://pair?gateway=http://<the Mac's LAN or Tailscale IPv4>:8791&id=demo&code=demo`. It is not authenticated; never point a Release build or a device at it.
+For screenshots without a real Fractal, `node --experimental-transform-types demoGateway.mjs 8791` serves the kit's `loadWorld('fleet-mid-refactor')` through `createReplay` with its real clock. HTTP and WebSocket traffic use the replay's fetch/socket seams directly: attention, missions, agents, conversations, terminals and actions have one shared scenario source, including recorded narrative content and timed updates. Run `pnpm install --frozen-lockfile` from the repository root first; like the app's client imports, the demo uses repository-relative kit source entrypoints, hence the Node transform flag. Pair a Debug simulator with `com.compoundingtech.fractal.starter://pair?gateway=http://<the Mac's LAN or Tailscale IPv4>:8791&id=demo&code=demo`. It is not authenticated; never point a Release build or a device at it.
 It completes the phone's real device-key verification read-only: the unauthenticated capabilities preflight is the raw advertisement, and pairing answers with an invented host-signed person-root proof and no signing grant, so the phone still runs its own checks.
+Like the real gateway, its collections socket sends a WebSocket protocol ping every eight seconds, keeping an idle native client inside its twenty-four-second receive deadline.
+The capture flow waits for **Review the loadUser rename** on Now and opens **Atlas Builder** (`agent/example/atlas/builder`) for the conversation. Pairing uses the world's first person and an invented host authority; only pairing preflight/completion and phone observation acknowledgement sit outside replay. The gateway decode test exercises real HTTP and WebSocket responses through the app's `FractalClient` and `Feed`, covering all three Now windows and the builder conversation without duplicating the scenario.
+For deterministic screenshots, `EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1` also loads the world at the kit anchor and uses a frozen `manualClock`, so neither wall-clock time nor timed replay events change the captured product state. The landing script already exports this flag. Ordinary manual demo launches retain the advancing real clock.
+
+`apps/ios/scripts/landing-screenshots --gateway-host LAN_IPV4 --output DIR` automates this on a disposable simulator. It sets `EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1`, which disables only the Debug LogBox overlay; warnings still reach `metro.log`. Normal Debug launches and Release builds do not apply this capture-only policy. The flow requires the unpinned-pairing confirmation, allows at most three presses while that confirmation is absent and its enabled button remains visible, and submits pairing only once. Alongside the four PNGs, `pairing-simulator.log` retains simulator unified logs from app launch through pairing, including on failure. Treat these diagnostic logs as private and review them before sharing.
 
 Generated `ios/`, build output, signing material, local configuration, and proof screenshots are ignored by Git. Do not commit Apple team/device IDs, credentials, machine paths, or private network addresses. Expo SDK 57 needs the `expo-build-properties` scene-lifecycle opt-in for Xcode 27/iOS 27.
 
@@ -344,9 +456,9 @@ There is no Expo push service.
 Ordinary prebuilds retain their previous signing requirements and do not gain `aps-environment`.
 Expo automatically applies installed notification plugins, so `plugins/withoutPush.js` reserves
 the notification plugin's run-once identity without changing native configuration. To opt in,
-run `ST_IOS_PUSH=1 pnpm exec expo prebuild --platform ios --clean --no-install`, then install pods
+run `FRACTAL_IOS_PUSH=1 pnpm exec expo prebuild --platform ios --clean --no-install`, then install pods
 and build as usual. The flag applies the real `expo-notifications` plugin and its development
-entitlement. Keep `ST_IOS_PUSH=1` set for subsequent prebuilds, Metro, bundle exports and Xcode build
+entitlement. Keep `FRACTAL_IOS_PUSH=1` set for subsequent prebuilds, Metro, bundle exports and Xcode build
 invocations for that target: its Expo runtime configuration also gates native token acquisition.
 A paid Apple Developer membership and Push Notifications enabled for the app's bundle identifier are required for
 physical-device APNs registration; retain signing material only in local configuration.
@@ -380,22 +492,23 @@ registered/environment summary. Revocation or expiry also removes the registrati
 
 ## Fabric, an opt-in carrier
 
-The app reaches its member over its saved gateway (Tailscale, the local network or HTTPS) unless the person turns on **Fabric** under Fleet › carrier. Fabric needs a build that links the native bridge: build with `ST3_FABRIC=1 pnpm run pods` after building the Rust framework (see [the module's README](modules/st-fabric/README.md)). A build without it is the ordinary app and shows no carrier setting.
+The app reaches its member over its saved gateway (Tailscale, the local network or HTTPS) unless the person turns on **Fabric** under Fleet › carrier. Daily delivery builds link the real native bridge without enabling proof or offline Debug behavior; linking it does not turn on the carrier. For manual builds, run `sh modules/fractal-fabric/build.sh` from `apps/ios`, then `FRACTAL_FABRIC=1 pnpm run pods` (see [the module's README](modules/fractal-fabric/README.md)). A build without the bridge shows no carrier setting.
 
-With Fabric on, each foreground opens a fresh native listener on the loopback address the bridge returns (the only loopback address the app accepts; it is never saved), the client talks to it, and the background stops it. The paired bearer and the enrolled signing key are the same ones the saved gateway uses, so a device already paired to the member needs only the setting and a grant, not a new pairing. A new pairing made while the bridge is open goes over fabric. The member exposes its paired-only client socket as one fabric service and grants this phone's node ID (shown in Fleet › carrier) that one service, inbound-only: `fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE` on fabric 0.2.41 or later, so the member never dials or probes the phone ([grant](../../docs/st3/ios-fabric-protocol.md#member-exposure-and-authorization)).
+With Fabric on, each foreground opens a fresh native listener on the loopback address the bridge returns (the only loopback address the app accepts; it is never saved), the client talks to it, and the background stops it. The paired bearer and the enrolled signing key are the same ones the saved gateway uses, so a device already paired to the member needs only the setting and a grant, not a new pairing. A new pairing made while the bridge is open goes over fabric. The member exposes its paired-only client socket as one fabric service and grants this phone's node ID (shown in Fleet › carrier) that one service, inbound-only, on fabric 0.2.41 or later, so the member never dials or probes the phone. After `st devices fabric enable` on the member, a pairing made with `st devices pair NAME --fabric-gateway` does this (the person chooses per pairing; without the flag nothing is granted): a member that offers `fabric-gateway-grant` receives the phone's node ID with the pairing and grants it, `st devices revoke` removes the grant, and a grant that failed is shown after pairing ([Fractal grants paired phones](../../docs/st3/ios-fabric-protocol.md#fractal-grants-paired-phones)). A member without it is granted by hand: `fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE`.
 
 <!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 The target is `node=NODE_ID&service=NAME` (and an optional `addr=` hint): paste it under Fleet › carrier. A build can carry one: put `EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT='node=…&service=…'` in an ignored `.env` on the build host and that build opens on Fabric with the target preset, until the person chooses otherwise. The legacy `EXPO_PUBLIC_ST3_FABRIC_DEFAULT` is read only when the preferred name is absent. A build from the repository carries none and stays on its saved gateway. Never commit a target, a node ID or a link.
 
 If fabric cannot connect (no grant, member out of reach, no answer within four seconds) the app falls back to the saved gateway and names the route and the reason in Fleet › this connection; a member that refuses the grant is named as a refusal. Turn the fallback off under Fleet › carrier to see fabric fail instead. Fabric is not tried again for thirty seconds after it fails, and a lost connection is redialed three times before the app falls back. Nothing is queued while the bridge is down, and a mutation is never retried over a new connection.
 
-The Debug-only fabric proof (`fabric-proof` links, the separate offline Debug app and its isolated member helper) is unchanged; see [the module](modules/st-fabric/README.md).
+The Debug-only fabric proof (`fabric-proof` links, the separate offline Debug app and its isolated member helper) is unchanged; see [the module](modules/fractal-fabric/README.md).
 
 ## Resource sidebar
 
 Resources opens shared folders followed by Everything else, grouped by Agents, Missions,
 Terminals and Machines. Agents and Missions open their full searchable lists in one tap. The filter row stays above the person's folders. This view follows
 the optional arrangements stream; older pairings retain the grouped resource browser.
+Terminal inventories do not include display names. Terminal rows show the owner's short ID (the first eight characters for a UUID); the filter also matches the complete owner ID and runtime ID. Opening a row still uses its terminal ID, not its runtime or owner ID.
 Tap a resource to open it and a heading to collapse it. Long-press a resource for Move to;
 long-press a folder for rename or confirmed deletion. Each folder's + finds a resource to
 add; choosing it previews the move, and the Move button commits it. Drag handles reorder folders and move or reorder resources; taps never move rows.
@@ -403,6 +516,25 @@ Folder groups start open; busy groups start collapsed above 30 items. Device-loc
 and previously seen rows are scoped to the gateway and person. Missing rows stay marked
 unavailable. Edits use `arrangement.edit` and the live winning registers, with Sidebar
 created only on the first edit.
+
+Run `pnpm --dir apps/ios test sidebarBehavior.test.mjs` from the repository root
+to replay the schema-validated shared v1 vectors through the native feed, view and
+edit planners. The runner's explicit divergence table locks down the current
+flat-folder presentation, UTF-16 ties and native planner validation differences;
+it does not claim recursive layouts, structured refusal parity or v2 support.
+
+`sidebarMemberships.ts` and the exported membership feed conversions are unwired:
+the active sidebar still follows its existing v1 path. The read model stages pages,
+retains a stale last-complete base, joins collection epochs/frontiers and bounds
+automatic restarts to three attempts. Epochs must be supplied by a capable daemon;
+missing epochs refuse rather than deriving a frontier from whole-host snapshots.
+HTTP 404 and 422 `unsupported-membership-paging-contract` produce `Unsupported`
+(needs a newer daemon). HTTP 422 `invalid-membership-cursor` yields `InvalidCursor`;
+500 `membership-frontier-inconsistent` yields `FrontierInconsistent`. These states
+retain stale complete data without retries. Both collection-v1 HTTP 409 codes
+(`membership-frontier-reset`/`membership-collection-changed`) restart at page one.
+Legacy HTTP 410 cursor expiry is not a collection-v1 restart signal.
+Run `pnpm --dir apps/ios test sidebarMemberships.test.mjs` for its paging contract.
 
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored
 tab orders are intentionally retired. A fresh workspace names its host and points to
@@ -418,3 +550,94 @@ graph subject. Session and PTY IDs only navigate; placements require stable grap
 
 Opening a resource detail also reads its exact subject with the existing prefix filter,
 including subjects beyond the catalog windows.
+
+## Isolated native test client and independent observer
+
+`APP_VARIANT=test` selects **Fractal Test**, bundle `com.compoundingtech.fractal.test`,
+app group `group.com.compoundingtech.fractal.test`, and sole keychain access group
+`$(AppIdentifierPrefix)com.compoundingtech.fractal.test`. It keeps the same Expo
+project/workspace and release application source as daily. The readable build-time
+flag is `Constants.expoConfig.extra.testClientMode` in JavaScript and
+`FractalTestClientMode` in the app's Info.plist; both are absent for dev/daily
+(absence means normal mode, preserving the normal configuration unchanged).
+This flag describes the binary, not enrollment or authorization. No command handlers
+or automatic enrollment are enabled by this preparation.
+
+State isolation relies on the separate application sandbox and sole test keychain
+access group, not on renaming existing state keys. `FractalDeviceKeyModule.swift`
+stores P-256 key material as a generic password under service
+`com.compoundingtech.fractal.device-key`; `FractalFabricModule.swift` similarly
+stores its independent transport secret under `com.compoundingtech.fractal.fabric-proof`.
+Neither specifies `kSecAttrAccessGroup`, so Keychain uses the application's default
+access group. SecureStore profile calls in `store.tsx` also omit access-group options.
+The local native modules do not use app-group containers or shared UserDefaults
+suites. Normal modules and normal dev/daily entitlements are unchanged. The test app
+must generate its own key and pair manually with a pinned fingerprint; never copy
+normal-app credentials. The app-group entitlement reserves the isolated namespace;
+the observer does not share that container or the application's keychain.
+
+`plugins/withTestClient.cjs` durably generates `FractalTestControl` (UI-testing
+target and shared Release scheme) and copies `plugins/ClientControlUITests.swift`
+into the disposable native project. The UI runner's base product bundle identifier
+is `com.compoundingtech.fractal.test`; Xcode appends `.xctrunner`, giving
+`com.compoundingtech.fractal.test.xctrunner`. Signing is manual, with app profile
+`$(FRACTAL_IOS_TEST_APP_PROFILE)` and runner profile
+`$(FRACTAL_IOS_TEST_RUNNER_PROFILE)`. Johannes performs provisioning/signing setup;
+these commands do not create profiles or allow provisioning updates.
+
+After unsigned test prebuild, run `node scripts/assert_test_project.mjs` from
+`apps/ios` to assert the generated product reference is exactly
+`FractalTestControl.xctest` (not a Spotlight `.mdimporter`) and uses the
+UI-testing product type and expected runner base identity. This checks project
+generation only; it is not a signed/compiled runner receipt.
+
+After the applicable consent/signing gates, the command interface from `apps/ios`
+is below. Use the daily delivery lane to enforce its guards and regenerate native
+source with `APP_VARIANT=test`; do not install using an unguarded alternate path.
+The commands illustrate the native build/observer interface, not permission to act
+on a device. Destination, profile names and signing identity are supplied locally.
+
+```sh
+APP_VARIANT=test pnpm exec expo prebuild --platform ios --no-install
+xcodebuild build-for-testing \
+  -workspace ios/fractal.xcworkspace -scheme FractalTestControl \
+  -configuration Release -destination "$TEST_DESTINATION" \
+  -derivedDataPath "$TEST_DERIVED_DATA" \
+  FRACTAL_IOS_TEST_APP_PROFILE="$FRACTAL_IOS_TEST_APP_PROFILE" \
+  FRACTAL_IOS_TEST_RUNNER_PROFILE="$FRACTAL_IOS_TEST_RUNNER_PROFILE"
+xcodebuild test-without-building -xctestrun "$TEST_XCTESTRUN" \
+  -destination "$TEST_DESTINATION" -resultBundlePath "$SMOKE_RESULT" \
+  -only-testing:FractalTestControl/ClientControlUITests/testLaunchAndReadAccessibility
+```
+
+The smoke launches only the test bundle in a separate process and reads the existing
+native **Now** tab. It never unlocks, dismisses system dialogs or launches the daily
+bundle. Run it separately from a content observation because launching may reset the
+route. Failed launches/locked devices are failures, not permission to unlock.
+
+For D-9, first have the authorized journey open the seeded item. In a copy of the
+generated `.xctestrun`, set the test target's **runner** `EnvironmentVariables`
+(inside `TestConfigurations[].TestTargets[]` for format 2; target dictionary for
+format 1) from the independent seed, not from `device.result`:
+
+- `FRACTAL_D9_TITLE`: exact rendered seed title.
+- `FRACTAL_D9_BODY`: exact plain-text seed body, rendered as one static-text
+  accessibility element.
+- `FRACTAL_D9_BODY_SHA256`: lowercase SHA-256 hex of the seed body's exact UTF-8
+  bytes, with no whitespace normalization.
+
+```sh
+xcodebuild test-without-building -xctestrun "$SEEDED_TEST_XCTESTRUN" \
+  -destination "$TEST_DESTINATION" -resultBundlePath "$D9_RESULT" \
+  -only-testing:FractalTestControl/ClientControlUITests/testSeededTitleAndBodyDigest
+```
+
+This test does not relaunch, activate, navigate, send commands or read a client
+report. It reads visible accessibility labels and hashes the observed body itself.
+Missing expectations, background state, missing/split/truncated text or an invisible
+element fail closed. Use a simple seed whose full body fits the visible viewport;
+rich-text segmentation is not reconstructed by this observer. The accessibility
+tree and screenshot are XCTest attachments; screenshots are not OCR proof.
+The observer alone does not prove enrollment, grants, receipts, no read-state
+mutation, or unchanged normal pairing: those remain separate journey evidence.
+

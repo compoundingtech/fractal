@@ -10,7 +10,7 @@ fn check_registry(
     origin: &str,
     configured_peers: &[String],
     digest: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     fractal_store::store::identities::check_fleet_registry_conn(
         connection,
         origin,
@@ -24,7 +24,7 @@ fn check_registry(
             return error;
         }
         let peer = error.details.get("peer").and_then(Value::as_str).unwrap_or("unknown");
-        St3Error::new(
+        FractalError::new(
             "retirement-upgrade-required",
             format!("terminal retirement requires every member to run the new registry; `{peer}` has not advertised it"),
         )
@@ -33,8 +33,8 @@ fn check_registry(
     })
 }
 
-fn check_successor(connection: &Connection, subject: &str, successor: &str) -> Result<(), St3Error> {
-    let invalid = || St3Error::new(
+fn check_successor(connection: &Connection, subject: &str, successor: &str) -> Result<(), FractalError> {
+    let invalid = || FractalError::new(
         "invalid-custody-successor",
         format!("`{successor}` is not an eligible successor for `{subject}`"),
     ).with_detail("applied", "none");
@@ -54,7 +54,7 @@ fn check_successor(connection: &Connection, subject: &str, successor: &str) -> R
     Ok(())
 }
 
-fn holds_custody(connection: &Connection, successor: &str) -> Result<bool, St3Error> {
+fn holds_custody(connection: &Connection, successor: &str) -> Result<bool, FractalError> {
     // The existing kind index narrows this infrequent retirement-only check. Repaired
     // replica records are quarantined evidence, not operative retirement grants.
     connection.query_row(
@@ -77,7 +77,7 @@ pub trait RetirementsStore {
             incarnation: Option<&str>,
             key: &str,
             peers: &[String],
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     #[allow(clippy::too_many_arguments)]
     fn retire_agent_with_successor(
             &self,
@@ -89,9 +89,10 @@ pub trait RetirementsStore {
             key: &str,
             peers: &[String],
             successor: Option<&str>,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
-    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, St3Error>;
-    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, St3Error>;
+            expect_revision: Option<&str>,
+        ) -> Result<(ClaimRecord, bool), FractalError>;
+    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, FractalError>;
+    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, FractalError>;
 }
 
 impl RetirementsStore for Store {
@@ -106,8 +107,8 @@ impl RetirementsStore for Store {
             incarnation: Option<&str>,
             key: &str,
             peers: &[String],
-        ) -> Result<(ClaimRecord, bool), St3Error> {
-        self.retire_agent_with_successor(subject, actor, reason, token, incarnation, key, peers, None)
+        ) -> Result<(ClaimRecord, bool), FractalError> {
+        self.retire_agent_with_successor(subject, actor, reason, token, incarnation, key, peers, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -121,22 +122,33 @@ impl RetirementsStore for Store {
             key: &str,
             peers: &[String],
             successor: Option<&str>,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+            expect_revision: Option<&str>,
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         use fractal_store::store::identities::{IdentityKind, IdentityStore as _};
         let resolved = self.resolve_identity(IdentityKind::Agent, subject)?;
         let subject = resolved.identity.as_str();
         if reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-retirement",
                 "retirement needs a reason",
             ));
         }
+        // A live member of an `enforce` set is never retired ad hoc, not even forced; an `audit`
+        // set records the retirement it would refuse.
+        self.source_gate(subject, fractal_store::store::owned_sets::Verb::Retire, None)?;
         let mut fields = BTreeMap::from([
             ("reason".into(), json!(reason)),
             ("retired_by".into(), json!(actor)),
             ("declaration".into(), json!(token)),
             ("owner_host".into(), json!(self.origin())),
         ]);
+        // Claim fields are the durable idempotency payload, checked before admission.
+        if let Some(incarnation) = incarnation {
+            fields.insert("runtime_incarnation".into(), json!(incarnation));
+        }
+        if let Some(revision) = expect_revision {
+            fields.insert("desired_revision".into(), json!(revision));
+        }
         if let Some(successor) = successor {
             fields.insert("successor".into(), json!(successor));
         }
@@ -151,9 +163,22 @@ impl RetirementsStore for Store {
         };
         self.graph.ensure_principal_key(actor)?;
         let admission = |connection: &Connection| {
+            if let Some(expected) = expect_revision {
+                let current: Option<String> = connection.query_row(
+                    "SELECT revision FROM desired WHERE subject=?1",
+                    [subject], |row| row.get(0),
+                ).optional().map_err(internal)?;
+                if current.as_deref() != Some(expected) {
+                    return Err(FractalError::new(
+                        "retire-revision-mismatch", format!("agent `{subject}` declaration changed"),
+                    ).with_detail("expected", expected)
+                        .with_detail("current", json!(current))
+                        .with_detail("applied", "none"));
+                }
+            }
             admit_recipient(connection, Some(subject))?;
             if holds_custody(connection, subject)? {
-                return Err(St3Error::new("custody-pending", format!(
+                return Err(FractalError::new("custody-pending", format!(
                     "`{subject}` holds pending mail custody; complete the custody first"
                 )).with_detail("applied", "none"));
             }
@@ -169,7 +194,7 @@ impl RetirementsStore for Store {
                 .optional()
                 .map_err(internal)?;
             if current.as_deref() != Some(token) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "stale-subject",
                     format!("agent `{subject}` declaration changed"),
                 ));
@@ -181,7 +206,7 @@ impl RetirementsStore for Store {
                 .map(|member| member.host.as_str())
                 .ok_or_else(|| unavailable(subject, LifecycleUnavailableReason::Unavailable))?;
             if owner != self.origin() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "runtime-not-local",
                     format!("agent `{subject}` must be retired at its owning host `{owner}`"),
                 )
@@ -190,16 +215,18 @@ impl RetirementsStore for Store {
             }
             if let Some(incarnation) = incarnation {
                 let actual = latest_actual(connection, subject).map_err(internal)?;
-                if actual
+                let current = actual
                     .as_ref()
                     .and_then(|body| body.get("fields").unwrap_or(body).get("incarnation_id"))
-                    .and_then(Value::as_str)
-                    != Some(incarnation)
-                {
-                    return Err(St3Error::new(
-                        "stale-incarnation",
+                    .and_then(Value::as_str);
+                if current != Some(incarnation) {
+                    return Err(FractalError::new(
+                        "retire-incarnation-mismatch",
                         format!("agent `{subject}` incarnation changed"),
-                    ));
+                    )
+                    .with_detail("expected", incarnation)
+                    .with_detail("current", json!(current))
+                    .with_detail("applied", "none"));
                 }
             }
             check_registry(
@@ -210,6 +237,7 @@ impl RetirementsStore for Store {
             )?;
             validate_claim_input(&input)
         };
+        let source = self.source_follow_up(subject, fractal_store::store::owned_sets::Verb::Retire, Some(actor), None);
         append_claim_with_commit_context(
             &self.graph,
             &input,
@@ -222,12 +250,13 @@ impl RetirementsStore for Store {
                 signature: None,
                 retirement_writer: true,
                 assistant: None,
+                then: Some(&source),
                 ..Default::default()
             },
         )
     }
 
-    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, St3Error> {
+    fn agent_retirement(&self, subject: &str) -> Result<Option<ClaimRecord>, FractalError> {
         use fractal_store::store::identities::{IdentityKind, resolve_identity_conn};
         let connection = self.readers.get();
         let resolved = match resolve_identity_conn(&connection, IdentityKind::Agent, subject) {
@@ -238,7 +267,7 @@ impl RetirementsStore for Store {
         record(&connection, &resolved.identity, None)
     }
 
-    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, St3Error> {
+    fn mail_custody_status(&self, subject: &str) -> Result<Option<Value>, FractalError> {
         let connection = self.readers.get();
         let Some(retirement) = record(&connection, subject, None)? else { return Ok(None); };
         let Some(successor) = retirement.body["fields"]["successor"].as_str() else {
@@ -369,7 +398,8 @@ mod tests {
     #[test]
     fn moved_message_producers_use_the_common_wrapper() {
         let source = include_str!("limits.rs");
-        assert!(source.contains("append_claim_tx(") && source.contains("\"message.sent\""));
+        // send_message_tx appends through the same wrapper when it does not queue for the stream.
+        assert!(source.contains("send_message_tx(") && source.contains("\"message.sent\""));
     }
 
     pub fn declare(store: &Store) -> String {
@@ -409,10 +439,8 @@ mod tests {
         let store = Store::open_memory("orchid").unwrap();
         let (old_token, successor_token) = declare_custody_pair(&store);
         let sent = store.append_claim(&send("custody-mail")).unwrap();
-        let retirement = store.retire_agent_with_successor(
-            SUBJECT, ACTOR, "Work finished", &old_token, None, "custody-retire", &[],
-            Some("agent/example/successor"),
-        ).unwrap().0;
+        let retirement = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &old_token, None, "custody-retire", &[],
+        Some("agent/example/successor"), None).unwrap().0;
         let lifecycle = |actor: &str, kind: &str, key: &str, custody: bool| ClaimInput {
             subject: sent.subject.clone(), kind: kind.into(), actor: Some(actor.into()),
             fields: [
@@ -446,20 +474,20 @@ mod tests {
         let (token, _) = declare_custody_pair(&store);
         for successor in [SUBJECT, "agent/example/missing", "person/avery", "agent/"] {
             let error = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
-                successor, &[], Some(successor)).unwrap_err();
+                successor, &[], Some(successor), None).unwrap_err();
             assert_eq!(error.code,"invalid-custody-successor");
             assert_eq!(error.details["applied"],"none");
             assert!(store.agent_retirement(SUBJECT).unwrap().is_none());
         }
         let (first, appended) = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
-            "stable-retirement", &[], Some("agent/example/successor")).unwrap();
+            "stable-retirement", &[], Some("agent/example/successor"), None).unwrap();
         assert!(appended);
         let (repeat, appended) = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
-            "stable-retirement", &[], Some("agent/example/successor")).unwrap();
+            "stable-retirement", &[], Some("agent/example/successor"), None).unwrap();
         assert!(!appended);
         assert_eq!(repeat.id, first.id);
         let error = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
-            "stable-retirement", &[], Some("agent/example/missing")).unwrap_err();
+            "stable-retirement", &[], Some("agent/example/missing"), None).unwrap_err();
         assert_eq!(error.code,"idempotency-mismatch");
     }
 
@@ -515,7 +543,7 @@ mod tests {
             }).unwrap();
         }
         owner.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token,
-            None, "retire-before-receipt-import", &[], Some("agent/example/successor")).unwrap();
+            None, "retire-before-receipt-import", &[], Some("agent/example/successor"), None).unwrap();
         assert_eq!(owner.append_claim(&ClaimInput {
             subject: sent.subject.clone(), kind: "message.read".into(), actor: Some(SUBJECT.into()),
             fields: BTreeMap::from([("status".into(), json!("read"))]),
@@ -533,7 +561,7 @@ mod tests {
         peer.import_replication("orchid", &owner.export_replication(0).unwrap()).unwrap();
         let sent = peer.append_claim(&send("late-peer-send")).unwrap();
         let retirement = owner.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token,
-            None, "retire-before-peer-send-import", &[], Some("agent/example/successor")).unwrap().0;
+            None, "retire-before-peer-send-import", &[], Some("agent/example/successor"), None).unwrap().0;
         owner.import_replication("birch", &peer.export_replication(0).unwrap()).unwrap();
         assert!(owner.messages(Some(SUBJECT), false).unwrap().iter().any(|message| message.subject == sent.subject));
         let read = owner.append_claim(&ClaimInput {
@@ -554,7 +582,7 @@ mod tests {
         let (token, _) = declare_custody_pair(&owner);
         let sent = owner.append_claim(&send("older-reader-mail")).unwrap();
         owner.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token,
-            None, "older-reader-retirement", &[], Some("agent/example/successor")).unwrap();
+            None, "older-reader-retirement", &[], Some("agent/example/successor"), None).unwrap();
         let mut registry = fractal_schema::registry().clone();
         registry.claims.get_mut(KIND).unwrap().fields.remove("successor");
         older.set_claim_registry(registry);
@@ -577,9 +605,9 @@ mod tests {
             let first_token = store.selected_desired_token(first).unwrap().unwrap();
             let second_token = store.selected_desired_token(second).unwrap().unwrap();
             store.retire_agent_with_successor(first, ACTOR, "Work finished", &first_token,
-                None, &format!("first-{first}"), &[], Some("agent/example/successor")).unwrap();
+                None, &format!("first-{first}"), &[], Some("agent/example/successor"), None).unwrap();
             let error = store.retire_agent_with_successor(second, ACTOR, "Work finished", &second_token,
-                None, &format!("second-{second}"), &[], Some("agent/example/successor")).unwrap_err();
+                None, &format!("second-{second}"), &[], Some("agent/example/successor"), None).unwrap_err();
             assert_eq!(error.code, "invalid-custody-successor");
             assert!(store.agent_retirement(second).unwrap().is_none());
         }
@@ -588,7 +616,7 @@ mod tests {
         store.retire_agent("agent/example/successor", ACTOR, "Work finished",
             &successor_token, None, "successor-first", &[]).unwrap();
         let error = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &old_token,
-            None, "old-second", &[], Some("agent/example/successor")).unwrap_err();
+            None, "old-second", &[], Some("agent/example/successor"), None).unwrap_err();
         assert_eq!(error.code, "invalid-custody-successor");
     }
 
@@ -998,10 +1026,8 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.code, "retirement-upgrade-required");
-        let custody_error = store.retire_agent_with_successor(
-            SUBJECT, ACTOR, "Work finished", &token, None,
-            "upgrade-gated-custody", &["birch".into()], Some("agent/example/successor"),
-        ).unwrap_err();
+        let custody_error = store.retire_agent_with_successor(SUBJECT, ACTOR, "Work finished", &token, None,
+        "upgrade-gated-custody", &["birch".into()], Some("agent/example/successor"), None).unwrap_err();
         assert_eq!(custody_error.code, "retirement-upgrade-required");
         assert!(store.agent_retirement(SUBJECT).unwrap().is_none());
         store.append_claim(&send("owner-offline-safe")).unwrap();

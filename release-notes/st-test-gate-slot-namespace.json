@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st-test recognizes memory-profile gate-slot scope names when reusing the caller's kernel-verified memory cap within the approved capped slice chain.",
+  "replay": {"status": "none", "detail": "No claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No CLI or wire change. Gate-slot scope recognition uses the namespace rather than a particular name generator; the approved slice chain and kernel memory.max requirement are unchanged."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

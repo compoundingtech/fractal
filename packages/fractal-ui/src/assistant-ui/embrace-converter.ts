@@ -130,7 +130,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       return {
         ...common, role,
         ...(role === 'assistant' ? { status: completed } : {}),
-        content: [{ type: 'text', text: item.title ?? `Message ${item.messageId}` }],
+        content: [{ type: 'text', text: item.text ?? item.title ?? `Message ${item.messageId}` }],
       }
     }
     case 'Status':
@@ -147,10 +147,10 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       return item.kind === 'error' ? {
         ...common, role: 'assistant',
         status: { type: 'incomplete', reason: 'error', error: { message: item.text } },
-        content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
+        content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}${item.retryable === true ? '\nCan be retried' : ''}` }],
       } : {
         ...common, role: 'system',
-        content: [{ type: 'text', text: `${item.kind} · ${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
+        content: [{ type: 'text', text: `${item.kind === 'event' ? '' : `${item.kind} · `}${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
       }
     case 'Event': {
       diagnostics.push('semantic-row-as-text')
@@ -163,6 +163,12 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
         content: [{ type: 'text', text: `${item.title}\n${item.text}` }],
       }
     }
+    case 'Unsupported':
+      diagnostics.push('semantic-row-as-text')
+      return {
+        ...common, role: 'system',
+        content: [{ type: 'text', text: `Unsupported ${item.harness} record · ${item.recordKind}` }],
+      }
     case 'UnknownEvent':
       diagnostics.push('semantic-row-as-text')
       return {

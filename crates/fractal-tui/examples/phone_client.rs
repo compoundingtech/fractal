@@ -5,11 +5,18 @@
 //! capabilities read every 10 s (5 s wait). Screens load launches, machines, devices and
 //! sessions only when opened, so an idle phone on Home reads nothing else: no usage, no clients,
 //! no glasses or conversation unless a screen follows one. This client does exactly that and
-//! names itself `smalltalk-ios 0.1.0 [LABEL]` in `x-st3-client`. Its transport is the local
+//! names itself `fractal-phone-client VERSION [LABEL]` in `x-st3-client`. Its transport is the local
 //! Unix socket, not the paired gateway; that difference is the limit of this measurement.
 //!
 //! cargo run --release -p fractal-tui --example phone_client -- --seconds 180 --label measure-phone
 use std::time::{Duration, Instant};
+
+#[path = "../src/environment.rs"]
+mod environment;
+
+#[allow(dead_code)]
+#[path = "../../fractal-drivers/src/version.rs"]
+mod version;
 
 use fractal_client::{Client, set_client_name};
 
@@ -21,6 +28,11 @@ fn timing_line(at_ms: u64, observation: &fractal_client::Observation<'_>) -> Str
             "at_ms": at_ms, "type": "request", "method": method, "route": route,
             "outcome": format!("{outcome:?}"), "status": status,
             "took_ms": took.as_secs_f64() * 1000.0,
+        }),
+        fractal_client::Observation::Mutation { method, route, attempts, took, retry_wait } => serde_json::json!({
+            "at_ms": at_ms, "type": "mutation", "method": method, "route": route,
+            "attempts": attempts, "took_ms": took.as_secs_f64() * 1000.0,
+            "retry_wait_ms": retry_wait.as_secs_f64() * 1000.0,
         }),
         fractal_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
             "at_ms": at_ms, "type": "frame", "id": id, "kind": kind, "bytes": bytes,
@@ -46,7 +58,11 @@ async fn main() {
             _ => {}
         }
     }
-    set_client_name(format!("smalltalk-ios 0.1.0 [{label}]"));
+    version::set_build_stamps(
+        option_env!("CLI_BUILD_STAMP"),
+        option_env!("ST_BUILD_STAMP_LOCAL"),
+    );
+    set_client_name(format!("fractal-phone-client {} [{label}]", version::machine_version()));
     if let Some(path) = timing {
         use std::io::Write as _;
         let started = Instant::now();
@@ -64,18 +80,24 @@ async fn main() {
             }
         });
     }
-    let path = fractal_client::discover_unix_endpoint(None).expect("a local st endpoint");
-    // The person as Fractal TUI resolves it: ST3_PERSON, else `person` in the st config.
-    let person = std::env::var("ST3_PERSON").ok().or_else(|| {
-        let home = std::env::var_os("HOME")?;
-        let raw = std::fs::read_to_string(std::path::Path::new(&home).join(".config/st3/config.toml")).ok()?;
-        raw.lines().find_map(|line| {
-            let (key, value) = line.split_once('=')?;
-            (key.trim() == "person").then(|| value.trim().trim_matches('"').to_owned())
-        })
-    });
-    let person = person.expect("ST3_PERSON or person in ~/.config/st3/config.toml");
-    let client = Client::unix_as(&path, &person);
+    let endpoint = environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")
+        .expect("unambiguous endpoint environment")
+        .map(std::path::PathBuf::from);
+    let identity = fractal_client::discover_unix_identity(endpoint).expect("a local st endpoint");
+    // Use the TUI's accepting reader before falling back to the configured person.
+    let person = environment::read("FRACTAL_PERSON", "ST3_PERSON")
+        .expect("unambiguous person environment")
+        .map(|person| person.into_string().expect("a Unicode person identity"))
+        .or_else(|| {
+            let home = std::env::var_os("HOME")?;
+            let raw = std::fs::read_to_string(std::path::Path::new(&home).join(".config/st3/config.toml")).ok()?;
+            raw.lines().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == "person").then(|| value.trim().trim_matches('"').to_owned())
+            })
+        });
+    let person = person.expect("FRACTAL_PERSON, ST3_PERSON or person in ~/.config/st3/config.toml");
+    let client = Client::discovered_unix_as(identity, &person);
     let mut stream = client.collection_stream().await.expect("collections stream");
     for (id, collection) in [("attention", "attention"), ("missions", "missions"), ("agents", "agents")] {
         stream.subscribe(id, collection, 200, None, None).await.expect("subscribe");

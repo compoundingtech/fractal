@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The daily answers check no longer reports a key that gained a claim after the cut on one member: members that computed their answers minutes apart differed only in such keys, so busy kinds would have raised a false answers-disagreement fault after two hours. Each kind now also carries a digest of every key's newest claim before the cut, which agrees whenever both members computed, and fold readers are narrowed without the eight-kind limit",
+  "replay": {"status": "none", "detail": "No claim is written or read differently; only the check's comparison changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged; summary and bucket digests are the same as before."},
+  "compatibility": {"status": "none", "detail": "Answer keys gain an optional moving field and kind answers an optional before_cut digest; older members ignore both. A pair with an older member still sees these differences until both run this build."},
+  "downtime": {"status": "none", "detail": "No restart beyond the normal upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting restores the earlier comparison."}
+}

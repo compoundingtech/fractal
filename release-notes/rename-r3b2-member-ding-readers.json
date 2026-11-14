@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Accept fractal member creation and inbox tag spellings while preserving legacy writers.",
+  "replay": {"status": "none", "detail": "No replay or rewriting of historical data."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or fleet coordination change."},
+  "compatibility": {"status": "changed", "detail": "Readers accept fractal.client.create-* and fractal-message/to/sha256/attachment tags alongside st3 spellings. Each key selects legacy values if present, with no malformed-value fallthrough or cross-family merging. All selected-family message and attachment tags remain readable. Writers and hash/signature domains are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No manual migration; legacy data remains supported."},
+  "recovery": {"status": "none", "detail": "No data migration to undo; writers retain legacy spellings."}
+}

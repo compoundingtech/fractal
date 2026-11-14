@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correct the GitHub event idle-hold regression fixture to use the existing raw claim-record append helper",
+  "replay": {"status": "none", "detail": "Test-only helper correction; no replay."},
+  "schema": {"status": "none", "detail": "No schema or claim format change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "The regression fixture uses smallclaims::store::append_claim_record_tx, which exists on both the original producer base and the merged consumer-fix base. Runtime behavior is unchanged."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No manual action."},
+  "recovery": {"status": "none", "detail": "No persisted state changes."}
+}

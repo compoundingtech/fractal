@@ -22,7 +22,7 @@ fn git(directory: &Path, arguments: &[&str]) {
 
 fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
     std::fs::write(root.join("cargo-mode"), mode).unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env_clear()
         .env("HOME", root)
         .env(
@@ -52,6 +52,33 @@ fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
         String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr),
     )
+}
+
+#[test]
+fn cargo_test_attributes_execution_and_rejects_a_foreign_actor_before_execution() {
+    let root = tempfile::tempdir().unwrap();
+    for actor in ["agent/example/caller", "agent/example/peer", "person/operator"] {
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("ST_AGENT", "agent/example/caller")
+            .args(["gate", "cargo-test", "--as", actor, "fixture", "--package", "fixture",
+                "--repository"])
+            .arg(root.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if actor == "agent/example/caller" {
+            assert_eq!(output.status.code(), Some(3));
+            assert!(stderr.contains("Executing gate cargo-test as agent/example/caller"));
+            assert!(String::from_utf8(output.stdout).unwrap().contains("not inside a git repository"));
+        } else {
+            assert!(!output.status.success());
+            assert!(!stderr.contains("Executing gate cargo-test"));
+            assert!(output.stdout.is_empty());
+        }
+    }
 }
 
 #[test]

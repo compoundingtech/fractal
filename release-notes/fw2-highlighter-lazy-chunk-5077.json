@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Failed Pierre highlighter chunks leave Markdown and diff code plain for the session, without retry or reload controls. Conversation and terminal chunk recovery is unchanged.",
+  "replay": { "status": "none", "detail": "No replay format change." },
+  "schema": { "status": "none", "detail": "No stored or wire schema change." },
+  "rules": { "status": "none", "detail": "No daemon rule change." },
+  "compatibility": { "status": "none", "detail": "Highlighting remains deferred until after plain-code first paint. Failure is sticky within the current document; other lazy chunks keep their independent recovery state." },
+  "downtime": { "status": "none", "detail": "Takes effect in the next web build; no daemon restart." },
+  "manual": { "status": "none", "detail": "No operator action. Highlighting failures do not offer or trigger a page reload." },
+  "recovery": { "status": "none", "detail": "Revert this change and rebuild the web application." }
+}

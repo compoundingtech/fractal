@@ -4,7 +4,7 @@ Status: proposed design for [#832](https://github.com/compoundingtech/fractal/is
 and [#841](https://github.com/compoundingtech/fractal/issues/841). This note grants no
 authority and implements no command. Nathan's 2026-10-14 disposition cancels Slice 0
 and the scratch-pair proof on our machines. Johannes's agent runs that replication proof
-on Johannes's machines; requests for needed st changes go to #832. No Docker or container
+on Johannes's machines; requests for needed Fractal changes go to #832. No Docker or container
 backend is permitted on any of our machines. Approval in principle covers this design note
 only, not an interim mechanism, tool, root helper or implementation.
 
@@ -22,13 +22,24 @@ evidence, not an installed-build or runtime test receipt.
   requires a person path for invite; `run_fleet` can found a fleet without that helper. Create and join already lock the state
   admission boundary. A separate state directory alone supplies no agent bootstrap authority.
 * [api.rs](../../crates/fractal-api-core/src/api.rs): `harness_ancestor` and `guard_bound_request` bind Linux
-  harness requests to their agent. Invite creation and revocation require `concrete_person`.
-  The non-Linux ancestry helper returns `None`; it cannot authenticate a Mac scratch owner.
+  and macOS harness requests to their agent. Invite creation and revocation require
+  `concrete_person`. macOS uses `LOCAL_PEERPID`, `proc_pidinfo` ancestry and
+  `KERN_PROCARGS2` environment masking, validating process birth before and after inspection.
+  The connector must match its accept-time generation before and after the walk;
+  failed capture is unverifiable, never a person or harness attribution.
+  A positively observed effective-UID transition ends the walk as a person; unreadable
+  same-UID processes and unknown ownership are unverifiable. Completed same-UID inspection
+  without any identity variable is a person.
+  On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
+  Failure denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER` sessions and
+  actor/requester body impersonation, not every public request. macOS has no pidfd:
+  before/after birth-time checks narrow but cannot eliminate the PID reuse window.
+  This cooperative attribution does not authenticate a scratch launcher owner.
 * [setup.rs](../../crates/fractal/src/setup.rs): setup refuses an agent process. Do not remove
   `ST_AGENT` or send a person actor to evade this check.
 * [fixture.rs](../../crates/fractal/src/fixture.rs), [test_support.rs](../../crates/fractal-store/src/test_support.rs)
   and [Cargo.toml](../../crates/fractal/Cargo.toml) provide a separate, non-installed
-  `st3-fixture` executable requiring `test-support`. It initializes test state that disables
+  `fractal-fixture` executable requiring `test-support`. It initializes test state that disables
   ancestry binding in its server and clears seat environment in fixture subprocess helpers.
   That mechanism is for repository tests. Its existence does not certify an isolated fleet,
   restrict a copied production store or provide a supported agent bootstrap command.
@@ -51,8 +62,8 @@ The launcher needs an operator-installed enrollment policy for the caller and a 
 identity verifier. On Linux it must bind the connecting process to a reviewed principal,
 process birth and execution placement, then recheck that binding before mutation. An
 environment variable or a caller-selected principal is insufficient. On macOS a reviewed
-authenticated client credential bound to an enrolled agent is required; absence of Linux
-ancestry is not permission. These are implementation prerequisites, not APIs already supplied
+authenticated client credential bound to an enrolled agent is required; cooperative macOS
+ancestry attribution is not launcher authentication. These are implementation prerequisites, not APIs already supplied
 by this proposal. If the host has no such verifier, creation returns unavailable and names
 the missing prerequisite.
 
@@ -110,7 +121,7 @@ Transport is not authority. Use scope-specific Fabric keys, home and ALPN, with 
 grants limited to the two attested scratch identities; never mount the production Fabric
 home or grant shell/exec. A Tailscale comparison needs separately provisioned disposable
 identities and ACLs permitting only these members and the test endpoints. Tailnet membership
-alone does not admit an st member. Provisioning disposable transport identities is an
+alone does not admit a Fractal member. Provisioning disposable transport identities is an
 operator prerequisite and must not borrow a production credential. Restrict DNS, relays and
 egress explicitly for the selected backend; changing the transport must not widen authority.
 
@@ -248,7 +259,7 @@ transport enrollment is reserved by this design note.
 
 ## Review and next assignment
 
-Factory records needed st changes for Johannes's replication proof on his machines. Intake then checks the threat matrix, bootstrap identity,
+Factory records needed Fractal changes for Johannes's replication proof on his machines. Intake then checks the threat matrix, bootstrap identity,
 cross-host attestation, protocol/import coverage, deadline recovery and OS boundary. The
 remaining implementation decisions are the qualified first backend and caller verifier,
 trusted launcher enrollment, manifest encoding, transport provisioning and resource limits.
@@ -326,7 +337,7 @@ first-run dates are void. Completed source and security reviews remain historica
 not execution authority or evidence of replication, isolation or cleanup.
 
 Johannes's agent performs the replication proof on Johannes's machines. Factory watches
-[#832](https://github.com/compoundingtech/fractal/issues/832) for requests for needed st
+[#832](https://github.com/compoundingtech/fractal/issues/832) for requests for needed Fractal
 changes. Our machines run our work; a machine request from Johannes's side stays on his
 machines unless Nathan explicitly directs otherwise.
 
@@ -336,7 +347,7 @@ capabilities from the current person guards. This note changes neither those gua
 actor authority. Any implementation, replicated vocabulary, storage/rules change or public
 contract requires its own reviewed assignment and applicable Nathan decision.
 
-A future design may discuss two separate `st --instance NAME` instances, and existing
+A future design may discuss two separate `fractal --instance NAME` instances, and existing
 tiles/namespaces where isolation is needed. Separate instance state, sockets and service
 names do not supply a security boundary against a same-UID process. No Docker/container
 backend, root-owned helper, launcher installation, disposable transport credential or

@@ -314,7 +314,7 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
     let path = directory.path().join("graph.db");
     let store = Store::open(&path, "node").unwrap();
     let append = |subject: &str, kind: &str| {
-        store.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: None,
@@ -322,7 +322,12 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        }).unwrap()
+        };
+        if kind.starts_with("custom.client.terminal") {
+            store.append_client_operation_claim(&input)
+        } else {
+            store.append_claim(&input)
+        }.unwrap()
     };
     let attached = append("custom/client/attachment-a", "custom.client.terminal-attached");
     append("custom/client/decoy", "custom.client.other");
@@ -355,8 +360,13 @@ proptest! {
         copies in 1usize..3,
     ) {
         let source = Store::open_memory("alder").unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        source.bind_fleet(TEST_FLEET).unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
         let append = |subject: &str, kind: &str, hash: &str| {
-            source.append_claim(&ClaimInput {
+            source.append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
                 actor: None,
@@ -374,6 +384,8 @@ proptest! {
         let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
         order.sort_by_key(|&index| (ranks[index], index));
         let target = Store::open_memory("birch").unwrap();
+        target.bind_fleet(TEST_FLEET).unwrap();
+        target.pin_fleet_anchor(key.public()).unwrap();
         for chunk in order.chunks(width) {
             let envelopes = chunk.iter().flat_map(|&index|
                 std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();
@@ -1179,6 +1191,44 @@ fn terminal_resource_status_never_warms_full_harness_or_provenance() {
 }
 
 #[test]
+fn notice_terminal_resources_keep_native_owners_and_strip_reserved_rows() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/notice-terminal";
+    observe_runtime(&store, subject, "running", "one");
+    let clean_cut = store.index().unwrap();
+    // Seed an old-peer-shaped row below current custom-subject admission.
+    let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
+        let hidden = append_claim_tx(
+            tx, store.origin(), subject, "runtime.observed", None,
+            &json!({"fields":{"runtime_id":"notice-secret","incarnation_id":"notice-secret"}}),
+            &[], None,
+        )?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9e9e37dcf663 owner=fractal_seats::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&hidden.id])?;
+        Ok(hidden)
+    }).unwrap().unwrap();
+    store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+    let cut = store.index().unwrap();
+    let names = BTreeSet::from([subject.to_owned()]);
+    let raw = store.agent_card_status_at(Some(&names), cut, false).unwrap();
+    assert!(serde_json::to_string(&raw).unwrap().contains("notice-secret"));
+    let clean = store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap();
+    for history in [false, true] {
+        for owner in [None, Some(subject)] {
+            let visible = store.terminal_resource_status_at(owner, cut, history).unwrap();
+            assert_eq!(visible.subjects.len(), 1);
+            assert_eq!(visible.subjects[0].actual.as_ref().unwrap()["incarnation_id"], "one");
+            assert_eq!(visible.subjects[0].claims, clean.subjects[0].claims);
+            let shown = serde_json::to_string(&visible).unwrap();
+            assert!(!shown.contains("notice-secret"));
+            assert!(!shown.contains(&hidden.id));
+        }
+    }
+    assert_eq!(store.terminal_resource_status_at(Some(subject), clean_cut, true).unwrap().subjects.len(), 1);
+    assert!(store.claim_by_id(&hidden.id).unwrap().is_some());
+    assert_eq!(store.status_history(Some(subject), None, Some(cut)).unwrap().subjects.len(), 1);
+}
+
+#[test]
 fn runtime_status_reuses_subject_generations_across_actor_only_claims() {
     let store = Store::open_memory("node").unwrap();
     // Keep the selected set below the parallel reduction threshold so the existing
@@ -1346,6 +1396,9 @@ agent "worker.one" { workspace "/tmp"; command "true"; restart always; }
             .unwrap();
         controller
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/test".into(),
                 title: "Choose a date".into(),
@@ -1399,6 +1452,14 @@ fn a_late_claim_about_a_delivered_run_rebuilds_its_part_and_matches_a_replay() {
 fn late_claims_about_asks_owned_by_the_root_and_by_a_child_match_a_replay() {
     for owned_by_root in [true, false] {
         let shapes = tree_shapes();
+        for store in [&shapes.controller, &shapes.worker] {
+            let budget = store
+                .attention_request_count("front-desk", "person/test", now_ms())
+                .unwrap();
+            assert_eq!(budget.requests, 2);
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.root.subject), Some(&1));
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.children[0].subject), Some(&1));
+        }
         let ask = if owned_by_root { &shapes.root_ask } else { &shapes.child_ask };
         let ask = ask.subject.clone();
         let parts = late_claim_matches_a_replay(&shapes, |controller| {
@@ -1545,8 +1606,8 @@ version 2
 
   mission "lease" state="ready" {
     goal "Complete mission lease."
-    step "work" { assigned-to "agent/worker" }
-    step "other" { assigned-to "agent/worker" }
+    step "work" { assigned-to "agent/node.worker" }
+    step "other" { assigned-to "agent/node.worker" }
   }
 
 "#,
@@ -1655,6 +1716,12 @@ version 2
     store
         .populate_work_wake_for_reconcile(&mut lean, now_ms())
         .unwrap();
+    assert_eq!(
+        wake.asks.messages,
+        ["message/correct-recipient"],
+        "a wake not yet consumed asks its seat's host about its own message, not another's"
+    );
+    assert!(!wake.asks.delivery_acknowledges, "no harness works in the wake's incarnation");
     assert_eq!(lean.wake, Some(wake));
     for (kind, status) in [
         ("message.delivered", "delivered"),
@@ -1681,6 +1748,7 @@ version 2
         Some("consumed"),
         "a closed wake must not leave an overdue reconcile deadline"
     );
+    assert!(lean.wake.as_ref().unwrap().asks.messages.is_empty(), "a consumed wake asks nothing");
     let request = |incarnation: &str, key: &str| WorkRequest {
         wait_ms: None,
         actor: Some("agent/node.worker".into()),
@@ -1797,30 +1865,52 @@ version 2
     assert!(view.claim_expires_at_unix_ms.is_none());
 }
 
+// Attribution follows immutable claim episodes, not the agent's mutable desired owner.
+fn claim_usage_step(store: &Store, agent: &str, step: &str, previous: Option<&str>) {
+    let at = now_ms();
+    let mut writer = store.connection.lock().unwrap();
+    writer.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    let tx = writer.transaction().unwrap();
+    if let Some(previous) = previous {
+        fractal_store::store::append_claim_tx(&tx, store.origin(), previous, "work.released",
+            Some(agent), &json!({"fields":{"attempt":1},"evidence":[]}), &[], None).unwrap();
+    }
+    tx.execute(/* sqlite-large-value: allow-for-now lv-h41d3a4749140 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO step_runs
+        (subject,run_id,generation_id,step_path,definition_hash,status,attempt,goals,
+         activated_at_unix_ms,created_at_unix_ms,updated_at_unix_ms)
+        VALUES(?1,'example','example',?1,'hash','working',1,'[]',?2,?2,?2)",
+        params![step, at.to_string()]).unwrap();
+    fractal_store::store::append_claim_tx(&tx, store.origin(), step, "work.claimed",
+        Some(agent), &json!({"fields":{"attempt":1,"claimant":agent,
+            "claim_incarnation":"inc-one","claim_expires_at_unix_ms":at+3_600_000},
+            "evidence":[]}), &[], None).unwrap();
+    tx.commit().unwrap();
+    writer.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+}
+
 #[test]
 fn response_usage_stays_local_while_attributed_totals_replicate() {
     let local = Store::open_memory("host-one").unwrap();
     let subject = "agent/example.worker";
-    let seed = local
-        .append_claim(&ClaimInput {
-            subject: subject.into(),
-            kind: "harness.observed".into(),
-            actor: Some(subject.into()),
-            fields: BTreeMap::from([
-                ("state".into(), Value::String("ready".into())),
-                ("driver".into(), Value::String("claude".into())),
-                ("incarnation_id".into(), Value::String("inc-one".into())),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some("usage-seed".into()),
-        })
-        .unwrap();
-    local.connection.lock().unwrap().execute(
-        /* sqlite-large-value: allow-for-now lv-h79caef580176 owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
-             VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', 'step-run/example/record')",
-        params![subject, seed.id],
-    ).unwrap();
+    let observed = |state: &str, key: &str| {
+        local
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.observed".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("state".into(), Value::String(state.into())),
+                    ("driver".into(), Value::String("claude".into())),
+                    ("incarnation_id".into(), Value::String("inc-one".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            })
+            .unwrap()
+    };
+    observed("ready", "usage-seed");
+    claim_usage_step(&local, subject, "step-run/example/record", None);
     let record = |entry: &str, input: u64, output: u64, reads: u64, writes: u64| {
         let mut claim = timeline_observation(subject, "inc-one", entry);
         claim
@@ -1873,6 +1963,9 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
         29
     );
     std::thread::sleep(std::time::Duration::from_millis(2));
+    // Turn b runs, and its tally arrives once the harness is ready again.
+    observed("working", "usage-turn-b");
+    observed("ready", "usage-turn-b-ready");
     let mut second = record("turn-b", 5, 1, 30, 0);
     second
         .fields
@@ -1912,6 +2005,8 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
         65
     );
 
+    // The second rollup waits for its hour on the host; the seat ending replicates it.
+    observed("ended", "usage-ended");
     let peer = Store::open_memory("host-two").unwrap();
     let exchange = exchange_from(&local, &ReplicationInventory::default());
     receive_and_project(&peer, "host-one", &exchange);
@@ -1941,6 +2036,21 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
     let local = Store::open(&path, "host-one").unwrap();
     let subject = "agent/example.provenance";
     let binding = |incarnation: &str, session: &str| {
+        // Bindings carrying an incarnation require its running observation first.
+        local
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
         local
             .append_claim(&ClaimInput {
                 subject: subject.into(),
@@ -1962,7 +2072,7 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
         claim.fields.insert("driver".into(), json!("codex"));
         claim.fields.insert("entry_type".into(), json!("usage"));
         let mut body = json!({"semantics":"response", "model":"gpt-6.1-sol",
-            "input_tokens":input,"output_tokens":100,"total_tokens":input+100});
+            "input_tokens":input,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":input+100});
         if reported {
             body["cost"] = json!(0.001);
         }
@@ -2072,6 +2182,72 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
             .fields,
         mixed.fields
     );
+}
+
+/// Rollups replicate hourly. On the seat's host a period also counts the readings since each
+/// series' last replication, so a boundary inside the hour still waiting finds the reading it ended
+/// on. Once the hour replicates, the host reads what every member reads: periods exact to the hour.
+#[test]
+fn a_host_period_ending_inside_the_hour_reads_the_rollup_it_ended_on() {
+    let local = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.hourly";
+    let hour = 3_600_000_u64;
+    let start = (now_ms() as u64 / hour + 1) * hour;
+    let minute = 60_000_u64;
+    local
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("state".into(), json!("working")),
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-one")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("hourly-working".into()),
+        })
+        .unwrap();
+    for (at, total) in [(start, 1), (start + 15 * minute, 10), (start + 30 * minute, 20)] {
+        local
+            .append_client_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.usage".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({
+                    "semantics":"response_rollup","driver":"codex","incarnation_id":"inc-one",
+                    "model":"example-model","observed_at_unix_ms":at,"total_tokens":total,
+                }))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    assert_eq!(local.claims_for(subject, Some("harness.usage")).unwrap().len(), 1, "the later two wait for the hour");
+    let total = |until: u64| local.usage_period_rows(start - 1, until).unwrap()[0]["total_tokens"].as_u64();
+    assert_eq!(total(start + 20 * minute), Some(10), "the reading the period ended on");
+    assert_eq!(total(start + 40 * minute), Some(20));
+    local
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("state".into(), json!("ended")),
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-one")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("hourly-ended".into()),
+        })
+        .unwrap();
+    assert_eq!(local.claims_for(subject, Some("harness.usage")).unwrap().len(), 2, "the end replicates the last");
+    assert_eq!(total(start + 40 * minute), Some(20));
+    assert_eq!(total(start + 20 * minute), Some(1), "replicated, the hour's snapshots are what every member reads");
 }
 
 #[test]
@@ -2186,13 +2362,11 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
             })
             .unwrap()
     };
-    let seed = observed("working", "spend-seed");
+    observed("working", "spend-seed");
+    let previous = std::cell::RefCell::new(None::<String>);
     let own_step = |step: &str| {
-        local.connection.lock().unwrap().execute(
-            /* sqlite-large-value: allow-for-now lv-ha43c88827ede owner=fractal_seats::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO desired(subject, kind, revision, claim_id, body, owner_run, owner_generation, owner_step)
-                 VALUES (?1, 'agent', 'revision', ?2, '{}', 'mission-run/example', 'run-generation/example', ?3)",
-            params![subject, seed.id, step],
-        ).unwrap();
+        claim_usage_step(&local, subject, step, previous.borrow().as_deref());
+        *previous.borrow_mut() = Some(step.to_owned());
     };
     let respond = |entry: &str, body: Value| {
         let mut claim = timeline_observation(subject, "inc-one", entry);
@@ -2245,15 +2419,15 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
     // leave the previous step's last totals pending behind the next step's.
     let replicated = local.claims_for(subject, Some("harness.usage")).unwrap();
     assert_eq!(replicated.len(), 3, "{replicated:#?}");
-    // The local model's second response waits for the next interval, or for the harness
-    // to stop working.
+    // The local model's second response waits for its hour to be over, or for the seat to
+    // end; a turn end no longer replicates it. The host's reads below still count it.
     observed("ready", "spend-idle");
     assert_eq!(
         local
             .claims_for(subject, Some("harness.usage"))
             .unwrap()
             .len(),
-        4
+        3
     );
 
     let rows = local
@@ -2288,6 +2462,160 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
     );
     assert_eq!(local_model["cost_microusd"], 2_500);
     assert_eq!(local_model["reported_cost_microusd"], 2_500);
+}
+
+#[test]
+fn execution_accounting_deduplicates_and_prices_delayed_retry_responses() {
+    let store = Store::open_memory("host-one").unwrap();
+    let agent = "agent/example.execution";
+    let step = "step-run/example/generation/work";
+    let at = now_ms().saturating_sub(1_000);
+    let event = |kind: &str, time: u128, fields: Value| {
+        store.set_write_clock_at(time).unwrap();
+        let mut writer = store.connection.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        let record = fractal_store::store::append_claim_tx(&tx, store.origin(), step, kind,
+            Some(agent), &json!({"fields":fields,"evidence":[]}), &[], None).unwrap();
+        tx.commit().unwrap();
+        record
+    };
+    let bind_execution = |claim: &ClaimRecord, operation: &str, incarnation: &str, attempt: u32| {
+        let receipt = serde_json::from_value(json!({
+            "invocation_id":format!("invocation/{operation}"),"operation_id":operation,
+            "agent":agent,"phase":"observed","incarnation":incarnation,"event_key":claim.id,
+            "owner_step":step,"owner_attempt":attempt,
+        })).unwrap();
+        let mut writer = store.connection.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        fractal_store::store::invocation_receipts::append_receipt_tx(&tx, store.origin(), &receipt).unwrap();
+        tx.commit().unwrap();
+    };
+    let first = event("work.claimed", at,
+        json!({"attempt":1,"claimant":agent,"claim_incarnation":"old","claim_expires_at_unix_ms":at+600_000}));
+    bind_execution(&first, "turn-old", "old", 1);
+    event("work.failed", at + 200, json!({"attempt":1}));
+    let second = event("work.claimed", at + 300,
+        json!({"attempt":2,"claimant":agent,"claim_incarnation":"new","claim_expires_at_unix_ms":at+600_300}));
+    bind_execution(&second, "turn-new", "new", 2);
+    let respond = |entry: &str, source: &str, incarnation: &str, time: u128, body: Value| {
+        let mut input = timeline_observation(agent, incarnation, entry);
+        input.fields.insert("entry_type".into(), json!("usage"));
+        input.fields.insert("source_id".into(), json!(source));
+        input.fields.insert("observed_at_unix_ms".into(), json!(time as u64));
+        input.fields.insert("body".into(), body);
+        let (observation, _) = store.append_claim_outcome(&input).unwrap();
+        let rollup = store.usage_rollup_for_timeline(&observation).unwrap().unwrap();
+        store.append_client_claim(&rollup).unwrap();
+        rollup
+    };
+    let old_usage = json!({"semantics":"response","model":"claude-opus-5-5",
+        "input_tokens":1000,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":1100});
+    let old = respond("old-a", "old-response", "old", at + 100, old_usage.clone());
+    assert_eq!(old.fields["execution_id"], first.id);
+    assert_eq!(old.fields["invocation_id"], "invocation/turn-old");
+    assert_eq!(old.fields["attempt"], 1);
+    assert_eq!(old.fields["cost_microusd"], 6_000);
+    let duplicate = respond("old-b", "old-response", "old", at + 100, old_usage);
+    assert_eq!(duplicate.fields["total_tokens"], 1100, "native source dedup is shared");
+    respond("old-c", "old-second-response", "old", at + 110,
+        json!({"semantics":"response","model":"claude-opus-5-5",
+            "input_tokens":1000,"output_tokens":100,"cached_tokens":0,"cache_write_tokens":0,"total_tokens":1100}));
+    let new = respond("new-a", "new-response", "new", at + 400,
+        json!({"semantics":"response","model":"unknown-local","input_tokens":7,"total_tokens":7}));
+    assert_eq!(new.fields["execution_id"], second.id);
+    assert_eq!(new.fields["invocation_id"], "invocation/turn-new");
+    assert_eq!(new.fields["attempt"], 2);
+    assert_eq!(new.fields["unpriced_tokens"], 7, "unknown pricing is not free");
+    let executions = store.step_executions(step).unwrap();
+    assert_eq!(executions.len(), 2);
+    assert_eq!(executions[0].usage.as_ref().unwrap().total_tokens, 2200,
+        "the local held latest rollup replaces, rather than adds to, the replicated snapshot");
+    assert_eq!(executions[1].usage.as_ref().unwrap().total_tokens, 7);
+    assert_eq!(executions[0].status.as_deref(), Some("failed"));
+    assert_eq!(executions[1].fallback, None);
+    assert_eq!(executions[0].invocation_id.as_deref(), Some("invocation/turn-old"));
+    assert_eq!(executions[1].invocation_id.as_deref(), Some("invocation/turn-new"));
+    let mut identity_only = timeline_observation(agent, "new", "identity-only");
+    identity_only.fields.insert("entry_type".into(), json!("usage"));
+    identity_only.fields.insert("body".into(), json!({"semantics":"response","model":"unknown-local"}));
+    let (identity_only, _) = store.append_claim_outcome(&identity_only).unwrap();
+    assert_eq!(identity_only.body["fields"]["attribution"]["invocation_id"], "invocation/turn-new");
+    assert_eq!(identity_only.body["fields"]["attribution"]["attempt"], 2);
+    assert!(identity_only.body["fields"].get("spend").is_none());
+    assert_eq!(store.step_executions(step).unwrap()[1].usage.as_ref().unwrap().total_tokens, 7,
+        "identity-only evidence does not reserve a spend receipt");
+}
+
+#[test]
+fn missing_response_totals_preserve_unknown_price_locally_and_after_replication() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let agent = "agent/example.incomplete-spend";
+    let step = "step-run/example/generation/incomplete-spend";
+    let at = now_ms().saturating_sub(1_000);
+    let store = Store::open(&path, "host-one").unwrap();
+    store.set_write_clock_at(at).unwrap();
+    {
+        let mut writer = store.connection.lock().unwrap();
+        let tx = writer.transaction().unwrap();
+        fractal_store::store::append_claim_tx(&tx, store.origin(), step, "work.claimed",
+            Some(agent), &json!({"fields":{"attempt":1,"claimant":agent,
+                "claim_incarnation":"incomplete","claim_expires_at_unix_ms":at+600_000},
+                "evidence":[]}), &[], None).unwrap();
+        tx.commit().unwrap();
+    }
+    for (index, cost) in [None, Some(0.0)].into_iter().enumerate() {
+        let entry = format!("incomplete-{index}");
+        let mut input = timeline_observation(agent, "incomplete", &entry);
+        input.fields.insert("entry_type".into(), json!("usage"));
+        input.fields.insert("source_id".into(), json!(entry));
+        input.fields.insert("observed_at_unix_ms".into(), json!((at + 100) as u64));
+        // Even a model in the price table cannot price absent disjoint buckets.
+        let mut body = json!({"semantics":"response","model":"claude-opus-5-5","input_tokens":7});
+        if let Some(cost) = cost {
+            body["cost"] = json!(cost);
+            body["model"] = json!("observed-zero");
+        }
+        input.fields.insert("body".into(), body);
+        let (observation, _) = store.append_claim_outcome(&input).unwrap();
+        assert_eq!(observation.body["fields"]["spend"]["basis"],
+            if cost.is_some() { "reported" } else { "unpriced" });
+        let rollup = store.usage_rollup_for_timeline(&observation).unwrap().unwrap();
+        assert_eq!(rollup.fields["total_tokens"], 0, "no total may be invented");
+        assert_eq!(rollup.fields["unpriced_tokens"], 0, "no token sentinel may be invented");
+        assert_eq!(rollup.fields["unpriced_responses"], u64::from(cost.is_none()),
+            "a reported zero remains a known price despite incomplete token buckets");
+        assert_eq!(rollup.fields["cost_microusd"], 0);
+        store.append_claim(&rollup).unwrap();
+    }
+    drop(store);
+    let store = Store::open(&path, "host-one").unwrap();
+    let peer = Store::open_memory("host-two").unwrap();
+    let exchange = exchange_from(&store, &ReplicationInventory::default());
+    receive_and_project(&peer, "host-one", &exchange);
+    for reader in [&store, &peer] {
+        let executions = reader.step_executions(step).unwrap();
+        let usage = executions[0].usage.as_ref().unwrap();
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.input_tokens, 14);
+        assert_eq!(usage.unpriced_tokens, 0);
+        assert_eq!(usage.unpriced_responses, 1);
+        assert_eq!(usage.cost_microusd, 0);
+        let (rows, report) = reader.usage_period_report(at as u64 - 1, now_ms() as u64 + 60_000).unwrap();
+        assert_eq!(rows.len(), 2, "zero total must not discard unknown-price evidence");
+        let unknown = rows.iter().find(|row| row["model"] == "claude-opus-5-5").unwrap();
+        let zero = rows.iter().find(|row| row["model"] == "observed-zero").unwrap();
+        assert_eq!(zero["unpriced_responses"], 0);
+        assert_eq!(zero["cost_microusd"], 0);
+        assert_eq!(unknown["unpriced_responses"], 1);
+        let provenance = unknown["pricing_provenance"].as_array().unwrap();
+        assert!(provenance.iter().any(|entry| entry["cost_source"] == "unpriced"
+            && entry["unpriced_responses"] == 1));
+        assert!(report["days"].as_array().unwrap().iter()
+            .any(|day| day["unpriced_responses"] == 1));
+        assert_eq!(reader.usage_summary_at(agent, None, None).unwrap().unwrap().cost, None,
+            "an unpriced response must not project as a free session");
+    }
 }
 
 #[test]
@@ -3326,6 +3654,117 @@ fn full_status_stays_full_after_summary_reductions_share_the_caches() {
     assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
     store.status_at(Some(subject), None, Some(index)).unwrap();
     assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
+}
+
+#[test]
+fn replicated_uri_resources_never_restore_legacy_run_ownership() {
+    let source = Store::open_memory("source").unwrap();
+    let reader = parse_intent(
+        r#"version 2
+agent "shared/reader" {
+  workspace "/tmp"
+  command "true"
+  resource "issue" uri="https://github.com/example/project/issues/42"
+}
+"#,
+        "source",
+    ).unwrap();
+    source.apply_internal(&reader, "replicated-uri-reader").unwrap();
+    let references = crate::graph::declared_resources(&reader.subjects["agent/shared/reader"].desired);
+    let resource = &references[0].subject;
+    let original = source.claims_for(resource, Some("intent.desired")).unwrap().remove(0);
+    let owner = "mission-run/legacy";
+    let mut legacy = reader.subjects[resource].clone();
+    legacy.owner_run = Some(owner.into());
+    legacy.owner_generation = Some("run-generation/legacy".into());
+    legacy.owner_step = Some("step-run/legacy/work".into());
+    // Author a valid historical claim through the durable append primitive, as the old
+    // materializer did, rather than bypassing replication admission with forged bytes.
+    let legacy_claim = {
+        let mut connection = source.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_tx(
+            &transaction,
+            &source.origin,
+            resource,
+            "intent.desired",
+            Some("daemon/legacy"),
+            &serde_json::to_value(&legacy).unwrap(),
+            &[original.id],
+            None,
+        ).unwrap();
+        select_replicated_desired(&transaction, &claim, &legacy).unwrap();
+        transaction.commit().unwrap();
+        claim
+    };
+    let replica = Store::open_memory("replica").unwrap();
+    receive_and_project(
+        &replica,
+        "source",
+        &exchange_from(&source, &replica.replication_inventory().unwrap()),
+    );
+    for replay in [false, true] {
+        if replay {
+            let mut connection = replica.connection.write();
+            let transaction = connection.transaction().unwrap();
+            replay_graph_from_nothing_tx(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        let shared = replica.desired_subjects_named(std::slice::from_ref(resource)).unwrap();
+        assert_eq!(shared[0].owner_run, None);
+        assert_eq!(shared[0].owner_generation, None);
+        assert_eq!(shared[0].owner_step, None);
+        assert!(replica.desired_subjects_for_owner_run(owner).unwrap().is_empty());
+        assert!(replica.status_at(Some(resource), Some(owner), Some(replica.index().unwrap()))
+            .unwrap().subjects.is_empty());
+        assert_eq!(
+            replica.declared_resource_uris(&references).unwrap()[resource],
+            "https://github.com/example/project/issues/42",
+        );
+        assert_eq!(replica.claim_by_id(&legacy_claim.id).unwrap().unwrap().body, legacy_claim.body);
+    }
+}
+
+#[test]
+fn a_shared_uri_resource_cannot_be_redeclared_with_a_different_kind() {
+    let store = Store::open_memory("node").unwrap();
+    let reader = parse_intent(
+        r#"version 2
+agent "shared/reader" {
+  workspace "/tmp"
+  command "true"
+  resource "issue" uri="https://github.com/example/project/issues/42"
+}
+"#,
+        "node",
+    ).unwrap();
+    store.apply_internal(&reader, "immutable-uri-reader").unwrap();
+    let references = crate::graph::declared_resources(&reader.subjects["agent/shared/reader"].desired);
+    let replacement = parse_intent(
+        &format!(
+            "version 2\nresource {:?} {{ kind \"custom.test.issue\" }}\n",
+            references[0].subject.strip_prefix("resource/").unwrap(),
+        ),
+        "node",
+    ).unwrap();
+    let planned = store.mission(
+        &replacement,
+        IntentInput { kdl: String::new(), source_name: None },
+    ).unwrap_err();
+    assert_eq!(planned.code, "immutable-uri-resource");
+    let tokens = BTreeMap::from([(
+        references[0].subject.clone(),
+        store.claims_for(&references[0].subject, Some("intent.desired")).unwrap()
+            .into_iter().map(|claim| claim.id).collect::<Vec<_>>(),
+    )]);
+    assert_eq!(
+        store.apply(&replacement, &tokens, "replace-uri-kind").unwrap_err().code,
+        "immutable-uri-resource",
+    );
+    assert_eq!(
+        store.declared_resource_uris(&references).unwrap()[&references[0].subject],
+        "https://github.com/example/project/issues/42",
+    );
 }
 
 #[test]

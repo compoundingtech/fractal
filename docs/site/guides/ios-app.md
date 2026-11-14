@@ -46,7 +46,7 @@ Finish [Fractal setup](../getting-started/install.md). Make its [paired-only gat
 fractal devices --as person/ada pair --full-control 'Garden iPhone'
 ```
 
-Enter the gateway URL, pairing ID, and private code in the app. Open your worker and send a message, then confirm a reply. Pairing success alone does not prove the account has the required control scope or that the worker is ready.
+Copy the returned person-root fingerprint separately from the trusted machine. Enter the gateway URL, pairing ID, private code, and fingerprint in the app. Open **Resources**, select your worker and send a message, then confirm a reply. Pairing success alone does not prove the account has the required control scope or that the worker is ready.
 
 ## Physical iPhone
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fabric pairing accepts new and legacy adapter executable and environment names, refusing conflicting environment overrides.",
+  "replay": { "status": "none", "detail": "No claims or projections change." },
+  "schema": { "status": "none", "detail": "No stored formats change." },
+  "rules": { "status": "none", "detail": "Pairing trust and authorization are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Discovery accepts FRACTAL_FABRIC_ADAPTER then ST_FABRIC_ADAPTER. Different paths in both variables are an error. Otherwise it searches beside the executable then each PATH directory, preferring fractal-fabric-adapter over st-fabric-adapter within each directory. The produced binary remains st-fabric-adapter." },
+  "downtime": { "status": "none", "detail": "No runtime migration is required." },
+  "manual": { "status": "none", "detail": "Existing installations continue working. If both overrides are set, use the same path or unset one." },
+  "recovery": { "status": "none", "detail": "Rollback retains support for the legacy executable and environment variable." }
+}

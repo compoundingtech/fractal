@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The live web integrator treats agent-nix capacity refusals as retryable tick errors instead of broken candidate builds. Refused candidates and attribution probes retain the served build without poisoning the failed-tree cache or ejecting a PR.",
+  "replay": {"status": "none", "detail": "No replay or backfill."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or admission-rule changes."},
+  "compatibility": {"status": "changed", "detail": "Integrator tick JSONL now reports build=error, reason=capacity-refused and retryable=true for EX_TEMPFAIL (75). Observers should distinguish this host-capacity outcome from candidate build failures. A capacity refusal during the reduced-candidate rebuild after attribution withholds the failure-cache write and restores the tentative included/skipped PR lists. Wire contracts and INTEGRATOR_VERSION are unchanged."},
+  "downtime": {"status": "none", "detail": "The served build remains active during a capacity refusal; the next tick retries the candidate."},
+  "manual": {"status": "none", "detail": "No new configuration. Existing failed-tree entries written by older integrators are not automatically reclassified; an operator must remove a confirmed capacity-poisoned entry before it can retry."},
+  "recovery": {"status": "changed", "detail": "Allow host capacity to recover and let the next tick retry. Rolling back restores the previous exit-code handling and can again cache capacity refusals as build failures; no storage rollback or migration is required."}
+}

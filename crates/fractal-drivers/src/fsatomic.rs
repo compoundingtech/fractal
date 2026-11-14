@@ -22,12 +22,11 @@
 //! - **Error context.** Every function returns [`io::Result`], never `anyhow`, so each callsite
 //!   keeps the exact context string it already had.
 //!
-//! Five publishers deliberately do **not** use this module, because each holds a strictly stronger
+//! Some publishers deliberately do **not** use this module, because each holds a strictly stronger
 //! primitive than a path-based stage-and-rename can express:
 //! `catalog_transaction::atomic_replace_file` and `agent_publish::{atomic_write_spec,
 //! atomic_publish_staged_bundle}` publish through a retained control-directory fd with `EXDEV`
-//! fault injection and error classification; `resource_profile::atomic_replace_at` and
-//! `event::write_record` use `openat`/`renameat` against a retained directory capability;
+//! fault injection and error classification;
 //! `codex_app_server::atomic_json` chmods its state directory to `0700` on every write and emits
 //! pretty JSON. `pretrust::write_atomic` also stays out for the opposite reason: it publishes
 //! files st2 does not own (`~/.claude.json`, `~/.codex/config.toml`), where tightening a foreign

@@ -1,11 +1,12 @@
 import { FractalClient } from '@fractal/client'
 import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ArrangementPage, Capabilities, EnvelopeOf } from '@fractal/client'
-import { Schema } from 'effect'
-import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, ArrangementEditParameters as ArrangementEditSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema'
+import { Effect, Schema } from 'effect'
+import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema/read'
+import { formatDuration } from '@fractal/ui/human-time/format'
+import { clientReadAuthorization, credentialExpiredMessage } from '../data/source.ts'
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 const isCapabilities = Schema.is(Schema.toEncoded(CapabilitiesSchema))
-const isEdit = Schema.is(Schema.toEncoded(ArrangementEditSchema))
 
 export type ArrangementEdit = Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>
 export type ArrangementsGateway = Pick<FractalClient, 'discover' | 'arrangementsGet' | 'arrangementsList' | 'arrangementEdit'>
@@ -23,8 +24,8 @@ export const selectionParts = ({ owner, subject }: Selection): { person: string;
   return { person: owner.slice('person/'.length), uuid: match[2] }
 }
 export const requireArrangements = (capabilities: Capabilities): void => {
-  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && item.version === 1))
-    throw new TypeError('Granted arrangements capability version 1 is required; older pairings may need renewal')
+  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && (item.version === 1 || item.version === 2)))
+    throw new TypeError('Granted arrangements capability version 1 or 2 is required; older pairings may need renewal')
 }
 
 /** Online only: immutable action IDs/keys belong to the caller, not a hidden retry queue. */
@@ -55,9 +56,11 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
       return result
     },
     edit: async (identity: Pick<ArrangementEdit, 'id' | 'idempotency_key' | 'fence'>, operations: ArrangementOperation[]) => {
+      const { ArrangementEditParameters } = await Effect.runPromise(loadArrangementSchema)
+      const isEdit = Schema.is(Schema.toEncoded(ArrangementEditParameters))
       await discover()
       const parameters = { subject: selection.subject, owner: selection.owner, operations }
-      if (!isEdit(parameters)) throw new TypeError('Invalid generated arrangements operations')
+      if (!isEdit(parameters as unknown)) throw new TypeError('Invalid generated arrangements operations')
       return gateway.arrangementEdit({ ...identity, parameters })
     },
   }
@@ -66,14 +69,17 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
 // Generated arrangements are authoritative. FolderDoc is only the Tree's presentation shape.
 import * as Atom from 'effect/reactivity/Atom'
 import type { CollectionSocketFactory } from '@fractal/client'
-import { arrangementActions, type ArrangementActionPort } from '@fractal/sdk/effect'
-import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, st3InventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
+import { loadArrangementSchema, loadMutations } from '../data/lazySdk.ts'
+import type { ArrangementActionPort } from './edit.ts'
+import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, fractalInventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
 import { emptyDoc, type FolderDoc, type Stamp } from './core.mts'
 import { createArrangementEditor, refusalText, type ArrangementEditor, type ArrangementRefusal, type EditOutcome, type SidebarOperation, type StructuralIntent } from './edit.ts'
+import { browserSocket } from '../data/sdk-browser/trace.ts'
 export interface FolderState {
   readonly doc: FolderDoc
   readonly phase: 'fixture' | 'connecting' | 'synced' | 'pending' | 'unavailable'
   readonly detail?: string
+  readonly reason?: 'unauthorized'
   readonly readOnly?: boolean
   readonly refusal?: ArrangementRefusal
   readonly sidebarCandidates?: readonly { readonly id: string; readonly label: string }[]
@@ -93,8 +99,10 @@ export const arrangementSidebarDoc = (arrangement: Arrangement): FolderDoc => {
       position: { ...folder.position.value, at: at(folder.position.revision) },
       ...(folder.tombstone === null ? {} : { deleted: at(folder.tombstone.revision) }),
     }])),
-    placements: Object.fromEntries(Object.entries(arrangement.body.placements).map(([subject, placement]) =>
-      [subject, { ...placement.value, at: at(placement.revision) }])),
+    placements: arrangement.body.version === 1
+      ? Object.fromEntries(Object.entries(arrangement.body.placements).map(([subject, placement]) =>
+          [subject, { ...placement.value, at: at(placement.revision) }]))
+      : {},
   }
 }
 export type SidebarGateway = ArrangementInventoryGateway & Pick<FractalClient, 'discover'> & {
@@ -125,6 +133,7 @@ export const sidebarFolders = ({ gateway, socket }: {
     })
   const retry = () => { if (follow !== undefined) follow.refresh(); else if (!starting) void start() }
   const publish = (next: FolderState) => {
+    if (current.reason === 'unauthorized') return
     if (!active) return
     if (next.doc === current.doc && next.phase === current.phase && next.detail === current.detail &&
       next.refusal === current.refusal && next.retryEdit === current.retryEdit && next.retryReady === current.retryReady && next.readOnly === current.readOnly &&
@@ -134,6 +143,11 @@ export const sidebarFolders = ({ gateway, socket }: {
         next.sidebarCandidates?.every((candidate, index) => candidate.id === current.sidebarCandidates?.[index]?.id && candidate.label === current.sidebarCandidates?.[index]?.label)))) return
     current = next
     get.setSelf(next)
+  }
+  const rejectCredential = (error: unknown): boolean => {
+    if (clientReadAuthorization(error) !== 'unauthorized') return false
+    publish({ doc, phase: 'unavailable', reason: 'unauthorized', detail: credentialExpiredMessage, readOnly: true, edit })
+    return true
   }
   const start = async () => {
     starting = true
@@ -183,16 +197,19 @@ export const sidebarFolders = ({ gateway, socket }: {
             return
           }
           case 'ReadFailed':
+            if (rejectCredential(event.error)) return
             publish({ ...current, phase: 'unavailable', detail: `Arrangement read failed: ${event.error.message}`, readOnly: true })
             return
           case 'Interrupted':
-            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${Math.ceil(event.retryInMs / 1000)}s.`, readOnly: true })
+            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${formatDuration(Math.ceil(event.retryInMs / 1000) * 1000)}.`, readOnly: true })
             return
           case 'Refused':
+            if (rejectCredential(event.error)) return
             publish({ ...current, phase: 'unavailable', detail: `Arrangement updates refused: ${event.error.message}`, readOnly: true })
         }
       } })
     } catch (error) {
+      if (rejectCredential(error)) return
       publish({ ...current, phase: 'unavailable', detail: error instanceof Error ? error.message : String(error), readOnly: true })
     } finally { starting = false }
   }
@@ -203,10 +220,24 @@ export const sidebarFolders = ({ gateway, socket }: {
 })
 /** Same-origin paired client API, scoped to the discovered person. */
 const pageHotData = import.meta.hot?.data
+let pageClientName: string | undefined = pageHotData?.pageClientName
+/** The page root supplies its build identity; reusable workspace stories never import it. */
+export const setPageFoldersClientName = (client: string): void => {
+  pageClientName = client
+  if (pageHotData !== undefined) pageHotData.pageClientName = client
+}
 export let folders: Atom.Atom<FolderState> = pageHotData?.pageFolders ?? sidebarFolders({
   gateway: () => {
-    const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }
-    return { ...st3InventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
+    const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis), socket: browserSocket, ...(pageClientName === undefined ? {} : { client: pageClientName }) }
+    const client = new FractalClient(options)
+    const actions = loadMutations.pipe(Effect.map(({ arrangementActions }) => arrangementActions(client)))
+    return {
+      ...fractalInventoryGateway(options),
+      actions: {
+        snapshot: actions.pipe(Effect.flatMap((port) => port.snapshot)),
+        submitAction: (request) => actions.pipe(Effect.flatMap((port) => port.submitAction(request))),
+      },
+    }
   },
 })
 

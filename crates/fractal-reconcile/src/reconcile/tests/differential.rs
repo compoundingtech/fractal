@@ -48,7 +48,7 @@ mission "diff/flow" state="ready" timeout="2h" {
     depends-on { step "review" completed }
   }
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     depends-on { step "prepare" completed }
   }
   step "team" {
@@ -242,7 +242,12 @@ fn regex_lite_hex() -> impl Fn(&str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut run = String::new();
         let flush = |run: &mut String, out: &mut String| {
-            if run.len() >= 32 && (!run.contains('-') || uuid::Uuid::parse_str(run).is_ok()) {
+            // W3C traceparent values (and plain hash/uuid runs) vary per launch; only their
+            // presence is equivalent between the incremental and full sides.
+            let hex_run = run.split('-')
+                .all(|part| !part.is_empty()
+                    && part.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+            if run.len() >= 32 && (hex_run || uuid::Uuid::parse_str(run).is_ok()) {
                 out.push_str("<id>");
             } else {
                 out.push_str(run);

@@ -16,15 +16,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - id: site-token
+        name: Mint website dispatch token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.SITE_CI_APP_ID }}
+          private-key: ${{ secrets.SITE_CI_APP_PRIVATE_KEY }}
+          owner: compoundingtech
+          repositories: private
+          permission-contents: write
       - name: Dispatch docs change
         env:
-          GH_TOKEN: ${{ secrets.FRACTAL_SITE_DISPATCH_TOKEN }}
-        run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo '::error::FRACTAL_SITE_DISPATCH_TOKEN is required (Contents: write on compoundingtech/private).'
-            exit 1
-          fi
-          gh api --method POST repos/compoundingtech/private/dispatches -f event_type=fractal-docs-changed
+          GH_TOKEN: ${{ steps.site-token.outputs.token }}
+        run: gh api --method POST repos/compoundingtech/private/dispatches -f event_type=fractal-docs-changed
       - name: Report job cache coverage
         if: always()
         shell: bash

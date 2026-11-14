@@ -37,6 +37,18 @@ class ModuleLayers(unittest.TestCase):
         return subprocess.run([sys.executable, str(SCRIPT), "--root", str(self.root), *args],
                               input=stdin, text=True, capture_output=True)
 
+    def test_new_layout_preferred_and_invalid_or_dangling_new_never_falls_back(self):
+        self.write(".fractal/module-layers.json", '{"version": 1, "allowed_upward": [["a", "b"]]}')
+        self.assertEqual(ml.load_layers(self.root), {("a", "b")})
+        new = self.root / ".fractal/module-layers.json"
+        new.write_text("{")
+        with self.assertRaises(ValueError):
+            ml.load_layers(self.root)
+        new.unlink()
+        new.symlink_to("missing")
+        with self.assertRaises(FileNotFoundError):
+            ml.load_layers(self.root)
+
     def test_clean_graph_passes(self):
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)

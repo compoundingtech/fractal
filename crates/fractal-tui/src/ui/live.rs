@@ -11,7 +11,8 @@ use fractal_daemon::MissionsStore;
 use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
-use super::view::{Load, MissionPreview};
+use super::resource_sidebar::ArrangementV1 as _;
+use super::view::Load;
 use super::{AgentControl, Effect, Guard, Ui};
 use crate::feed::{self, Command, Inventories, Inventory, Window};
 use crate::model::{self, Collection, Model};
@@ -306,10 +307,10 @@ async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRea
         Inventory::Machines => InventoryRead::Rows(inventory, model::read_machines(client).await.map_err(|error| error.to_string())),
         Inventory::Devices => InventoryRead::Rows(inventory, model::read_devices(client).await.map_err(|error| error.to_string())),
         Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
-        Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.plain())),
+        Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.human())),
         Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
-            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
-            error => error.plain(),
+            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this version of Fractal does not list its clients yet: its daemon needs an update".into(),
+            error => error.human(),
         })),
         Inventory::Usage(hours) => {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
@@ -360,12 +361,12 @@ fn usage_error(error: &fractal_client::ClientError) -> String {
     match error {
         // A daemon from before the read answers its path with a bare 404.
         fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound, _, _) => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve usage yet: its daemon needs an update.".into()
         }
-        error => format!("Could not read usage: {}", error.plain()),
+        error => format!("Could not read usage: {}", error.human()),
     }
 }
 
@@ -400,20 +401,23 @@ enum Fetched {
         /// How long st took to answer, so a slow st is not asked for more than the person scrolled to.
         took: Duration,
     },
-    Preview(String, Load<MissionPreview>),
-    /// A document's text, by the reference its pane names, or why it could not be read.
-    Document(String, Result<String, String>),
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
-    AlertOutcome(String, bool),
+    AlertOutcome(String, Result<(), String>),
     /// Harness sessions st did not start, found on this machine.
     Session(String, Result<Box<fractal_client::Session>, String>),
+    /// A document's page, a page of the documents list, and the documents a mission or step names.
+    Document(String, Result<fractal_client::DocumentContent, fractal_ui_model::documents::Unavailable>),
+    DocumentList(Option<String>, Result<fractal_client::DocumentsPage, fractal_ui_model::documents::Unavailable>),
+    DocumentReferences(String, Result<fractal_client::DocumentReferences, String>),
+    /// What the Availability pane asked: the person's availability and note.
+    Availability(super::availability::Done),
     /// The Fleet tab's machines and paired devices.
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
     /// The objectives and budgets the Usage view shows, or why st could not say.
-    Slo { generation: u64, outcome: Result<Vec<fractal_client::SloRow>, String> },
+    Slo { generation: u64, outcome: Result<(Vec<fractal_client::SloRow>, Option<String>), String> },
     /// What was left of one objective or budget across the chart period.
     SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
     /// st's conversation search for the palette's query, or why st could not say.
@@ -456,6 +460,12 @@ enum Fetched {
         key: String,
         outcome: Result<Option<String>, String>,
     },
+    /// st's read positions for the person, on the connection `generation`: `None` from a daemon
+    /// that keeps none (positions stay on this device), or why they could not be read.
+    ReadPositions { generation: u64, outcome: Result<Option<Vec<(String, i64)>>, fractal_client::ClientError> },
+    /// st answered the advance of a read position to `at_ms`: the position it keeps now, if it
+    /// said, or why it failed.
+    ReadPositionAdvanced { generation: u64, conversation: String, at_ms: i64, outcome: Result<Option<i64>, String> },
 }
 
 /// Send one glass write to st; its answer comes back as `Fetched::GlassSaved`.
@@ -481,7 +491,7 @@ fn save_glass(
                     )
                     .await
                     .map(|saved| Some(saved.value.header.revision))
-                    .map_err(|error| error.plain()),
+                    .map_err(|error| error.human()),
                 Err(error) => Err(error.to_string()),
             },
             GlassWrite::Delete { id, base, key } => client
@@ -494,7 +504,7 @@ fn save_glass(
                 )
                 .await
                 .map(|_| None)
-                .map_err(|error| error.plain()),
+                .map_err(|error| error.human()),
         };
         let _ = tx.send(Fetched::GlassSaved {
             id: write.id().to_owned(),
@@ -544,12 +554,15 @@ pub fn run(context: Context) -> Result<()> {
     // The session each conversation was last subscribed again for, so it is asked once.
     let mut resubscribed: BTreeMap<String, String> = BTreeMap::new();
     let mut sessions_requested = HashSet::new();
-    let mut preview_requested: HashSet<String> = HashSet::new();
     let mut body_requested: HashSet<String> = HashSet::new();
     let mut read_receipts = ReadReceipts::default();
     // Messages sent from here, shown at once until st reports them back.
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
+    if super::freshness::enabled() {
+        tracing::debug!(target: "fractal_tui::freshness", stage = "startup",
+            version = %crate::version::short(crate::version::now()), endpoint = ?client);
+    }
     ui.load_prefs();
     // A demo's agents are scripted stand-ins whose terminals stay empty: they open on their
     // conversation, without changing this device's choice.
@@ -559,6 +572,8 @@ pub fn run(context: Context) -> Result<()> {
     ui.drafts_path = super::drafts_store::path();
     let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
+    ui.reads = super::read_store::ReadPositions::load(super::read_store::path(cache_path.as_deref()));
+    ui.refresh_tab_statuses();
     ui.quality = super::slo::Draw::new(process_started);
     if earlier.is_some() {
         super::slo::METRICS.add("drafts_restored_unclean", ui.drafts_saved.len() as u64);
@@ -568,6 +583,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.build = true;
     ui.live = true;
     ui.glasses = super::glass::Glasses::open(space, super::glass_store::path(&person));
+    ui.prune_place_history();
     // A space opens where this device left it.
     ui.show_focused();
     if std::env::args().any(|arg| arg == "--old") {
@@ -580,9 +596,10 @@ pub fn run(context: Context) -> Result<()> {
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
     }
     let _guard = Guard::enter(true)?;
+    ui.keyboard_enhanced = _guard.enhanced;
     // The release smoke test's probe: the terminal is restored after a panic too.
     #[cfg(debug_assertions)]
-    if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
+    if std::env::var_os("FRACTAL_TUI_TEST_PANIC_AFTER_ENTER").is_some() {
         panic!("terminal restoration probe");
     }
     // How images are drawn: asked of the terminal itself, once, inside the alternate screen and
@@ -670,7 +687,7 @@ pub fn run(context: Context) -> Result<()> {
         let turn_started = Instant::now();
         // A program written over on disk while it runs is told to the person at once, and noted.
         if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
-            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+            ui.flash("Fractal was updated on disk while this was running: restart it, the system may stop it");
         }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
@@ -721,32 +738,45 @@ pub fn run(context: Context) -> Result<()> {
                     agents_live = false;
                     glasses_ready = true;
                     client = member;
+                    if super::freshness::enabled() {
+                        tracing::debug!(target: "fractal_tui::freshness", stage = "connected",
+                            version = %crate::version::short(crate::version::now()), endpoint = ?client);
+                    }
                     resources_generation += 1;
                     resources_stale = true;
                     extras.inventory_supported = None;
                     extras.inventory_partial.clear();
                     inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
-                    extras.live = false;
+                    // Another member's objectives are not this one's: drop them until it answers.
+                    extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
+                    extras.reset_connection();
+                    ui.availability.connected();
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
-                    preview_requested.clear();
                     body_requested.clear();
                     changed = true;
+                    ui.reads.connected(Instant::now());
                 }
                 feed::Update::InventorySupport { granted, member_build } => {
                     extras.inventory_supported = Some(granted);
                     model.member_build = member_build;
                     changed = true;
                 }
+                // An invalidation: st's list is read again (`read_store`), not the frame's rows.
+                feed::Update::Window { window: Window::ReadPositions, .. } => {
+                    ui.reads.stream_frame(Instant::now());
+                    changed |= extras.window_errors.remove(&window_label(Window::ReadPositions)).is_some();
+                }
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
                     ui.resource_sidebar.writable = true;
                     ui.resource_sidebar.arrangements = items.into_iter().filter_map(|item| match item {
-                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted => Some(arrangement),
+                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted
+                            && matches!(arrangement.body, fractal_client::ArrangementBody::V1(_)) => Some(arrangement),
                         _ => None,
                     }).collect();
-                    if ui.resource_sidebar.arrangements.iter().any(|a| a.body.folders.values().any(|folder| folder.tombstone.is_none()))
+                    if ui.resource_sidebar.arrangements.iter().any(|a| a.v1().folders.values().any(|folder| folder.tombstone.is_none()))
                         && !ui.glasses.sidebar.configured {
                         ui.glasses.sidebar.shown = true;
                     }
@@ -808,7 +838,7 @@ pub fn run(context: Context) -> Result<()> {
                     }
                     if window == Window::Summary {
                         extras.summary = items.iter().find_map(|item| match item {
-                            Resource::Summary(summary) => Some(summary.clone()),
+                            Resource::Summary(summary) => Some((summary.clone(), snapshot.clone())),
                             _ => None,
                         });
                         changed = true;
@@ -851,7 +881,7 @@ pub fn run(context: Context) -> Result<()> {
                             Inventory::Usage(hours) if hours == ui.usage_hours => model.usage = Some(model::inventory_usage(collection.items)),
                             Inventory::Usage(_) => {},
                         },
-                        Window::Glasses | Window::Summary | Window::Arrangements => {}
+                        Window::Glasses | Window::Summary | Window::Arrangements | Window::ReadPositions => {}
                     }
                     extras.live = true;
                     extras.offline = None;
@@ -862,6 +892,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Conversation {
+                    subscription_id,
                     target,
                     session_id,
                     replace,
@@ -869,6 +900,12 @@ pub fn run(context: Context) -> Result<()> {
                     items,
                     header,
                 } => {
+                    if super::freshness::enabled() {
+                        tracing::debug!(target: "fractal_tui::freshness", stage = "frame",
+                            subscription_id, target_id = target, frame_session = session_id,
+                            newest = ?super::freshness::newest(&items), count = items.len(), replace);
+                        ui.freshness_panes("update_before");
+                    }
                     if let Some(trace) = &mut open_timing {
                         trace.received(&target, items.len());
                     }
@@ -885,7 +922,7 @@ pub fn run(context: Context) -> Result<()> {
                             .insert(target.clone(), header.clone());
                     }
                     filled.entry(target.clone()).or_default().apply(
-                        timelines.entry(target).or_default(),
+                        timelines.entry(target.clone()).or_default(),
                         fractal_conversation_ui::Frame {
                             replace,
                             has_more,
@@ -894,6 +931,15 @@ pub fn run(context: Context) -> Result<()> {
                             header,
                         },
                     );
+                    if super::freshness::enabled() {
+                        let held = &timelines[&target];
+                        tracing::debug!(target: "fractal_tui::freshness", stage = "held",
+                            subscription_id, target_id = target,
+                            held_session = ?held.session_id,
+                            newest = ?super::freshness::newest(&held.items),
+                            newest_id = held.items.last().map(|entry| entry.id.as_str()),
+                            count = held.items.len());
+                    }
                     // A message sent from here is done once st shows it in the conversation.
                     pending.retain(|pending| {
                         let Some(id) = pending.message_id.as_ref() else {
@@ -962,13 +1008,12 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Degraded(reason) => {
                     ui.quality.live(false);
                     // st answered; only its live stream is being replaced. Not offline, and
-                    // nothing on screen is cleared.
+                    // nothing on screen is cleared. Not flashed either: it reconnects by itself,
+                    // the bar says connecting meanwhile, and clicking it says why.
                     extras.live = false;
+                    ui.availability.disconnected();
                     extras.offline = None;
                     extras.offline_since = None;
-                    ui.flash(format!(
-                        "Live stream lost ({reason}); st answers, reconnecting"
-                    ));
                     extras.degraded = Some(reason);
                     attached = None;
                     changed = true;
@@ -976,6 +1021,7 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Offline(error) => {
                     ui.quality.live(false);
                     extras.live = false;
+                    ui.availability.disconnected();
                     extras.degraded = None;
                     extras.offline = Some(error);
                     extras.offline_since.get_or_insert_with(Instant::now);
@@ -995,15 +1041,6 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Protocol(key, width, height, protocol) => {
                     encoding.remove(&(key.clone(), width, height));
                     ui.content.install_protocol(key, width, height, protocol);
-                }
-                Fetched::Document(reference, result) => {
-                    ui.documents.insert(
-                        reference,
-                        match result {
-                            Ok(text) => Load::Ready(text),
-                            Err(why) => Load::Failed(why),
-                        },
-                    );
                 }
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
@@ -1092,16 +1129,14 @@ pub fn run(context: Context) -> Result<()> {
                         waiting
                     });
                 }
-                Fetched::Preview(id, preview) => {
-                    extras.previews.insert(id, preview);
-                }
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
                 Fetched::Notice(notice) => ui.flash(notice),
-                Fetched::AlertOutcome(id, accepted) => {
-                    if !accepted {
+                Fetched::AlertOutcome(id, outcome) => {
+                    if let Err(error) = outcome {
                         ui.finish_answer(&id, false);
+                        ui.answer_errors.insert(id.clone(), error);
                         answers.remove(&id);
                     } else if let Some(timing) = answers.get_mut(&id) {
                         timing.accepted = true;
@@ -1134,6 +1169,10 @@ pub fn run(context: Context) -> Result<()> {
                         Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
                     }
                 }
+                Fetched::Document(reference, outcome) => ui.documents.got(&reference, outcome),
+                Fetched::DocumentList(prefix, outcome) => ui.documents.listed(prefix.as_deref(), outcome),
+                Fetched::DocumentReferences(subject, outcome) => ui.documents.referenced(&subject, outcome),
+                Fetched::Availability(done) => ui.availability.done(done),
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
                     if generation == resources_generation { match outcome {
@@ -1214,12 +1253,19 @@ pub fn run(context: Context) -> Result<()> {
                     slo_reading = false;
                     if generation != resources_generation { continue; }
                     match outcome {
-                        Ok(rows) => {
+                        Ok((rows, otel_url)) => {
                             extras.slo = Load::Ready(rows);
+                            extras.slo_otel_url = otel_url;
+                            extras.slo_stale = None;
                             // A chart open now is read again beside the fresh rows.
                             slo_history_asked.clear();
                         }
-                        Err(why) if matches!(extras.slo, Load::Ready(_)) => ui.flash(format!("Could not read objectives and budgets again: {why}")),
+                        Err(why) if matches!(extras.slo, Load::Ready(_)) => {
+                            // The rows stay, marked as the last reading, so a failed refresh is not
+                            // taken for a fresh all clear.
+                            ui.flash(format!("Could not read objectives and budgets again: {why}"));
+                            extras.slo_stale = Some(why);
+                        }
                         Err(why) => extras.slo = Load::Failed(why),
                     }
                 }
@@ -1232,6 +1278,24 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
+                Fetched::ReadPositions { generation, outcome } => {
+                    if generation == resources_generation {
+                        if let Err(error) = &outcome {
+                            extras.window_errors.insert("ReadPositionsList".into(), error.human());
+                        } else {
+                            extras.window_errors.remove("ReadPositionsList");
+                        }
+                        if ui.reads.listed(outcome, Instant::now()) {
+                            ui.refresh_tab_statuses();
+                        }
+                    }
+                }
+                Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome } => {
+                    if generation != resources_generation { continue; }
+                    if ui.reads.sent(&conversation, at_ms, outcome, Instant::now()) {
+                        ui.refresh_tab_statuses();
+                    }
+                }
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 msg @ (Fetched::Native { .. } | Fetched::NativeFailed { .. } | Fetched::AttachWaiting { .. }) => {
                     attach.apply_fetched(&mut ui, msg, &commands);
@@ -1265,26 +1329,66 @@ pub fn run(context: Context) -> Result<()> {
             resources_stale = false; resources_reading = true;
             let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
             runtime.spawn(async move {
-                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.plain()));
+                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.human()));
                 let _ = tx.send(Fetched::Observations { generation, outcome });
             });
         }
         resources_shown = showing_resources;
-        // A document is read once, when its pane is first shown.
-        if let Some(super::pane::Pane::Document(reference)) = ui.focused_pane()
-            && !ui.documents.contains_key(&reference)
+        // Documents on screen, the list, and the documents of a mission on screen: read once each
+        // through the client's document routes, the same ones web and the phone read.
         {
-            ui.documents.insert(reference.clone(), Load::Loading);
-            let reader = client.clone();
-            let tx = fetched_tx.clone();
-            runtime.spawn(async move {
-                let outcome = reader
-                    .document_get(&reference)
-                    .await
-                    .map(|document| String::from_utf8_lossy(&document.value.bytes).into_owned())
-                    .map_err(|error| error.plain());
-                let _ = tx.send(Fetched::Document(reference, outcome));
-            });
+            let shown = ui.shown_panes().into_iter().map(|(_, pane)| pane).collect::<Vec<_>>();
+            let background = if ui.palette_asks_documents() { vec![super::pane::Pane::Documents(None)] } else { Vec::new() };
+            let subjects = shown
+                .iter()
+                .filter_map(|pane| match pane {
+                    super::pane::Pane::Mission(Some(id)) => Some(ui.document_subjects(id)),
+                    _ => None,
+                })
+                .flatten()
+                .map(|(subject, _)| subject)
+                .collect::<Vec<_>>();
+            if !extras.live {
+                ui.documents.offline(&shown);
+            } else {
+                for want in ui.documents.wanted(&shown, &background, &subjects) {
+                    let reader = client.clone();
+                    let tx = fetched_tx.clone();
+                    runtime.spawn(async move {
+                        use super::documents::{PAGE, Want, unavailable};
+                        let fetched = match want {
+                            Want::Get(reference) => {
+                                let outcome = reader.document_get(&reference).await.map(|envelope| envelope.value).map_err(|error| unavailable(&error));
+                                Fetched::Document(reference, outcome)
+                            }
+                            Want::List { prefix, cursor } => {
+                                let outcome = reader
+                                    .documents_list(prefix.as_deref(), false, cursor.as_deref(), Some(PAGE))
+                                    .await
+                                    .map(|envelope| envelope.value)
+                                    .map_err(|error| unavailable(&error));
+                                Fetched::DocumentList(prefix, outcome)
+                            }
+                            Want::References(subject) => {
+                                let outcome = reader.document_references_get(&subject).await.map(|envelope| envelope.value).map_err(|error| error.human());
+                                Fetched::DocumentReferences(subject, outcome)
+                            }
+                        };
+                        let _ = tx.send(fetched);
+                    });
+                }
+            }
+            // Availability is on no stream: it is read when its pane opens, when the terminal
+            // regains focus and after a reconnect.
+            if extras.live {
+                for want in ui.availability.wanted(shown.contains(&super::pane::Pane::Availability)) {
+                    let reader = client.clone();
+                    let tx = fetched_tx.clone();
+                    runtime.spawn(async move {
+                        let _ = tx.send(Fetched::Availability(super::availability::perform(&reader, want).await));
+                    });
+                }
+            }
         }
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
@@ -1318,7 +1422,7 @@ pub fn run(context: Context) -> Result<()> {
             slo_stale = false; slo_reading = true;
             let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
             runtime.spawn(async move {
-                let outcome = reader.slo_list().await.map(|reply| reply.value.rows).map_err(|error| super::objectives::error(&error));
+                let outcome = reader.slo_list().await.map(|reply| (reply.value.rows, reply.value.otel_ui_url)).map_err(|error| super::objectives::error(&error));
                 let _ = tx.send(Fetched::Slo { generation, outcome });
             });
         }
@@ -1369,7 +1473,7 @@ pub fn run(context: Context) -> Result<()> {
                                 .conversation_search(&query, None, None, None, Some(20))
                                 .await
                                 .map(|envelope| envelope.value)
-                                .map_err(|error| error.plain());
+                                .map_err(|error| error.human());
                             let _ = tx.send(Fetched::Said(query, outcome));
                         });
                     }
@@ -1429,60 +1533,6 @@ pub fn run(context: Context) -> Result<()> {
         for target in moved_sessions(&conversing, &model, &timelines, &mut resubscribed) {
             let _ = commands.send(Command::Resubscribe { target });
         }
-        if tab == 0
-            && let Some(id) = selected.clone()
-            && !preview_requested.contains(&id)
-            && let Some(item) = model
-                .attention()
-                .find(|item| item.header.id == id && item.attention_kind == "launch-approval")
-        {
-            preview_requested.insert(id.clone());
-            let client = client.clone();
-            let tx = fetched_tx.clone();
-            let source = item.source_id.clone();
-            let name = item
-                .mission_id
-                .clone()
-                .unwrap_or_else(|| item.title.clone())
-                .trim_start_matches("mission/")
-                .to_owned();
-            runtime.spawn(async move {
-                let preview = match client.launch_variants_list(&source, None, Some(50)).await {
-                    Err(error) => Load::Failed(format!("Could not load the proposed mission: {error}")),
-                    Ok(variants) => {
-                        let latest = variants
-                            .value
-                            .items
-                            .iter()
-                            .filter_map(|item| match item {
-                                Resource::LaunchVariant(variant) => Some(variant),
-                                _ => None,
-                            })
-                            .max_by_key(|variant| variant.ordinal);
-                        match latest {
-                            None => Load::Failed("The planner has not proposed a mission yet.".into()),
-                            Some(variant)
-                                if variant.normalized_mission.as_object().is_none_or(|fields| fields.is_empty()) =>
-                            {
-                                let mut reason = format!(
-                                    "The planner's latest candidate ({}) has no preview, so there is no mission to show yet.",
-                                    variant.status
-                                );
-                                for diagnostic in variant.diagnostics.iter().take(3) {
-                                    if let Some(message) = diagnostic.get("message").and_then(|value| value.as_str()) {
-                                        reason.push_str(&format!("\n• {message}"));
-                                    }
-                                }
-                                Load::Failed(reason)
-                            }
-                            Some(variant) => Load::Ready(adapt::preview(&name, &variant.normalized_mission)),
-                        }
-                    }
-                };
-                let _ = tx.send(Fetched::Preview(id, preview));
-            });
-        }
-
         // An unread-message item names its message; load the message itself.
         if tab == 0
             && let Some(id) = selected.clone()
@@ -1517,6 +1567,17 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 continue;
             }
+            // Only queued while live against a daemon that keeps positions; a failure is sent
+            // again after a growing wait (`read_store`), never flashed.
+            if let Effect::AdvanceReadPosition { conversation, at_ms } = effect {
+                let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone();
+                let generation = resources_generation;
+                runtime.spawn(async move {
+                    let outcome = advance_read_position(&client, &person, &conversation, at_ms).await.map_err(|error| plain(&error));
+                    let _ = tx.send(Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome });
+                });
+                continue;
+            }
             if let Effect::EditArrangement(write) = &effect {
                 let write = write.clone();
                 if !extras.live {
@@ -1542,14 +1603,14 @@ pub fn run(context: Context) -> Result<()> {
                     ui.content.finish(key, Err("Offline · reconnect, then load again".into()));
                 }
                 ui.flash(if extras.degraded.is_some() {
-                    "Reconnecting to st · try again in a moment; nothing was queued"
+                    "Reconnecting to Fractal · try again in a moment; nothing was queued"
                 } else {
                     "Offline · reconnect before acting; nothing was queued"
                 });
                 continue;
             }
             ui.note_acted(&effect);
-            if let Effect::Attention { id, .. } = &effect {
+            if let Effect::Attention { id, .. } | Effect::Dismiss { id, .. } = &effect {
                 if answers.len() < 256 || answers.contains_key(id) || ui.pending_answers.contains_key(id) {
                     answers.insert(id.clone(), AnswerTiming::new(Instant::now()));
                 } else {
@@ -1571,6 +1632,7 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Effect::OpenTerminal { agent } => {
                     let (generation, wanted, serial) = attach.begin(&mut ui, &agent);
+                    let trace = attach.trace(&agent);
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
                     // it; st's screen view (the feed follows it on its socket) only when st cannot
                     // give a direct stream.
@@ -1613,19 +1675,22 @@ pub fn run(context: Context) -> Result<()> {
                         let task_agent = agent.clone();
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
+                        let setup_owner = attach::SetupOwner::new(trace.clone());
                         let task = runtime.spawn(async move {
-                            // A shell has no other view to fall back to, and one started a moment ago
-                            // can be refused while st settles which host runs it: wait, say why, retry.
+                            let mut setup_owner = setup_owner;
+                            // Discovery refusals may settle for a new shell. Capability timeouts
+                            // retry inside attach_terminal, keeping its selected incarnation.
                             let delays: &[Duration] = if agent.starts_with("terminal/") {
                                 &attach::RETRY_DELAYS
                             } else {
                                 &[]
                             };
-                            let attached = attach::phase("attach setup", attach::DEADLINE, async {
+                            let attached = attach::traced_phase(trace.as_ref(), "attach setup", attach::DEADLINE, async {
                                 let _permit = serial.acquire_owned().await
                                     .map_err(|_| "attach setup cancelled".to_owned())?;
                                 retry_attach(
                                     delays,
+                                    true,
                                     || wanted.load(Ordering::Relaxed),
                                     |reason| {
                                         let _ = tx.send(Fetched::AttachWaiting {
@@ -1642,10 +1707,16 @@ pub fn run(context: Context) -> Result<()> {
                                             &runtime_ids,
                                             owner.as_deref(),
                                             fallback,
+                                            trace.as_ref(),
                                         )
                                     },
                                 ).await
                             }).await;
+                            if let Err(reason) = &attached
+                                && let Some(trace) = &trace
+                            {
+                                trace.finish(if reason == "attach setup timed out" { "outer-deadline" } else { "setup-failed" });
+                            }
                             // Its tab closed while it waited: nobody is left to hear the outcome.
                             if !wanted.load(Ordering::Relaxed) {
                                 if let Ok(direct) = attached { attach::close(direct); }
@@ -1659,8 +1730,11 @@ pub fn run(context: Context) -> Result<()> {
                                     runtime_ids,
                                     reason,
                                 },
-                            }) && let Fetched::Native { direct, .. } = error.0 {
-                                attach::close(direct);
+                            }) {
+                                if let Some(trace) = &trace { trace.finish("dispatch-unavailable"); }
+                                if let Fetched::Native { direct, .. } = error.0 { attach::close(direct); }
+                            } else {
+                                setup_owner.handed_off();
                             }
                         });
                         attach.tasks.insert(task_agent, task);
@@ -1861,7 +1935,7 @@ pub fn run(context: Context) -> Result<()> {
                 other => (other, None, None),
             };
             let alert = match &effect {
-                Effect::Attention { id, .. } => Some(id.clone()),
+                Effect::Attention { id, .. } | Effect::Dismiss { id, .. } => Some(id.clone()),
                 _ => None,
             };
             let optimistic_answer = alert.as_ref().is_some_and(|id| ui.pending_answers.contains_key(id));
@@ -1875,7 +1949,14 @@ pub fn run(context: Context) -> Result<()> {
                 let outcome =
                     perform_steadily(&client, &person, &model, effect, sent.as_deref()).await;
                 if let Some(id) = alert {
-                    let _ = tx.send(Fetched::AlertOutcome(id, outcome.is_ok()));
+                    let _ = tx.send(Fetched::AlertOutcome(id,
+                        outcome.as_ref().map(|_| ()).map_err(|error| {
+                            // Refused here before sending: nothing reached Fractal.
+                            if error.downcast_ref::<crate::OptionNotesUnsupported>().is_some() {
+                                return error.to_string();
+                            }
+                            format!("Could not confirm answer: {} · request restored; check before sending again", plain(error))
+                        })));
                 }
                 if let Some(token) = token {
                     let _ = tx.send(Fetched::Sent(
@@ -1900,12 +1981,9 @@ pub fn run(context: Context) -> Result<()> {
                     // A message's refusal is said, and its text put back, where its answer is
                     // handled (`Fetched::Sent`).
                     Err(_) if sends_message => {}
+                    Err(_) if optimistic_answer => {}
                     Err(error) => {
-                        let notice = if optimistic_answer {
-                            format!("Could not confirm answer: {} · request restored; check before sending again", plain(&error))
-                        } else {
-                            format!("Not done: {}", plain(&error))
-                        };
+                        let notice = format!("Not done: {}", plain(&error));
                         let _ = tx.send(Fetched::Notice(notice));
                     }
                 }
@@ -1921,13 +1999,13 @@ pub fn run(context: Context) -> Result<()> {
             None => offline_drawn = false,
             Some(_) => {}
         }
+        // A row put off comes back on its own clock: adapt again when its snooze ends.
+        if ui.world.snooze_ends().is_some_and(|end| chrono::Utc::now() >= end) {
+            changed = true;
+        }
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
-            extras.pending_calls = timelines
-                .iter()
-                .map(|(agent, timeline)| (agent.clone(), adapt::pending_calls(&timeline.items)))
-                .collect();
             for entry in &pending {
                 if let Some(Load::Ready(entries)) = extras.conversations.get_mut(&entry.agent) {
                     entries.push(super::view::Entry {
@@ -1988,6 +2066,9 @@ pub fn run(context: Context) -> Result<()> {
         attach.opens.retain(|target, _| ui.terminal_view(target).is_some());
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
+        for native in ui.terminal.iter().chain(ui.parked.iter()).filter_map(|view| view.native.as_ref()) {
+            native.frame_started();
+        }
         let mut links = Vec::new();
         let draw_started = Instant::now();
         terminal.draw(|frame| {
@@ -2056,6 +2137,10 @@ pub fn run(context: Context) -> Result<()> {
             || execute!(io::stdout(), EndSynchronizedUpdate),
             |target| ui.conversation_entry_visible(target),
         )?;
+        for native in ui.terminal.iter().chain(ui.parked.iter()).filter_map(|view| view.native.as_ref()) {
+            native.frame_rendered();
+        }
+        ui.freshness_panes("presented");
         ui.quality.live(extras.live);
         let top = u8::from(extras.live)
             | (u8::from(extras.offline.is_some()) << 1)
@@ -2083,6 +2168,20 @@ pub fn run(context: Context) -> Result<()> {
         });
         for at in landed_answers.drain(..) {
             super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
+        }
+        ui.read_presented_conversations(&timelines);
+        ui.queue_read_advances(Instant::now(), extras.live);
+        if extras.live
+            && let Some(check) = ui.reads.list_due(Instant::now())
+        {
+            let client = client.clone();
+            let person = person.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = read_positions(&client, &person, check).await;
+                let _ = tx.send(Fetched::ReadPositions { generation, outcome });
+            });
         }
         let visible = ui.visible_messages();
         let incoming: HashSet<_> = timelines
@@ -2138,6 +2237,7 @@ pub fn run(context: Context) -> Result<()> {
                     Some(&expected),
                     owner.as_deref(),
                     fallback,
+                    None,
                 )
                 .await;
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
@@ -2319,6 +2419,12 @@ fn conversations(
                 if let Some(note) = history_note(timeline) {
                     entries.insert(0, note);
                 }
+                if super::freshness::enabled() {
+                    tracing::debug!(target: "fractal_tui::freshness", stage = "adapted",
+                        target_id = target, held_session = ?timeline.session_id,
+                        last_id = entries.last().map(|entry| entry.id.as_str()),
+                        count = entries.len());
+                }
                 Load::Ready(entries)
             }
             (None, Some(error)) => {
@@ -2467,13 +2573,13 @@ async fn older_page(
         match read(cursor).await {
             Ok(page) => return Ok(page),
             Err(ClientError::Api(fractal_client::ErrorCode::PageCursorExpired, _, _)) => {}
-            Err(error) => return Err(error.plain()),
+            Err(error) => return Err(error.human()),
         }
     }
     let mut cursor = None;
     // Bounded: a session longer than this many pages stops loading with a reason.
     for _ in 0..50 {
-        let page = read(cursor).await.map_err(|error| error.plain())?;
+        let page = read(cursor).await.map_err(|error| error.human())?;
         let reaches = oldest.as_ref().is_none_or(|(at, sequence)| {
             page.items
                 .first()
@@ -2484,7 +2590,7 @@ async fn older_page(
         }
         cursor = page.cursor;
     }
-    Err("this session is too long to read further back here; st conversations timeline reads it all".into())
+    Err("this session is too long to read further back here; fractal conversations timeline reads it all".into())
 }
 
 /// How long a message st did not confirm waits before it is sent again by itself, for each time.
@@ -2534,7 +2640,7 @@ fn mark_unanswered(pending: &mut [Pending]) -> bool {
 /// The followed agents whose conversation shows a session they have since left: st resolves an
 /// agent to its session when a subscription starts, so after a restart that subscription keeps
 /// the old one (Nathan's message to a restarted seat sat at "sending…" because it landed in the
-/// new session, which his stui was not showing). Each is named once per new session.
+/// new session, which his terminal UI was not showing). Each is named once per new session.
 fn moved_sessions(
     conversing: &[String],
     model: &Model,
@@ -2580,7 +2686,7 @@ fn history_note(timeline: &fractal_conversation_ui::Timeline) -> Option<super::v
     } else if timeline.items.is_empty() {
         return None;
     } else {
-        "Start of this session · earlier ones: st conversations sessions".to_owned()
+        "Start of this session · earlier ones: fractal conversations sessions".to_owned()
     };
     Some(super::view::Entry {
         id: HISTORY_NOTE.into(),
@@ -2672,7 +2778,7 @@ pub(crate) fn plain(error: &anyhow::Error) -> String {
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<ClientError>())
-        .map(ClientError::plain)
+        .map(ClientError::human)
         .unwrap_or_else(|| error.to_string())
 }
 
@@ -2755,10 +2861,49 @@ async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -
     let reply = client.arrangement_edit(
         format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
         Fence { snapshot_id: snapshot.id, ..Default::default() },
-        fractal_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
+        fractal_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone(), version: None },
     ).await?;
     anyhow::ensure!(matches!(reply.value.status, fractal_client::ActionStatus::Completed), "Sidebar edit is not completed.");
     Ok(())
+}
+
+/// The person's read positions st keeps, every page, as ms since the epoch; `None` when the daemon
+/// keeps none (asked first when `check`) or the session is no person's.
+async fn read_positions(client: &Client, person: &str, check: bool) -> Result<Option<Vec<(String, i64)>>, fractal_client::ClientError> {
+    if !person.starts_with("person/") {
+        return Ok(None);
+    }
+    if check && !client.capabilities().await?.value.grants(super::read_store::CAPABILITY, 1) {
+        return Ok(None);
+    }
+    let mut positions = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = client.read_positions_list(person, cursor.as_deref(), None).await?.value;
+        positions.extend(page.items.into_iter().filter(|item| item.owner == person).filter_map(|item| {
+            let at = super::read_store::at_ms(&item.at)?;
+            Some((item.conversation, at))
+        }));
+        match page.page.next_cursor {
+            Some(next) if page.page.has_more => cursor = Some(next),
+            _ => return Ok(Some(positions)),
+        }
+    }
+}
+
+/// Advance the person's read position in st, fenced like a sidebar edit. st keeps the larger, so
+/// each send may use a fresh identity; the position st keeps afterwards, if it says.
+async fn advance_read_position(client: &Client, person: &str, conversation: &str, at_ms: i64) -> Result<Option<i64>> {
+    let at = super::read_store::timestamp(at_ms).ok_or_else(|| anyhow::anyhow!("read position {at_ms} is not a time"))?;
+    let snapshot = client.capabilities().await?.snapshot;
+    let key = uuid::Uuid::now_v7();
+    let reply = client.read_position_advance(
+        format!("action/read-{key}"), format!("read-{key}"),
+        Fence { snapshot_id: snapshot.id, ..Default::default() },
+        fractal_client::ReadPositionAdvanceParameters { owner: person.to_owned(), conversation: conversation.to_owned(), at },
+    ).await?;
+    anyhow::ensure!(matches!(reply.value.status, fractal_client::ActionStatus::Completed), "Read position advance is not completed.");
+    Ok(reply.value.read_position_at.as_deref().and_then(super::read_store::at_ms))
 }
 
 async fn perform(
@@ -2771,7 +2916,7 @@ async fn perform(
     match effect {
         // Glass writes and retries never reach here: the loop handles them itself.
         Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::RetryConversation { .. }
-        | Effect::Forget { .. } | Effect::LoadContent(_) => {
+        | Effect::Forget { .. } | Effect::LoadContent(_) | Effect::AdvanceReadPosition { .. } => {
             Ok((String::new(), None))
         }
         Effect::EditArrangement(write) => {
@@ -2782,7 +2927,7 @@ async fn perform(
             agent_control(client, &agent, control).await?;
             Ok((
                 format!(
-                    "{} {}: asked st",
+                    "{} {}: asked Fractal",
                     control.verb(),
                     agent.trim_start_matches("agent/")
                 ),
@@ -2845,11 +2990,29 @@ async fn perform(
             action,
             reason,
             answer,
+            option_notes,
         } => {
             let seen = model.attention().find(|card| card.header.id == id);
-            crate::attention_action(client, person, &id, seen, &action, reason, answer)
+            crate::attention_action(client, person, &id, seen, &action, reason, answer, option_notes)
                 .await
                 .map(|notice| (notice, None))
+        }
+        Effect::Snooze { id, until } => {
+            let fence = Fence { snapshot_id: client.capabilities().await?.snapshot.id, ..Fence::default() };
+            let (action, idem) = crate::action_pair();
+            let back = until.is_none();
+            client
+                .attention_snooze(action, idem, fence, fractal_client::AttentionSnoozeParameters { attention_id: id, until })
+                .await?;
+            Ok((if back { "Back in Inbox" } else { "Put off on every device" }.into(), None))
+        }
+        Effect::Dismiss { id, text } => {
+            let fence = Fence { snapshot_id: client.capabilities().await?.snapshot.id, ..Fence::default() };
+            let (action, idem) = crate::action_pair();
+            client
+                .attention_dismiss(action, idem, fence, fractal_client::AttentionDismissParameters { attention_id: id, text })
+                .await?;
+            Ok(("Dismissed".into(), None))
         }
         Effect::LaunchRevise { id, feedback } => {
             let current = client.attention_get(&id).await?;
@@ -2935,7 +3098,7 @@ async fn perform(
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
-            // downloads (ST3_DOWNLOADS or their download directory) where it has none.
+            // downloads (FRACTAL_DOWNLOADS, ST3_DOWNLOADS or their download directory) where it has none.
             let bytes = client.blob(&image.sha256, Some(&image.message)).await?;
             let dir = super::attach::dir()
                 .ok_or_else(|| anyhow::anyhow!("No place to keep the image (HOME is not set)"))?;
@@ -2943,11 +3106,11 @@ async fn perform(
             if super::attach::show(&kept) {
                 return Ok((format!("Opened {}", image.name.as_deref().unwrap_or("the image")), None));
             }
-            let downloads = super::attach::downloads()
+            let downloads = super::attach::downloads()?
                 .ok_or_else(|| anyhow::anyhow!("No place to save the image (HOME is not set)"))?;
             let path = super::attach::save(&downloads, &image, &bytes)?;
             Ok((
-                format!("Saved to {} · ST3_DOWNLOADS chooses where", path.display()),
+                format!("Saved to {} · FRACTAL_DOWNLOADS chooses where (ST3_DOWNLOADS also works)", path.display()),
                 None,
             ))
         }
@@ -3086,7 +3249,7 @@ async fn perform(
                         text.push_str(&super::attach::mention(&rest));
                         break;
                     }
-                    Err(error) => anyhow::bail!("the image was not sent: {}", error.plain()),
+                    Err(error) => anyhow::bail!("the image was not sent: {}", error.human()),
                 }
             }
             let id = send_message(
@@ -3217,11 +3380,21 @@ async fn send_message(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_refused_read_position_stream_is_visible_without_an_inventory() {
+        let extras = Extras {
+            window_errors: BTreeMap::from([("ReadPositions".into(), "subscription refused".into())]),
+            ..Extras::default()
+        };
+        assert_eq!(adapt::world(&Model::default(), "person/robin", &extras).stale,
+            ["ReadPositions: subscription refused"]);
+    }
+
+    #[test]
     fn a_polled_inventory_that_fails_briefly_says_nothing_and_one_that_keeps_failing_is_said() {
         let start = Instant::now();
         let mut failing = BTreeMap::new();
         let mut errors = BTreeMap::new();
-        let why = "st did not answer".to_owned();
+        let why = "Fractal did not answer".to_owned();
         let stale = |errors: &BTreeMap<String, String>| {
             let extras = Extras { window_errors: errors.clone(), ..Extras::default() };
             adapt::world(&Model::default(), "person/avery", &extras).stale
@@ -3238,7 +3411,7 @@ mod tests {
         // One that has lasted is said, in the stale note.
         note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER);
         assert_eq!(errors.get("machines"), Some(&why));
-        assert_eq!(stale(&errors), ["machines: st did not answer"]);
+        assert_eq!(stale(&errors), ["machines: Fractal did not answer"]);
 
         // A read that succeeds clears the error and the clock; the next failure starts over.
         note_legacy_read(&mut failing, &mut errors, "machines", None, start + feed::REPORT_AFTER * 2);
@@ -3261,6 +3434,7 @@ mod tests {
                 .unwrap()
                 .block_on(retry_attach(
                     &vec![Duration::ZERO; delays],
+                    true,
                     || true,
                     |reason| said.push(reason.to_owned()),
                     || {
@@ -3270,7 +3444,7 @@ mod tests {
                 ));
             (outcome, said)
         };
-        let unsure = "st cannot tell yet which host runs this";
+        let unsure = "Fractal cannot tell yet which host runs this";
         // It works on the third try; each wait said why.
         let (outcome, said) = run(vec![unsure, "host/example cannot be reached right now"], 5);
         assert_eq!(outcome, Ok(7));
@@ -3294,26 +3468,73 @@ mod tests {
             fractal_client::ErrorCode::StaleFence,
         ] {
             assert!(
-                super::worth_retrying(&fractal_client::plain_message(Some(&code), "")),
+                super::worth_retrying(&fractal_client::human_message(Some(&code), "")),
                 "{code:?} is not retried"
             );
         }
-        assert!(super::worth_retrying(&fractal_client::plain_message(
+        assert!(super::worth_retrying(&fractal_client::human_message(
             Some(&fractal_client::ErrorCode::RemoteUnavailable),
             "host/example is away"
         )));
-        assert!(!super::worth_retrying(&fractal_client::plain_message(
+        assert!(!super::worth_retrying(&fractal_client::human_message(
             Some(&fractal_client::ErrorCode::NotFound),
             "terminal/x"
         )));
-        // Transient shell discovery may retry briefly, but a phase timeout is never retried.
+        // Capability issuance opens no PTY; upgrade cancellation has no cleanup receipt.
         assert_eq!(super::attach::RETRY_DELAYS.iter().sum::<Duration>(), Duration::from_secs(3));
+        assert!(super::worth_retrying("raw terminal capability timed out"));
+        assert!(!super::worth_retrying("raw terminal connect/upgrade (including auth and owner-open) timed out"));
+        assert!(!super::worth_retrying("raw terminal first-frame timed out"));
         assert!(!super::worth_retrying("raw terminal stream timed out"));
     }
 
     #[test]
+    fn setup_timeouts_retry_only_capability_and_drop_each_attempt_before_retry() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Cleanup(Arc<AtomicUsize>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time().build().unwrap();
+        for phase in [
+            attach::SetupPhase::Capability,
+            attach::SetupPhase::Upgrade,
+            attach::SetupPhase::FirstFrame,
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let cleaned = Arc::new(AtomicUsize::new(0));
+            let result: Result<(), String> = runtime.block_on(retry_attach(
+                &[Duration::ZERO; attach::RETRY_DELAYS.len()],
+                false,
+                || true,
+                |_| {},
+                || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(cleaned.load(Ordering::SeqCst), attempt,
+                        "the previous setup future must be dropped before another starts");
+                    let guard = Cleanup(cleaned.clone());
+                    async move {
+                        attach::phase(phase.name(), Duration::from_millis(1), async move {
+                            let _guard = guard;
+                            std::future::pending::<Result<(), String>>().await
+                        }).await
+                    }
+                },
+            ));
+            let reason = result.unwrap_err();
+            assert_eq!(attach::SetupPhase::timeout(&reason), Some(phase));
+            let expected = if phase.retry_safe() { 3 } else { 1 };
+            assert_eq!(attempts.load(Ordering::SeqCst), expected);
+            assert_eq!(cleaned.load(Ordering::SeqCst), expected);
+        }
+        assert_eq!(attach::SetupPhase::timeout("raw terminal stream timed out"), None);
+        assert_eq!(attach::SetupPhase::timeout("raw terminal capability refused"), None);
+    }
+
+    #[test]
     fn a_shells_attach_stops_retrying_once_its_tab_is_closed() {
-        let unsure = "st cannot tell yet which host runs this";
+        let unsure = "Fractal cannot tell yet which host runs this";
         let wanted = std::cell::Cell::new(true);
         let attempts = std::cell::Cell::new(0);
         let mut said = 0;
@@ -3323,6 +3544,7 @@ mod tests {
             .unwrap()
             .block_on(retry_attach(
                 &[Duration::ZERO; 20],
+                true,
                 || wanted.get(),
                 |_| {
                     said += 1;
@@ -3402,7 +3624,7 @@ mod tests {
         assert!(unknown.downcast_ref::<ClientError>().unwrap().outcome_unknown());
         assert_eq!(
             super::plain(&unknown),
-            "st may have taken it and has not confirmed it yet; sending it again is safe"
+            "Fractal may have taken it and has not confirmed it yet; sending it again is safe"
         );
         // `applied: "none"` with a full queue (rate limited): nothing was queued, so try again.
         assert!(not_applied(&answer("none", fractal_client::ErrorCode::RateLimited), &send));
@@ -3536,7 +3758,7 @@ mod tests {
         assert!(!not_applied(&error, &send));
         assert_eq!(
             super::plain(&error),
-            "st may have taken it and has not confirmed it yet; sending it again is safe"
+            "Fractal may have taken it and has not confirmed it yet; sending it again is safe"
         );
         assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
         // The agent moved to a new session before the person sent it again.
@@ -3577,7 +3799,7 @@ mod tests {
         timeline.older.loading = true;
         assert!(!super::wants_fill(&timeline, 0));
         timeline.older.loading = false;
-        timeline.older.failed = Some("st is slow".into());
+        timeline.older.failed = Some("Fractal is slow".into());
         assert!(!super::wants_fill(&timeline, 0));
         timeline.older.failed = None;
         timeline.has_more = false;
@@ -3719,7 +3941,7 @@ mod tests {
         assert_eq!(connecting_text(Duration::from_secs(3)), "connecting 3s");
         assert_eq!(
             connecting_text(Duration::from_secs(12)),
-            "connecting 12s, st is slow to answer"
+            "connecting 12s, Fractal is slow to answer"
         );
     }
 
@@ -3727,7 +3949,7 @@ mod tests {
     #[test]
     fn attach_deadline_retry_key_reopens_the_same_terminal() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let mut ui = Ui::new(crate::ui::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::test_world());
         ui.live = true;
         let agent = "terminal/attach-deadline-test";
         ui.open_in_glass(
@@ -3771,6 +3993,7 @@ mod tests {
             store_index,
             projection_version: "1".into(),
             created_at: "2026-10-16T11:00:00Z".into(),
+            published_at: None,
         }
     }
 
@@ -3787,7 +4010,7 @@ mod tests {
     }
 
     #[test]
-    fn a_running_stui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
+    fn a_running_tui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
         use super::super::view::Link;
         let diverged = fractal_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
         let shown = running_world(Some(&diverged));
@@ -3851,7 +4074,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("requests");
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3879,7 +4102,7 @@ mod tests {
         let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(350));
         answer_open_requests(&mut ui, &mut inbox, true);
-        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for Fractal to know it");
         assert_eq!(inbox.waiting().count(), 1);
         inbox.waiting_since_for_test(&later, requests::GRACE);
         answer_open_requests(&mut ui, &mut inbox, true);
@@ -3892,7 +4115,7 @@ mod tests {
     fn a_name_another_process_wrote_cannot_put_control_characters_in_the_flash() {
         use super::super::pane::Pane;
         use super::super::requests::Place;
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3917,7 +4140,7 @@ mod tests {
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let mut assistant = world.agents.items()[0].clone();
         assistant.id = "agent/st/assistant".into();
         assistant.name = "Fractal Assistant".into();
@@ -3957,7 +4180,7 @@ mod tests {
 
     #[test]
     fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let mut missing = Some("agent/st/assistant".to_owned());
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut missing, true, true);
@@ -3985,7 +4208,7 @@ mod tests {
     #[test]
     fn no_initial_subject_preserves_the_restored_space() {
         use super::super::pane::Pane;
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         ui.open_home();
@@ -4070,11 +4293,14 @@ mod tests {
         let socket = root.path().join("daemon.sock");
         let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
             node: "ui-hint".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: "pty".into(),
@@ -4083,6 +4309,9 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         let path = socket.clone();
         let server = tokio::spawn(async move {
@@ -4125,10 +4354,12 @@ mod tests {
         async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store = Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
+                seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
-                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
+                node: "sidebar-edit-test".into(), api_socket: root.join("api.sock"), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
@@ -4149,20 +4380,93 @@ mod tests {
         // Exact retry of the accepted create does not replace later register winners.
         save_sidebar(&client, &creation).await.unwrap();
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].position.value.key < found.body.folders[&first].position.value.key);
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].position.value.key < found.v1().folders[&first].position.value.key);
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], Some(second.clone()));
         save_sidebar(&client, &write(vec![Op::FolderDelete { id: second.clone() }])).await.unwrap();
         server.abort(); let _ = server.await; drop(store);
         let _ = std::fs::remove_file(&socket);
         let (_store, server) = serve(root.path(), &socket).await;
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].tombstone.is_some());
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].tombstone.is_some());
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
         // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
-        assert!(found.body.placements.contains_key("agent/example/atlas"));
+        assert!(found.v1().placements.contains_key("agent/example/atlas"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn read_positions_advance_in_st_and_list_by_the_larger_from_any_device() {
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("read.sock");
+        let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "read-position-test").unwrap());
+        let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "read-position-test".into(), api_socket: root.path().join("api.sock"), state_dir: root.path().into(), pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+            fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
+        };
+        let path = socket.clone();
+        let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
+        for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
+        let client = Client::unix_as(&socket, "person/avery");
+        let other_device = Client::unix_as(&socket, "person/avery");
+        let conversation = "agent/example/atlas";
+        let at = 1_790_000_000_000_i64;
+        assert_eq!(read_positions(&client, "person/avery", true).await.unwrap(), Some(Vec::new()), "st keeps positions, none yet");
+        assert_eq!(advance_read_position(&client, "person/avery", conversation, at + 20_000).await.unwrap(), Some(at + 20_000));
+        assert_eq!(
+            advance_read_position(&other_device, "person/avery", conversation, at + 10_000).await.unwrap(),
+            Some(at + 20_000),
+            "an older read on another device moves nothing back"
+        );
+        advance_read_position(&other_device, "person/avery", conversation, at + 30_000).await.unwrap();
+        let listed = read_positions(&client, "person/avery", false).await.unwrap().unwrap();
+        assert_eq!(listed, [(conversation.to_owned(), at + 30_000)]);
+        // Merged here, the larger position from st wins over this device's.
+        let mut reads = super::super::read_store::ReadPositions::default();
+        reads.advance(conversation, at + 25_000);
+        let now = Instant::now();
+        reads.connected(now);
+        assert_eq!(reads.list_due(now), Some(true));
+        assert!(reads.listed(Ok(Some(listed)), now));
+        assert!(!reads.unread(conversation, Some(at + 30_000)));
+        assert!(reads.due(now, true).is_empty(), "nothing st does not already keep");
+        assert!(read_positions(&client, "person/robin", false).await.is_err(), "another person's positions are refused");
+        server.abort();
+    }
+
+    /// l and x reach st as the person's own controls, through the dispatch every action uses:
+    /// the row st serves carries the snooze, null brings it back, and a dismissal st does not
+    /// take for this kind is refused in st's words.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snooze_and_dismiss_reach_st_as_the_persons_own_controls() {
+        let gate = crate::tests::WaitingGate::start().await;
+        let id = gate.card().await.expect("the gate waits on the person").header.id;
+        let model = Model::default();
+        let until = chrono::Utc::now() + super::super::SNOOZE;
+        let snooze = Effect::Snooze {
+            id: id.clone(),
+            until: Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        };
+        let (notice, _) = perform(&gate.client, "person/avery", &model, snooze, None).await.unwrap();
+        assert_eq!(notice, "Put off on every device");
+        let served = gate.card().await.unwrap().snoozed_until.expect("st serves the snooze");
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&served).unwrap().timestamp_millis(),
+            until.timestamp_millis()
+        );
+        let back = Effect::Snooze { id: id.clone(), until: None };
+        perform(&gate.client, "person/avery", &model, back, None).await.unwrap();
+        assert_eq!(gate.card().await.unwrap().snoozed_until, None);
+        let dismiss = Effect::Dismiss { id, text: None };
+        let refused = perform(&gate.client, "person/avery", &model, dismiss, None).await.unwrap_err();
+        assert!(super::plain(&refused).contains("not an ask"), "{}", super::plain(&refused));
+        assert!(gate.card().await.is_some(), "a refused dismissal leaves the gate asking");
     }
 
     #[tokio::test]
@@ -4177,11 +4481,14 @@ mod tests {
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
+                seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "ui-actions".into(),
+                api_socket: root.join("api.sock"),
                 state_dir: root.into(),
                 pty_root: root.join("pty"),
                 pty_binary: "pty".into(),
@@ -4190,6 +4497,9 @@ mod tests {
                 client_relay: None,
                 native_session_home: None,
                 planner_default: Default::default(),
+                harness_question_sink: None,
+                assistant_receipts: Default::default(),
+                private_notes: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
@@ -4490,6 +4800,7 @@ mod tests {
             action: "review.approve".into(),
             reason: None,
             answer: None,
+            option_notes: Vec::new(),
         };
         let terminal = Effect::CreateTerminal {
             name: "shell".into(),
@@ -4560,7 +4871,7 @@ mod tests {
             fractal_conversation_ui::Density::Full,
         );
         let body_start = doc.messages[0].1.start as u16;
-        let ui = Ui::new(super::super::demo::world());
+        let ui = Ui::new(super::super::demo::test_world());
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(90, body_start)).unwrap();
         terminal
@@ -4601,11 +4912,14 @@ mod tests {
                 .unwrap();
         }
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
             node: "person-read".into(),
+            api_socket: root.path().join("api.sock"),
             state_dir: root.path().into(),
             pty_root: root.path().join("pty"),
             pty_binary: root.path().join("unused-pty"),
@@ -4614,6 +4928,9 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();
@@ -4649,7 +4966,7 @@ mod tests {
                 images: Vec::new(),
             },
         };
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let agent = world.agents.items()[0].clone();
         let agent_id = agent.id.clone();
         world.agents = Load::Ready(vec![agent]);
@@ -4780,7 +5097,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         for child in [false, true] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             ui.live = true;
             let target = if child {
                 "session/tester-child".to_owned()
@@ -4908,8 +5225,8 @@ mod tests {
             has_more: true,
             ..Default::default()
         };
-        timeline.older_failed("st did not answer".into());
-        assert!(note(timeline).starts_with("Could not load earlier entries: st did not answer"));
+        timeline.older_failed("Fractal did not answer".into());
+        assert!(note(timeline).starts_with("Could not load earlier entries: Fractal did not answer"));
         timeline = fractal_conversation_ui::Timeline {
             items,
             ..Default::default()
@@ -4991,7 +5308,7 @@ mod tests {
             text: "hello".into(),
             at: "10:17".into(),
             message_id: message_id.map(str::to_owned),
-            failed: unconfirmed.then(|| "st did not answer".into()),
+            failed: unconfirmed.then(|| "Fractal did not answer".into()),
             unconfirmed,
             effect: Effect::Send {
                 in_reply_to: None,
@@ -5074,7 +5391,7 @@ fn connecting_text(waited: Duration) -> String {
     match waited.as_secs() {
         0..2 => "connecting".into(),
         2..8 => format!("connecting {}s", waited.as_secs()),
-        seconds => format!("connecting {seconds}s, st is slow to answer"),
+        seconds => format!("connecting {seconds}s, Fractal is slow to answer"),
     }
 }
 
@@ -5083,6 +5400,9 @@ fn connecting_text(waited: Duration) -> String {
 /// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
 /// is gone, restarted or not allowed is not retried.
 fn worth_retrying(reason: &str) -> bool {
+    if let Some(phase) = attach::SetupPhase::timeout(reason) {
+        return phase.retry_safe();
+    }
     [
         "cannot tell yet which host",
         "cannot be reached right now",
@@ -5098,6 +5418,7 @@ fn worth_retrying(reason: &str) -> bool {
 /// as `wanted` says nobody is waiting any more (the tab was closed).
 async fn retry_attach<T, Fut>(
     delays: &[Duration],
+    transient_refusals: bool,
     wanted: impl Fn() -> bool,
     mut waiting: impl FnMut(&str),
     mut attempt: impl FnMut() -> Fut,
@@ -5108,7 +5429,8 @@ where
     let mut delays = delays.iter();
     loop {
         match attempt().await {
-            Err(reason) if worth_retrying(&reason) => match delays.next() {
+            Err(reason) if worth_retrying(&reason)
+                && (transient_refusals != attach::SetupPhase::timeout(&reason).is_some()) => match delays.next() {
                 Some(delay) if wanted() => {
                     waiting(&reason);
                     tokio::time::sleep(*delay).await;
@@ -5131,6 +5453,7 @@ async fn attach_known_then_direct(
     runtime_ids: &[String],
     owner: Option<&str>,
     fallback: bool,
+    trace: Option<&super::attach_trace::Trace>,
 ) -> Result<Direct, String> {
     if let Some((name, terminal, incarnation)) = known
         && !agent.starts_with("terminal/")
@@ -5138,10 +5461,11 @@ async fn attach_known_then_direct(
         // Once selected, keep this incarnation through every route failure. Rediscovery after
         // an error could silently attach a process that restarted in the meantime.
         return attach_terminal(
-            client, agent, (name, incarnation), &terminal, owner, None, fallback,
+            client, agent, (name, incarnation), &terminal,
+            AttachTerminalOptions { owner, expected: None, fallback, trace },
         ).await;
     }
-    attach_direct(client, agent, runtime_ids, None, owner, fallback).await
+    attach_direct(client, agent, runtime_ids, None, owner, fallback, trace).await
 }
 
 async fn attach_direct(
@@ -5151,8 +5475,9 @@ async fn attach_direct(
     expected: Option<&str>,
     owner: Option<&str>,
     fallback: bool,
+    trace: Option<&super::attach_trace::Trace>,
 ) -> Result<Direct, String> {
-    let found = attach::phase("terminal discovery", attach::DISCOVERY, async {
+    let found = attach::traced_phase(trace, "terminal discovery", attach::DISCOVERY, async {
         let mut found = Vec::new();
         if subject.starts_with("terminal/") {
             // A shell just started may take a moment before its screen exists.
@@ -5164,7 +5489,7 @@ async fn attach_direct(
                         tries += 1;
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
-                    Err(error) => return Err(error.plain()),
+                    Err(error) => return Err(error.human()),
                 }
             };
             found.push((
@@ -5207,9 +5532,7 @@ async fn attach_direct(
             subject,
             (name, incarnation),
             &terminal,
-            owner.as_deref(),
-            expected,
-            fallback,
+            AttachTerminalOptions { owner: owner.as_deref(), expected, fallback, trace },
         )
         .await
         {
@@ -5221,6 +5544,13 @@ async fn attach_direct(
     Err(reason)
 }
 
+struct AttachTerminalOptions<'a> {
+    owner: Option<&'a str>,
+    expected: Option<&'a str>,
+    fallback: bool,
+    trace: Option<&'a super::attach_trace::Trace>,
+}
+
 /// One terminal's PTY session at one incarnation, and its stream: the local socket for a terminal
 /// on this host, Fabric for one another fleet host owns. The paired-device gateway carries the
 /// bytes only for a device with no daemon of its own.
@@ -5229,12 +5559,11 @@ async fn attach_terminal(
     subject: &str,
     identity: (String, String),
     terminal: &str,
-    owner: Option<&str>,
-    expected: Option<&str>,
-    fallback: bool,
+    options: AttachTerminalOptions<'_>,
 ) -> Result<Direct, String> {
+    let AttachTerminalOptions { owner, expected, fallback, trace } = options;
     let (name, incarnation) = identity;
-    let opened = attach::phase("direct open", attach::DIRECT, direct::open(
+    let opened = attach::traced_phase(trace, "direct open", attach::DIRECT, direct::open(
         client,
         &direct::Terminal {
             subject,
@@ -5262,15 +5591,23 @@ async fn attach_terminal(
         }
         direct::Opened::UseGateway { route } => route,
     };
-    let attachment = attach::phase("raw terminal attachment", attach::GATEWAY, async {
-        client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
-            .await.map_err(|error| format!("{route}: {}", error.plain()))
-    }).await?;
+    // Retry only this pre-open phase, not discovery: every attempt keeps the same incarnation.
+    let attachment = retry_attach(
+        &attach::RETRY_DELAYS,
+        false,
+        || true,
+        |_| {},
+        || attach::traced_phase(trace, attach::SetupPhase::Capability.name(), attach::GATEWAY, async {
+            client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
+                .await.map_err(|error| format!("{route}: {}", error.human()))
+        }),
+    ).await?;
     // An unused capability opens no PTY and expires on the server after 60 seconds.
-    // Once upgraded, dropping the stream cancels its bridge, including on task abort.
-    let stream = attach::phase("raw terminal stream", attach::GATEWAY, async {
+    // Cancelling this upgrade does not acknowledge completion of remote owner cleanup;
+    // unlike capability issuance, its timeout must not trigger another attachment.
+    let stream = attach::traced_phase(trace, attach::SetupPhase::Upgrade.name(), attach::GATEWAY, async {
         client.raw_terminal_stream(&attachment).await
-            .map_err(|error| format!("{route}: {}", error.plain()))
+            .map_err(|error| format!("{route}: {}", error.human()))
     }).await?;
     stream
         .into_std()

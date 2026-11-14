@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Run the unchanged daily iOS delivery suite in the parallel script-test pool."""
+from pathlib import Path
+import runpy
+import sys
+
+suite = Path(__file__).resolve().parent.parent / 'apps/ios/scripts/test_release_delivery.py'
+sys.path.insert(0, str(suite.parent))
+runpy.run_path(str(suite), run_name='__main__')

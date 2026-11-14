@@ -19,16 +19,15 @@ function styled<P extends { className?: unknown; style?: unknown }>(props: P, ..
 }
 const tone = (variant?: string): Kit.Tone => variant?.includes('red') || variant === 'error' || variant === 'danger' ? 'danger' : variant?.includes('amber') || variant === 'warning' ? 'warning' : variant?.includes('green') || variant === 'success' ? 'good' : 'neutral'
 
-export type ButtonProps = Omit<Aria.ButtonProps, 'style'> & Style & { size?: Size; variant?: string; shape?: string; style?: React.CSSProperties; ref?: React.Ref<HTMLButtonElement>; isLoading?: boolean }
-export function Button({ size, variant, shape, stylexStyle, isLoading, children, ...props }: ButtonProps) {
-  return <Kit.Button {...styled(props, stylexStyle)} size={size === 'md' || size === 'lg' ? 'md' : 'sm'} square={shape === 'square'} variant={variant === 'primary' ? 'primary' : variant === 'error' || variant === 'danger' ? 'danger' : variant === 'tertiary' || variant === 'ghost' || variant === 'quiet' ? 'quiet' : 'secondary'} isDisabled={props.isDisabled || isLoading}>{isLoading ? <Spinner size="sm" /> : children}</Kit.Button>
+export type ButtonProps = Omit<Aria.ButtonProps, 'style'> & Style & { size?: Size; variant?: string; shape?: string; style?: React.CSSProperties; ref?: React.Ref<HTMLButtonElement> }
+export function Button({ size, variant, shape, stylexStyle, children, ...props }: ButtonProps) {
+  return <Kit.Button {...styled(props, stylexStyle)} size={size === 'md' || size === 'lg' ? 'md' : 'sm'} square={shape === 'square'} variant={variant === 'primary' ? 'primary' : variant === 'error' || variant === 'danger' ? 'danger' : variant === 'tertiary' || variant === 'ghost' || variant === 'quiet' ? 'quiet' : 'secondary'}>{children}</Kit.Button>
 }
 export type BadgeProps = React.HTMLAttributes<HTMLSpanElement> & Style & { variant?: BadgeVariant; size?: Size }
 export function Badge({ variant, size: _size, stylexStyle, children, ...props }: BadgeProps) { return <span {...styled(props, stylexStyle)}><Kit.Badge tone={tone(variant)}>{children}</Kit.Badge></span> }
 export function Pill({ variant, children }: { variant?: PillVariant; children: React.ReactNode }) { return <Kit.Pill tone={tone(variant)}>{children}</Kit.Pill> }
 export type StatusDotProps = React.HTMLAttributes<HTMLSpanElement> & Style & { status?: Kit.DotState; state?: Kit.DotState; size?: Size; label?: string }
 export function StatusDot({ status, state, size: _size, stylexStyle, label, ...props }: StatusDotProps) { return <span {...styled(props, stylexStyle)}><Kit.StatusDot state={status ?? state ?? 'queued'} label={label ?? ''} /></span> }
-export function Spinner({ size, label, ...props }: React.HTMLAttributes<HTMLSpanElement> & { size?: Size; label?: string }) { return <span {...props}><Kit.Spinner label={label ?? ''} size={size === 'lg' || size === 'md' ? 'md' : 'sm'} /></span> }
 export function Kbd({ children, size: _size, ...props }: React.HTMLAttributes<HTMLElement> & { size?: Size }) { return <span {...props}><Kit.Kbd>{children}</Kit.Kbd></span> }
 export function Note({ variant, size, filled, fill, title, children, stylexStyle, ...props }: Omit<React.HTMLAttributes<HTMLDivElement>, 'title'> & Style & { variant?: string; size?: Size; filled?: boolean; fill?: boolean; title?: string }) { return <div {...styled(props, stylexStyle)}><Kit.Note tone={tone(variant)} size={size === 'sm' ? 'sm' : 'md'} filled={filled ?? fill} title={title}>{children}</Kit.Note></div> }
 export function EmptyState({ title, description, hint, icon, action, children }: { title: string; description?: string; hint?: string; icon?: React.ReactNode; action?: React.ReactNode; children?: React.ReactNode }) { return <div>{icon}<Kit.EmptyState title={title} hint={description ?? hint ?? ''} action={action ?? children} /></div> }
@@ -47,8 +46,6 @@ export function Checkbox({ label, size: _size, stylexStyle, children, ...props }
 }
 export function Toggle({ label, size: _size, ...props }: Aria.SwitchProps & { label?: string; size?: Size }) { return <Aria.Switch {...styled(props, styles.checkbox)}>{state => <><span {...stylex.props(styles.switchTrack, state.isSelected && styles.checked)} aria-hidden="true"><span {...stylex.props(styles.switchThumb, state.isSelected && styles.switchOn)} /></span>{label}</>}</Aria.Switch> }
 export function Tooltip({ size: _size, stylexStyle, ...props }: Aria.TooltipProps & Style & { size?: Size }) { return <Aria.Tooltip {...styled(props, styles.tooltip, stylexStyle)} /> }
-export const ContextCardTrigger = Aria.TooltipTrigger
-export function ContextCard({ size: _size, stylexStyle, ...props }: Aria.TooltipProps & Style & { size?: Size }) { return <Aria.Tooltip {...styled(props, styles.popover, stylexStyle)} /> }
 export function MenuPopover({ stylexStyle, ...props }: Aria.PopoverProps & Style) { return <Aria.Popover {...styled(props, styles.popover, stylexStyle)} /> }
 export function Menu<T extends object>({ stylexStyle, ...props }: Aria.MenuProps<T> & Style) { return <Aria.Menu {...styled(props, styles.menu, stylexStyle)} /> }
 export function MenuItem<T extends object>({ stylexStyle, children, suffix, ...props }: Aria.MenuItemProps<T> & Style & { suffix?: React.ReactNode }) {

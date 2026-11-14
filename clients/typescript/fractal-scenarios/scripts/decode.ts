@@ -146,7 +146,7 @@ export const decodeCatalog = (nows: readonly number[]): DecodeFailure[] => {
 const isSliceKind = (value: string): value is SliceKind => (SLICE_KINDS as readonly string[]).includes(value)
 
 /** Strict-decodes the wire values of one committed slice file as it is on disk. */
-const decodeFile = (world: string, path: string): DecodeFailure[] => {
+export const decodeFile = (world: string, path: string): DecodeFailure[] => {
   const failure = (slice: string, variant: string, message: string): DecodeFailure[] => [{ world, slice, variant, pointer: '', message }]
   const file = JSON.parse(readFileSync(path, 'utf8')) as SliceFile
   if (file.format !== SLICE_FORMAT || !isSliceKind(file.slice)) return failure(String(file.slice), String(file.variant), `not a ${SLICE_FORMAT} file`)
@@ -184,10 +184,10 @@ export const decodeRecordings = (dir = RECORDINGS_DIR, nows: readonly number[] =
       }
       for (const now of nows) {
         const imported = importRecording(script, normalizeRecording(script, raw, now))
-        for (const kind of SLICE_KINDS) failures.push(...decodeSlice(world, imported.slices[kind]))
+        for (const slice of SLICE_KINDS.flatMap((kind) => imported.slices[kind] ?? [])) failures.push(...decodeSlice(world, slice))
       }
       const importedOracle = importRecording(script, oracle)
-      for (const kind of SLICE_KINDS) failures.push(...decodeSlice(world, importedOracle.slices[kind]))
+      for (const slice of SLICE_KINDS.flatMap((kind) => importedOracle.slices[kind] ?? [])) failures.push(...decodeSlice(world, slice))
     } catch (error) {
       failures.push({ world, slice: 'recording', variant: 'default', pointer: '', message: error instanceof Error ? error.message : String(error) })
     }

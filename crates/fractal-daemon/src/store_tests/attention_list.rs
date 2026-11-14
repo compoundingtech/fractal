@@ -57,7 +57,7 @@ ClaimInput {
 
 fn custom(store: &Store, subject: &str, person: &str) {
 let manifest =
-    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h3f11fc42fd46 owner=fractal_daemon::store_tests::attention_list TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/custom-review.json"))
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h0be6ccb7b217 owner=fractal_daemon::store_tests::attention_list TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/fractal/custom-review.json"))
         .unwrap();
 store
     .register_custom_kind(&crate::store::custom::RegistrationRequest {
@@ -344,6 +344,7 @@ store.publish_attention_list(
         owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
         fleet: None,
+        ask_deadline_policy: before.ask_deadline_policy,
     },
     false,
 );
@@ -419,12 +420,120 @@ store.publish_attention_list(
         owners: before.owners.clone(),
         rows: Arc::clone(&before.rows),
         fleet: None,
+        ask_deadline_policy: before.ask_deadline_policy,
     },
     false,
 );
 let after = refresh_and_check(&store);
 assert!(after.evaluated_at_unix_ms > stale);
 assert_eq!(store.attention_list_folds().get("clock"), Some(&1));
+}
+
+/// The deadline policy lives in `meta`, not in claims. Turning deadlines on or off or changing
+/// the default wakes the refresher, and its next refresh serves the new deadline at once, well
+/// within the clock period and with no claim written; a pass that changes no policy wakes it not.
+#[test]
+fn the_published_list_follows_the_deadline_policy_without_a_claim() {
+let (store, _, request) = fixture();
+let wake = store.start_attention_list_refresher().unwrap();
+let woken = || futures_util::FutureExt::now_or_never(wake.notified()).is_some();
+// Asked while deadlines are off, so the claim records no deadline of its own.
+let ask = store.ask_person(&request).unwrap();
+let served = |publication: &AttentionPublication| {
+    publication
+        .rows
+        .iter()
+        .find(|row| row["source_id"] == ask.subject)
+        .expect("the ask is on the home")["deadline_at"]
+        .clone()
+};
+let at = |ms: u128| json!(fractal_store::client_values::client_timestamp(ms));
+let policy_folds = || store.attention_list_folds().get("ask deadline policy").copied().unwrap_or(0);
+let mut revisions = store.subscribe_attention_list();
+assert_eq!(served(&refresh_and_check(&store)), Value::Null);
+woken();
+revisions.borrow_and_update();
+// Each policy change wakes the refresher, folds once and gives windows a new revision.
+let mut follows = |change: &str, expected: Value| {
+    assert!(woken(), "{change} wakes the refresher");
+    let index = store.index().unwrap();
+    let folded = policy_folds();
+    let published = refresh_and_check(&store);
+    assert_eq!(published.cut, index, "{change}: no claim was written");
+    assert_eq!(policy_folds(), folded + 1, "{change} folds the list");
+    assert!(revisions.has_changed().unwrap(), "{change}: windows reread");
+    revisions.borrow_and_update();
+    assert_eq!(served(&published), expected, "{change}");
+};
+store.set_ask_deadlines(true);
+let on = now_ms();
+store.reconcile_person_asks_at(on).unwrap();
+let day = fractal_store::store::person_work::DEFAULT_ASK_DEADLINE_MS as u128;
+follows("turning deadlines on", at(on + day));
+store.reconcile_person_asks_at(on + 1).unwrap();
+assert!(!woken(), "a pass while already counting changes no policy");
+store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
+follows("a new default", at(on + 2 * 3_600_000));
+store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
+assert!(!woken(), "the same default again changes nothing");
+store.set_ask_deadlines(false);
+store.reconcile_person_asks_at(now_ms()).unwrap();
+follows("turning deadlines off", Value::Null);
+store.reconcile_person_asks_at(now_ms()).unwrap();
+assert!(!woken(), "a pass while off changes no policy");
+let folded = policy_folds();
+refresh_and_check(&store);
+assert_eq!(policy_folds(), folded, "an unchanged policy folds nothing");
+assert!(!revisions.has_changed().unwrap());
+}
+
+/// The asked person's deadline clock moves an ask's deadline, and each change is a claim, so it
+/// folds the published list: the home serves no deadline while the clock is held, and the
+/// stored deadline plus the time held once it runs again. The person's status, interruptions
+/// and presence move nothing attention shows, so they fold nothing.
+#[test]
+fn the_published_list_follows_the_asked_persons_deadline_clock() {
+use fractal_store::store::availability::{AvailabilityChange, AvailabilityStore, DeadlineClock, DeviceReport, DeviceState, Interruptions, Status};
+let (store, _, mut request) = fixture();
+store.start_attention_list_refresher().unwrap();
+store.set_ask_deadlines(true);
+request.deadline_ms = Some(2 * 3_600_000);
+let ask = store.ask_person(&request).unwrap();
+store.reconcile_person_asks_at(now_ms()).unwrap();
+let deadline = u128::from(store.claims_for(&ask.subject, Some("work.person-asked")).unwrap()[0]
+    .body["fields"]["deadline_unix_ms"].as_u64().unwrap());
+let served = |publication: &AttentionPublication| {
+    publication.rows.iter().find(|row| row["source_id"] == ask.subject)
+        .expect("the ask is on the home")["deadline_at"].clone()
+};
+let at = |ms: u128| json!(fractal_store::client_values::client_timestamp(ms));
+let clock_folds = || store.attention_list_folds().get("person.deadline-clock-set").copied().unwrap_or(0);
+assert_eq!(served(&refresh_and_check(&store)), at(deadline));
+let set = |clock: DeadlineClock| {
+    let folded = clock_folds();
+    store.set_person_availability("person/avery", "host/alder", &[AvailabilityChange::DeadlineClock(clock, None)], now_ms()).unwrap();
+    let published = refresh_and_check(&store);
+    assert_eq!(clock_folds(), folded + 1, "{clock:?} folds the list");
+    served(&published)
+};
+assert_eq!(set(DeadlineClock::HoldAll), Value::Null, "no deadline while held");
+let served_after_run = set(DeadlineClock::Run);
+let changes = store.claims_for("person/avery", Some("person.deadline-clock-set")).unwrap();
+let held = changes[1].accepted_at_unix_ms - changes[0].accepted_at_unix_ms;
+assert_eq!(served_after_run, at(deadline + held));
+let published = refresh_and_check(&store);
+store.set_person_availability("person/avery", "host/alder", &[
+    AvailabilityChange::Status(Some(Status::Away), None),
+    AvailabilityChange::Interruptions(Interruptions::Urgent, None),
+], now_ms()).unwrap();
+store.report_person_presence("person/avery", "host/alder",
+    DeviceReport { state: DeviceState::Active, last_input_at: None, observed_at: now_ms() }, now_ms()).unwrap();
+assert!(store.index().unwrap() > published.cut);
+assert_eq!(
+    store.read_snapshot(|index| store.attention_list_delta(&published, index, now_ms())).unwrap(),
+    AttentionDelta::Unchanged(None),
+    "status, interruptions and presence fold nothing"
+);
 }
 
 #[test]
@@ -493,6 +602,7 @@ let shared_at = |publication: &AttentionPublication, cut: u64| {
         owners: AttentionPublication::index_owners(&rows),
         rows: Arc::new(rows),
         fleet: None,
+        ask_deadline_policy: publication.ask_deadline_policy,
     }
 };
 let without_at = |publication: &AttentionPublication, cut: u64| AttentionPublication {
@@ -505,6 +615,7 @@ let without_at = |publication: &AttentionPublication, cut: u64| AttentionPublica
     owners: publication.owners.clone(),
     rows: Arc::clone(&publication.rows),
     fleet: None,
+    ask_deadline_policy: publication.ask_deadline_policy,
 };
 let delta = |publication: &AttentionPublication| {
     store
@@ -562,6 +673,7 @@ let at = |publication: &AttentionPublication, cut: u64, rows: Vec<Value>| Attent
     owners: AttentionPublication::index_owners(&rows),
     rows: Arc::new(rows),
     fleet: None,
+    ask_deadline_policy: publication.ask_deadline_policy,
 };
 // A seat blocked on a person is a new prompt: its observation folds.
 store
@@ -650,6 +762,63 @@ store
 let answered = refresh_and_check(&store);
 assert_eq!(folds(&store), before + 1, "the answer folds");
 assert_eq!(prompts(&answered), 0);
+}
+
+#[test]
+fn human_questions_use_principals_and_invalidate_on_republication() {
+    for declared in [true, false] {
+        for configured in [true, false] {
+            let store = Store::open_memory("node").unwrap();
+            if configured {
+                store.question_principal_default.set("person/config-operator".into()).unwrap();
+            }
+            let workspace = tempfile::tempdir().unwrap();
+            let publish = |principal: Option<&str>, key: &str| {
+                let principal = principal.map_or_else(String::new, |person| {
+                    format!("principal {person:?};")
+                });
+                let source = format!(
+                    "version 2\nagent \"example/worker\" {{ workspace {:?}; {principal} harness \"omp\" {{}} }}\n",
+                    workspace.path().display().to_string()
+                );
+                let intent = crate::graph::parse_intent(&source, "node").unwrap();
+                let preview = store.mission(&intent, IntentInput { kdl: source, source_name: None }).unwrap();
+                store.apply_as(&intent, &preview.subject_tokens, key, Some("agent/example/publisher")).unwrap();
+            };
+            publish(declared.then_some("person/operator"), "first");
+            let seat = "agent/example/worker";
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":"one"})),
+                ("harness.observed", json!({"state":"working", "driver":"omp",
+                    "incarnation_id":"one", "blocked_on":"human", "ask":"question",
+                    "reason":"Choose an option", "ownership_sequence":1, "transition_sequence":1})),
+            ] {
+                store.append_claim(&input(seat, kind, Some(seat), fields)).unwrap();
+            }
+            store.start_attention_list_refresher().unwrap();
+            let before = refresh_and_check(&store);
+            let expected = if declared { Some("person/operator") }
+                else if configured { Some("person/config-operator") } else { None };
+            let items = store.harness_prompt_attention_items(None, now_ms()).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].person, expected.unwrap_or(""));
+            assert_eq!(items[0].kind, "harness-prompt");
+            if expected.is_none() {
+                assert!(items[0].detail.contains("configure the daemon's person"));
+                assert!(items[0].answers.is_empty());
+                assert!(before.rows.iter().any(|row| row["attention_kind"] == "harness-prompt"));
+            }
+            publish(Some("person/operator-two"), "replacement");
+            let after = refresh_and_check(&store);
+            assert!(after.rows.iter().any(|row| row["person_id"] == "person/operator-two"
+                && row["attention_kind"] == "harness-prompt"));
+            assert!(!after.rows.iter().any(|row| row["person_id"] == expected.unwrap_or("")));
+            // An old incarnation must not acquire the new principal's attention.
+            store.append_claim(&input(seat, "runtime.observed", Some(seat),
+                json!({"status":"running", "incarnation_id":"two"}))).unwrap();
+            assert!(store.harness_prompt_attention_items(None, now_ms()).unwrap().is_empty());
+        }
+    }
 }
 
 /// The fleet the attention presentation reads: each agent's label, the step each holds, and the

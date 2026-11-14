@@ -94,6 +94,116 @@ pub fn unprotected_reason(reason: &str) -> bool {
 #[derive(Clone)]
 struct Uncertain { fence: crate::mailbox::Fence, owner: u64, since: Instant, failures: u8 }
 
+#[derive(Clone)]
+struct Refusal {
+    incarnation: String,
+    code: String,
+}
+
+/// A refused bind is diagnostic evidence, never mailbox custody or a heartbeat.
+pub fn bind_refused(fence: &crate::mailbox::Fence, code: &str) {
+    if fence.component == "delivery"
+        && let Ok(mut rows) = presence().refusals.lock()
+    {
+        rows.insert(fence.subject.clone(), Refusal {
+            incarnation: fence.incarnation.clone(), code: code.into(),
+        });
+        notify(&fence.subject);
+    }
+}
+
+/// Successful admission supersedes refusal evidence from the previous incarnation as well.
+pub fn bind_recovered(fence: &crate::mailbox::Fence) {
+    if fence.component == "delivery"
+        && let Ok(mut rows) = presence().refusals.lock()
+    {
+        rows.remove(&fence.subject);
+    }
+}
+
+/// The readers' clock (the system clock unless a clock snapshot or a simulation holds it), so one
+/// evaluation dates every state it reports from the same instant.
+fn unix_ms() -> u64 {
+    u64::try_from(smallclaims::store::now_ms()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn successor_binding_clears_predecessor_refusal_for_incarnation_agnostic_reads() {
+        let subject = "agent/example/refused-predecessor-healthy-successor";
+        let old = crate::mailbox::Fence::new(subject, "old", "delivery");
+        let new = crate::mailbox::Fence::new(subject, "new", "delivery");
+        bind_refused(&old, "mailbox-runtime-indeterminate");
+        bind_recovered(&new);
+        record_fenced(&new, &json!({
+            "transport":"omp-channel", "ready":true, "pid":std::process::id(),
+            "image":presence().image,
+        }).to_string());
+        let known = known(subject).expect("successor heartbeat is visible to message delivery");
+        assert_ne!(known.state, "refused");
+        assert!(!known.reason.as_deref().unwrap_or_default().contains("mailbox-runtime-indeterminate"));
+    }
+
+    #[tokio::test]
+    async fn bind_422_exports_refusal_and_writes_warning() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        if std::env::var_os("FRACTAL_REFUSAL_STATE_TEST").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "delivery_presence::refusal_tests::bind_422_exports_refusal_and_writes_warning", "--nocapture"])
+                .env("FRACTAL_REFUSAL_STATE_TEST", "1")
+                .env("XDG_STATE_HOME", root.path())
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let log = std::fs::read_to_string(root.path().join("st3/driver-api-warnings.log")).unwrap();
+            assert!(log.contains("delivery refused: mailbox-runtime-indeterminate (HTTP 422)"), "{log}");
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let subject = "agent/example/bind-422-state-and-warning";
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let _ = stream.read(&mut bytes).await.unwrap();
+            // Inject an authority refusal at the same diagnostic seam as the bind route.
+            bind_refused(&crate::mailbox::Fence::new(subject, "current", "delivery"),
+                "mailbox-runtime-indeterminate");
+            let body = r#"{"code":"mailbox-runtime-indeterminate","message":"forced refusal","details":{}}"#;
+            stream.write_all(format!("HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let mut fence = crate::client::Fence::new(subject, "current", "delivery");
+        assert!(tokio::time::timeout(Duration::from_millis(250),
+            fence.bind(&crate::client::Client::new(endpoint))).await.is_err());
+        server.await.unwrap();
+        let state = assess_current(subject, "omp", Some("current")).to_value();
+        assert_eq!(state["state"], "refused");
+        assert_eq!(state["reason"], "delivery refused: mailbox-runtime-indeterminate");
+        assert!(state["since_unix_ms"].is_u64());
+    }
+
+    #[test]
+    fn refused_bind_is_visible_until_recovery_without_resetting_since() {
+        let fence = crate::mailbox::Fence::new("agent/example/refused-delivery-state", "current", "delivery");
+        bind_refused(&fence, "mailbox-runtime-indeterminate");
+        let first = assess_current(&fence.subject, "omp", Some("current"));
+        assert_eq!(first.state, "refused");
+        assert_eq!(first.reason.as_deref(), Some("delivery refused: mailbox-runtime-indeterminate"));
+        assert!(first.stale());
+        assert!(first.to_value()["since_unix_ms"].is_u64());
+        bind_refused(&fence, "mailbox-runtime-indeterminate");
+        assert_eq!(assess_current(&fence.subject, "omp", Some("current")).since_unix_ms, first.since_unix_ms);
+        assert_ne!(assess_current(&fence.subject, "omp", Some("successor")).state, "refused");
+        bind_recovered(&fence);
+        assert_ne!(assess_current(&fence.subject, "omp", Some("current")).state, "refused");
+    }
+}
+
+type IncarnationStateClocks = HashMap<String, (&'static str, u64)>;
+
 struct Presence {
     started: Instant,
     image: Option<String>,
@@ -102,6 +212,8 @@ struct Presence {
     ownership: Mutex<HashMap<String, Ownership>>,
     observations: Mutex<std::collections::HashSet<std::path::PathBuf>>,
     uncertain: Mutex<HashMap<String, Uncertain>>,
+    refusals: Mutex<HashMap<String, Refusal>>,
+    state_since: Mutex<HashMap<String, IncarnationStateClocks>>,
     /// Attachment-push title streams waiting on a subject, one sender per watched subject.
     watchers: Mutex<HashMap<String, watch::Sender<u64>>>,
     /// The title binding of each live stream that has been sent an attachment frame.
@@ -118,6 +230,8 @@ fn presence() -> &'static Presence {
         ownership: Mutex::new(HashMap::new()),
         observations: Mutex::default(),
         uncertain: Mutex::default(),
+        refusals: Mutex::default(),
+        state_since: Mutex::default(),
         watchers: Mutex::new(HashMap::new()),
         pushed: Mutex::new(HashMap::new()),
     })
@@ -301,6 +415,90 @@ fn stale_after(recipient: &str) -> Duration {
     }
     let _ = recipient;
     CHANNEL_STALE_AFTER
+}
+
+/// How long ago the daemon started, as the assessments on this thread read it.
+fn uptime(presence: &Presence) -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(uptime) = uptime_pin::PINNED.get() {
+        return uptime;
+    }
+    presence.started.elapsed()
+}
+
+/// A seat that has not polled its mailbox is described by the daemon's uptime, a live age read
+/// from a process-wide start. A test that reads the same seat twice, or one whose verdict depends
+/// on the startup grace, pins the uptime its own thread's assessments read. A pinned thread also
+/// keeps its own state clocks (`since_unix_ms`): tests sharing a process assess the same fixture
+/// seats, and an unpinned or differently pinned test reading another state would otherwise restart
+/// the clock this one reads. Production always reads the real clock and the process-wide map.
+#[cfg(any(test, feature = "test-support"))]
+pub mod uptime_pin {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+
+    type Clocks = Arc<Mutex<HashMap<String, IncarnationStateClocks>>>;
+
+    thread_local! {
+        pub(super) static PINNED: Cell<Option<Duration>> = const { Cell::new(None) };
+        pub(super) static CLOCKS: RefCell<Option<Clocks>> = const { RefCell::new(None) };
+    }
+
+    /// Carry a test's frozen assessment clock across its blocking read boundary.
+    pub struct Context(Option<Duration>, Option<Clocks>);
+
+    pub fn capture() -> Context {
+        Context(PINNED.get(), CLOCKS.with_borrow(Clone::clone))
+    }
+
+    impl Context {
+        pub fn enter(self) -> impl Drop {
+            let previous = capture();
+            PINNED.set(self.0);
+            CLOCKS.set(self.1);
+            Restore(previous)
+        }
+    }
+
+    struct Restore(Context);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PINNED.set(self.0.0);
+            CLOCKS.set(self.0.1.take());
+        }
+    }
+
+    /// Assessments on this thread read `uptime`, and keep state clocks of their own, until the
+    /// returned pin drops. A nested pin shares the clocks of the pin it is inside.
+    pub fn pin(uptime: Duration) -> Pin {
+        let started = CLOCKS.with_borrow_mut(|clocks| {
+            if clocks.is_some() { return false; }
+            *clocks = Some(Arc::new(Mutex::new(HashMap::new())));
+            true
+        });
+        Pin(PINNED.replace(Some(uptime)), started)
+    }
+
+    /// Restores the uptime this thread read before it was pinned, and drops the clocks it started.
+    pub struct Pin(Option<Duration>, bool);
+
+    impl Pin {
+        /// Move this thread's pinned uptime, as the daemon ageing between two reads would.
+        pub fn set(&self, uptime: Duration) {
+            PINNED.set(Some(uptime));
+        }
+    }
+
+    impl Drop for Pin {
+        fn drop(&mut self) {
+            PINNED.set(self.0);
+            if self.1 {
+                CLOCKS.set(None);
+            }
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -555,7 +753,7 @@ pub fn finish_legacy_shape(
             if fractal_drivers::claude_process::failure_kind(&error)
                 == Some(fractal_drivers::claude_process::FailureKind::Refused)
                 || error
-                    .downcast_ref::<crate::St3Error>()
+                    .downcast_ref::<crate::FractalError>()
                     .is_some_and(|error| error.code == "stale-mailbox-session") =>
         {
             "would-have-refused direct-chain shape; installed topology remains unverified".into()
@@ -623,11 +821,12 @@ pub struct Assessment {
     pub reason: Option<String>,
     pub polled_seconds_ago: Option<u64>,
     pub transport: Option<String>,
+    pub since_unix_ms: Option<u64>,
 }
 
 impl Assessment {
     pub fn stale(&self) -> bool {
-        self.state == "stale"
+        matches!(self.state, "stale" | "refused")
     }
 
     pub fn to_value(&self) -> Value {
@@ -636,6 +835,7 @@ impl Assessment {
             "reason": self.reason,
             "polled_seconds_ago": self.polled_seconds_ago,
             "transport": self.transport,
+            "since_unix_ms": self.since_unix_ms,
         })
     }
 }
@@ -681,7 +881,7 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         beat = Some(captured(monitor));
     }
     let assessment = assess_beat(
-        presence.started.elapsed(),
+        uptime(presence),
         presence.image.as_deref(),
         beat.map(|(at, mut report)| {
             report.follows_image = report.follows.as_deref().and_then(|path| {
@@ -718,7 +918,36 @@ fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, cur
         assessment.reason = Some(format!("ownership proof unavailable{}; established stream retained, new effects held and automatic recovery deferred; {}s",
             if proof.failures >= 3 { ": suspect after three checks" } else { "" }, proof.since.elapsed().as_secs()));
     }
+    if let Some(refusal) = presence.refusals.lock().ok().and_then(|rows|
+        rows.get(recipient).filter(|r| incarnation.is_none_or(|i| i == r.incarnation)).cloned())
+    {
+        assessment.state = "refused";
+        assessment.reason = Some(format!("delivery refused: {}", refusal.code));
+    }
+    if let Some(since) = state_since(presence, recipient, incarnation.unwrap_or_default(), assessment.state) {
+        assessment.since_unix_ms = Some(since);
+    }
     assessment
+}
+
+/// When this incarnation's assessments entered `state`, restarting the clock when the state changes.
+fn state_since(presence: &Presence, recipient: &str, incarnation: &str, state: &'static str) -> Option<u64> {
+    let record = |rows: &mut HashMap<String, IncarnationStateClocks>| {
+        if !rows.contains_key(recipient) { rows.insert(recipient.into(), HashMap::new()); }
+        let incarnations = rows.get_mut(recipient).expect("inserted seat");
+        if !incarnations.contains_key(incarnation) {
+            incarnations.insert(incarnation.into(), (state, unix_ms()));
+        }
+        let row = incarnations.get_mut(incarnation).expect("inserted incarnation");
+        if row.0 != state { *row = (state, unix_ms()); }
+        row.1
+    };
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(since) = uptime_pin::CLOCKS.with_borrow(|clocks| clocks.as_ref()
+        .map(|clocks| record(&mut clocks.lock().expect("test assessment clocks poisoned")))) {
+        return Some(since);
+    }
+    presence.state_since.lock().ok().map(|mut rows| record(&mut rows))
 }
 
 /// A message view may include a local poll when one exists; absent remote evidence stays absent.
@@ -765,6 +994,7 @@ fn assess_beat(
                 )),
                 polled_seconds_ago: None,
                 transport: None,
+                since_unix_ms: None,
             };
         }
         return Assessment {
@@ -775,6 +1005,7 @@ fn assess_beat(
             )),
             polled_seconds_ago: None,
             transport: None,
+            since_unix_ms: None,
         };
     };
     let stale = |reason: String| Assessment {
@@ -782,6 +1013,7 @@ fn assess_beat(
         reason: Some(reason),
         polled_seconds_ago: Some(age.as_secs()),
         transport: report.transport.clone(),
+        since_unix_ms: None,
     };
     if age > POLL_STALE_AFTER {
         return stale(format!(
@@ -798,6 +1030,7 @@ fn assess_beat(
             )),
             polled_seconds_ago: Some(age.as_secs()),
             transport: report.transport,
+            since_unix_ms: None,
         };
     }
     if report.ready == Some(false) {
@@ -866,6 +1099,7 @@ fn assess_beat(
             reason: outdated,
             polled_seconds_ago: Some(age.as_secs()),
             transport: report.transport,
+            since_unix_ms: None,
         },
         unprotected,
     )
@@ -888,6 +1122,55 @@ mod tests {
     use super::*;
 
     const DAEMON: Option<&str> = Some("new");
+
+    /// Let the wall clock pass `after`, so a state clock restarted from now reads a later time.
+    fn past(after: u64) {
+        while unix_ms() <= after {
+            std::hint::spin_loop();
+        }
+    }
+
+    #[test]
+    fn pinned_threads_keep_their_own_state_clocks_for_one_seat() {
+        let seat = "agent/example/pinned-state-clock";
+        let _inside = uptime_pin::pin(Duration::ZERO);
+        let first = assess_current(seat, "omp", Some("current"));
+        assert_eq!(first.state, "unknown");
+        past(first.since_unix_ms.unwrap());
+        std::thread::scope(|scope| scope.spawn(|| {
+            let _past = uptime_pin::pin(STARTUP_GRACE * 3);
+            assert_eq!(assess_current(seat, "omp", Some("current")).state, "stale");
+        }).join().unwrap());
+        assert_eq!(assess_current(seat, "omp", Some("current")).since_unix_ms, first.since_unix_ms);
+        let carried_seat = "agent/example/carried-state-clock";
+        let context = uptime_pin::capture();
+        let carried = std::thread::scope(|scope| scope.spawn(move || {
+            let _context = context.enter();
+            assess_current(carried_seat, "omp", Some("current"))
+        }).join().unwrap());
+        assert_eq!(carried.state, "unknown");
+        past(carried.since_unix_ms.unwrap());
+        assert_eq!(assess_current(carried_seat, "omp", Some("current")).since_unix_ms,
+            carried.since_unix_ms, "carried assessments share the fixture's state clocks");
+    }
+
+    #[test]
+    fn an_unpinned_assessment_of_the_seat_does_not_restart_a_pinned_state_clock() {
+        let seat = "agent/example/unpinned-state-clock";
+        let unpinned = || std::thread::scope(|scope| scope.spawn(|| assess_current(seat, "omp", Some("current"))).join().unwrap());
+        let live = unpinned();
+        // Pin the uptime that gives the seat the other state from the one its unpinned reads see.
+        let _pin = uptime_pin::pin(if live.state == "unknown" { STARTUP_GRACE * 3 } else { Duration::ZERO });
+        let first = assess_current(seat, "omp", Some("current"));
+        assert_ne!(first.state, live.state);
+        past(first.since_unix_ms.unwrap());
+        unpinned();
+        assert_eq!(assess_current(seat, "omp", Some("current")).since_unix_ms, first.since_unix_ms);
+        // Pinned assessments keep out of the process-wide clocks that production and unpinned reads use.
+        let pinned_only = "agent/example/pinned-only-state-clock";
+        assess_current(pinned_only, "omp", Some("current"));
+        assert!(!presence().state_since.lock().unwrap().contains_key(pinned_only));
+    }
 
     #[test]
     fn malformed_report_does_not_replace_a_beat_or_prove_recording() {
@@ -1334,6 +1617,17 @@ mod tests {
     // unattached monitor is stale at any age, and an attached one is never consulted.
     #[test]
     fn title_report_age_never_changes_the_assessment() {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        // One instant for every reading: the state goes stale and back below, so each return to
+        // current restarts `since`, and two clock reads a millisecond apart would differ.
+        const AT: u128 = 1_800_000_000_000;
+        smallclaims::store::set_thread_clock(Some(AT));
         let recipient = "agent/attachment-monitor-age";
         let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
         delivery.epoch = 1;
@@ -1352,6 +1646,7 @@ mod tests {
         // The delivery beat alone is current, so only the monitor can make the seat stale below.
         assert!(!without_monitor.stale(), "{without_monitor:?}");
         assert_eq!(without_monitor.state, "current", "{without_monitor:?}");
+        assert_eq!(without_monitor.since_unix_ms, Some(AT as u64), "{without_monitor:?}");
         record_fenced(
             &title,
             &json!({"transport":"claude-channel", "ready":false,

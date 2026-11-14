@@ -4,7 +4,7 @@ import { submitAnswer } from './answer.ts';
 
 const refused = (code, details = {}) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable: false, details }, 409);
 
-// A scripted st: each send answers the next step; `waiting` is what stillWaiting reports.
+// A scripted Fractal: each send answers the next step; `waiting` is what stillWaiting reports.
 function world(steps, waiting) {
   const log = { sent: [], built: 0, waited: [], asked: 0 };
   const ports = {
@@ -30,7 +30,7 @@ function world(steps, waiting) {
 }
 
 // Cos, 2026-10-10: the answer landed but the reply was lost. The identical request is sent again
-// (the same key), and st's first answer comes back: a success, no second record.
+// (the same key), and Fractal's first answer comes back: a success, no second record.
 {
   const { ports, log } = world([new TypeError('Network request failed'), 'ok'], true);
   assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
@@ -38,7 +38,7 @@ function world(steps, waiting) {
   assert.equal(log.built, 1);
 }
 
-// st said it may still complete: the same.
+// Fractal said it may still complete: the same.
 {
   const { ports, log } = world([refused('unavailable', { applied: 'unknown' }), 'ok'], true);
   assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'sent' });
@@ -51,7 +51,7 @@ function world(steps, waiting) {
   assert.deepEqual(await submitAnswer(ports), { ok: true, how: 'already' });
 }
 
-// A repeat submit after the answer landed: st refuses the new key as stale. The step no longer
+// A repeat submit after the answer landed: Fractal refuses the new key as stale. The step no longer
 // waits, so it is a success.
 {
   const { ports, log } = world([refused('stale-fence')], false);
@@ -79,7 +79,7 @@ function world(steps, waiting) {
   assert.deepEqual(log.sent, ['action/1']);
 }
 
-// If st cannot say whether it still waits, the failure stands (nothing is claimed).
+// If Fractal cannot say whether it still waits, the failure stands (nothing is claimed).
 {
   const { ports } = world([new TypeError('Network request failed')], new Error('offline'));
   assert.equal((await submitAnswer(ports)).ok, false);

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A checkpoint no longer drops a seat's last turn: the harness.observed rule also keeps each incarnation's newest working and newest ended observation",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change."},
+  "rules": {"status": "changed", "detail": "Rules version 25: harness.observed keeps at most two more claims per incarnation, its newest working and newest ended observation, which readers of a seat's last turn ask for (when it began, whether the seat worked after a nudge, whether it moved on after a denial). The rules digest changes, so members agree on a checkpoint only once they all run this build; until then, a member on the new rules waits instead of sealing with older peers.", "transitions": [[24, 25]]},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. Checkpoints already trimmed keep what they dropped."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build: later checkpoints use version 24 again."}
+}

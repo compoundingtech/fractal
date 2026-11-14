@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Loading earlier messages no longer stalls the frame that delivers them: the transcript adopts an older page into the assistant runtime one batch per frame, starting with the next frame",
+  "replay": {
+    "status": "none",
+    "detail": "Rendering only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or public API changes; older rows appear one frame later and then in the same batches as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores adoption of the first batch in the prepending commit."
+  }
+}

@@ -1,10 +1,20 @@
 # Harness questions
 
 A seat's harness can ask its person a question natively: a multiple-choice prompt the harness
-shows in its own interface. st records that such a question exists, how it is shaped and how it
+shows in its own interface. Fractal records that such a question exists, how it is shaped and how it
 ended, so other clients can tell the question is waiting. It records **ids and positions only,
 never text**. The question text, option labels, free-text answers and notes stay in the harness's
 own timeline; a client that shows the question joins its text from there.
+
+## Managed seats
+
+A managed seat asks its person through native work asks (`fractal work ask`), not through a harness
+question tool. The managed launch wrapper selected from the runtime profile (see
+[configuration](../site/reference/configuration.md)) decides which harness-native tools the agent
+receives, and it removes model-authored question tools before the first turn. Fractal does not refuse,
+translate or answer a question tool on the agent's behalf. The records below cover a harness question
+that a seat still holds open, such as one raised by a session that started before its wrapper removed
+the tool. Harness permission, login and recovery prompts are separate: their alerts stay visible.
 
 ## Identity
 
@@ -16,9 +26,9 @@ native id before deriving the subject or storing the observation; paths, command
 other native text are never stored verbatim as ids. The same native call in the same session
 of the same seat is always the same subject.
 
-The claim subject must match its `(agent, session, native_id)` parts. Cross-field subject
-validation is not implemented by this schema-only PR; it lands with the first production
-callers. Those callers must use the canonical hash before deriving the subject.
+The claim subject must match its `(agent, session, native_id)` parts. The OMP ingest
+route derives the subject itself from its authenticated runtime binding and canonical
+native digest; the caller cannot supply a claim subject.
 
 ## Claims
 
@@ -79,6 +89,211 @@ question before and after compaction. Resolved questions never become pending ag
 same native call is refused even after history expiry or checkpoint trimming, including when
 the resolution status is `expired`. Its original resolution and receipt remain authoritative.
 
-A question stays pending until the harness writes its end. The harness adapter writes `expired`
-or `cancelled` when the harness gives up on or withdraws a question; st does not end a pending
-question by itself.
+A question stays pending until its native lifetime ends. The harness adapter writes `expired`
+or `cancelled` when the harness gives up on or withdraws a question. The owner also durably
+records `cancelled` when its admitted native question generation definitively ends; merely
+failing to read that generation is not evidence of its end.
+
+## Live OMP observations
+
+`ST_OMP_WEB_ANSWERS=1` independently opts the daemon and managed OMP extension/channel
+into **observation only**. Every default is off. No answer sink is installed by this
+step; `harness.answer` remains unavailable with `adapter_missing`, even when ingestion
+is enabled. There is no ask override, terminal input, or native settlement path.
+
+The extension opens observation at `tool_execution_start`, using its finalized native
+arguments, not the earlier modifiable `tool_call` input. Native call ids are SHA-256
+digested before they enter the durable native-event outbox.
+Question ids are zero-based native array ordinals (`q0` first, `q15` sixteenth);
+option counts retain native order without sending labels. OMP single-select positional
+answers require one option (`required:true`); native multi-select permits no selected
+options (`required:false`). Other/note values never cross this observation path.
+
+Only the exact managed `driver omp` wrapper generation can ingest observations,
+through the local native route. Its kernel Unix connector PID/birth must agree with
+the physical terminal-wrapper witness, revalidated under the provider record lock.
+Its launch configuration must independently opt in. Agent, runtime incarnation and
+ready native-session binding must agree. Persons, tiles, ordinary agent requests
+and Fabric loopback cannot use that route. A close must refer to a question opened
+by that same binding; unknown/foreign closes write nothing. Replayed opens and closes
+are idempotent. A reused call identity with different descriptors is refused.
+Legacy PTY records without a boot id may establish daemon identity through their
+matching live start token; this does not relax the independent exact-wrapper
+custody or launch/binding checks above.
+The common native identity-proof boundary follows provider, physical runtime and
+daemon-selected source-path checks; question observations additionally prove the
+exact wrapper before that boundary. Neither forged observations nor closes may
+write claims or shared delivery diagnostics. Observation admission never promotes
+a mailbox lease or records mailbox bind-refusal diagnostics.
+
+Native successful completion records `answered_elsewhere`, a structured native timeout
+records `expired`, and error completion records `cancelled`. O1a records closure status
+only: resolution answers are empty and no person receipt is created. A true native session
+switch, session shutdown or final agent end cancels remaining observed calls before the
+extension discards its observation set. An agent end that will continue preserves them.
+Same-session recreation, transport disconnection, absence from a snapshot and elapsed
+time do not invent a closure.
+The durable outbox retains opens/closes across channel/daemon interruption; the
+extension also replays retained observations after a pipe reconnect. Retention is
+bounded at 256 observed calls per native session; once full, the extension stops
+observing new calls but retains the existing calls and their closes. A true native
+session switch starts a new observation set.
+Observations refused for a disabled receiver or a superseded runtime/session binding
+are retired without inventing a close, so they cannot block unrelated native events.
+
+Before publishing each open the owner persists a local generation lease containing the
+admitted wrapper, terminal and daemon kernel PID/birth witnesses, provider ownership
+generation and native session. A startup/periodic bounded sweep checks those witnesses
+under the same provider record lock used for ingestion. Definitive process death or PID
+reuse, provider replacement/end, or a successor native session durably appends the
+existing `cancelled` resolution. It never records answer positions or a person receipt,
+and preserves any prior native resolution. The lease is deleted only after resolution
+is durable; a crash therefore replays retirement, not an answer. No lease expires by
+wall-clock age, and unavailable process/provider evidence leaves the question pending.
+This cleanup continues with the opt-in off. The sweep runs every two seconds between
+bounded passes; readers do not synthesize resolutions.
+
+An observation without a local generation lease stays pending and indeterminate
+across restart. Its stored shape has no exact wrapper birth/provider ownership
+generation, so neither startup nor the present runtime's state proves that its
+native call ended. It remains visible through the existing pending resource with
+answering unavailable; no new client state is introduced. A later native close
+from the authenticated same runtime/session binding can settle it normally,
+including a cancellation emitted by the shutdown/switch hook. A replayed open
+from that binding may first attach its authenticated generation; only then can
+the normal positive-evidence lease reconciliation apply. Foreign observations
+are never swept as local generations. Recovery visits only the local lease
+table in keyset-paginated batches of at most 128; it does not scan lease-less
+observations or invent a lease for them.
+
+Observation metadata is not a proof that a web selection can be executed. In particular,
+the current typed timeline lacks native preview/required presentation semantics.
+Unrepresentable asks stay unavailable. Delivery remains a separate, exact-build-gated
+change requiring a typed native pending-ask submission API and normal native formatting.
+
+
+## Client reads and person answers
+
+`harness-questions.list` (`GET /v1/client/harness-questions`) and
+`harness-questions.get` (`GET /v1/client/harness-questions/{id}`) require
+`read.projections`. They expose metadata only, in the ordinary client-v0 envelope:
+the agent, opaque native session, hashed native call id, runtime incarnation, question
+ids, option counts, selection constraints and any resolution. No text, option labels,
+notes or internal receipt crosses these resources. The web view joins text from the
+existing raw native timeline; a missing or ambiguous join must not enable answering.
+
+The list uses the existing cached, snapshot-bound pagination with `limit` and `cursor`
+only (default 50, maximum 200). Detail returns one `harness-question` resource. Its
+`revision` is the observation revision, unchanged by settlement; `updated_at` is an
+RFC 3339 UTC timestamp. `observed_at` and the resolution's `resolved_at` are integer
+Unix epoch milliseconds. A resolution contains `status`, the observation `revision`,
+and per-question `{positions, timed_out}`. The native harness owns each `timed_out`
+flag. Compact resolved records and receipts remain visible indefinitely.
+
+Every resource has `answer.state` (`available` or `unavailable`); unavailable reasons
+are `adapter_missing`, `adapter_unavailable` or `resolved`. This describes adapter
+availability, not caller permission. Global capability `harness.answer`, version 0,
+uses the normal `{id, version, state}` capability shape, without a `reason` field.
+No adapter is installed by default; capability is unavailable and submission returns
+`not-answerable` with `details.reason: adapter_missing`, without writing a receipt.
+Every per-harness flag and the web-client flag remain off; this contract does not wire
+the O1 adapter or ship an answering form.
+
+Synchronous native availability checks and settlement run on blocking workers,
+not async executor threads. This includes availability checks while building
+metadata list and detail responses, as well as capability checks and answer submission.
+
+`harness.answer` posts to `/v1/client/actions` with parameters
+`{question, answers}`, where `answers` maps canonical `q0`–`q15` or hashed question
+ids to `{positions:[0,2]}`. Positions are unique and zero-based in native option order.
+A required question needs an answer; single-select needs exactly one position.
+No question text, option ids, Other, notes or client-supplied `timed_out` is accepted.
+Answer-map keys are data, never identity selectors; identity fields elsewhere remain
+forbidden. The action id is at most 256 UTF-8 bytes, checked before native settlement.
+
+The action explicitly requires `terminal.control` and the authenticated concrete
+person's authority over the selected live local terminal runtime, using terminal
+input's authority check. Every agent actor is refused, including Unix free-mode agents
+and agents carrying `terminal.control`. Neither an availability flag nor a person id
+in the body grants authority. Unknown `harness.*` actions receive no scope or advertised
+capability. Remote harness-answer relay and cross-writer exactly-once settlement are
+not provided.
+
+Read detail before submitting. Echo its envelope `snapshot.id`, resource `revision`
+under `fence.subject_revisions[question]`, and `runtime_incarnation`. No terminal screen
+sequence is needed. Snapshot provenance and current live-runtime authority are checked
+before replaying a receipt. A changed observation or runtime refuses with `stale-fence`;
+unrelated store writes do not invalidate snapshot provenance.
+
+Keep the same action id, key and parameters for an uncertain retry; the request digest
+excludes the fence, so fresh fences do not change request identity. Exact retained
+retries return `harness_answer.status: accepted` without settling again. Reusing an
+actor's key with another id, type or parameters returns `idempotency-conflict`,
+including reuse across generic client actions, private-notes writes and harness answers
+in either direction. Private-notes writes retain their owner-local exact-request recovery,
+current ownership checks and fence validation; the shared graph reservation never replays
+private content or private fences.
+Harness receipts stay solely in the existing compact resolution. Shared-key admission
+seeks owner-authored receipts through an actor/key expression index; it never scans the
+indefinitely retained resolved-question collection. The index supplies candidates only:
+the canonical first resolution and owner provenance still decide trust. An unknown key
+is new; a new key after resolution returns `already_resolved` before adapter or answer
+validation, but still requires current authority, snapshot provenance and question/runtime
+fences. The result is an ordinary completed action with a nested `harness_answer`
+containing its status and the authoritative resolution. `accepted` acknowledges adapter
+settlement; it does not prove the harness resumed or completed a later turn.
+
+Receipt replay and key occupancy are owner-local authority, not replicated metadata.
+Generic receipts come from reserved `client.action-result` local observations with the
+local origin and no actor; any legacy `custom.client.action-result` for the key refuses
+with `legacy-action-receipt-untrusted` before settlement. Harness receipts remain in the
+already-reserved, system-only compact resolution: only an originating local resolution
+with no actor can authorize replay or reserve a local key. Peer resolutions remain
+readable as terminal metadata but never become local replay authority. This reads existing
+claim provenance; it changes no stored format, retention rule or replication policy.
+
+Invalid selections return `invalid-answer` and typed `details.reason`:
+`unknown_option`, `too_many`, `required_missing`, `empty_single`, `too_long`,
+`unknown_question`, `other_not_allowed` or `note_not_allowed`. Malformed envelopes
+return `validation-failed`. `not-answerable` carries `adapter_missing` or
+`adapter_unavailable`. These are non-retryable refusals, not successful answers.
+With a delivery adapter, `adapter_unavailable` after submitting may mean delivery is
+uncertain, not that native input was unchanged. Clients must re-read the question
+before retrying; never silently resubmit to changed content or with a fresh key.
+
+## CLI
+
+Use an explicit concrete person for reads and answers:
+
+```sh
+fractal harness-questions list --as person/alex
+fractal harness-questions list --as person/alex --limit 50 --cursor CURSOR
+fractal harness-questions show QUESTION --as person/alex
+fractal harness-questions answer QUESTION --as person/alex \
+  --answers-file answers.json --revision REVISION --incarnation INCARNATION \
+  --idempotency-key alex-harness-answer-0001
+```
+
+List prints one page. Continue with its `page.next_cursor`, preserving `--limit`.
+The generated Rust, Swift and TypeScript list helpers expose the same cursor and limit
+controls; callers must follow `next_cursor` when `has_more` is true.
+
+`answers.json` contains only a map such as `{"q0":{"positions":[1]}}`.
+Read `show` before answering and pass its resource `revision` as `--revision` and
+`runtime_incarnation` as `--incarnation`. Both flags are required explicitly; the CLI
+never fetches question detail to replace them with fresh values. If the question or
+runtime changed since review, submission refuses the stale fence rather than answering
+the changed question. The CLI obtains only snapshot provenance from capabilities.
+Its action id is
+`action/harness-answer-` plus SHA-256 hex over the key and canonical question id,
+each prefixed by its UTF-8 byte length as a big-endian u64. A bare question id is
+prefixed with `harness-question/` locally. Retain the file, key and reviewed fences
+to reproduce the same action identity without silently refreshing the review.
+Rust, Swift and TypeScript clients are generated
+from the shared schema and templates with `cargo run -p fractal-client-codegen`.
+
+This is an additive client contract, not a new stored schema, receipt format or
+retention rule. Enabling an adapter or web answering remains a separate gate: prove the
+fail-closed native timeline join, render each error code deliberately, show `accepted`
+only as acknowledged, and settle the deployment/authority/relay boundaries before
+enabling any flags.

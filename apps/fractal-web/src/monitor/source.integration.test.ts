@@ -15,11 +15,12 @@ const gateway = Effect.acquireRelease(
   Effect.promise(async () => {
     let status = 200
     let body: unknown = quotaEnvelope()
+    let relayValue: unknown
     const requests: Array<string> = []
     const server = createServer((request, response) => {
       requests.push(request.url ?? '')
       response.writeHead(status, { 'content-type': 'application/json' })
-      response.end(status === 200 ? JSON.stringify(body) : 'unsupported')
+      response.end(status === 200 ? JSON.stringify({ api_version: 'st3.client.v0', value: relayValue ?? { state: 'available', refresh_seconds: 30, snapshot: body } }) : 'unsupported')
     })
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject)
@@ -39,6 +40,9 @@ const gateway = Effect.acquireRelease(
       },
       setBody: (next: unknown) => {
         body = next
+      },
+      setRelayValue: (next: unknown) => {
+        relayValue = next
       },
     }
   }),
@@ -81,6 +85,20 @@ describe('usage relay availability', () => {
         _tag: 'Failed',
         failure: { kind: 'incompatible' },
       })
+    }),
+  )
+
+  it.live('reads the relay states: no source reads like a daemon without the route, and failures keep their cause', () =>
+    Effect.gen(function* () {
+      const { source, setRelayValue } = yield* gateway
+      setRelayValue({ state: 'disabled' })
+      expect(yield* Effect.result(source.quota)).toMatchObject({ _tag: 'Failure', failure: { kind: 'unavailable' } })
+      setRelayValue({ state: 'unavailable', refresh_seconds: 30, reason: 'transport' })
+      expect(yield* Effect.result(source.quota)).toMatchObject({ _tag: 'Failure', failure: { kind: 'unreachable' } })
+      setRelayValue({ state: 'unavailable', refresh_seconds: 30, reason: 'invalid_snapshot' })
+      expect(yield* Effect.result(source.quota)).toMatchObject({ _tag: 'Failure', failure: { kind: 'incompatible' } })
+      setRelayValue({ state: 'something new' })
+      expect(yield* Effect.result(source.quota)).toMatchObject({ _tag: 'Failure', failure: { kind: 'incompatible' } })
     }),
   )
 

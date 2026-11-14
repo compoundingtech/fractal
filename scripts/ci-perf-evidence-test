@@ -73,3 +73,35 @@ for path, logs in (('daily-long.yml', 'daily-perf-cost-logs'), ('main-upkeep.yml
 fixture = (ROOT / 'crates/fractal/tests/messaging_faults.rs').read_text()
 assert 'ST3_MESSAGING_FAULTS_EVIDENCE' in fixture and 'output_root.take().unwrap().keep()' in fixture
 print('Perf evidence controls passed: explicit parent, absent CI_RUN_ID, failure retained, no retry, status preserved')
+
+# Outside CI the load test takes the perf slot by itself only on a host marked by ~/.config/fractal/perf-slot, never by its
+# hostname: with the marker its first python3 is ci-perf-slot, without it (or with the slot already held) it is not.
+with tempfile.TemporaryDirectory(prefix='perf slot marker ') as scratch:
+    base = Path(scratch)
+    tools = base / 'tools'
+    tools.mkdir()
+    (tools / 'python3').write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "$RUNNER_TEMP/python3.calls"\nexit 3\n')
+    (tools / 'python3').chmod(0o755)
+
+    def first_python(marker, held=False):
+        home, temp = base / f'home-{marker}-{held}', base / f'temp-{marker}-{held}'
+        home.mkdir()
+        temp.mkdir()
+        if marker:
+            (home / '.config/fractal').mkdir(parents=True)
+            (home / '.config/fractal/perf-slot').touch()
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('GITHUB_ACTIONS', 'FRACTAL_PERF_SLOT_HELD', 'ST_PERF_SLOT_HELD')}
+        env.update(HOME=str(home), RUNNER_TEMP=str(temp), GITHUB_STEP_SUMMARY=str(temp / 'summary.md'),
+                   PATH=str(tools) + os.pathsep + os.environ['PATH'])
+        if held:
+            env['FRACTAL_PERF_SLOT_HELD'] = '1'
+        subprocess.run(['bash', str(ROOT / 'scripts/ci-perf'), 'load'], cwd=ROOT, env=env, capture_output=True, text=True,
+                       timeout=20)
+        calls = (temp / 'python3.calls').read_text().split() if (temp / 'python3.calls').exists() else []
+        return Path(calls[0]).name if calls else None
+
+    assert first_python(marker=True) == 'ci-perf-slot'
+    assert first_python(marker=False) != 'ci-perf-slot'
+    assert first_python(marker=True, held=True) != 'ci-perf-slot'
+print('Perf slot controls passed: the marker file, not the hostname, makes an outside-CI load run take the slot')

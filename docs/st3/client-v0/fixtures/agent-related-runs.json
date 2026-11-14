@@ -1,0 +1,11 @@
+{
+  "kind": "agent-related-runs", "agent_id": "agent/example", "as_of": 100,
+  "work_cut": 1, "missions_cut": 1, "total_rows": 1, "truncated": false,
+  "rows": [{
+    "id": "mission-run/example", "mission_id": "mission/example", "status": "running",
+    "status_chip": "waiting-on-you", "progress": {"done": 1, "total": 2},
+    "eta": null, "waiting_on_you": true, "late": false, "deadline_at": null,
+    "current_step": {"step": "step-run/example/check", "path": "check", "state": "ready", "kind": "ask", "who": "person/reviewer"},
+    "waits_on": [], "urgency_rank": 0, "folded": false, "completed_at": null
+  }]
+}

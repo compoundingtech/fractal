@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Seek a step's indexed wake tags instead of repeatedly fetching every retained message body sent to its assignee",
+  "replay": {
+    "status": "none",
+    "detail": "Claim replay semantics are unchanged. The explicit projection rebuild reconstructs the local wake-tag lookup from retained message claims and marks its historical copy complete. Ordinary replicated inserts, body updates and deletions maintain the lookup with database triggers."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds local_work_wake_tags, keyed by recipient, normalized work tag and claim id, a claim-id cleanup index, and local_work_wake_backfill with cursor, ceiling and complete fields. Schema installation creates empty local tables and triggers and records the indexed maximum claim store_index; it does not scan or rewrite historical bodies. A resumable background copy processes at most 128 message.sent rows per turn through the existing background writer admission. Between turns the writer is released; pacing uses queue admission, not sleeps. Reads combine indexed tags with a recipient-and-store-index seek over only the not-yet-copied historical region until complete. No schema-version bump."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The lookup and its copy cursor are local derived state, not replicated or included in checkpoint digests. Both st3-work: and fractal-work: tags remain readable, with existing legacy precedence, manual-wake exclusion and raw-body substring semantics retained. Numeric attempt and readiness components are normalized only in the lookup key; stored claims are not rewritten."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client or wire changes. Older binaries continue reading claims and keep the new lookup current through the persisted database triggers. Wake results are unchanged during and after migration."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "No restart or operator migration is required beyond an ordinary rollout. On first upgrade, the background copy reads historical message bodies once; the initial legacy region can still cost as much as the old lookup, then its body-read cost declines as the cursor advances. Once complete, wake folds fetch only matching wake-message bodies rather than all messages to each assignee. Doctor's work-wake-index check reports cursor, ceiling and done, including whether legacy reads remain."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration changes, checkpoint verification or repair, or manual backfill commands are needed. Inspect doctor work-wake-index for progress. A copy error retains the last committed cursor and legacy correctness; the next normal daemon start resumes there."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback retains original claims and reads them as before. The derived lookup and cursor may remain in the database; its SQL triggers remain compatible with older claim writers."
+  }
+}

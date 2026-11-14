@@ -1,16 +1,17 @@
-import type * as St3 from '@fractal/client/schema'
-import type { DecodedAgent } from '@fractal/sdk/effect'
+import type * as Fractal from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/read'
 import { DateTime, Option } from 'effect'
+import type { MissionEta } from '../../../../packages/fractal-ui/src/assistant-ui/MissionEta.tsx'
 
-import words from '../../../../fixtures/clients/words.json' with { type: 'json' }
 import { leafText } from '../data/projections.ts'
+import { missionDisplayTitle } from './missionTitle.ts'
+import type { MissionWord } from './missionWords.ts'
 
 // The mission presentation of docs/clients/ui-contract.md ("Presentation projections",
-// "Mission"), derived in the app until st serves it on the missions collection (#2646). The
-// fields and words are the contract's, so reading st's projection replaces only this file. The
+// "Mission"), derived in the app until Fractal serves it on the missions collection (#2646). The
+// fields and words are the contract's, so reading Fractal's projection replaces only this file. The
 // precedence is `fractal-ui-model::missions::adapt`'s, first match wins.
 
-export type MissionWord = (typeof words.mission)[number]['id']
 export type StepWord = 'needs_you' | 'done' | 'working' | 'ready' | 'waiting' | 'cancelled' | 'failed' | 'pending'
 
 /** Who must act, or who holds a step: `{kind, agent, label}` as the contract names it. */
@@ -26,6 +27,8 @@ export type PresentedStep = {
   readonly attempts: number
   readonly blockers: readonly string[]
   readonly keep_open: boolean
+  /** The mission revision the step's run is pinned to; older daemons do not serve it. */
+  readonly revision: string | null
 }
 
 export type MissionPresentation = {
@@ -39,11 +42,8 @@ export type MissionPresentation = {
   readonly settled_at: number | null
 }
 
-export const MISSION_WORDS: readonly MissionWord[] = words.mission.map((word) => word.id)
-export const missionWord = (id: MissionWord) => words.mission.find((word) => word.id === id)!
-
-type Step = St3.MissionStep & { readonly keep_open?: boolean }
-type Row = St3.Mission & { readonly system?: boolean }
+type Step = Fractal.MissionStep & { readonly keep_open?: boolean; readonly run_revision?: string }
+type Row = Fractal.Mission & { readonly system?: boolean }
 
 const ACTIVE = new Set(['claimed', 'working', 'running', 'verifying'])
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
@@ -53,7 +53,14 @@ const missionSteps = (mission: Row): readonly Step[] => {
   const runs = mission.run_details ?? []
   const open = runs.filter((run) => !FINISHED.has(run.status))
   const shown = open.length > 0 ? open : runs.slice(-1)
-  return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly St3.MissionStep[]))
+  return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly Fractal.MissionStep[]).map((step): Step => run.revision === undefined ? step : { ...step, run_revision: run.revision }))
+}
+
+/** The served ETA of the latest open run, never a finished run's: a terminal status or `completed_at` hides it. */
+export const missionEta = (mission: Fractal.Mission): MissionEta | null => {
+  const open = (mission.run_details ?? []).filter((run) => !FINISHED.has(run.status) && Option.isNone(run.completed_at))
+  const run = open.at(-1)
+  return run === undefined ? null : Option.getOrNull(run.eta)
 }
 
 const queuedFor = (agents: readonly DecodedAgent[], work: string) =>
@@ -81,11 +88,11 @@ export const presentMission = ({
   agents,
   attention,
 }: {
-  readonly mission: St3.Mission
+  readonly mission: Fractal.Mission
   /** The agents collection: names, and who queues each ready step. */
   readonly agents: readonly DecodedAgent[]
   /** Open attention, already the reader's. */
-  readonly attention: readonly St3.Attention[]
+  readonly attention: readonly Fractal.Attention[]
 }): MissionPresentation => {
   const row = mission as Row
   const work = missionSteps(row)
@@ -113,7 +120,7 @@ export const presentMission = ({
                           : 'done'
   const owner = (step: Step, stepWordValue: StepWord): Who => {
     if (stepWordValue === 'needs_you') return { kind: 'you', label: 'you' }
-    if (step.agentless === true) return { kind: 'st', label: 'st' }
+    if (step.agentless === true) return { kind: 'st', label: 'Fractal' }
     const seat = seatOf(step)
     return seat === undefined ? { kind: 'nobody', label: 'nobody yet' } : { kind: 'agent', agent: seat, label: label(seat) }
   }
@@ -137,6 +144,7 @@ export const presentMission = ({
         attempts: step.attempt,
         blockers: step.blockers ?? [],
         keep_open: step.keep_open === true,
+        revision: step.run_revision ?? null,
       }
     })
     .map((step, index) => ({ step, index }))
@@ -154,7 +162,7 @@ export const presentMission = ({
   const who: Who =
     word === 'decision' ? { kind: 'you', label: 'you' }
       : ['working', 'queued', 'unstaffed', 'stalled', 'failed'].includes(word) && whoSeat !== undefined ? { kind: 'agent', agent: whoSeat, label: label(whoSeat) }
-        : open.length > 0 && open.every((step) => step.agentless === true) ? { kind: 'st', label: 'st' }
+        : open.length > 0 && open.every((step) => step.agentless === true) ? { kind: 'st', label: 'Fractal' }
           : { kind: 'nobody', label: 'nobody' }
   const latest = (mission.run_details ?? []).at(-1)
   const settled = latest === undefined ? undefined : Option.getOrUndefined(latest.outcome)
@@ -177,12 +185,23 @@ export const presentMission = ({
   }
 }
 
-/** Missions in `words.json` order, st's order within each word. */
-export const sortMissions = <T extends { readonly presentation: MissionPresentation }>(rows: readonly T[]): readonly T[] =>
-  rows.map((row, index) => ({ row, index }))
-    .sort((a, b) => MISSION_WORDS.indexOf(a.row.presentation.word) - MISSION_WORDS.indexOf(b.row.presentation.word) || a.index - b.index)
-    .map(({ row }) => row)
+/** Ad hoc one-off work rather than a declared mission. Folded in the sidebar until someone must act on it. */
+export const isAdHocWork = (id: string): boolean => id.startsWith('mission/spontaneous-work/')
+/** The sidebar's fold: the contract's, plus quiet ad hoc work (not yet decided, flagged to the user). */
+export const foldedInSidebar = ({ mission, presentation, startOfToday }: { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation; readonly startOfToday: number }): boolean =>
+  hiddenByDefault(presentation, startOfToday) || (isAdHocWork(mission.id) && !missionNeedsYou({ mission, presentation }) && !missionFaulted(presentation))
+/** The person must act: the mission says so, or a gate waits on them. */
+export const missionNeedsYou = ({ mission, presentation }: { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation }): boolean =>
+  mission.must_act === 'you' || presentation.word === 'decision'
+export const missionFaulted = (presentation: MissionPresentation): boolean => presentation.word === 'stalled' || presentation.word === 'failed'
 
-/** Hidden by default, in the client as the contract says: st's own, never started, or settled before today. */
+/** The title a reader sees: never a machine hash; its first open step's `title ?? goal` stands in. */
+export const missionReaderTitle = (mission: Fractal.Mission): string => {
+  const steps = missionSteps(mission as Row)
+  const step = steps.find((step) => !FINISHED.has(step.state)) ?? steps[0]
+  return missionDisplayTitle({ title: mission.title, work: step === undefined ? undefined : { title: Option.getOrUndefined(step.title), goal: step.goals?.[0] } })
+}
+
+/** Hidden by default, in the client as the contract says: Fractal's own, never started, or settled before today. */
 export const hiddenByDefault = (presentation: MissionPresentation, startOfToday: number): boolean =>
   presentation.system || presentation.word === 'not_started' || (presentation.settled_at !== null && presentation.settled_at < startOfToday)

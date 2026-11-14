@@ -3,8 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { interactionVars as interaction, colorVars as c, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import type { AgentRowData, AgentStatus, FolderGroupData } from '../composition-model'
 import { Icon } from './Icons'
-
-const spin = stylex.keyframes({ to: { transform: 'rotate(360deg)' } })
+import { LiveRing } from './LiveRing'
 
 /** One glyph per agent/run state; color lives on the glyph only. */
 export function StatusGlyph({ status, elapsed }: { status: AgentStatus; elapsed?: string }) {
@@ -13,7 +12,7 @@ export function StatusGlyph({ status, elapsed }: { status: AgentStatus; elapsed?
   return <span data-status={status} title={status} {...stylex.props(styles.glyphWrap)}>
     <span {...stylex.props(styles.glyphDot, dot)}>
       {mark === undefined ? null : <Icon name={mark} size={8} />}
-      {status === 'working' ? <span aria-hidden="true" {...stylex.props(styles.glyphRing)} /> : null}
+      {status === 'working' ? <span aria-hidden="true" {...stylex.props(styles.glyphRing)}><LiveRing size="sm" /></span> : null}
     </span>
     {elapsed ? <span {...stylex.props(styles.glyphElapsed)}>{elapsed}</span> : null}
   </span>
@@ -70,7 +69,7 @@ export function AgentSidebar({ groups, activeId, onSelect, onCollapse, collapsed
       </nav>
     </>}
     <div {...stylex.props(styles.footer)}>
-      <button type="button" aria-label="Settings" title="Settings" {...stylex.props(styles.ghostLg)}>⚙</button>
+      <button type="button" aria-label="Settings" title="Settings" {...stylex.props(styles.ghostLg)}><Icon name="gear" /></button>
       <button type="button" aria-label="Reviews" title="Reviews" {...stylex.props(styles.ghostLg)}>⇄</button>
       <button type="button" aria-label="Usage" title="Usage" {...stylex.props(styles.ghostLg)}>◷</button>
     </div>
@@ -104,7 +103,7 @@ const styles = stylex.create({
   rowMeta: { display: 'flex', alignItems: 'center', gap: s.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.sidebarFgMuted },
   glyphWrap: { display: 'inline-flex', alignItems: 'center', gap: s.xs, marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' },
   glyphDot: { width: 12, height: 12, borderRadius: '50%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', position: 'relative', fontSize: '8px', lineHeight: 1, color: c.fg },
-  glyphRing: { position: 'absolute', inset: -2, borderRadius: '50%', borderWidth: 1, borderStyle: 'dashed', borderColor: c.running, animationName: spin, animationDuration: '1.2s', animationTimingFunction: 'linear', animationIterationCount: 'infinite' },
+  glyphRing: { position: 'absolute', inset: -2, display: 'flex', alignItems: 'center', justifyContent: 'center' },
   glyphElapsed: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.sidebarFgMuted },
   footer: { height: 40, display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.lg, flexShrink: 0 },
   ghostMd: { width: 28, height: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, backgroundColor: 'transparent', color: c.sidebarFgMuted, borderRadius: r.control, cursor: 'pointer', fontSize: t.uiSize, transition: 'background-color 150ms ease, color 150ms ease', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },

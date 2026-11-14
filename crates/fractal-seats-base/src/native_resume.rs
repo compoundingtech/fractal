@@ -323,6 +323,26 @@ pub fn pi_family_header_id(path: &Path) -> Option<String> {
     None
 }
 
+/// Verify the exact transcript reported by a pi-family harness, including an externally
+/// resumed file. Its header, not its filename or directory, must name `id`. Return the
+/// canonical regular-file path; never search for a substitute for missing or foreign evidence.
+pub fn pi_family_reported_transcript(path: &Path, id: &str) -> Option<PathBuf> {
+    valid_id(id).ok()?;
+    let path = fs::canonicalize(path).ok()?;
+    (path.is_file() && pi_family_header_id(&path).as_deref() == Some(id)).then_some(path)
+}
+
+/// The single absolute transcript selected by an OMP process's argv. This is only launch
+/// intent, not proof of its current session; recovery must also verify the reported native ID.
+pub fn omp_resume_path(argv: &[String]) -> Option<PathBuf> {
+    if Path::new(argv.first()?).file_name()?.to_str()? != "omp" {
+        return None;
+    }
+    let (_, _, selected) = authored_resume("omp", argv).ok()??;
+    let path = Path::new(selected);
+    path.is_absolute().then(|| path.to_path_buf())
+}
+
 /// The seat's own transcript of pi-family session `id`: `<time>_<id>.jsonl` in its private
 /// session directory `sessions`, whose header names the same session.
 pub fn pi_family_transcript(sessions: &Path, id: &str) -> Option<PathBuf> {
@@ -639,14 +659,27 @@ pub fn pi_family_argv(
             check_authored_transcript(transcript, id)?;
             argv.drain(range);
         }
+        if !path.is_file() {
+            return Err(Refusal::new(
+                "transcript-missing",
+                format!("{driver} session {id} has no transcript at {}", path.display()),
+            ));
+        }
         if pi_family_header_id(path).as_deref() != Some(id) {
             return Err(Refusal::new(
                 "transcript-header-mismatch",
                 "the imported transcript does not name the required session",
             ));
         }
+        // omp resumes the checked path itself; the inventory link only lists it. An inventory
+        // that already holds other transcripts is left as it is.
         #[cfg(unix)]
-        pi_family_link_selected_transcript(path, sessions)?;
+        match pi_family_link_selected_transcript(path, sessions) {
+            Err(refusal) if refusal.code == "managed-directory-not-empty" => {}
+            linked => {
+                linked?;
+            }
+        }
         return Ok(insert_after_program(
             argv,
             &["--resume", &path.to_string_lossy()],
@@ -766,6 +799,65 @@ mod tests {
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    #[test]
+    fn omp_recovery_uses_only_one_explicit_absolute_selector() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("external.jsonl");
+        let selected = path.to_str().unwrap();
+        for arguments in [
+            argv(&["omp", "--resume", selected]),
+            argv(&["omp", "-r", selected]),
+            argv(&["omp", &format!("--resume={selected}")]),
+        ] {
+            assert_eq!(omp_resume_path(&arguments), Some(path.clone()));
+        }
+        for arguments in [
+            argv(&["other", "--resume", selected]),
+            argv(&["omp", "--", "--resume", selected]),
+            argv(&["omp", "--resume", "relative.jsonl"]),
+            argv(&["omp", "--resume"]),
+            argv(&["omp", "--resume", selected, "-r", selected]),
+            argv(&["omp", "--resume", selected, "--continue"]),
+            argv(&["omp", "--session", selected]),
+        ] {
+            assert_eq!(omp_resume_path(&arguments), None, "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn pi_family_reports_verify_the_exact_external_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("external.jsonl");
+        assert_eq!(pi_family_reported_transcript(&path, "one"), None);
+        fs::write(&path, "{\"type\":\"session\",\"id\":\"other\"}\n").unwrap();
+        assert_eq!(pi_family_reported_transcript(&path, "one"), None);
+        fs::write(&path, "{}\n").unwrap();
+        assert_eq!(pi_family_reported_transcript(&path, "one"), None);
+        fs::write(&path, "{\"type\":\"title\"}\n{\"type\":\"session\",\"id\":\"one\"}\n").unwrap();
+        assert_eq!(
+            pi_family_reported_transcript(&path, "one"),
+            Some(fs::canonicalize(&path).unwrap())
+        );
+        assert_eq!(pi_family_reported_transcript(root.path(), "one"), None);
+        assert_eq!(pi_family_reported_transcript(&path, "../one"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_family_reports_bind_the_canonical_target_not_the_link_name() {
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join("external.jsonl");
+        fs::write(&transcript, "{\"type\":\"session\",\"id\":\"one\"}\n").unwrap();
+        let link = root.path().join("time_other.jsonl");
+        std::os::unix::fs::symlink(&transcript, &link).unwrap();
+        assert_eq!(
+            pi_family_reported_transcript(&link, "one"),
+            Some(fs::canonicalize(&transcript).unwrap())
+        );
+        fs::remove_file(&transcript).unwrap();
+        assert_eq!(pi_family_reported_transcript(&link, "one"), None);
     }
 
     #[cfg(unix)]
@@ -1311,6 +1403,28 @@ sed -n '1s/.*"id":"\([^"]*\)".*/\1/p' "$file"
                 &seat.id, Some(&seat.transcript),
             ).unwrap_err().code,
             "authored-session-mismatch",
+        );
+    }
+
+    /// A seat whose staged inventory link is gone, beside its other transcripts, still resumes
+    /// the exact transcript its binding names; once that file is gone too, resume says so.
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_transcript_resumes_beside_other_inventory_entries_until_it_is_lost() {
+        let seat = AuthoredSeat::new();
+        fs::remove_file(seat.staged()).unwrap();
+        fs::write(seat.sessions.join("earlier_other.jsonl"), "preserve me").unwrap();
+        let transcript = seat.transcript.to_str().unwrap();
+        let resumed = pi_family_argv("omp", seat.launch(&[]), &seat.sessions, &seat.id, Some(&seat.transcript)).unwrap();
+        assert_eq!(resumed, argv(&["omp", "--resume", transcript]));
+        assert_eq!(fs::read_to_string(seat.sessions.join("earlier_other.jsonl")).unwrap(), "preserve me");
+
+        fs::remove_file(&seat.transcript).unwrap();
+        assert_eq!(
+            pi_family_argv("omp", seat.launch(&[]), &seat.sessions, &seat.id, Some(&seat.transcript))
+                .unwrap_err()
+                .code,
+            "transcript-missing",
         );
     }
 

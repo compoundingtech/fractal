@@ -13,7 +13,7 @@ pub use crate::gate_kinds::GateAnswer;
 
 use crate::github_http::GithubAuth;
 use super::{
-    GITHUB_AUTH_REMEDY, ProviderForbidden, ProviderRateLimit, ProviderUnauthenticated,
+    GITHUB_AUTH_REMEDY, LocalObserverBudget, ProviderForbidden, ProviderRateLimit, ProviderUnauthenticated,
     github_api_base, github_client, github_json, github_auth,
 };
 
@@ -216,6 +216,9 @@ fn http_status(error: &anyhow::Error) -> Option<u16> {
 
 /// A failed lookup: no access or no such thing breaks the gate; anything passing is not yet.
 fn lookup_failure(error: &anyhow::Error, what: &str) -> GateAnswer {
+    if let Some(local) = error.downcast_ref::<LocalObserverBudget>() {
+        return GateAnswer::NotYet(format!("{local}; waiting to read {what}"));
+    }
     if error.downcast_ref::<ProviderRateLimit>().is_some() {
         return GateAnswer::NotYet(format!("GitHub rate-limited the read of {what}"));
     }

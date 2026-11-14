@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Documentation only: the accepted program engine design (docs/st3/program-engine.md), with its decisions and build plan",
+  "replay": {"status": "none", "detail": "Documentation only; no claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "Documentation only; no table, index or migration change."},
+  "rules": {"status": "none", "detail": "Documentation only; no rule or authority change."},
+  "compatibility": {"status": "none", "detail": "Documentation only; no client, wire, CLI or behaviour change."},
+  "downtime": {"status": "none", "detail": "No restart or migration."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

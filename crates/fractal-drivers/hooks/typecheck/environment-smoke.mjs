@@ -21,7 +21,8 @@ for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
   if (!file.startsWith("st-")) fields.CATALOG = "catalog";
   if (harness === "omp") Object.assign(fields, { EXPECTED_NATIVE_SESSION: "expectedNativeSession", RESUME_GENERATION: "resumeGeneration" });
   const constants = Object.keys(fields).map(name => `const ${name} = ${JSON.stringify(prefix + name)};`).join("\n");
-  const bridge = file === "st-omp" ? 'const PENDING_ASK = "ST3_OMP_PENDING_ASK";' : "";
+  const bridge = file === "st-omp"
+    ? 'const PENDING_ASK = "ST3_OMP_PENDING_ASK"; const WEB_ANSWERS = "ST_OMP_WEB_ANSWERS";' : "";
   const identityFields = new Set(["IDENTITY", "RUNTIME_ID", "SESSION", "SEQ", "EXPECTED_NATIVE_SESSION", "RESUME_GENERATION"].filter(suffix => suffix in fields));
   const modes = ["unset", "preferred", "current", "legacy", "equal", "conflict", "legacy-conflict", "legacy-empty", "empty", "current-empty", "reload"];
   if (harness === "omp") modes.push("expected-session-conflict");
@@ -29,6 +30,13 @@ for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
   for (const mode of modes) {
     const env = {};
     const reports = [];
+    if (file === "st-omp") {
+      // Unlike migrated identity variables, observation opt-in has no preferred alias.
+      env.FRACTAL_OMP_WEB_ANSWERS = "1";
+      if (mode === "current") env.ST_OMP_WEB_ANSWERS = "1";
+      if (mode === "empty") env.ST_OMP_WEB_ANSWERS = "";
+      if (mode === "conflict") env.ST_OMP_WEB_ANSWERS = "true";
+    }
     const context = vm.createContext({ process: { env }, console: { error: message => reports.push(message) } });
     vm.runInContext(`${helpers}\n${constants}\n${bridge}\n${stashSource}\nglobalThis.contract = { readEnv, removeEnv, writeEnv, stash };`, context);
     for (const suffix of Object.keys(fields)) {
@@ -48,6 +56,11 @@ for (const file of ["pi", "omp", "st-pi", "st-omp"]) {
       for (const suffix of Object.keys(fields)) env[preferred + suffix] = "reinjected";
     }
     const state = context.contract.stash();
+    if (file === "st-omp") {
+      assert.equal(state.webAnswers, mode.startsWith("reload") ? undefined : mode === "current");
+      assert.equal(env.ST_OMP_WEB_ANSWERS, undefined, "clears exact opt-in");
+      assert.equal(env.FRACTAL_OMP_WEB_ANSWERS, undefined, "clears ignored alias");
+    }
     for (const [suffix, field] of Object.entries(fields)) {
       let expected;
       if (mode.startsWith("reload")) expected = "retained";

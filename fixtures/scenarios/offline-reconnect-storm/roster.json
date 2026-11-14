@@ -50,6 +50,7 @@
         "reachability": "local",
         "revision": "ag40",
         "runtime_ids": [
+          "runtime/example-harbor-builder-shell",
           "runtime/example-harbor-builder"
         ],
         "since": "2030-01-01T11:58:00.000Z",
@@ -101,6 +102,7 @@
         "workspace": "~/src/harbor/.worktrees/reviewer"
       }
     ],
+    "devices": [],
     "machines": [
       {
         "capacity": {
@@ -198,7 +200,8 @@
         "state": "running",
         "updated_at": "2030-01-01T11:57:00.000Z"
       }
-    ]
+    ],
+    "sessions": []
   },
   "timeline": [],
   "times": [

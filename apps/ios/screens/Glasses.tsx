@@ -11,7 +11,7 @@ import { ListRow, Note, Screen, T } from '../ui';
 
 // Spaces on the phone: the list of the person's spaces by name, and each one's tabs across all its
 // panes, grouped as the panes group them on the computer and in the same order. A tab opens what it
-// shows. Both follow st live, so a change made in stui shows here.
+// shows. Both follow Fractal live, so a change made in the Fractal terminal UI shows here.
 
 type Navigation = NativeStackNavigationProp<RootParams>;
 
@@ -50,7 +50,7 @@ function useLists(): GlassLists {
 function Notes() {
   const { glassesGranted, glassesIssue, status } = useStore();
   return <>
-    {status === 'online' && !glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in stui appear here once it does.</Note> : null}
+    {status === 'online' && !glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in the Fractal terminal UI appear here once it does.</Note> : null}
     {glassesIssue ? <Note tone="fault">{glassesIssue}</Note> : null}
   </>;
 }
@@ -70,7 +70,7 @@ export function GlassesScreen() {
         return <ListRow key={choice.id} glyph="▢" glyphColor={theme.lavender} title={choice.name} second={spaceSummary(glass)}
           onPress={() => navigation.navigate('Space', { id: choice.id, title: choice.name })} />;
       })}
-      {!choices.length && glassesGranted ? <Empty text="No spaces yet. Make one in stui on a computer." /> : null}
+      {!choices.length && glassesGranted ? <Empty text="No spaces yet. Make one in the Fractal terminal UI on a computer." /> : null}
     </ScrollView>
   </Screen>;
 }
@@ -103,7 +103,7 @@ export function SpaceScreen({ route, navigation }: RootScreen<'Space'>) {
   </Screen>;
 }
 
-/** The space's splits at the sizes stui gives them (st keeps them from glasses version 2), each
+/** The space's splits at the sizes the Fractal terminal UI gives them (Fractal keeps them from glasses version 2), each
  * labelled with its first tab, so the cards below map to where they sit on the computer. */
 function SpaceMap({ layout, titles }: { layout: Parameters<typeof groupBoxes>[0]; titles: string[] }) {
   return <View style={styles.map}>

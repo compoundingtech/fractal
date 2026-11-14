@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A GitHub repository poller's read positions (`items_since`, `comments_since`) no longer move past the time the look began. A position took the newest `updated_at` a listing returned. On 2026-11-01, while US Pacific clocks fell back, GitHub stamped some records an hour in the future, and a poller's position jumped to that stamp: every change stamped before it was filtered out of the listings until real time caught up. A position now stops at the look's own start, so a future-stamped record costs at most a re-read. A cursor an earlier build left in the future reads on from the look's start.",
+  "replay": {"status": "none", "detail": "No claim or projection replay; changes a poller already skipped are not re-read by this change."},
+  "schema": {"status": "none", "detail": "No table, file or schema change; the cursor keeps its shape."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Only the poller's own cursor values change; no claim kind, field or wire capability changes, and an older build reads the same cursor."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the old watermark; a future stamp could again hide changes until its time."}
+}

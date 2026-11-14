@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: two message-selector tests no longer assume a commit finishes folding its selectors. A commit folds for at most 10 ms of wall time, so on a loaded host a subject could still be pending. fractal-store's retired-headers test now folds its seed before taking the cut and folds loan by loan until the first subject's header is retired. fractal-api-core's cursor tests fold their fixture messages before the first page.",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Test only."},
+  "compatibility": {"status": "none", "detail": "Test only."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

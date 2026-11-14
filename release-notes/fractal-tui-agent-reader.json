@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Terminal UI open requests prefer FRACTAL_AGENT while retaining ST_AGENT compatibility",
+  "replay": {"status": "none", "detail": "No replay or rebuild."},
+  "schema": {"status": "none", "detail": "No storage schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Terminal UI open request attribution reads FRACTAL_AGENT first, then ST_AGENT when the preferred name is absent. An explicitly empty FRACTAL_AGENT masks ST_AGENT. Unequal aliases omit agent attribution and warn using variable names only, matching the existing Rust identity environment resolver; matching aliases retain their identity. Request routing and UI layout are unchanged."},
+  "downtime": {"status": "none", "detail": "No service replacement or seat restart required."},
+  "manual": {"status": "none", "detail": "Existing ST_AGENT-only callers remain supported. Resolve unequal manually authored aliases to retain agent attribution."},
+  "recovery": {"status": "none", "detail": "No durable state migration. Existing request files and ST_AGENT readers remain compatible."}
+}

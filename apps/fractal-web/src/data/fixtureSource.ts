@@ -1,6 +1,6 @@
 /** Constant generated rows over the deterministic fixture world. */
 import type { Agent, Attention, Mission, TerminalScreen } from '@fractal/client/schema'
-import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 
 import type { ProposedMissionFields } from '../missions/model.ts'
@@ -12,6 +12,7 @@ import {
   type Feed,
   type GatewayEvent,
   type Grants,
+  decodedRoster,
   observed,
   unavailable,
 } from './source.ts'
@@ -79,7 +80,7 @@ export const fixtureSource = ({
   ...(world.proposed === undefined ? {} : { proposed: world.proposed }),
   now: Atom.make(world.now),
   grants: Atom.make(
-    overrides.grants ?? { actions: 'granted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'granted' },
+    overrides.grants ?? { actions: 'granted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'granted', terminalControl: 'granted' },
   ),
   connection: Atom.make<ConnectionState>(overrides.connection ?? { _tag: 'Live' }),
   agents: Atom.make<Feed<readonly DecodedAgent[]>>(
@@ -90,7 +91,9 @@ export const fixtureSource = ({
         : overrides.agents,
   ),
   missions: Atom.make(overrides.missions ?? observed({ value: world.missions })),
+  missionsDecode: Atom.make(decodedRoster),
   attention: Atom.make(overrides.attention ?? observed({ value: world.attention })),
+  attentionDecode: Atom.make(decodedRoster),
   events: Atom.make(overrides.events ?? observed({ value: world.events })),
   conversation: keyed({ table: world.conversations, pinned: overrides.conversation }),
   terminal: keyed({ table: world.terminals, pinned: overrides.terminal }),

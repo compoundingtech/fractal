@@ -1,8 +1,8 @@
 import { commonPnpmPolicySettings, pnpmWorkspaceYaml, projectPnpmSourceInputs } from './repos/effect-utils/genie/external.ts'
-import { diagnosticsPackages, workspaceMembers } from './package.json.genie.ts'
+import { composedPackages, workspaceMembers } from './package.json.genie.ts'
 
-export const diagnosticsSourceInputs = projectPnpmSourceInputs({
-  packages: diagnosticsPackages,
+export const composedSourceInputs = projectPnpmSourceInputs({
+  packages: composedPackages,
   repoName: 'fractal',
 })
 
@@ -13,21 +13,21 @@ const { allowBuilds: _sharedDenylist, ...pnpmPolicy } = commonPnpmPolicySettings
 // One frozen root lock for every member. The hoisted linker keeps the flat `node_modules`
 // layout Expo's Metro resolver already relies on; workspace packages are linked, not injected.
 export default pnpmWorkspaceYaml.root({
-  packages: diagnosticsPackages,
+  packages: composedPackages,
   repoName: 'fractal',
   extraMembers: workspaceMembers,
   ...pnpmPolicy,
   overrides: {
     ...pnpmPolicy.overrides,
-    ...diagnosticsSourceInputs.overrides,
-    // platform-node 4.0.0 declares shared ^4.0.0; the latest shared requires effect ^4.0.4.
-    '@effect/platform-node>@effect/platform-node-shared': '4.0.0',
+    ...composedSourceInputs.overrides,
+    // Keep platform-node's shared peer in the same Effect cohort as the consumers.
+    '@effect/platform-node>@effect/platform-node-shared': '4.1.0',
   },
   peerDependencyRules: {
     ...pnpmPolicy.peerDependencyRules,
     allowedVersions: {
       ...pnpmPolicy.peerDependencyRules?.allowedVersions,
-      ...diagnosticsSourceInputs.peerDependencyRules.allowedVersions,
+      ...composedSourceInputs.peerDependencyRules.allowedVersions,
     },
   },
   minimumReleaseAgeExclude: ['@types/node'],

@@ -155,7 +155,7 @@ pub use crate::store::publication_tests_shared::{declaration, observe, publish};
                 &|_, check| {
                     assert_eq!(check.incarnation.as_deref(), Some("two"));
                     if check.interruption == Interruption::Unknown {
-                        Err(St3Error::new("conflict", "unknown launch"))
+                        Err(FractalError::new("conflict", "unknown launch"))
                     } else {
                         Ok(())
                     }
@@ -201,7 +201,7 @@ pub use crate::store::publication_tests_shared::{declaration, observe, publish};
                 None,
                 &|_, check| {
                     if check.interruption != Interruption::None {
-                        Err(St3Error::new("conflict", "interrupting publication"))
+                        Err(FractalError::new("conflict", "interrupting publication"))
                     } else {
                         Ok(())
                     }

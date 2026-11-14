@@ -240,7 +240,7 @@ def onboarding_history(view):
 
 def restart_requested(result,subject):
     waiting=f"st: `{subject}` restarted and is waiting for your input; attach with `st terminals attach {subject}`"
-    return result["exit"]==0 or (result["exit"]==2 and result["stderr"].strip()==waiting)
+    return result["exit"]==0 or (result["exit"]==2 and waiting in result["stderr"].splitlines())
 
 def cache_state_matches(state,override):
     fields={"pid","unit_cache_kib","daemon_cache_kib","unit_has_cache_directive"}
@@ -295,7 +295,11 @@ class Run:
 
     def require_initial_roster(self):
         # Health/socket startup is not roster readiness. No polling or implicit CLI wait.
-        r=self.execute("Initial history roster publication",shlex.join(["curl","--silent","--show-error","--fail","--unix-socket",f"/run/user/{self.m.uid}/st3.sock","http://localhost/v1/client/agents?history=true&min_cut=0&limit=200"]),timeout=15)
+        select_socket=f'socket=/run/user/{self.m.uid}/fractal.sock\n'
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+        select_socket+=f'if [ ! -e "$socket" ] && [ -e /run/user/{self.m.uid}/st3.sock ]; then socket=/run/user/{self.m.uid}/st3.sock; fi\n'
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+        r=self.execute("Initial history roster publication",select_socket+'curl --silent --show-error --fail --unix-socket "$socket" '+shlex.quote("http://localhost/v1/client/agents?history=true&min_cut=0&limit=200"),timeout=15)
         if r["exit"]: raise RuntimeError("initial roster publication failed")
         payload=json.loads(r["stdout"])
         if payload.get("snapshot",{}).get("store_index",-1)<0:
@@ -490,7 +494,7 @@ class Run:
 
     def install_harnesses(self,scenario):
         fixtures=self.m.args.fixtures
-        if fixtures is None: raise RuntimeError("stub harness scenarios require --fixtures scripts/st3-boot-canaries")
+        if fixtures is None: raise RuntimeError("stub harness scenarios require --fixtures scripts/fractal-boot-canaries")
         with tempfile.TemporaryDirectory(prefix="st-onboarding-fixtures-") as d:
             bundle=Path(d,"fixtures.tar")
             with tarfile.open(bundle,"w") as t:
@@ -732,7 +736,7 @@ def main():
     parser.add_argument("--macos-signing-identity",help="optional explicit signing identity already in guest keychain")
     parser.add_argument("--macos-signing-team",help="optional expected signing team; requires explicit identity")
     parser.add_argument("--image",help="prebuilt Docker image implementing the embedded clean-systemd recipe")
-    parser.add_argument("--fixtures",type=Path,default=Path(__file__).resolve().parent/"st3-boot-canaries")
+    parser.add_argument("--fixtures",type=Path,default=Path(__file__).resolve().parent/"fractal-boot-canaries")
     parser.add_argument("--strict-release",action="store_true")
     parser.add_argument("--harness-only",action="store_true",help="test a disposable native-driver seat without requiring the built-in Fractal Assistant or onboarding")
     parser.add_argument("--require-wrap-up",action="store_true",help="also require mission completion; basic native fixtures only read and claim")

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The merge queue builds five entries at once instead of three",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."},
+  "compatibility": {"status": "changed", "detail": "Repository settings only: max_entries_to_build in the main ruleset's merge_queue rule goes from 3 to 5. Merge method, HEADGREEN grouping, one to six entries per merge, the one-minute batch wait and the 120-minute check-response timeout are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "changed", "detail": "A repository administrator applies .github/repo-settings.json to ruleset 20563764 after this lands; CI never applies it. Check with gh-check-settings (docs/ci.md, Merge queue)."},
+  "recovery": {"status": "none", "detail": "No persistent state changes. Setting max_entries_to_build back to 3 restores the previous queue."}
+}

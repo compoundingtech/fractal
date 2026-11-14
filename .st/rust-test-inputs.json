@@ -11,10 +11,9 @@
   "scripts/ci-linux",
   "scripts/ci-nextest",
   "scripts/ci-nextest-flaky",
-  "scripts/ci-nextest-targets",
   "scripts/ci-rustc-wrapper",
   "scripts/rust-test-keys",
-  "scripts/st3_test_process.py"
+  "scripts/fractal_test_process.py"
  ],
  "crates": {
   "agent-spec": {
@@ -42,11 +41,13 @@
     "docs/st3/operational-state/screens.json",
     "evals",
     "examples/demos",
-    "examples/st3",
+    "examples/fractal",
     "fixtures",
+    "packages/fractal/fixtures/daily-review.kdl",
+    "packages/fractal/fixtures/pr-landing.kdl",
+    "packages/fractal/fixtures/upstream-repin.kdl",
     "scripts",
-    "slo",
-    "src/main.rs"
+    "slo"
    ]
   },
   "fractal-api-client-v0": {
@@ -55,15 +56,18 @@
     "crates/fractal-daemon/fixtures/native-records/codex.jsonl",
     "crates/fractal-daemon/fixtures/native-records/omp-parity.jsonl",
     "crates/fractal-daemon/fixtures/native-records/schema-conformance.jsonl",
+    "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
-    "examples/st3/custom-review.json",
+    "docs/st3/client-v0/schemas/quota-source-v1.schema.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
   "fractal-api-core": {
    "extra": [
     ".github/workflows/fleet.yml",
+    "claude-channel",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -83,12 +87,23 @@
   "fractal-chatgpt": {
    "extra": []
   },
+  "fractal-cli": {
+   "extra": [
+    "scripts/ci-test-paths.rs"
+   ]
+  },
   "fractal-client": {
    "extra": [
+    "clients/typescript/fractal-scenarios/src/kit/wire.ts",
     "docs/st3/client-v0/fixtures",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
+    "fixtures/clients/arrangements-v1.json",
     "fixtures/clients/device-signing-v1.json",
+    "fixtures/clients/ordered-memberships-v2.json",
+    "fixtures/clients/plain-errors-v1.json",
+    "fixtures/clients/stream-sync/frames.json",
+    "fixtures/scenarios",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -97,14 +112,15 @@
     "clients/swift/FractalClient/Sources/FractalClient/Client.swift",
     "clients/swift/FractalClient/Sources/FractalClient/Contract.generated.swift",
     "clients/swift/FractalClient/Sources/FractalClient/Models.swift",
-    "clients/typescript/fractal-client/Client.generated.ts",
-    "clients/typescript/fractal-client/Models.generated.ts",
-    "clients/typescript/fractal-client/Schema.generated.ts",
-    "crates/fractal-client/src/contract.rs",
-    "crates/fractal-client/src/generated.rs",
-    "crates/fractal-client/src/lib.rs",
+    "clients/swift/FractalClient/Sources/FractalClient/NoticeModels.generated.swift",
+    "clients/typescript/fractal-client",
+    "clients/typescript/fractal-declarations/fixtures/capacity-principal.kdl",
+    "clients/typescript/fractal-declarations/fixtures/daily-review.kdl",
+    "clients/typescript/fractal-declarations/index.ts",
+    "crates/fractal/tests/fixtures/validate-revisions.kdl",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
-    "docs/st3/client-v0/schemas/operations.json"
+    "docs/st3/client-v0/schemas/operations.json",
+    "fixtures/clients/person-pins-v2.json"
    ]
   },
   "fractal-client-tui": {
@@ -128,8 +144,7 @@
     "fixtures/clients/transcripts/native-omp-run.json",
     "fixtures/clients/transcripts/noise.json",
     "fixtures/clients/transcripts/omp-parity.expected.json",
-    "fixtures/clients/transcripts/omp-parity.json",
-    "src"
+    "fixtures/clients/transcripts/omp-parity.json", "fixtures/clients/transcripts/wakes.expected.json", "fixtures/clients/transcripts/wakes.json"
    ]
   },
   "fractal-daemon": {
@@ -137,7 +152,7 @@
     "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
     "docs/st3/client-v0/fixtures/timeline-relay-omission.json",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
-    "examples/st3/custom-review.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -153,16 +168,15 @@
   },
   "fractal-drivers": {
    "extra": [
-    "AGENTS.md",
     "claude-channel/.claude-plugin/marketplace.json",
     "claude-channel/plugins/st2-channel/.claude-plugin/plugin.json",
     "claude-channel/plugins/st2-channel/.mcp.json",
-    "crates/pty-launch-environment.rs",
+    "docs/st3/client-v0/fixtures/response-evidence.json",
     "plugins/claude/.claude-plugin/marketplace.json",
     "plugins/claude/st-channel/.claude-plugin/plugin.json",
     "plugins/claude/st-channel/.mcp.json",
     "scripts/ci-test-paths.rs",
-    "scripts/st3-boot-canaries/codex-schemas"
+    "scripts/fractal-boot-canaries/codex-schemas"
    ]
   },
   "fractal-e2e": {
@@ -184,6 +198,8 @@
   "fractal-feed": {
    "extra": [
     "README.md",
+    "docs/st3/client-v0/fixtures/agents-publication-chunk.json",
+    "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/events.json",
     "docs/st3/client-v0/fixtures/resources.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json"
@@ -199,8 +215,7 @@
     ".github/workflows/daily-long.yml",
     ".github/workflows/fleet.yml",
     ".github/workflows/perf.yml",
-    "scripts/ci-test-paths.rs",
-    "src/main.rs"
+    "scripts/ci-test-paths.rs"
    ]
   },
   "fractal-github-issue-component": {
@@ -213,27 +228,20 @@
     "wit/github-pr"
    ]
   },
+  "fractal-jobs": {
+   "extra": []
+  },
   "fractal-kernel": {
    "extra": [
     ".config",
     ".github/workflows/fleet.yml",
+    ".st/evidence-policy.json",
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
-    "crates/fractal-daemon/hooks/pi-channel.ts"
-   ]
-  },
-  "fractal-legacy-runner": {
-   "extra": [
-    "AGENTS.md",
-    "crates",
-    "docs/st2/invariants.md",
-    "docs/vrs",
-    "examples/native/agent-claude.kdl",
-    "examples/native/agent-codex.kdl",
-    "scripts/ci-test-paths.rs",
-    "scripts/conflict-census-test",
-    "templates/bus.st2.md"
+    "crates/fractal-daemon/hooks/pi-channel.ts",
+    "slo/fractal-ci.kdl",
+    "slo/objectives.kdl"
    ]
   },
   "fractal-migrate": {
@@ -244,8 +252,9 @@
   },
   "fractal-missions": {
    "extra": [
+    "crates/fractal-attention/src/store/attention.rs",
     "crates/fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz",
-    "examples/st3/custom-review.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -289,14 +298,16 @@
   },
   "fractal-runtime": {
    "extra": [
-    "crates/pty-launch-environment.rs"
+    "crates/pty-launch-environment.rs",
+    "fixtures/host-envelope.schema.json"
    ]
   },
   "fractal-schema": {
    "extra": [
     "docs/st3/schema.md",
-    "examples/st3/custom-review.json",
-    "examples/st3/decision-tree.json"
+    "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree-v2.json",
+    "examples/fractal/decision-tree.json"
    ]
   },
   "fractal-seats": {
@@ -307,7 +318,7 @@
     "crates/fractal-daemon/fixtures/native-records/codex.jsonl",
     "crates/fractal-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl",
     "crates/fractal-daemon/fixtures/omp-tool-results.jsonl",
-    "examples/st3/custom-review.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -322,22 +333,39 @@
     "scripts/ci-test-paths.rs"
    ]
   },
+  "fractal-sidebar": {
+   "extra": [
+    "fixtures/clients/sidebar/behavior-v1.json",
+    "fixtures/clients/sidebar/behavior-v2.json",
+    "fixtures/clients/sidebar/behavior.schema.json",
+    "fixtures/clients/sidebar/tui-v1.snapshot"
+   ]
+  },
+  "fractal-socket-discovery": {
+   "extra": []
+  },
   "fractal-storage-version": {
    "extra": []
   },
   "fractal-store": {
    "extra": [
     ".github/workflows/perf.yml",
+    "AGENTS.md",
     "crates/fractal-daemon/fixtures/native-records/omp-parity.jsonl",
     "crates/fractal-daemon/fixtures/omp-admin-events.jsonl",
     "crates/fractal-daemon/fixtures/omp-native-events.jsonl",
     "crates/fractal-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl",
     "crates/fractal-daemon/fixtures/omp-tool-results.jsonl",
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
-    "evals/st3",
-    "examples/st3/custom-review.json",
-    "examples/st3/decision-tree.json",
-    "examples/st3/human-feedback.kdl",
+    "crates/fractal-missions/src/store/tests/huge_part_digest.rs",
+    "crates/fractal-store/src/store/notice_authority.rs",
+    "crates/fractal-store/src/store/notice_authority_tests.rs",
+    "crates/fractal-store/src/store/transaction_work.rs",
+    "docs/st3/client-v0/fixtures/notice-conformance.json",
+    "evals/fractal",
+    "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree.json",
+    "examples/fractal/human-feedback.kdl",
     "scripts/ci-test-paths.rs",
     "slo"
    ]
@@ -359,18 +387,27 @@
   },
   "fractal-tui": {
    "extra": [
+    "clients",
     "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json",
     "fixtures/clients",
+    "fixtures/scenarios/fleet-mid-refactor/attention.json",
+    "fixtures/scenarios/fleet-mid-refactor/conversation.json",
+    "fixtures/scenarios/fleet-mid-refactor/details.json",
+    "fixtures/scenarios/fleet-mid-refactor/roster.json",
+    "fixtures/scenarios/fleet-mid-refactor/sync.json",
+    "fixtures/scenarios/fleet-mid-refactor/terminal.json",
     "scripts/ci-test-paths.rs",
     "slo"
    ]
   },
   "fractal-ui-model": {
    "extra": [
+    "clients/typescript/fractal-views/tests/fixtures/prompt-forms.json",
     "fixtures/clients/documents-v1.json",
-    "fixtures/clients/sidebar-v2.json",
-    "fixtures/clients/words.json"
+    "fixtures/clients/words.json",
+    "fixtures/scenarios",
+    "scripts/ci-test-paths.rs"
    ]
   },
   "fractal-vista-component": {
@@ -382,7 +419,9 @@
    "extra": []
   },
   "smallclaims": {
-   "extra": []
+   "extra": [
+    "crates/fractal"
+   ]
   }
  },
  "no_tests": [

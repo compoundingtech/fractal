@@ -252,3 +252,106 @@ fn last_activity_reads_do_not_scan_growing_completed_history() {
         );
     }
 }
+
+fn append_at(store: &Store, time: u128, subject: &str, kind: &str, fields: Value) {
+    store.set_write_clock_at(time).unwrap();
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    append_claim_tx(&tx, &store.origin, subject, kind, Some(AGENT), &json!({"fields": fields}), &[], None).unwrap();
+    tx.commit().unwrap();
+}
+
+fn timeline(entry: usize, entry_type: &str, role: &str) -> Value {
+    json!({
+        "incarnation_id": INCARNATION, "driver": "codex", "entry_id": format!("prose-{entry}"),
+        "entry_type": entry_type, "operation": "append", "revision": 1,
+        "sequence": entry + 1,
+        "role": role, "final": true, "body": {"text": "Words"}
+    })
+}
+
+/// "New since you last looked" compares with the agent's own prose: its assistant timeline text and the
+/// mail it sends. Tool calls, the person's prompts and mail to the agent are activity, not prose.
+#[test]
+fn last_prose_is_the_agents_own_words_only() {
+    let store = activity_source(4, &[]);
+    let prose = |store: &Store| store.agent_last_prose_at(AGENT, Some(INCARNATION), store.index().unwrap()).unwrap();
+    assert_eq!(prose(&store), None);
+    append_at(&store, 100, AGENT, "harness.timeline", timeline(1, "message", "assistant"));
+    append_at(&store, 200, AGENT, "harness.timeline", timeline(2, "tool_call", "assistant"));
+    append_at(&store, 300, AGENT, "harness.timeline", timeline(3, "message", "user"));
+    append_at(&store, 400, "message/to-agent", "message.sent", json!({"from": "person/ada", "to": AGENT, "content": "Hi", "status": "sent"}));
+    assert_eq!(prose(&store), Some(100));
+    assert_eq!(store.agent_last_activity_at(AGENT, Some(INCARNATION), store.index().unwrap()).unwrap(), Some(400));
+    append_at(&store, 500, "message/from-agent", "message.sent", json!({"from": AGENT, "to": "person/ada", "content": "Done", "status": "sent"}));
+    assert_eq!(prose(&store), Some(500));
+    append_at(&store, 600, AGENT, "harness.timeline", timeline(4, "content", "assistant"));
+    assert_eq!(prose(&store), Some(600));
+}
+
+#[test]
+fn last_prose_reads_do_not_scan_growing_non_prose_history() {
+    use smallclaims::sqlite::work::SqliteWorkScope;
+
+    let measure = |local, count, has_prose, tools_only| {
+        let store = activity_source(4, &[]);
+        let append = |entry, entry_type, role, incarnation| {
+            let mut fields = timeline(entry, entry_type, role);
+            fields["incarnation_id"] = json!(incarnation);
+            if local {
+                store.append_claim(&ClaimInput {
+                    subject: AGENT.into(),
+                    kind: "harness.timeline".into(),
+                    actor: Some(AGENT.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                }).unwrap();
+            } else {
+                append_at(&store, entry as u128 + 1, AGENT, "harness.timeline", fields);
+            }
+        };
+        if has_prose {
+            append(0, "message", "assistant", INCARNATION);
+        }
+        let index = store.index().unwrap();
+        let expected = store.agent_last_prose_at(AGENT, Some(INCARNATION), index).unwrap();
+        assert_eq!(expected.is_some(), has_prose);
+        for entry in 1..=count {
+            let (entry_type, role, incarnation) = match entry % if tools_only { 2 } else { 4 } {
+                0 => ("tool_call", "assistant", INCARNATION),
+                1 => ("tool_result", "tool", INCARNATION),
+                2 => ("message", "user", INCARNATION),
+                _ => ("content", "assistant", "other-incarnation"),
+            };
+            append(entry, entry_type, role, incarnation);
+        }
+        let index = store.index().unwrap();
+        let scope = SqliteWorkScope::start();
+        // This is the per-card roster read, including both timeline seeks and sent mail.
+        assert_eq!(
+            store.agent_last_prose_at(AGENT, Some(INCARNATION), index).unwrap(),
+            expected
+        );
+        let work = scope.finish();
+        assert!(work.vm_steps > 0, "{work:?}");
+        assert_eq!(work.fullscan_steps, 0, "{work:?}");
+        assert_eq!(work.sorts, 0, "{work:?}");
+        work
+    };
+    for local in [false, true] {
+        for tools_only in [true, false] {
+            // An absent frontier is the worst case for a residual role/type filter.
+            for has_prose in [false, true] {
+                let small = measure(local, 128, has_prose, tools_only);
+                let large = measure(local, 4096, has_prose, tools_only);
+                assert_eq!(large.statements, small.statements);
+                assert!(
+                    large.vm_steps <= small.vm_steps + 100,
+                    "local={local}, has_prose={has_prose}, tools_only={tools_only}, small={small:?}, large={large:?}"
+                );
+            }
+        }
+    }
+}

@@ -43,15 +43,15 @@ mod tests {
         state.store.read_snapshot(|index| {
             windows.read(state, session, request, ReadFence { index, now, commits, prepared }, || {
                 let n = count.fetch_add(1, Ordering::SeqCst);
-                Ok((vec![json!({"id":format!("row/{n}"), "authority":session.authority_actor})], false, None))
-            }).map(|(rows, _)| rows)
+                Ok((vec![json!({"id":format!("row/{n}"), "authority":session.authority_actor})], false, None, None))
+            }).map(|(rows, _, _)| rows)
         }).unwrap()
     }
 
     fn diagnostic(state: &AppState) {
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/shared-window".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -80,8 +80,8 @@ mod tests {
             state.store.read_snapshot(|index| {
                 windows.read(&state, &session, &request, ReadFence {index, now, commits, prepared}, || {
                     let n = count.fetch_add(1, Ordering::SeqCst);
-                    Ok((vec![json!({"evaluated_at":now.to_string(),"valid_until":"200","missions":[],"build":n})], false, None))
-                }).map(|(rows, _)| rows)
+                    Ok((vec![json!({"evaluated_at":now.to_string(),"valid_until":"200","missions":[],"build":n})], false, None, None))
+                }).map(|(rows, _, _)| rows)
             }).unwrap()
         };
         let first = read(100);
@@ -143,6 +143,7 @@ mod tests {
             revision: held.revision, period: held.period,
             valid_from: held.valid_from, valid_until: Some(200),
             items: held.items.clone(), has_more: held.has_more,
+            membership: held.membership,
         }));
         drop(cached);
         assert_eq!(read(&windows, &state, &session, &agents, 199, &count), first);
@@ -189,7 +190,7 @@ mod tests {
                             builds.fetch_add(1, Ordering::SeqCst);
                             entered.send(()).unwrap();
                             held.recv().unwrap();
-                            Ok((vec![json!({"id":"shared"})], false, None))
+                            Ok((vec![json!({"id":"shared"})], false, None, None))
                         },
                     )
                 })
@@ -321,13 +322,22 @@ mod tests {
         for (collection, scope) in [
             ("glasses", "read.glasses"),
             ("arrangements", "read.arrangements"),
+            ("ordered-memberships", "read.arrangements"),
             ("agents", "read.projections"),
         ] {
             let root = tempfile::tempdir().unwrap();
             let state = state(root.path());
+            let arrangement = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+            if collection == "ordered-memberships" {
+                state.store.append_claim(&ClaimInput {
+                    subject:arrangement.into(),kind:"arrangement.edited".into(),actor:Some("person/ada".into()),
+                    fields:serde_json::from_value(json!({"owner":"person/ada","version":2,"operations":[{"op":"create","name":"Membership scope"}]})).unwrap(),
+                    evidence:vec![],expected_subject:None,idempotency_key:None,
+                }).unwrap();
+            }
             let grant = "custom/client/scoped-window-reader";
             let pair = |scopes: Value| {
-                state.store.append_claim(&ClaimInput {
+                state.store.append_client_operation_claim(&ClaimInput {
                 subject:grant.into(), kind:"custom.client.pairing-completed".into(), actor:Some("person/ada".into()),
                 fields:serde_json::from_value(json!({"session_actor":"client/scoped-window-reader", "person_id":"person/ada", "expires_at_unix_ms":client_now_ms() as u64 + 60_000, "scopes":scopes})).unwrap(),
                 evidence:vec![], expected_subject:None, idempotency_key:None,
@@ -339,9 +349,10 @@ mod tests {
             let windows = Windows::attach(&state.store).unwrap();
             let slots = Arc::new(tokio::sync::Semaphore::new(1));
             let mut query = request(collection);
-            if collection == "arrangements" {
+            if matches!(collection, "arrangements" | "ordered-memberships") {
                 query.person = Some("person/ada".into());
             }
+            if collection == "ordered-memberships" { query.subject = Some(arrangement.into()); }
             if collection == "agents" {
                 query.agent = Some("agent/selected".into());
             }
@@ -354,7 +365,12 @@ mod tests {
             )
             .await
             .unwrap();
+            let before = windows.changes(&state.store).unwrap();
             pair(if collection == "agents" { json!([]) } else { json!(["read.projections"]) });
+            if collection == "ordered-memberships" {
+                assert!(Windows::changed(collection, &before, &windows.changes(&state.store).unwrap()),
+                    "scope changes invalidate a held membership window without a membership edit");
+            }
             for cache in [Some(windows.clone()), None] {
                 let error = collection_items_with_windows(
                     &state,
@@ -456,7 +472,7 @@ mod tests {
                         },
                         || {
                             count.fetch_add(1, Ordering::SeqCst);
-                            Ok((vec![json!({"id":"old-snapshot"})], false, None))
+                            Ok((vec![json!({"id":"old-snapshot"})], false, None, None))
                         },
                     )?
                     .0;
@@ -683,7 +699,7 @@ mod tests {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
-        let grant = state.store.append_claim(&ClaimInput {
+        let grant = state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/cost-window-reader".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(json!({"session_actor":"client/cost-window-reader", "person_id":"person/ada", "expires_at_unix_ms":(client_now_ms()+600_000) as u64,"scopes":["read.projections","read.glasses"]})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
@@ -778,7 +794,7 @@ mod tests {
             };
             let paired = state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: grant.into(),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/ada".into()),
@@ -806,7 +822,7 @@ mod tests {
             if change == "revoked" {
                 state
                     .store
-                    .append_claim(&ClaimInput {
+                    .append_client_operation_claim(&ClaimInput {
                         subject: grant.into(),
                         kind: "custom.client.pairing-revoked".into(),
                         actor: Some("person/ada".into()),
@@ -906,12 +922,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            let frame = super::super::tests::next_data_frame(socket).await;
             assert_eq!(frame["kind"], "snapshot");
             assert_eq!(frame["id"], id);
         }
@@ -932,12 +943,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), reconnect.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let frame = super::super::tests::next_data_frame(&mut reconnect).await;
         assert_eq!(frame["kind"], "snapshot");
         assert_eq!(frame["snapshot"]["store_index"], index);
         assert_eq!(windows.builds(), 1);
@@ -1049,7 +1055,7 @@ mod tests {
                 } else {
                     client_attention_resources_at(&state.store, Some("person/ada"), false, now)?
                 };
-                client_attention_compatibility(&mut items, session.custom_forms);
+                client_attention_compatibility(&mut items, session.attention_compatibility());
                 Ok((items, false))
             };
             let oracle = state.store.read_snapshot(|_| projection()).unwrap();
@@ -1076,9 +1082,9 @@ mod tests {
                         } else {
                             client_attention_resources_fenced_at(&state.store, Some("person/ada"), now)?
                         };
-                        client_attention_compatibility(&mut items, session.custom_forms);
-                        Ok((items, false, until))
-                    })).unwrap()
+                        client_attention_compatibility(&mut items, session.attention_compatibility());
+                        Ok((items, false, until, None))
+                    })).map(|(items, more, _)| (items, more)).unwrap()
             };
             measure("shared cold", &|| { assert_eq!(cached(), oracle); });
             measure("shared warm x22", &|| {
@@ -1094,6 +1100,7 @@ mod tests {
             for kind in fractal_schema::registry().claims.keys() {
                 let telemetry = matches!(kind.as_str(),
                     "daemon.diagnostic" | "transport.observed" | "workspace.observed")
+                    || kind == fractal_schema::read_positions::KIND
                     || (collection == "missions" && matches!(kind.as_str(),
                         "harness.observed" | "harness.diagnostic" | "harness.timeline" | "harness.usage"
                             | "harness.todo.observed" | "harness.session-file"))
@@ -1155,7 +1162,7 @@ mod tests {
                         } else {
                             client_attention_resources_fenced_at(&state.store, Some("person/ada"), now)?
                         };
-                        Ok((items, false, until))
+                        Ok((items, false, until, None))
                     })).unwrap().0
             };
             let before = cached(29_999);
@@ -1200,9 +1207,7 @@ mod tests {
                     barrier.wait().await;
                     socket.send(Message::Text(json!({"kind":"subscribe", "id":"visible",
                         "collection":collection, "limit":n%8+1}).to_string().into())).await.unwrap();
-                    let frame = tokio::time::timeout(Duration::from_secs(10), socket.next())
-                        .await.unwrap().unwrap().unwrap();
-                    let frame: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    let frame = super::super::tests::data_frame_within(&mut socket, Duration::from_secs(10)).await.expect("a data frame within 10 s");
                     assert_eq!(frame["kind"], "snapshot", "{frame}");
                     assert_eq!(frame["items"].as_array().unwrap().len(), n%8+1);
                     socket
@@ -1246,7 +1251,8 @@ mod tests {
                     ReadFence { index, now, commits, prepared },
                     // Two cards plus lookahead exercise the production projection's
                     // membership/has_more logic with a small injected-clock fixture.
-                    || mission_collection_projection_at(&state.store, 2, now),
+                    || mission_collection_projection_at(&state.store, 2, now)
+                        .map(|(items, more, until)| (items, more, until, None)),
                 )).unwrap()
             };
             let before = read(oldest_last_included - 1);
@@ -1276,7 +1282,7 @@ mod tests {
             let (oracle, more, _) = state.store.read_snapshot(|_| {
                 mission_collection_projection_at(&state.store, 2, latest_last_included + 1)
             }).unwrap();
-            assert_eq!(after, (oracle, more), "{status} cached/uncached membership parity");
+            assert_eq!(after, (oracle, more, None), "{status} cached/uncached membership parity");
         }
     }
 }

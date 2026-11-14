@@ -12,7 +12,7 @@ pub trait ArrangementsStore {
     fn arrangement_inventory_revision(&self, person: &str) -> Result<u64>;
     fn arrangement(&self, subject: &str, through: u64) -> Result<Option<Value>>;
     fn arrangements_changed(&self, after: u64, through: u64) -> Result<bool>;
-    fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error>;
+    fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,FractalError>;
 }
 
 impl ArrangementsStore for Store {
@@ -33,18 +33,23 @@ impl ArrangementsStore for Store {
     }
 
     fn arrangements_changed(&self, after: u64, through: u64) -> Result<bool> {
-        Ok(self.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM arrangements WHERE changed_index>?1 AND changed_index<=?2)",params![after,through.min(i64::MAX as u64)],|row| row.get(0))?)
+        Ok(self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM arrangements WHERE changed_index>?1 AND changed_index<=?2)
+             OR EXISTS(SELECT 1 FROM meta WHERE key='local_arrangement_repair_index'
+               AND CAST(value AS INTEGER)>?1 AND CAST(value AS INTEGER)<=?2)",
+            params![after,through.min(i64::MAX as u64)], |row| row.get(0),
+        )?)
     }
 
-    fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error> {
-        if input.kind != "arrangement.edited" { return Err(St3Error::new("invalid-arrangement-operations","edit_arrangement requires arrangement.edited")); }
+    fn edit_arrangement(&self, input: &ClaimInput, expected_subjects: &BTreeMap<String,String>) -> Result<ClaimRecord,FractalError> {
+        if input.kind != "arrangement.edited" { return Err(FractalError::new("invalid-arrangement-operations","edit_arrangement requires arrangement.edited")); }
         let expected_subjects = {
             let connection = self.readers.get();
             let mut stable = BTreeMap::new();
             for (subject, revision) in expected_subjects {
                 let identity = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
                 if stable.insert(identity, revision.clone()).is_some_and(|previous| previous != *revision) {
-                    return Err(St3Error::new("stale-fence", "alias references have conflicting declaration fences"));
+                    return Err(FractalError::new("stale-fence", "alias references have conflicting declaration fences"));
                 }
             }
             stable

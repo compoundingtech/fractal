@@ -1,10 +1,9 @@
 /** @vitest-environment jsdom */
 /// <reference types="vite/client" />
 import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
-import { loadWorld } from '@fractal/scenarios'
+import { foldSlice, loadWorld } from '@fractal/scenarios'
 import { useScenarioSlice } from '@fractal/scenarios/react'
-import { scenarioSections } from './scenario-transcript.story-harness'
-import { scenarioExemptionIds } from './scenario-exemption-ids.ts'
+import { scenarioSections, type TranscriptSection } from './scenario-transcript.story-harness'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -13,7 +12,7 @@ import { isExportStory } from 'storybook/internal/csf'
 import meta, { AllStates } from './Markdown.scenario.stories.tsx'
 import * as systemModule from './SystemState.stories.tsx'
 import * as nodePath from 'node:path'
-import { globSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { globSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import ts from 'typescript'
 import { checkFixtureGraph, createTypeScriptGraph, requiresDomainMarker, type ExemptStoryMode } from './scenario-fixture-graph.ts'
@@ -21,8 +20,8 @@ import './scenario-fixture-graph.unit.test.ts'
 import { storyGlobs } from '../.storybook/stories.ts'
 import storybookConfig from '../.storybook/main.ts'
 
-import { transcriptInitialTailCount, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
-import { historyBatchSize } from './assistant-ui/EmbraceScrollViewport'
+import type { TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { transcriptInitialSourceRowCount, transcriptMountedWindow } from './assistant-ui/composition/transcript-window'
 
 // jsdom has no layout engine. This test observes domain reads, not resize geometry;
 // the real browser plays remain the proof for observer-driven layout behavior.
@@ -77,10 +76,8 @@ test('an error boundary cannot hide an exempt story domain read', () => {
   }, {})).toThrow(/exempt|forbidden/)
 })
 
-test('the story mounted window uses the real Transcript and viewport mount constants', () => {
-  expect(transcriptMountedWindow).toEqual({
-    _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
-  })
+test('the story mounted window uses the real Transcript initial source-row bound', () => {
+  expect(transcriptMountedWindow).toEqual({ _tag: 'sourceRows', rows: transcriptInitialSourceRowCount })
 })
 test('Markdown AllStates consumes the declared conversation slice', () => {
   const result = scenarioStoryCheck(AllStates, meta)
@@ -104,12 +101,6 @@ const deferredStoryModes: Readonly<Record<string, number>> = {
 
 // Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
 const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale': 'fractal-web-app',
 }
 
 interface StoryModule {
@@ -206,6 +197,100 @@ test('the scenario inventory covers exactly the CSFs loaded by kit Storybook', (
   expect(storybookConfig.stories).toEqual(storyGlobs)
   expect(Object.keys(storyModules).map(file => nodePath.resolve(uiSource, file)).sort()).toEqual(configuredFiles.sort())
   expect(configuredFiles.length).toBeGreaterThan(0)
+})
+
+test('story-local play tags preserve the main play sets, including unlisted spread aliases', () => {
+  const baseline: { MERGE_ONLY: string[], BOTH_WIDTHS: string[], exports: Record<string, string[]> } = JSON.parse(readFileSync(nodePath.resolve(uiSource, '../scripts/kit-play-main-baseline.json'), 'utf8'))
+  // Freeze main's original exports, not the evolving inventory. New stories
+  // never require editing this historical regression fixture or a lane file.
+  const entries = Object.fromEntries(Object.entries(baseline.exports).flatMap(([file, names]) => {
+    const module = storyModules[`./${nodePath.relative(uiSource, nodePath.resolve(uiSource, '../../..', file))}`]
+    expect(module, file).toBeDefined()
+    const { default: storyMeta } = module!
+    return names.flatMap(name => {
+      const story = module![name]
+      if (!isExportStory(name, storyMeta) || !isStory(story)) return []
+      const composed = composeStory(story, storyMeta, {}, name)
+      return [[composed.id, composed.tags]]
+    })
+  }))
+  for (const id of [...baseline.MERGE_ONLY, ...baseline.BOTH_WIDTHS]) expect(entries[id], id).toBeDefined()
+  expect(Object.keys(entries).filter(id => entries[id].includes('merge-only')).sort()).toEqual([...baseline.MERGE_ONLY].sort())
+  expect(Object.keys(entries).filter(id => entries[id].includes('both-widths')).sort()).toEqual([...baseline.BOTH_WIDTHS].sort())
+})
+
+test('policy lane membership cannot shrink when a tagged story is removed or renamed', () => {
+  const baseline: { MERGE_ONLY: string[], BOTH_WIDTHS: string[] } = JSON.parse(readFileSync(nodePath.resolve(uiSource, '../scripts/kit-play-main-baseline.json'), 'utf8'))
+  // Reuse the reviewed ID lists: counts alone cannot identify lost coverage or detect a replacement.
+  const expected = {
+    'merge-only': baseline.MERGE_ONLY,
+    'both-widths': [...baseline.BOTH_WIDTHS,
+      'fractal-ui-sidebar-tabs--all-states', 'fractal-ui-sidebar-tabs--keyboard',
+      'fractal-app-sidebar-alerts-tab--served', 'fractal-app-sidebar-alerts-tab--bounded-scroll',
+      'fractal-app-usagepane--all-states', 'fractal-app-usagepane--populated',
+      'fractal-ui-sidebar-pins-section--all-states', 'fractal-ui-sidebar-pins-section--many-pins',
+    ],
+  }
+  const entries = Object.values(storyModules).flatMap(module => Object.entries(module).flatMap(([name, story]) => {
+    if (!isExportStory(name, module.default) || !isStory(story)) return []
+    const composed = composeStory(story, module.default, {}, name)
+    return [{ id: composed.id, tags: composed.tags }]
+  }))
+  for (const [tag, ids] of Object.entries(expected)) {
+    const actual = entries.filter(entry => entry.tags.includes(tag)).map(entry => entry.id).sort()
+    const missing = ids.filter(id => !actual.includes(id))
+    expect(missing, `${tag}: missing story ids: ${missing.join(', ')}`).toEqual([])
+    expect(actual, `${tag}: update the reviewed membership list when coverage changes`).toEqual([...ids].sort())
+  }
+})
+
+test('sidebar tab contracts retain both widths through story-local policy tags', () => {
+  const module = storyModules['./assistant-ui/sidebar/SidebarTabs.stories.tsx']
+  expect(module).toBeDefined()
+  for (const name of ['AllStates', 'Keyboard']) {
+    const story = module![name]
+    expect(isStory(story)).toBe(true)
+    if (!isStory(story)) throw new Error(`Missing sidebar tab story ${name}`)
+    expect(composeStory(story, module!.default, {}, name).tags).toEqual(expect.arrayContaining(['critical', 'both-widths']))
+  }
+})
+
+test('main focus plays and new app layout policies survive tag-derived selection', () => {
+  const tabs = storyModules['./assistant-ui/sidebar/SidebarTabs.stories.tsx']
+  expect(tabs).toBeDefined()
+  const focus = tabs!['OverlayFocusReturn']
+  expect(isStory(focus)).toBe(true)
+  if (!isStory(focus)) throw new Error('Missing sidebar overlay focus-return story')
+  expect(composeStory(focus, tabs!.default, {}, 'OverlayFocusReturn').tags).toContain('critical')
+  expect(focus.play).toBeTypeOf('function')
+  for (const [file, names] of [
+    ['../../../apps/fractal-web/src/web/AlertsTab.stories.tsx', ['Served', 'BoundedScroll']],
+    ['../../../apps/fractal-web/src/monitor/UsagePane.stories.tsx', ['AllStates', 'Populated']],
+  ] as const) {
+    const module = storyModules[`./${file}`]
+    expect(module, file).toBeDefined()
+    for (const name of names) {
+      const story = module![name]
+      expect(isStory(story), `${file} ${name}`).toBe(true)
+      if (!isStory(story)) throw new Error(`Missing app layout story ${file} ${name}`)
+      expect(composeStory(story, module!.default, {}, name).tags).toEqual(expect.arrayContaining(['critical', 'both-widths']))
+    }
+  }
+})
+
+test('configured inventory discovers app stories in a new nested source folder', () => {
+  const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-'))
+  try {
+    const configDirectory = nodePath.join(directory, 'packages/fractal-ui/.storybook')
+    mkdirSync(configDirectory, { recursive: true })
+    const story = nodePath.join(directory, 'apps/fractal-web/src/new-feature/nested/Example.stories.tsx')
+    mkdirSync(nodePath.dirname(story), { recursive: true })
+    writeFileSync(story, '')
+    writeFileSync(nodePath.join(nodePath.dirname(story), 'Example.tsx'), '')
+    expect(configuredStoryFiles(storyGlobs.filter(glob => glob.includes('apps/fractal-web/')), configDirectory)).toEqual([story])
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('configured inventory rejects directory and file symlinks without following them', () => {
@@ -416,14 +501,31 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('app mode debt matches its reviewed shrink-only pin', () => {
-  expect(Object.keys(deferredAppStoryModes)).toHaveLength(6)
+  expect(Object.keys(deferredAppStoryModes)).toHaveLength(0)
   expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
-test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(567)
-  expect(exemptions.sort()).toEqual(scenarioExemptionIds)
+const isExemptionList = (value: unknown): value is readonly string[] => Array.isArray(value) && value.every(entry => typeof entry === 'string')
+
+// Each stories file reviews its own exemptions, so parallel PRs only meet when they edit the same file.
+test('scenario exemptions match the reviewed list exported by each stories file and their reasons are printed by each check', () => {
+  const listed: string[] = []
+  for (const [path, module] of Object.entries(storyModules)) {
+    const { default: storyMeta, scenarioExemptions } = module
+    if (scenarioExemptions === undefined) continue
+    expect(isExemptionList(scenarioExemptions), `${path} scenarioExemptions must be a list of export:mode ids`).toBe(true)
+    if (!isExemptionList(scenarioExemptions)) continue
+    expect(isExportStory('scenarioExemptions', storyMeta), `${path} must list scenarioExemptions in its meta excludeStories`).toBe(false)
+    expect(scenarioExemptions.length, `${path} exports an empty scenarioExemptions list`).toBeGreaterThan(0)
+    expect(scenarioExemptions, `${path} scenarioExemptions must be sorted with no id listed twice`).toEqual([...new Set(scenarioExemptions)].sort())
+    for (const entry of scenarioExemptions) {
+      const name = entry.slice(0, entry.lastIndexOf(':'))
+      expect(isExportStory(name, storyMeta) && isStory(module[name]), `${path}#${entry} names no story`).toBe(true)
+      listed.push(`${path}#${entry}`)
+    }
+  }
+  expect(exemptions.sort()).toEqual(listed.sort())
 })
 
 test('scenario transcript preserves the active migrator turn without a terminal status', () => {
@@ -454,13 +556,58 @@ test('scenario transcript preserves tool operations and failed tool lifecycle', 
   expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
 })
 
-test('phone whole-thread projection preserves turns while leaving mounting to Transcript', () => {
+test('scenario transcript projects native reasoning, generic arguments and structured tool results', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  const items = turns.flatMap(turn => turn.items)
+  expect(items).toContainEqual(expect.objectContaining({
+    _tag: 'Reasoning', id: 'timeline-entry/scenario-transcript-families-builder-3',
+    text: 'I will compare the release scope and report totals before exporting.', streaming: false,
+  }))
+  const call = items.find(item => item._tag === 'ToolCall' && item.callId === 'inspect-report')
+  expect(call).toMatchObject({
+    _tag: 'ToolCall', name: 'catalog.compare_release', status: 'success',
+    input: { releases: ['atlas-7', 'atlas-8'], include: { totals: true, sections: ['runtime', 'client'] }, limit: 3 },
+    result: { mediaType: 'application/json', content: { release: 'atlas-8', totals: { passed: 18, failed: 0 }, sections: [{ name: 'runtime', ready: true }, { name: 'client', ready: true }] } },
+  })
+  expect(turns.flatMap(turn => turn.work.calls)).toContainEqual(expect.objectContaining({ kind: 'read', title: 'catalog.compare_release', outputLanguage: 'json' }))
+})
+
+test('scenario transcript retains semantic failure evidence and interrupts unresolved terminal calls', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  for (const status of ['failed', 'cancelled']) {
+    const turn = turns.find(turn => turn.items.some(item => item._tag === 'Status' && item.status === status))
+    expect(turn).toBeDefined()
+    expect(turn?.work).toMatchObject({ running: false, failed: status === 'failed', interrupted: status === 'cancelled', calls: [expect.objectContaining({ status: 'interrupted' })] })
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'ToolCall', status: 'interrupted' }))
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'Status', status, detail: expect.any(String) }))
+  }
+  const failed = turns.find(turn => turn.work.failed)
+  expect(failed?.work.failureNote).toBe('Export worker lost; report totals retained, but no export result was received.')
+  expect(failed?.items).toContainEqual(expect.objectContaining({ _tag: 'Notice', kind: 'error', text: 'The export worker disconnected before returning a result.' }))
+})
+
+test('scenario transcript replaces a streaming revision with its final native content', () => {
+  const slice = loadWorld('transcript-families').slices.conversation
+  const before = scenarioSections(slice).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const after = scenarioSections({ ...slice, state: foldSlice(slice, 2_000).state }).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const partial = before.find(item => item._tag === 'Text' && item.streaming)
+  expect(partial).toMatchObject({ _tag: 'Text', streaming: true, text: 'The report totals are retained; checking the handoff summary.' })
+  expect(after.filter(item => item.id === partial?.id)).toHaveLength(1)
+  expect(after.find(item => item.id === partial?.id)).toMatchObject({ _tag: 'Text', streaming: false, text: 'All 18 checks passed. The export failed and its retry was cancelled; hand off the report totals, not an export artifact.' })
+  expect(after).toContainEqual(expect.objectContaining({ _tag: 'Status', status: 'completed', detail: 'Handoff summary complete; no export claimed.' }))
+})
+
+test('phone whole-thread projection preserves source rows while leaving mounting to Transcript', () => {
   const slice = loadWorld('huge').slices.conversation
+  const sourceIds = (sections: readonly TranscriptSection[]) => sections.flatMap(section => section.turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]))
+  const sourceRowCount = (turns: readonly TranscriptTurn[]) => turns.reduce((rows, turn) => rows + turn.items.length + (turn.prompt === undefined ? 0 : 1), 0)
   const bounded = scenarioSections(slice).sections
   const whole = scenarioSections(slice, 'whole-thread').sections
   expect(whole).toHaveLength(slice.state.threads.length)
-  expect(whole.flatMap(section => section.turns.map(turn => turn.id))).toEqual(bounded.flatMap(section => section.turns.map(turn => turn.id)))
-  expect(whole.some(section => section.turns.length > transcriptInitialTailCount + historyBatchSize)).toBe(true)
+  expect(sourceIds(whole)).toEqual(sourceIds(bounded))
+  // Bounded sections mount whole; whole threads exceed the initial bound, so Transcript defers their history.
+  expect(bounded.every(section => sourceRowCount(section.turns) <= transcriptInitialSourceRowCount)).toBe(true)
+  expect(whole.some(section => sourceRowCount(section.turns) > transcriptInitialSourceRowCount)).toBe(true)
 })
 
 test('connection geometry header and bounded history belong to the same thread', () => {

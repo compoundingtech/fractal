@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A mission loop with a timeout is re-evaluated when the timeout passes, so it ends on time even when nothing else changes, instead of at the next full pass",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "The loop's timeout verdict is unchanged; only when it is reached changes. A loop waiting on a blocked round or a person used to pass its timeout unnoticed until the reconciler's next full pass."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "An older build ends such a loop at its next full pass."}
+}

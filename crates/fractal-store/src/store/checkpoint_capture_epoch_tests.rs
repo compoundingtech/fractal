@@ -68,7 +68,7 @@ fn all_projection_protection_insert_update_delete_paths_advance_capture_epoch() 
 fn checkpoint_trim_advances_capture_epoch_with_tombstones_and_deletions() {
     let store = Store::open_memory("writer").unwrap();
     for n in 0..5 {
-        store.append_claim(&ClaimInput {
+        store.append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/writer".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -103,7 +103,7 @@ fn protection_updates_fence_old_and_new_below_cut_references_but_ignore_newer_ta
     let captured: String = store.readers.get().query_row(
         "SELECT claim_id FROM desired WHERE subject='agent/writer.capture'", [], |row| row.get(0),
     ).unwrap();
-    let newer = store.append_claim(&ClaimInput {
+    let newer = store.append_as_older_build_for_test(&ClaimInput {
         subject: "daemon/writer".into(),
         kind: "daemon.diagnostic".into(),
         actor: None,

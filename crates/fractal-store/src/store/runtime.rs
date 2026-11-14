@@ -15,6 +15,8 @@ pub struct PreviousRoster {
 /// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct FractalRuntime {
+    /// Daemon-local append authorization and read-time fold writers; never replication policy.
+    pub(super) usage_limits_writers: Mutex<BTreeSet<String>>,
     /// Source-owned observation fencing only; no canonical sample log or timer.
     pub(super) slo_source: Mutex<slo_breaches::SourceState>,
     /// Committed launch-source invalidation, independent of append frontiers.
@@ -67,6 +69,10 @@ pub struct FractalRuntime {
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub agent_roster_requested_at: std::sync::atomic::AtomicU64,
+    /// Serializes request capture/restoration with projection-generation reset.
+    pub agent_roster_request_generation: parking_lot::Mutex<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub agent_roster_restore_checked: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Bit 0: a refresh is in flight. Bit 1: the last attempt failed.
     pub agent_roster_attempt: std::sync::atomic::AtomicU8,
     /// Fault retries due in this fold, and deadlines deferred to the next refresh.
@@ -85,6 +91,9 @@ pub struct FractalRuntime {
     /// Counts complete current roster publications, same graph index or not, so collection
     /// streams that read an earlier one reread the newer.
     pub agent_roster_published: tokio::sync::watch::Sender<u64>,
+    /// Complete presented current rosters share the existing generation-fenced list owner.
+    pub presented_agents: published_list::PublishedList<agents_publication::PresentedAgents>,
+    pub presented_agents_epoch: agents_publication::NodeEpoch,
     /// Every other collection's published view revisions, for the same rereads.
     pub published_views: published_views::PublishedViews,
     /// The attention list a daemon's refresher publishes for collection windows.
@@ -172,12 +181,25 @@ impl Store {
 impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
+        resource_references::create_schema(connection)?;
+        // Legacy run stamps are projection metadata, not ownership of a shared URI.
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h379d33768384 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run=NULL, owner_generation=NULL, owner_step=NULL
+             WHERE kind='resource' AND subject LIKE 'resource/uri/%'
+               AND (owner_run IS NOT NULL OR owner_generation IS NOT NULL OR owner_step IS NOT NULL)",
+            [],
+        )?;
         push_registrations::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5484380b8507 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
         retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
+        // Before the projection backfills, which fold marks in.
+        message_marks::create_table(connection)?;
+        message_outbox::create_table(connection)?;
+        stream_mirror::create_table(connection)?;
+        relayed_closes::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
@@ -195,11 +217,16 @@ impl FractalRuntime {
         agent_messages::create_schema(connection)?;
         client_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        // After every projection its triggers maintain.
+        message_marks::create_triggers(connection)?;
+        relayed_closes::create_triggers(connection)?;
+        stream_mirror::create_triggers(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
+        ordered_membership::create_schema(connection)?;
         if let Some(transaction) = transaction {
             transaction.commit()?;
         }
@@ -227,11 +254,30 @@ impl FractalRuntime {
         }
         fractal_schema::registry()
     }
+
+    pub(super) fn validate_usage_limits_writer(&self, kind: &str, actor: Option<&str>) -> Result<(), FractalError> {
+        if kind == fractal_schema::usage_limits::KIND
+            && !actor.is_some_and(|actor| self.usage_limits_writers.lock().unwrap().contains(actor)) {
+            return Err(FractalError::new("claim-write-forbidden", "usage observation writer is not configured"));
+        }
+        Ok(())
+    }
 }
 
 impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
         Some(self.observer_actuals.clone())
+    }
+    fn admit_writer_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        writer: &str,
+        kind: &str,
+        subject: &str,
+    ) -> Result<(), FractalError> {
+        // A document a run binds is decided by its run authority, as its claims are.
+        super::run_authority::admit_tx(transaction, origin, Some(writer), kind, subject, &BTreeMap::new())
     }
     fn idempotency_response_in_use(&self, connection: &Connection, response: &str) -> Result<bool> {
         // Some local entries contain a digest, not JSON. They have no work lifetime to pin.
@@ -345,6 +391,8 @@ impl Runtime for FractalRuntime {
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
         projectors::run_hooks(projectors::OPEN, transaction)?;
+        resource_references::open(transaction, shared_memory)?;
+        ordered_membership::open(transaction)?;
         if shared_memory {
             rebuild_operations_tx(transaction)?;
             rebuild_planning_tx(transaction)?;
@@ -400,12 +448,16 @@ impl Runtime for FractalRuntime {
         BTreeMap::from([("mission_run_deadlines".into(), 3)])
     }
 
+    fn requires_keyed_envelope(&self, kind: &str) -> bool {
+        kind == crate::pairing::OPERATION_AUTHORIZED
+    }
+
     fn classify_replicated_claim(
         &self,
         _connection: &Connection,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Result<ReplicatedClaimAdmission, St3Error> {
+    ) -> Result<ReplicatedClaimAdmission, FractalError> {
         classify_replicated_claim_with_registry(claim, self.claim_registry())
     }
 
@@ -413,8 +465,7 @@ impl Runtime for FractalRuntime {
         &self,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Option<Result<ReplicatedClaimAdmission, St3Error>> {
-        // The registry is this build's schema, fixed for the process.
+    ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
         Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
     }
 
@@ -422,7 +473,15 @@ impl Runtime for FractalRuntime {
         &self,
         store: &GraphStore,
         input: &ClaimInput,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
+        self.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
+        if input.kind == message_expiry::KIND {
+            let gate = self.extensions.get::<message_expiry::ReceiptGate>();
+            let _held = gate.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let admission = |connection: &Connection| message_expiry::validate_shard(self, connection, &input.subject);
+            return append_claim_with_commit_context(store, input, None, None, None, None,
+                ClaimCommitContext { expiry_writer: true, admission: Some(&admission), ..Default::default() });
+        }
         append_claim_fenced_outcome(store, input, None)
     }
 
@@ -433,7 +492,30 @@ impl Runtime for FractalRuntime {
         replacement: &str,
     ) -> Result<()> {
         select_desired_repair_tx(transaction, repaired, replacement)?;
-        slo_breaches::repair(transaction, repaired)
+        slo_breaches::repair(transaction, repaired)?;
+        let original: Option<(String, String)> = transaction.query_row(
+            "SELECT subject,kind FROM claims WHERE id=?1",
+            [repaired], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((subject, kind)) = original else { return Ok(()); };
+        if matches!(kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
+            // Repair retracts every operation in the original, including pairs omitted
+            // by its replacement and the arrangement's shared revision. Reuse the same
+            // unrepaired-authority reducer as restart/checkpoint instead of partial undo.
+            arrangements::rebuild(transaction)?;
+            ordered_membership::rebuild(transaction)?;
+            arrangements::repair_frontier(transaction, &subject)?;
+            ordered_membership::repair_frontier(transaction, &subject)?;
+        } else if kind == read_positions::KIND {
+            // A retracted advance can lower a maximum: refold every unrepaired advance.
+            read_positions::repair_frontier(transaction)?;
+        } else if fractal_schema::attention_controls::KINDS.contains(&kind.as_str()) {
+            // A retracted control can move seen later or bring back an older snooze.
+            attention_controls::rebuild(transaction)?;
+        } else {
+            ordered_membership::member_repaired(transaction, &subject)?;
+        }
+        Ok(())
     }
 
     fn append_claim_tx(
@@ -447,6 +529,7 @@ impl Runtime for FractalRuntime {
         predecessors: &[String],
         forced_batch: Option<&str>,
     ) -> Result<ClaimRecord> {
+        self.validate_usage_limits_writer(kind, actor).map_err(anyhow::Error::new)?;
         append_claim_tx(
             transaction,
             origin,
@@ -464,11 +547,32 @@ impl Runtime for FractalRuntime {
         transaction: &Transaction<'_>,
         origin: &str,
         through: u64,
-    ) -> Result<IncrementalProjection, St3Error> {
+    ) -> Result<IncrementalProjection, FractalError> {
         try_project_simple_replication_tx(transaction, origin, through)
     }
 
-    fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn project_incremental_chunk(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        through: u64,
+    ) -> Result<IncrementalProjection, FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
+        try_project_simple_replication_inner_tx(transaction, origin, through, true)
+    }
+
+    fn projection_work_pending(&self, connection: &Connection) -> Result<bool, FractalError> {
+        projection_work_pending_tx(connection)
+    }
+
+    fn finish_projection_work(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
+        finish_projection_work_tx(transaction)
+    }
+
+    fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
         replay_graph_from_nothing_tx(transaction)
     }
 
@@ -476,13 +580,40 @@ impl Runtime for FractalRuntime {
         &self,
         transaction: &Transaction<'_>,
         progress: &mut dyn FnMut(ReplayProgress),
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         replay_graph_from_nothing_with_progress_tx(transaction, progress)
     }
 
-    fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
         projectors::run_hooks(projectors::FLUSH, transaction).map_err(internal)?;
-        reapply_local_work_lease_renewals_tx(transaction)
+        holds::stage("lease-renewals", || reapply_local_work_lease_renewals_tx(transaction))
+    }
+
+    fn delete_trimmed_claims_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        claims: &[ClaimTombstone],
+        delete: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        resources::delete_trimmed_tx(transaction, claims, delete)
+    }
+
+    fn rebuild_deferred(&self, transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
+        // The subjects a trim's steps left pending first, then the preparation its deletes deferred.
+        let started = std::time::Instant::now();
+        if resources::flush_pending(transaction, budget)? {
+            return Ok(true);
+        }
+        resources::flush_deferred_preparation(transaction, budget.saturating_sub(started.elapsed()))
+    }
+
+    fn deferred_pending(&self, connection: &Connection) -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)
+                OR EXISTS(SELECT 1 FROM local_resource_projection_pending)",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
@@ -490,7 +621,11 @@ impl Runtime for FractalRuntime {
         // without running APPEND (or can do so after its last claim projector).
         // The native connection signal makes the no-work boundary SQL-free.
         resources::flush_preparation(transaction)?;
+        // Desired/liveness projections can change after the final claim projector.
+        // The connection-local hint keeps unrelated commits SQL-free.
+        custom::flush(transaction)?;
         completion_state::flush(transaction)?;
+        run_eta::flush(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -502,6 +637,13 @@ impl Runtime for FractalRuntime {
     }
 
     fn forget_views(&self) {
+        // Pending work names the discarded projection generation. A recent reader or a
+        // live subscriber below can request a new-generation publication after invalidation.
+        {
+            let _generation = self.agent_roster_request_generation.lock();
+            self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
+            self.presented_agents.forget();
+        }
         self.forget_reductions();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
@@ -515,6 +657,29 @@ impl Runtime for FractalRuntime {
         self.published_runtimes.forget();
         self.published_views.invalidate();
         self.wake_read_roster();
+    }
+
+    fn claims_trimmed(&self) {
+        // A trim's run goes on: every list refolds, keeping its generation, so a fold under way
+        // still publishes and readers keep their rows.
+        // Forgetting them here, after every chunk, restarted the roster's fold of seconds
+        // before it could publish, all through the run. The trim forgets the views once when
+        // the run stops, which also drops what the caches hold of the claims it deleted.
+        self.presented_agents.refold();
+        self.published_missions.refold();
+        self.published_work.refold();
+        self.published_runtimes.refold();
+        // Glasses and arrangements read again only the people whose rows changed, so they reread
+        // everyone, keeping their generation. The attention list refolds from nothing on its own
+        // clock (30 s), and the summary's shared counts recompute when the roster publishes and
+        // every period; forgetting either would only drop a fold under way.
+        self.glass_list.refold();
+        self.arrangement_list.refold();
+        self.published_views.invalidate();
+        self.wake_read_roster();
+        if let Some(wake) = self.attention_list.refresher.get() {
+            wake.notify_one();
+        }
     }
 
     fn projection_advanced(&self, caught_up: bool) {
@@ -622,7 +787,7 @@ impl Runtime for FractalRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.slo-breach-episodes.v1";
+    "st3.shared-projections.slo-breach-episodes-declared-resource-edges-arrangement-placement-migration.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {
@@ -634,17 +799,25 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
     if fresh {
         let transaction = connection.unchecked_transaction()?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h31d1ed089c5e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        desired_progress::initialize_write_witness(&transaction)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hcbab08c75150 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hc85e78595758 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ attention_controls::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
+        mission_supersession::install_schema(&transaction)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        desired_progress::initialize_write_witness(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2eda34b01b09 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ read_positions::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h9d92a9b287c2 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ attention_controls::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
+        mission_supersession::install_schema(connection)?;
     }
     Ok(())
 }
@@ -660,10 +833,12 @@ impl FractalRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         cache.views.clear();
+        cache.serving_views.clear();
         cache.statuses.clear();
         cache.summary_statuses.clear();
         cache.runtime_statuses.clear();
         cache.card_statuses.clear();
+        cache.serving_card_statuses.clear();
         drop(cache);
         let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
         self.conversation_owner_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -693,11 +868,23 @@ impl FractalRuntime {
     /// store. Where agents lists are being read, start it here rather than when the next read
     /// finds no roster and waits for it. A node nobody reads keeps folding only on demand, so a
     /// long catch-up or trim that forgets once per chunk does not refold it once per chunk.
-    fn wake_read_roster(&self) {
+    pub fn agents_publication_demand(&self) -> bool {
         let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
-        let read_lately = read_at != 0
-            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64;
-        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| read_lately) {
+        self.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire) != 0
+            || self.presented_agents.has_subscribers() || (read_at != 0
+                && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64)
+    }
+
+    pub fn wake_read_roster(&self) {
+        if self.agents_publication_demand() {
+            self.request_roster_refresh();
+        }
+    }
+
+    /// A queued startup, explicit-read or local-activity request remains demand until answered.
+    pub fn request_roster_refresh(&self) {
+        if let Some(wake) = self.agent_roster_refresh.get() {
+            let _generation = self.agent_roster_request_generation.lock();
             let _ = self.agent_roster_requested_at.compare_exchange(
                 0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
@@ -711,6 +898,242 @@ impl FractalRuntime {
 mod schema_install_tests {
     use super::*;
 
+    /// What smallclaims installs before the runtime's schema: its tables and the fleet generation
+    /// counter, which the notice owner's invalidation trigger watches.
+    fn graph_schema(connection: &Connection) {
+        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        connection.execute_batch("CREATE TABLE fleet_generation(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL); INSERT INTO fleet_generation VALUES(1,0);").unwrap();
+    }
+
+    #[test]
+    fn assistant_principal_index_installs_on_existing_claims_and_reopens_without_ddl() {
+        const GRANTED: &str = "custom.client.assistant.v1.granted";
+        const REVOKED: &str = "custom.client.assistant.v1.revoked";
+        const POLICY: &str = "custom.client.assistant.v1.policy";
+        const INDEX: &str = "claims_assistant_v1_principal_index";
+        const SELECT: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
+        const ACTIVE: &str =
+            "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+     AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
+     AND (?5 IS NULL OR COALESCE(
+         (SELECT CASE WHEN json_type(policy.body,'$.fields') IS NULL THEN 1 ELSE
+             COALESCE(json_type(policy.body,'$.fields.expires_at_unix_ms')='integer'
+                 AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5,0) END
+          FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 ORDER BY policy.store_index DESC LIMIT 1),
+         CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
+             COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
+                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
+
+        fn snapshot(connection: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
+            connection
+                .prepare("SELECT * FROM claims ORDER BY store_index")
+                .unwrap()
+                .query_map([], |row| {
+                    (0..row.as_ref().column_count()).map(|column| row.get(column)).collect()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        fn plan(connection: &Connection, sql: &str, active: bool) -> Vec<String> {
+            let parameters: Vec<&dyn rusqlite::ToSql> = if active {
+                vec![&GRANTED, &"assistant/chatgpt", &REVOKED, &POLICY, &100_u64]
+            } else {
+                vec![&GRANTED, &"assistant/chatgpt"]
+            };
+            connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(parameters.as_slice(), |row| row.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+
+        // These supported stores need additive DDL, not a data or version conversion.
+        for version in [18, 19, fractal_schema::STORAGE_VERSION] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("claims.sqlite");
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+            install_initial_schema(&connection, true).unwrap();
+            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index;").unwrap();
+            connection.pragma_update(None, "user_version", version).unwrap();
+            connection.execute(
+                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('batch','node',1,'hash','1')",
+                [],
+            ).unwrap();
+            for (id, subject, kind, body) in [
+                ("legacy", "custom/client/legacy", GRANTED, r#"{"fields":{"expires_at_unix_ms":200}}"#),
+                ("chatgpt", "custom/client/chatgpt", GRANTED, r#"{"fields":{"principal":"assistant/chatgpt","expires_at_unix_ms":50}}"#),
+                ("mcp", "custom/client/mcp", GRANTED, r#"{"fields":{"principal":"assistant/mcp","expires_at_unix_ms":200}}"#),
+                ("policy", "custom/client/chatgpt", POLICY, r#"{"fields":{"expires_at_unix_ms":200}}"#),
+                ("revoked", "custom/client/legacy", REVOKED, r#"{"fields":{}}"#),
+                ("unrelated", "custom/test/unrelated", "custom.test.recorded", r#"{"fields":{}}"#),
+            ] {
+                connection.execute(
+                    "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES(?1,'batch',?2,?3,'node',?4,'[]','1')",
+                    params![id, subject, kind, body],
+                ).unwrap();
+            }
+            let before = snapshot(&connection);
+            let plans_before = [plan(&connection, SELECT, false), plan(&connection, ACTIVE, true)];
+            assert!(plans_before.iter().flatten().all(|detail| !detail.contains(INDEX)));
+            drop(connection);
+
+            let connection = Connection::open(&path).unwrap();
+            migrate_schema(&connection).unwrap();
+            install_initial_schema(&connection, false).unwrap();
+            assert_eq!(snapshot(&connection), before, "version {version}: claim bytes");
+            assert_eq!(
+                connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(),
+                version,
+            );
+            for (sql, active, previous) in [(SELECT, false, &plans_before[0]), (ACTIVE, true, &plans_before[1])] {
+                let current = plan(&connection, sql, active);
+                eprintln!("assistant admission version={version} active={active} before={previous:?} after={current:?}");
+                assert!(
+                    current.iter().any(|detail| detail.contains("SEARCH") && detail.contains(INDEX)
+                        && detail.contains("kind=?") && detail.contains("<expr>=?")),
+                    "version {version}: before={previous:?}; after={current:?}",
+                );
+            }
+            for (principal, mut expected) in [
+                ("assistant/chatgpt", vec!["chatgpt".to_owned(), "legacy".to_owned()]),
+                ("assistant/mcp", vec!["mcp".to_owned()]),
+            ] {
+                let mut found = connection.prepare(SELECT).unwrap()
+                    .query_map(params![GRANTED, principal], |row| row.get::<_, String>(0))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                found.sort();
+                expected.sort();
+                assert_eq!(found, expected);
+            }
+            let active = connection.prepare(ACTIVE).unwrap()
+                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, 100_u64], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(active, vec!["chatgpt"]);
+            let unfiltered = connection.prepare(ACTIVE).unwrap()
+                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, Option::<u64>::None], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(unfiltered.len(), 2, "no cutoff preserves unfiltered validation candidates");
+            let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
+            drop(connection);
+
+            let connection = Connection::open(&path).unwrap();
+            migrate_schema(&connection).unwrap();
+            install_initial_schema(&connection, false).unwrap();
+            assert_eq!(snapshot(&connection), before);
+            assert_eq!(
+                connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(),
+                cookie,
+                "an unchanged reopen must not rebuild the index",
+            );
+        }
+    }
+
+    #[test]
+    fn supersession_queue_counter_survives_empty_reopen_without_frontier_scans() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queue-counter.sqlite");
+        let mut previous = 0;
+        for (attempt, goal) in ["First publication.", "Second publication.", "Third publication."].into_iter().enumerate() {
+            let store = Store::open(&path, "owner").unwrap();
+            let source = format!("version 2\nmission \"counter\" state=\"ready\" {{ goal {goal:?}; step \"work\" {{ agentless }} }}\n");
+            let intent = crate::graph::parse_test_intent(&source, "owner").unwrap();
+            let plan = store.mission(&intent, IntentInput {
+                kdl: source, source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, &format!("counter-{attempt}")).unwrap();
+            let sequence: u64 = store.readers.get().query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert!(sequence > previous, "emptying and reopening must not reuse a drain ceiling");
+            previous = sequence;
+            assert_eq!(store.readers.get().query_row(
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), 0, "ordinary publication drains its own head");
+            let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            assert!(store.index().unwrap() > 0);
+            let work = scope.finish();
+            assert_eq!(work.fullscan_steps, 0, "private queue allocation must not add work to canonical frontier reads: {work:?}");
+        }
+    }
+
+    #[test]
+    fn supersession_bootstrap_recovers_after_each_data_write_refusal() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        for (refused_table, refused_meta_insert) in [
+            ("local_mission_supersession_heads_v3", 0), ("meta", 1), ("meta", 2),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("bootstrap.sqlite");
+            let store = Store::open(&path, "owner").unwrap();
+            let source = "version 2\nmission \"existing-head\" state=\"ready\" { goal \"Recover selected heads.\"; step \"work\" { agentless } }\n";
+            let intent = crate::graph::parse_test_intent(source, "owner").unwrap();
+            let plan = store.mission(&intent, IntentInput {
+                kdl: source.into(), source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, "bootstrap-head").unwrap();
+            {
+                let connection = store.connection.write();
+                connection.execute("DELETE FROM meta WHERE key=?1",
+                    [mission_supersession::BOOTSTRAP_KEY]).unwrap();
+                connection.execute("DELETE FROM local_mission_supersession_heads_v3", []).unwrap();
+                let counter = || connection.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_mission_supersession_heads_v3_sequence'",
+                    [], |row| row.get::<_, u64>(0),
+                ).unwrap();
+                let counter_before = counter();
+                let meta_inserts = std::sync::atomic::AtomicUsize::new(0);
+                connection.authorizer(Some(move |context: AuthContext<'_>| {
+                    let denied = match context.action {
+                        AuthAction::Insert { table_name } if table_name == refused_table => {
+                            table_name != "meta" || meta_inserts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 == refused_meta_insert
+                        }
+                        _ => false,
+                    };
+                    if denied {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }));
+                assert!(mission_supersession::install_schema(&connection).is_err());
+                connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+                assert!(connection.is_autocommit(), "failed bootstrap must roll back");
+                assert_eq!(counter(), counter_before, "failed bootstrap must roll back its allocator");
+                assert_eq!(connection.query_row(
+                    "SELECT COUNT(*) FROM local_mission_supersession_heads_v3",
+                    [], |row| row.get::<_, u64>(0),
+                ).unwrap(), 0, "head seed and completion marker must commit together");
+                assert!(!connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+                    [mission_supersession::BOOTSTRAP_KEY], |row| row.get::<_, bool>(0),
+                ).unwrap());
+            }
+            drop(store);
+            let store = Store::open(&path, "owner").unwrap();
+            let connection = store.connection.write();
+            assert_eq!(connection.query_row(
+                "SELECT COUNT(*) FROM local_mission_supersession_heads_v3 WHERE mission_id='existing-head'",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), 1, "reopen must recover the existing selected head");
+            assert!(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')",
+                [mission_supersession::BOOTSTRAP_KEY], |row| row.get::<_, bool>(0),
+            ).unwrap());
+            let changes = connection.total_changes();
+            let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
+            install_initial_schema(&connection, false).unwrap();
+            assert_eq!(connection.total_changes(), changes, "complete reopen must not write");
+            assert_eq!(connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(), cookie);
+        }
+    }
+
     #[test]
     fn complete_runtime_schema_does_not_take_a_held_writer_lock() {
         let directory = tempfile::tempdir().unwrap();
@@ -718,6 +1141,9 @@ mod schema_install_tests {
         let writer = Connection::open(&path).unwrap();
         writer.execute_batch(smallclaims::store::SCHEMA).unwrap();
         install_initial_schema(&writer, true).unwrap();
+        writer.execute(
+            "UPDATE local_desired_write_witness SET generation=7 WHERE id=1", [],
+        ).unwrap();
         writer
             .execute_batch("PRAGMA user_version=18; BEGIN IMMEDIATE;")
             .unwrap();
@@ -726,14 +1152,35 @@ mod schema_install_tests {
         install_initial_schema(&reader, false).unwrap();
         assert!(reader.is_autocommit());
         assert!(reader.execute_batch("BEGIN IMMEDIATE;").is_err());
+        assert_eq!(reader.total_changes(), 0, "complete schema installation must not write");
+        assert_eq!(reader.query_row(
+            "SELECT generation FROM local_desired_write_witness WHERE id=1",
+            [], |row| row.get::<_, u64>(0),
+        ).unwrap(), 7, "reopen must preserve the durable generation");
+    }
+
+    #[test]
+    fn runtime_schema_initializes_only_a_missing_desired_write_witness() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        install_initial_schema(&connection, true).unwrap();
+        connection.execute(
+            "DELETE FROM local_desired_write_witness WHERE id=1", [],
+        ).unwrap();
+        install_initial_schema(&connection, false).unwrap();
+        assert_eq!(connection.query_row(
+            "SELECT generation FROM local_desired_write_witness WHERE id=1",
+            [], |row| row.get::<_, u64>(0),
+        ).unwrap(), 0);
+        let changes = connection.total_changes();
+        install_initial_schema(&connection, false).unwrap();
+        assert_eq!(connection.total_changes(), changes, "an initialized witness needs no write");
     }
 
     #[test]
     fn incomplete_runtime_schema_keeps_completed_ddl() {
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('preserved');").unwrap();
         assert!(
             FractalRuntime::default()
@@ -754,9 +1201,7 @@ mod schema_install_tests {
     #[test]
     fn failed_runtime_schema_install_rolls_back_its_ddl_and_preserves_existing_data() {
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         // This damaged table fails after the runtime's early claim indexes were created.
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('existing');").unwrap();
         let error = FractalRuntime::default()
@@ -777,9 +1222,7 @@ mod schema_install_tests {
     fn late_install_error_fixture() -> (Connection, std::sync::Arc<std::sync::atomic::AtomicBool>) {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved');").unwrap();
         let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let observed = reached.clone();
@@ -884,9 +1327,7 @@ mod schema_install_tests {
     fn fresh_late_runtime_ddl_has_one_transaction_boundary() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
         let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
+        graph_schema(&connection);
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let committed = events.clone();
         connection.commit_hook(Some(move || {
@@ -989,9 +1430,7 @@ mod schema_install_tests {
                 let connection = Connection::open(&path).unwrap();
                 connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved'); PRAGMA user_version=18;").unwrap();
                 if phase != "core" {
-                    connection
-                        .execute_batch(smallclaims::store::SCHEMA)
-                        .unwrap();
+                    graph_schema(&connection);
                 }
             }
             let status = std::process::Command::new(std::env::current_exe().unwrap())

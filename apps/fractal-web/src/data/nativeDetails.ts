@@ -1,11 +1,11 @@
 import type * as Native from '@fractal/client/schema'
-import type { DecodedAgent } from '@fractal/sdk/effect'
+import type { DecodedAgent } from '@fractal/sdk/read'
 import type { DetailsOverview, DetailsReadFailure, DetailsSection, DetailsSpendRead, DetailsState, DetailsResource, TraceSeries, TraceFact, TraceCoverage, TraceAccumulationWindow } from '@fractal/ui/assistant-ui'
 import type { SyncStatus } from '@fractal/ui/assistant-ui/sync-status'
 import { DateTime, Duration, Option } from 'effect'
 import { earliestChange } from '@fractal/ui/human-time/format'
 import { contextOccupancy } from './contextOccupancy.ts'
-import type { Agent, Feed } from './source.ts'
+import { credentialExpiredMessage, credentialNotice, type Agent, type Feed } from './source.ts'
 import type { NativeDeclarations } from './nativeDeclarations.ts'
 
 export interface NativeDetailsObservation {
@@ -13,6 +13,7 @@ export interface NativeDetailsObservation {
   readonly sections: readonly DetailsSection[]
   readonly trace: TraceSeries
   readonly state: DetailsState
+  readonly credentialNotice?: string
   readonly observedAt?: number
   readonly stale: boolean
   readonly nativeSessionId?: string
@@ -79,6 +80,7 @@ const usageRead = ({ feed, refresh }: { readonly feed: Feed<Native.UsagePeriod>;
 export const nativeDetailsUriPrefix = 'details:'
 const rowSyncStatus = (feed: Feed<unknown>): SyncStatus | undefined => {
   if (feed._tag !== 'Unavailable') return undefined
+  if (feed.reason === 'unauthorized') return { _tag: 'Failed', cause: { _tag: 'Server', code: feed.code ?? 'forbidden', message: credentialExpiredMessage } }
   if (feed.reason === 'ungranted') return { _tag: 'Failed', cause: { _tag: 'Server', code: feed.code ?? 'forbidden', message: feed.detail } }
   if (feed.reason === 'unsupported') return { _tag: 'Failed', cause: { _tag: 'Server', code: feed.code ?? 'unsupported', message: feed.detail } }
   return { _tag: 'Failed', cause: feed.code === undefined ? { _tag: 'Unknown' } : { _tag: 'Server', code: feed.code, message: feed.detail } }
@@ -138,8 +140,8 @@ const elapsedChange = (at: number | undefined, now: number): number | undefined 
   return at + (Math.floor((now - at) / unit) + 1) * unit
 }
 const factFailure = (feed: Feed<unknown>): string => feed._tag === 'Waiting' ? 'Loading this session’s details.'
-  : feed._tag === 'Unavailable' ? feed.reason === 'ungranted' ? 'Access to these details is not granted.' : feed.reason === 'unsupported' ? 'This session does not report these details.' : 'These details could not be loaded.'
-  : feed.error?.reason === 'ungranted' ? 'Access to these details is not granted.' : 'Not reported for this session.'
+  : feed._tag === 'Unavailable' ? feed.reason === 'unauthorized' ? credentialExpiredMessage : feed.reason === 'ungranted' ? 'Access to these details is not granted.' : feed.reason === 'unsupported' ? 'This session does not report these details.' : 'These details could not be loaded.'
+  : feed.error?.reason === 'unauthorized' ? credentialExpiredMessage : feed.error?.reason === 'ungranted' ? 'Access to these details is not granted.' : 'Not reported for this session.'
 const resource = ({ key, label, detail }: { readonly key: string; readonly label: string; readonly detail: string }): DetailsResource => ({ uri: `${nativeDetailsUriPrefix}${key}`, glyph: 'resource', card: { kind: 'worktree', label, detail, fileCount: { _tag: 'Unknown' }, files: [] } })
 
 /** Pure host DTO boundary: SDK-normalized roster rows, generated getter DTOs, no fixture fallback. */
@@ -160,11 +162,11 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   readonly onRetry: () => void
   readonly reads: NativeDetailsReads
 }): NativeDetailsObservation => {
-  const row = rowFeed._tag === 'Observed' && rowFeed.error?.reason !== 'ungranted' ? rowFeed.value : undefined
-  const projected = agent._tag === 'Observed' && agent.error?.reason !== 'ungranted' ? agent.value : undefined
-  const session = sessionFeed._tag === 'Observed' && sessionFeed.error?.reason !== 'ungranted' ? sessionFeed.value : undefined
-  const period = periodFeed._tag === 'Observed' && periodFeed.error?.reason !== 'ungranted' ? periodFeed.value : undefined
-  const declared = declarations._tag === 'Observed' && declarations.error?.reason !== 'ungranted' && declarations.value.agentRef === agentRef ? declarations.value : undefined
+  const row = rowFeed._tag === 'Observed' && rowFeed.error?.reason !== 'ungranted' && rowFeed.error?.reason !== 'unauthorized' ? rowFeed.value : undefined
+  const projected = agent._tag === 'Observed' && agent.error?.reason !== 'ungranted' && agent.error?.reason !== 'unauthorized' ? agent.value : undefined
+  const session = sessionFeed._tag === 'Observed' && sessionFeed.error?.reason !== 'ungranted' && sessionFeed.error?.reason !== 'unauthorized' ? sessionFeed.value : undefined
+  const period = periodFeed._tag === 'Observed' && periodFeed.error?.reason !== 'ungranted' && periodFeed.error?.reason !== 'unauthorized' ? periodFeed.value : undefined
+  const declared = declarations._tag === 'Observed' && declarations.error?.reason !== 'ungranted' && declarations.error?.reason !== 'unauthorized' && declarations.value.agentRef === agentRef ? declarations.value : undefined
   const stale = [agent, rowFeed, sessionFeed, periodFeed, declarations, missions].some(feed => feed._tag === 'Observed' && feed.freshness === 'stale')
   const spendRead = usageRead({ feed: periodFeed, refresh: reads.refreshUsage })
   const sessionFailure = retryableFailure(sessionRead) ? readFailure('session', sessionRead!, reads.retrySession) : undefined
@@ -196,10 +198,10 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   // Unpriced tokens are not expressible in kit coverage; the amount keeps unavailable attribution coverage.
   const cost = rows.reduce((sum, item) => sum + item.cost_microusd, 0) / 1_000_000
   // API period groups expose latest native ID, not their incarnation or binding history.
-  const nativeCoverage: TraceCoverage = { _tag: 'Unavailable', reason: rows.some(item => item.unpriced_tokens > 0) ? 'not-covered' : 'not-attributed' }
+  const nativeCoverage: TraceCoverage = { _tag: 'Unavailable', reason: rows.some(item => item.unpriced_tokens > 0 || (item.unpriced_responses ?? 0) > 0) ? 'not-covered' : 'not-attributed' }
   const unsupported = unknown<number>('This session does not report spend including subagents.')
   const timing = row === undefined ? {} : nativeDetailsTiming({ row, session, snapshotCreatedAt: sessionFeed._tag === 'Observed' ? sessionFeed.snapshotCreatedAt : undefined, now })
-  const timingDetail = timing.detail ?? (sessionFeed._tag === 'Unavailable' ? sessionFeed.detail : undefined)
+  const timingDetail = timing.detail ?? (sessionFeed._tag === 'Unavailable' ? sessionFeed.reason === 'unauthorized' ? credentialExpiredMessage : sessionFeed.detail : undefined)
   const timingPending = rowFeed._tag === 'Waiting' || sessionFeed._tag === 'Waiting'
   // A rejected declaration projection must expose the same recovery control as a failed getter.
   const syncStatus = rowSyncStatus(rowFeed) ?? (declarations._tag === 'Unavailable' && declarations.reason === 'failed' ? rowSyncStatus(declarations) : undefined)
@@ -213,7 +215,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
   const workspaceItems: DetailsResource[] = []
   if (row !== undefined && Option.isSome(row.workspace)) workspaceItems.push(resource({ key: 'workspace/declared', label: 'Declared workspace', detail: 'Configured on the owning host; path withheld. Observed checkout/cwd confirmation is not reported.' }))
   if (row !== undefined && Option.isSome(row.checkout)) workspaceItems.push(resource({ key: 'workspace/requested-checkout', label: 'Requested repository / branch', detail: 'Repository, base and branch are declared intent; reference targets withheld. Successful checkout is not observed.' }))
-  const nativeQueue = queue?._tag === 'Observed' && queue.error?.reason !== 'ungranted' && queue.value.agent_id === agentRef ? queue.value : undefined
+  const nativeQueue = queue?._tag === 'Observed' && queue.error?.reason !== 'ungranted' && queue.error?.reason !== 'unauthorized' && queue.value.agent_id === agentRef ? queue.value : undefined
   const queuedResources = nativeQueue === undefined ? [] : [
     resource({ key: 'queue/summary', label: `Current work · ${nativeQueue.current_work_ids.length}`, detail: `${nativeQueue.runs.length} observed mission runs in this agent queue${queue?._tag === 'Observed' && queue.freshness === 'stale' ? ' · last observed queue' : ''}` }),
     ...nativeQueue.runs.map(run => resource({ key: `queue/${run.mission_run_id}`, label: `Mission run · ${run.mission_run_id}`, detail: `${run.state} · ${run.run_state} · ${run.ready_work_ids.length} ready, ${run.waiting_work_ids.length} waiting · position ${run.position}` })),
@@ -262,6 +264,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     nativeRootPending: rowFeed._tag === 'Waiting' || periodFeed._tag === 'Waiting',
     ...(incarnationId === undefined ? {} : { incarnationId }), ...(nativeHost === undefined ? {} : { host: nativeHost }), ...(projected?.harness === undefined ? {} : { harness: projected.harness }),
     ...(syncStatus === undefined ? {} : { syncStatus }), onRetry,
+    ...([rowFeed, agent, sessionFeed, sessionRead, periodFeed, declarations, missions, queue].some(feed => credentialNotice(feed)) ? { credentialNotice: credentialExpiredMessage } : {}),
     ...(spendRead === undefined ? {} : { spendRead }), ...(sessionFailure === undefined ? {} : { sessionFailure }),
     sessionPending: readPending(sessionRead),
     ...(nextChangeAt === undefined ? {} : { nextChangeAt }),

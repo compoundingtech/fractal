@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import html from './index.html?raw'
 import main from './main.tsx?raw'
 import { coldOpenDocument, type ColdOpenControl } from './coldOpen.fixtures.ts'
@@ -25,6 +25,14 @@ describe('first-paint document', () => {
     expect(document.documentElement.style.getPropertyValue('--wf-boot-canvas')).toBe(scheme === 'dark' ? '#0a0a0a' : '#fcfcfc')
     expect(document.querySelectorAll('[data-wf-sidebar-skeleton] > div')).toHaveLength(8)
     expect(document.querySelector('[data-wf-shell-skeleton]')?.getAttribute('aria-busy')).toBe('true')
+  })
+  it.each([[true, 'dark'], [false, 'light']] as const)('paints System from the device before application code executes (dark device: %s)', (dark, scheme) => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(prefers-color-scheme: dark)' && dark }))
+    try {
+      const document = render(savedTheme('system'))
+      expect(document.documentElement.dataset.scheme).toBe(scheme)
+      expect(document.documentElement.style.colorScheme).toBe(scheme)
+    } finally { vi.unstubAllGlobals() }
   })
   it.each([undefined, '{bad', savedTheme('unexpected')])('uses the product dark default for missing or unreadable preference', saved => {
     expect(render(saved).documentElement.dataset.scheme).toBe('dark')

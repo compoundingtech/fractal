@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make workspace persistence tests drain debounce timers instead of sleeping for 30 ms.",
+  "replay": { "status": "none", "detail": "Test-only change; replay behavior is unchanged." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules or fleet coordination changes." },
+  "compatibility": { "status": "none", "detail": "No runtime, client, protocol or harness compatibility changes." },
+  "downtime": { "status": "none", "detail": "No services need restarting for this test-only change." },
+  "manual": { "status": "none", "detail": "No manual upgrade steps are required." },
+  "recovery": { "status": "none", "detail": "No runtime behavior or persisted data changes; rollback and roll-forward need no special steps." }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "CSP highlighting proof reports uncached source paint and highlighting timing",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persistent data changes." },
+  "rules": { "status": "none", "detail": "No upgrade coordination changes." },
+  "compatibility": { "status": "none", "detail": "Semantic token names and palette remain unchanged; token marker lookup is shared rather than allocated per token." },
+  "downtime": { "status": "none", "detail": "No expected interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "No persistent state changes; reverting this proof and token mapping refinement needs no recovery action." }
+}

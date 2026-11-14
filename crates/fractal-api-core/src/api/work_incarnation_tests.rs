@@ -19,11 +19,11 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(bound: bool) -> Self {
-        fn chooser(_: u32) -> Option<String> {
-            Some(SEAT.into())
+        fn chooser(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+            HarnessAncestry::Bound(SEAT.into())
         }
-        fn unbound(_: u32) -> Option<String> {
-            None
+        fn unbound(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+            HarnessAncestry::Person
         }
         let root = tempfile::tempdir().unwrap();
         let state = super::tests::state(root.path());
@@ -199,6 +199,8 @@ async fn explicit_stale_ask_names_expected_and_given_incarnations() {
     let message = fixture.refused(body, "stale-work-ask").await;
     assert!(message.contains("chooser:one"), "{message}");
     assert!(message.contains("chooser:stale"), "{message}");
+    assert!(message.contains(&fixture.step), "{message}");
+    assert!(message.contains("omit --step"), "{message}");
 }
 
 #[cfg(target_os = "linux")]
@@ -212,6 +214,8 @@ async fn restarted_seat_cannot_ask_with_its_old_incarnation() {
     let message = fixture.refused(body, "stale-work-ask").await;
     assert!(message.contains("chooser:two"), "{message}");
     assert!(message.contains("chooser:one"), "{message}");
+    assert!(message.contains(&fixture.step), "{message}");
+    assert!(message.contains("omit --step"), "{message}");
 }
 
 #[tokio::test]

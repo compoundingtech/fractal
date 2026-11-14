@@ -13,6 +13,37 @@ use serde::{Deserialize, Serialize};
 
 pub const MOVED_CLAIM: &str = "agent.queue.moved";
 
+/// Compare work actors without changing persisted rows or conflating recognized actor kinds.
+pub fn work_actor_matches(candidate: Option<&str>, actor: &str) -> bool {
+    let Some(candidate) = candidate.and_then(fractal_schema::canonical_agent_actor) else {
+        return false;
+    };
+    fractal_schema::canonical_agent_actor(actor).as_deref() == Some(candidate.as_ref())
+}
+
+#[derive(Clone, Copy)]
+enum ActorMatching {
+    Literal,
+    Aliases,
+}
+
+impl ActorMatching {
+    fn matches(self, candidate: Option<&str>, actor: &str) -> bool {
+        match self {
+            Self::Literal => candidate == Some(actor),
+            Self::Aliases => work_actor_matches(candidate, actor),
+        }
+    }
+
+    fn same(self, left: Option<&str>, right: Option<&str>) -> bool {
+        match (left, right) {
+            (Some(left), Some(right)) => self.matches(Some(left), right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Placement {
@@ -99,6 +130,30 @@ pub fn replay(joins: &[QueueJoin], moves: &[QueueMove]) -> Vec<String> {
         join_run(&mut order, &join.run);
     }
     order
+}
+
+/// The runs outside `live` that the live runs' order can depend on: the anchors of the live
+/// runs' moves, then the anchors of those anchors' own moves, and so on. Every join and move
+/// changes only its own run's place, so a run that no kept run is ever placed against cannot
+/// change the order of the others. [`replay`] gives the live runs the same order whether or
+/// not it knows such a run's join.
+pub fn order_anchors(moves: &[QueueMove], live: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut anchors = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for movement in moves {
+        if let Some(anchor) = movement.anchor.as_deref() {
+            anchors.entry(movement.run.as_str()).or_default().push(anchor);
+        }
+    }
+    let mut needed = BTreeSet::new();
+    let mut placed = live.iter().map(String::as_str).collect::<Vec<_>>();
+    while let Some(run) = placed.pop() {
+        for anchor in anchors.get(run).into_iter().flatten() {
+            if !live.contains(*anchor) && needed.insert((*anchor).to_owned()) {
+                placed.push(anchor);
+            }
+        }
+    }
+    needed
 }
 
 fn join_run(order: &mut Vec<String>, run: &str) {
@@ -194,12 +249,26 @@ impl<'a> SeatSelection<'a> {
 /// place either: a ready step whose claim by this seat a revision dropped comes
 /// first until the seat claims it again.
 pub fn select<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> SeatSelection<'a> {
+    select_with_matching(agent, steps, run_order, ActorMatching::Aliases)
+}
+
+/// Select mutation-admission work using the exact persisted actor spellings.
+pub fn select_literal<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> SeatSelection<'a> {
+    select_with_matching(agent, steps, run_order, ActorMatching::Literal)
+}
+
+fn select_with_matching<'a>(
+    agent: &str,
+    steps: &[SeatStep<'a>],
+    run_order: &[String],
+    matching: ActorMatching,
+) -> SeatSelection<'a> {
     let held = steps
         .iter()
         .filter(|step| {
             matches!(step.status, "claimed" | "working" | "verifying")
-                && (step.claimant == Some(agent) || step.assignee == Some(agent))
-                && !submitted_with_ready_nested_work(step, steps)
+                && (matching.matches(step.claimant, agent) || matching.matches(step.assignee, agent))
+                && !submitted_with_ready_nested_work_matching(step, steps, matching)
         })
         .map(|step| step.subject)
         .collect();
@@ -213,11 +282,13 @@ pub fn select<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> 
         .iter()
         .filter(|step| {
             step.status == "ready"
-                && step.assignee == Some(agent)
-                && !reached_through_parent(step, steps)
+                && matching.matches(step.assignee, agent)
+                && !steps.iter().any(|candidate| {
+                    nests_under_matching(candidate, step, matching) && candidate.status != "verifying"
+                })
         })
         .collect::<Vec<_>>();
-    let waits_its_turn = |step: &SeatStep<'_>| step.carried_claimant != Some(agent);
+    let waits_its_turn = |step: &SeatStep<'_>| !matching.matches(step.carried_claimant, agent);
     ready.sort_by(|left, right| {
         waits_its_turn(left)
             .cmp(&waits_its_turn(right))
@@ -243,9 +314,21 @@ pub fn reached_through_parent(step: &SeatStep<'_>, steps: &[SeatStep<'_>]) -> bo
 /// True when `step` is nested under the listed `ancestor` in the same run and
 /// both have the same selector.
 pub fn nests_under(ancestor: &SeatStep<'_>, step: &SeatStep<'_>) -> bool {
+    nests_under_matching(ancestor, step, ActorMatching::Aliases)
+}
+
+/// Compare nested selectors for mutation admission without merging actor aliases.
+pub fn nests_under_literal(ancestor: &SeatStep<'_>, step: &SeatStep<'_>) -> bool {
+    nests_under_matching(ancestor, step, ActorMatching::Literal)
+}
+
+fn nests_under_matching(ancestor: &SeatStep<'_>, step: &SeatStep<'_>, matching: ActorMatching) -> bool {
     ancestor.run == step.run
-        && ancestor.assignee == step.assignee
-        && ancestor.available_to == step.available_to
+        && matching.same(ancestor.assignee, step.assignee)
+        && ancestor.available_to.len() == step.available_to.len()
+        && ancestor.available_to.iter().zip(step.available_to).all(|(left, right)| {
+            matching.matches(Some(left), right)
+        })
         && ancestor.step.len() < step.step.len()
         && step.step.starts_with(ancestor.step)
         && step.step.as_bytes().get(ancestor.step.len()) == Some(&b'/')
@@ -256,10 +339,18 @@ pub fn nests_under(ancestor: &SeatStep<'_>, step: &SeatStep<'_>) -> bool {
 /// inherited parent message was consumed, and the seat looks occupied. Such a
 /// parent frees the seat so the ready nested step gets its own wake.
 pub fn submitted_with_ready_nested_work(parent: &SeatStep<'_>, steps: &[SeatStep<'_>]) -> bool {
+    submitted_with_ready_nested_work_matching(parent, steps, ActorMatching::Aliases)
+}
+
+fn submitted_with_ready_nested_work_matching(
+    parent: &SeatStep<'_>,
+    steps: &[SeatStep<'_>],
+    matching: ActorMatching,
+) -> bool {
     parent.status == "verifying"
         && steps
             .iter()
-            .any(|step| step.status == "ready" && nests_under(parent, step))
+            .any(|step| step.status == "ready" && nests_under_matching(parent, step, matching))
 }
 
 #[cfg(test)]
@@ -331,6 +422,123 @@ mod tests {
             moved("b", Placement::Before, Some("b"), 6),
         ];
         assert_eq!(replay(&joins, &moves), ["a", "b"]);
+    }
+
+    #[test]
+    fn order_anchors_follow_anchors_from_the_live_runs_only() {
+        let live = BTreeSet::from(["a".to_owned(), "b".to_owned()]);
+        let moves = [
+            moved("ended-1", Placement::Top, None, 1),
+            moved("ended-2", Placement::After, Some("a"), 2),
+            moved("a", Placement::Before, Some("ended-3"), 3),
+            moved("ended-3", Placement::After, Some("ended-4"), 4),
+            moved("ended-4", Placement::Before, Some("b"), 5),
+            moved("ended-5", Placement::Before, Some("ended-6"), 6),
+        ];
+        assert_eq!(
+            order_anchors(&moves, &live),
+            BTreeSet::from(["ended-3".to_owned(), "ended-4".to_owned()])
+        );
+    }
+
+    #[test]
+    fn the_live_order_is_the_same_without_the_runs_no_live_run_is_placed_against() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % below
+        };
+        let runs = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let placements = [
+            Placement::Top,
+            Placement::Bottom,
+            Placement::Before,
+            Placement::After,
+        ];
+        for case in 0..5_000 {
+            let mut joins = Vec::new();
+            for run in runs {
+                if next(5) != 0 {
+                    joins.push(join(run, u128::from(next(40))));
+                }
+            }
+            let mut at = 0;
+            let moves = (0..next(14))
+                .map(|_| {
+                    at += u128::from(next(6));
+                    let run = runs[next(8) as usize];
+                    let anchor = (next(4) != 0).then(|| runs[next(8) as usize]);
+                    moved(run, placements[next(4) as usize], anchor, at)
+                })
+                .collect::<Vec<_>>();
+            let live = joins
+                .iter()
+                .filter(|_| next(2) == 0)
+                .map(|join| join.run.clone())
+                .collect::<BTreeSet<_>>();
+            let live_order = |joins: &[QueueJoin]| {
+                replay(joins, &moves)
+                    .into_iter()
+                    .filter(|run| live.contains(run))
+                    .collect::<Vec<_>>()
+            };
+            let anchors = order_anchors(&moves, &live);
+            let kept = joins
+                .iter()
+                .filter(|join| live.contains(&join.run) || anchors.contains(&join.run))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                live_order(&kept),
+                live_order(&joins),
+                "case {case}: joins {joins:?}, moves {moves:?}, live {live:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_actor_spellings_share_ready_held_carried_and_nested_selection() {
+        let available = vec!["node/worker".to_owned()];
+        let canonical_available = vec!["agent/node/worker".to_owned()];
+        let first = SeatStep {
+            subject: "step-run/first/build", run: "mission-run/first", step: "build",
+            status: "ready", assignee: Some("node/worker"), claimant: None,
+            available_to: &available, created_at_unix_ms: 10, carried_claimant: None,
+        };
+        let second = SeatStep {
+            subject: "step-run/second/build", run: "mission-run/second",
+            assignee: Some("agent/node/worker"), created_at_unix_ms: 20, ..first
+        };
+        let order = vec![first.run.to_owned(), second.run.to_owned()];
+        assert_eq!(
+            select_literal("agent/node/worker", &[second, first], &order).ready,
+            [second.subject],
+        );
+        for actor in ["node/worker", "agent/node/worker"] {
+            assert_eq!(select(actor, &[second, first], &order).ready, [first.subject, second.subject]);
+            let carried = SeatStep { carried_claimant: Some("node/worker"), ..second };
+            assert_eq!(select(actor, &[first, carried], &order).next(), Some(second.subject));
+            let held = SeatStep { status: "working", claimant: Some("node/worker"), ..second };
+            assert_eq!(select(actor, &[first, held], &order).held, [second.subject]);
+        }
+        let nested = SeatStep {
+            subject: "step-run/first/build/check", step: "build/check",
+            assignee: Some("agent/node/worker"), available_to: &canonical_available, ..first
+        };
+        assert!(reached_through_parent(&nested, &[first, nested]));
+        assert_eq!(
+            select_literal("agent/node/worker", &[first, nested], &order).ready,
+            [nested.subject],
+            "an alias-assigned parent must not hide literally assigned nested work",
+        );
+        let submitted = SeatStep { status: "verifying", ..first };
+        assert!(submitted_with_ready_nested_work(&submitted, &[submitted, nested]));
+        for other in ["daemon/node/worker", "person/test", "host/node/worker"] {
+            assert!(select(other, &[first, second], &order).ready.is_empty());
+            assert!(!nests_under(&SeatStep { assignee: Some(other), ..first }, &nested));
+        }
     }
 
     #[test]

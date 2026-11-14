@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { FractalClient } from '@fractal/client'
 import * as Native from '@fractal/client/schema'
-import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { DateTime, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -35,6 +35,10 @@ describe('native Details mounted hook with real getter adapters', () => {
       expect(registry.get(mounted.atom)._tag).toBe('Observed')
       registry.set(input, observed({ value: session(2000) }))
       expect(registry.get(mounted.atom)).toMatchObject({ _tag: 'Unavailable', detail: 'Session start changed between observations; elapsed time and age are unreported.' })
+      const refused = { ...observed({ value: session(2000) }), error: { reason: 'unauthorized', detail: 'private diagnostic' } } as const
+      registry.set(input, refused)
+      expect(registry.get(mounted.atom)).toBe(refused)
+      registry.set(input, observed({ value: session(2000) }))
       mounted.release()
       mounted = mount()
       expect(registry.get(mounted.atom)._tag).toBe('Unavailable')

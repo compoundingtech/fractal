@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A native seat that its run's end stopped while it still held mail now keeps its mailbox until its runtime stops, so it can read that earlier mail and the stop completes. Before, its mailbox was fenced as soon as the stop was declared and its driver then stopped the provider, abandoning the mail and work the seat was kept running for. Mail sent after the stop is not offered to it and waits for its next incarnation.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No store schema change. The mailbox reads the stop declaration's claim and the declaration it ended, which already exist."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "A stop that a mission run's end declared keeps the mailbox authority of the seat declaration it ended, for that same provider, host and incarnation: binding, the lease and its fence, receipts, reports and the delivery stream accept it as they did before the stop. The reconciler still decides how long the seat runs; once nothing from before the stop holds it, it stops the runtime and the lease ends with the incarnation. The stream withholds mail created after the stop on this host, as it withholds mail from a draining rollout. A stop a person or an agent declared, a moved seat, another provider and another incarnation are refused as before."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Mixed-version fleets with the previous release interoperate. A seat's mailbox is admitted by the host that runs it, so a previous-release host keeps fencing its own stopping seats as before, and nothing on the wire changes: no new frame, field or refusal code."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No step is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back restores the old fence: a stopping seat's mailbox is refused as soon as its stop is declared, and its driver stops it."
+  }
+}

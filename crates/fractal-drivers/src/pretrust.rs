@@ -7,6 +7,12 @@
 //! onboarding friction. We merge into any existing entry and never clobber the
 //! other per-project fields — and write ALL requested dirs in ONE atomic read-modify-write.
 //!
+//! The same write completes Claude's own first launch on a config that has never run it: the
+//! text-style picker (and the welcome that follows it) is shown while the top-level
+//! `hasCompletedOnboarding` is not `true`, and finishing it writes that key and the chosen `theme`
+//! (see [`complete_first_launch`]). The seat then reaches the login prompt, or its first usable
+//! screen, and a missing login is the only thing left for the person to do.
+//!
 //! A booted Claude process periodically flushes `.claude.json`. One explicit batch prevents sibling
 //! trust writes from losing updates. Each Claude process re-reads and replaces the file under its own
 //! lock, so the trust write takes that lock too — see [`ClaudeConfigLock`].
@@ -48,8 +54,15 @@ pub fn pretrust_claude(dirs: &[PathBuf]) -> Result<usize> {
     pretrust_at(&config_path()?, dirs)
 }
 
+/// Admit workspaces for Codex in the provider runtime's selected config, `$CODEX_HOME/config.toml`
+/// or `~/.codex/config.toml`: the file the seat's own Codex reads. A Codex seat start calls this
+/// for its work root before it starts Codex, so Codex does not ask "Do you trust this directory?".
+pub fn pretrust_codex(dirs: &[PathBuf]) -> Result<usize> {
+    pretrust_codex_at(&codex_config_path()?, dirs)
+}
+
 /// The codex config file: `$CODEX_HOME/config.toml` if set, else `~/.codex/config.toml`.
-fn codex_config_path() -> Result<PathBuf> {
+pub(crate) fn codex_config_path() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("CODEX_HOME") {
         Ok(PathBuf::from(dir).join("config.toml"))
     } else {
@@ -117,6 +130,7 @@ pub fn pretrust_at(config: &Path, dirs: &[PathBuf]) -> Result<usize> {
     let obj = root
         .as_object_mut()
         .with_context(|| format!("{} is not a JSON object", config.display()))?;
+    complete_first_launch(obj);
     let projects = obj
         .entry("projects")
         .or_insert_with(|| json!({}))
@@ -145,6 +159,27 @@ pub fn pretrust_at(config: &Path, dirs: &[PathBuf]) -> Result<usize> {
 
     write_atomic(config, &root)?;
     Ok(dirs.len())
+}
+
+/// Complete Claude's first launch in a config that has never finished it, so the text-style picker
+/// and the welcome are not shown to a new person. Claude shows them while the top-level
+/// `hasCompletedOnboarding` is not `true`; finishing them writes `hasCompletedOnboarding: true`
+/// (plus the version it ran, which nothing reads back) and the chosen `theme`, whose default is
+/// `"dark"`. Read from Claude Code 2.1.296.
+///
+/// Only an ABSENT `hasCompletedOnboarding` is completed. A key that is present, true or false, was
+/// written by Claude or by the person and is left alone, and so is every `theme` that is already
+/// set: st writes the default theme only together with the onboarding flag it adds. A login is never
+/// touched: `oauthAccount` and every other field are neither read nor written, so a signed-out
+/// config stays signed out and Claude still asks for the login.
+fn complete_first_launch(config: &mut serde_json::Map<String, Value>) {
+    if config.contains_key("hasCompletedOnboarding") {
+        return;
+    }
+    config.insert("hasCompletedOnboarding".into(), Value::Bool(true));
+    config
+        .entry("theme")
+        .or_insert_with(|| Value::String("dark".into()));
 }
 
 /// The writer lock for one foreign harness config. Read only by `Drop`: the guard's job is to
@@ -468,6 +503,101 @@ mod tests {
             v["projects"][&key]["hasCompletedProjectOnboarding"],
             json!(true)
         );
+    }
+
+    #[test]
+    fn pretrust_completes_claudes_first_launch_on_a_clean_config_and_touches_no_login() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude.json");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        pretrust_at(&cfg, std::slice::from_ref(&ws)).unwrap();
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(v["hasCompletedOnboarding"], json!(true));
+        assert_eq!(v["theme"], json!("dark"));
+        // A clean config stays signed out: no account, key or token field appears.
+        let mut names: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["hasCompletedOnboarding", "projects", "theme"]);
+    }
+
+    #[test]
+    fn pretrust_completes_first_launch_beside_a_login_and_unrelated_fields_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude.json");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let account = json!({ "emailAddress": "avery@example.com", "accountUuid": "account-a" });
+        let seed = json!({ "oauthAccount": account, "numStartups": 3, "verbose": true });
+        std::fs::write(&cfg, serde_json::to_string(&seed).unwrap()).unwrap();
+
+        pretrust_at(&cfg, std::slice::from_ref(&ws)).unwrap();
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(v["hasCompletedOnboarding"], json!(true));
+        assert_eq!(v["oauthAccount"], account, "the login was touched");
+        assert_eq!(v["numStartups"], json!(3));
+        assert_eq!(v["verbose"], json!(true));
+    }
+
+    #[test]
+    fn pretrust_leaves_a_present_onboarding_state_and_a_chosen_theme_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        // (seed, expected hasCompletedOnboarding, expected theme); None means the key is absent.
+        let cases = [
+            // Finished by the person with their own theme: nothing added or changed.
+            (
+                json!({ "hasCompletedOnboarding": true, "theme": "light-ansi" }),
+                Some(json!(true)),
+                Some(json!("light-ansi")),
+            ),
+            // Finished with no theme recorded: st does not invent one.
+            (
+                json!({ "hasCompletedOnboarding": true }),
+                Some(json!(true)),
+                None,
+            ),
+            // Present and false is Claude's or the person's state, not st's to flip.
+            (
+                json!({ "hasCompletedOnboarding": false, "theme": "light" }),
+                Some(json!(false)),
+                Some(json!("light")),
+            ),
+            // Not finished but a theme was already chosen: only the missing flag is added.
+            (
+                json!({ "theme": "dark-daltonized" }),
+                Some(json!(true)),
+                Some(json!("dark-daltonized")),
+            ),
+        ];
+        for (index, (seed, onboarding, theme)) in cases.into_iter().enumerate() {
+            let cfg = tmp.path().join(format!("case-{index}.json"));
+            std::fs::write(&cfg, serde_json::to_string(&seed).unwrap()).unwrap();
+
+            pretrust_at(&cfg, std::slice::from_ref(&ws)).unwrap();
+
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(v.get("hasCompletedOnboarding"), onboarding.as_ref(), "case {index}");
+            assert_eq!(v.get("theme"), theme.as_ref(), "case {index}");
+        }
+    }
+
+    #[test]
+    fn completing_first_launch_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude.json");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        pretrust_at(&cfg, std::slice::from_ref(&ws)).unwrap();
+        let first = std::fs::read_to_string(&cfg).unwrap();
+        pretrust_at(&cfg, std::slice::from_ref(&ws)).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), first);
     }
 
     #[test]

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read ordered-membership keyset rows and authoritative collection state in one short store transaction",
+  "replay": {"status": "none", "detail": "Existing repair and rebuild paths advance a local projection generation, including maintenance at an unchanged claim index."},
+  "schema": {"status": "none", "detail": "The local generation uses the existing metadata table; no replicated schema or migration changes."},
+  "rules": {"status": "none", "detail": "Membership visibility, admission and checkpoint authority are unchanged."},
+  "compatibility": {"status": "none", "detail": "The additive store page includes rows, live count, invalidation index, projection generation and read index. Existing HTTP cursors and stream frames are unchanged; no capability is advertised."},
+  "downtime": {"status": "none", "detail": "Normal daemon rollout only."},
+  "manual": {"status": "none", "detail": "No manual steps are required."},
+  "recovery": {"status": "none", "detail": "Each page releases its read transaction on return. The generation is transactional and persists across reopen; serving-daemon boot identity remains the API layer's responsibility."}
+}

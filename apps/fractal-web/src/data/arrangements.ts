@@ -12,8 +12,9 @@
  */
 import { SIDEBAR_ARRANGEMENT_UUID, FractalClient } from '@fractal/client'
 import type { Arrangement, CollectionSocketFactory, CollectionStream, Snapshot } from '@fractal/client'
-import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema'
+import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@fractal/client/schema/read'
 import { Schema } from 'effect'
+import { browserSocket } from './sdk-browser/trace.ts'
 
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 // Generated Arrangement.id is a generic subject Id; the winner rule needs the full UUIDv7 form.
@@ -33,11 +34,12 @@ export interface ArrangementInventoryGateway {
 }
 
 /** The generated client cancels each request through its own `requestOptions.signal`; discovery stays shared. */
-export const st3InventoryGateway = ({ baseUrl, fetchImpl }: {
+export const fractalInventoryGateway = ({ baseUrl, fetchImpl, client: clientName }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof globalThis.fetch
+  readonly client?: string
 }): ArrangementInventoryGateway & Pick<FractalClient, 'discover'> => {
-  const client = new FractalClient({ baseUrl, fetchImpl })
+  const client = new FractalClient({ baseUrl, fetchImpl, socket: browserSocket, ...(clientName === undefined ? {} : { client: clientName }) })
   return {
     discover: () => client.discover(),
     collectionStream: (options) => client.collectionStream(options),
@@ -77,13 +79,13 @@ export const reservedSidebarSubject = (owner: string): string => `arrangement/${
 /** Exact-name legacy candidates are live, person-owned and ordered by lowercase UUIDv7. */
 export const sidebarCandidates = (items: readonly Arrangement[], owner: string | undefined = items[0]?.owner): readonly Arrangement[] =>
   owner === undefined || !/^person\/[^/\s]+$/.test(owner) ? [] : items.filter((item) =>
-    !item.deleted && item.owner === owner && item.id.startsWith(`arrangement/${owner}/`) &&
+    !item.deleted && item.body.version === 1 && item.owner === owner && item.id.startsWith(`arrangement/${owner}/`) &&
     isArrangementId(item.id) && item.body.name.value === 'Sidebar' && item.id !== reservedSidebarSubject(owner))
     .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
 
-/** The reserved subject is identity, regardless of name; otherwise use the deterministic legacy pick. */
+/** A v1 reserved subject is identity, regardless of name; otherwise use the deterministic v1 legacy pick. */
 export const sidebarWinner = (items: readonly Arrangement[], owner: string | undefined = items[0]?.owner): Arrangement | undefined =>
-  owner === undefined ? undefined : items.find((item) => !item.deleted && item.owner === owner && item.id === reservedSidebarSubject(owner)) ??
+  owner === undefined ? undefined : items.find((item) => !item.deleted && item.body.version === 1 && item.owner === owner && item.id === reservedSidebarSubject(owner)) ??
     sidebarCandidates(items, owner)[0]
 
 /** Rows requested per page; a page returning more is malformed. */

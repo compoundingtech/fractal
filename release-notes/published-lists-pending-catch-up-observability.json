@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correction to the published-lists pending catch-up note: the 'pending: missions kept changing' and 'pending: work kept changing' rebuild counts it mentions are read only by tests. In production, only the daemon log and the per-path publish latency show how the missions and work lists behave through a burst.",
+  "replay": {"status": "none", "detail": "A release note correction only; nothing in the daemon changes."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or migrations."},
+  "rules": {"status": "none", "detail": "No checkpoint rule, registry or coordinated member upgrade change."},
+  "compatibility": {"status": "none", "detail": "No code change."},
+  "downtime": {"status": "none", "detail": "No service change."},
+  "manual": {"status": "none", "detail": "To watch a burst, read the 'publish missions' and 'publish work' latency (the projection-fresh paths of /v1/client/request-latency) and look for 'kept changing in ways no short fold can follow' in the daemon log. A fold that carries rows over leaves no other trace outside tests."},
+  "recovery": {"status": "none", "detail": "Nothing to undo."}
+}

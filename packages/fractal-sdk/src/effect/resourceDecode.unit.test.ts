@@ -336,3 +336,25 @@ describe('row-wise resource decoding', () => {
     expect(windows.at(-1)?.decodeStale).toBe(false)
   })
 })
+
+describe('mission served projections', () => {
+  const mission = {
+    id: 'mission/example/build', kind: 'mission', revision: 'r1', updated_at: '2026-10-14T10:00:00.000Z', title: 'example/build', state: 'running',
+    mission_revision: 'r1', system: false, runs: [], run_details: [], active_runs: 0, total_runs: 0, run_counts: {}, runs_truncated: false, run_generations: {},
+    must_act: 'nobody', resources: [], operational: { layer: 'current', actionable: true, reasons: [] },
+  }
+  const person = { word: 'unclaimed', system: false, who: { kind: 'nobody' }, stuck: null, queued_behind: null, card: null, actions: [], progress: { done: 0, total: 1 }, last_progress: null, settled_at: null,
+    steps: [{ id: 'step-run/example/ask', path: 'ask', title: 'Ask', word: 'ready', owner: { kind: 'agent', agent: 'person/ada', label: 'person/ada' }, note: null, attempts: 1, blockers: [], keep_open: false }] }
+
+  it('keeps a mission whose optional presentation fails its schema, reporting it as degraded', () => {
+    const result = decodeResourceRow({ ...mission, presentation: person } as unknown as ResourceWire)
+    expect(result.value?.id).toBe(mission.id)
+    expect(result.undecodable).toEqual([expect.objectContaining({ _tag: 'Degraded', id: mission.id, path: 'presentation' })])
+  })
+  it('still rejects a mission whose own fields fail', () => {
+    const result = decodeResourceRow({ ...mission, title: 7, presentation: person } as unknown as ResourceWire)
+    expect(result.value).toBeUndefined()
+    expect(result.undecodable[0]?._tag).toBe('Rejected')
+  })
+})
+

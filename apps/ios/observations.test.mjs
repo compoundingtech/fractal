@@ -23,7 +23,7 @@ for (let ms = 0; ms < 70_000; ms += 7) {
   assert.ok(bound >= ms && bound - ms <= ms / 16, `${ms} -> ${bound}`);
 }
 
-/** The member's rules for a latency sample (crates/st3/src/api/client_observations.rs), as far as they bear on what the app sends. */
+/** The member's rules for a latency sample (crates/fractal-api-core/src/api/client_observations.rs), as far as they bear on what the app sends. */
 function memberAccepts(sample) {
   const p99 = TARGETS[sample.target];
   const lower = bound => bound < 16 ? bound : bound + 1 - 2 ** (31 - Math.clz32(bound) - 4);

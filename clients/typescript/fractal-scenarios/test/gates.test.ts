@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { ANCHOR_MS, catalog, loadWorld, type Slice } from '../src/index.ts'
-import { decodeFixtures, decodeRecordings, decodeSlice, everyVariant, RECORDINGS_DIR } from '../scripts/decode.ts'
+import { decodeFile, decodeFixtures, decodeRecordings, decodeSlice, everyVariant, RECORDINGS_DIR } from '../scripts/decode.ts'
 import { checkTree, FIXTURES_DIR, generate } from '../scripts/emit.ts'
 import { checkPublicRepo, scanContent, scanIdentities, scanRecordingContent, scanTree, scanVocabulary } from '../scripts/scan.ts'
 import { decodeRecording } from '../scripts/recordings.ts'
@@ -40,9 +40,16 @@ describe('decode gate', () => {
     expect(failures.map((failure) => failure.pointer)).toEqual(['/state/agents/0'])
   })
 
-  it('decodes every committed fixture file from disk', () => {
-    expect(decodeFixtures(FIXTURES_DIR)).toEqual([])
-  })
+  // Keep the ordinary deadline per real file, not per ever-growing catalog.
+  for (const world of readdirSync(FIXTURES_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('_'))
+    .sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const name of readdirSync(join(FIXTURES_DIR, world.name)).filter((file) => file.endsWith('.json')).sort()) {
+      it(`decodes committed fixture ${world.name}/${name} from disk`, () => {
+        expect(decodeFile(world.name, join(FIXTURES_DIR, world.name, name))).toEqual([])
+      })
+    }
+  }
 
   it('fails on planted strict-invalid values in a committed file', () => {
     const dir = mkdtempSync(join(tmpdir(), 'st3-scenarios-decode-'))

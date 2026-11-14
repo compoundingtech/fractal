@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The web conversation keeps following its live end through input that cannot scroll (a click, a downward wheel or key at the end); only input toward history pauses following",
+  "replay": { "status": "none", "detail": "Web scroll behaviour only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "Kit EmbraceScrollViewport behaviour only; its props are unchanged. No runtime, wire or client changes." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Reverting restores the previous position-based follow." }
+}

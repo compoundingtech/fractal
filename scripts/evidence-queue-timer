@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One tick of the shadow merge-queue signer, as main has it (scripts/evidence-queue-{observe,sign,seed}.service from their timers).
 # The signer, and the pre-sign worker whose host rules it uses, are read from origin/main of the clone it owns, never a checkout's
-# copy; st-test, which it runs, is read the same way.
+# copy; fractal-test, which it runs, is read the same way.
 #   evidence-queue-timer observe|sign|seed [--dry-run]
 set -euo pipefail
 state=${EVIDENCE_QUEUE_STATE:-$HOME/.local/state/evidence-queue-signer}

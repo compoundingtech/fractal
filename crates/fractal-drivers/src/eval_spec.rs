@@ -16,8 +16,8 @@ use std::time::Duration;
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use agent_spec::spec::{
-    AGENT_DESCRIPTION_MAX_CHARS, AGENT_NAME_MAX_CHARS, ClaudeDriver, CodexDriver, Driver, Restart,
-    RestartMode, parse_duration, validate_presentation,
+    AGENT_NAME_MAX_CHARS, ClaudeDriver, CodexDriver, Driver, Restart, RestartMode, parse_duration,
+    validate_description, validate_presentation,
 };
 
 /// A parsed st2 spec: a base team (`st2 up` boots this) plus an optional `eval` (`st2 eval` runs it).
@@ -716,11 +716,7 @@ fn parse_agent(
             "agent '{id}' uses a native driver; remove `ding` because the driver owns message delivery"
         );
         validate_presentation("name", display_name.as_deref(), AGENT_NAME_MAX_CHARS)?;
-        validate_presentation(
-            "description",
-            description.as_deref(),
-            AGENT_DESCRIPTION_MAX_CHARS,
-        )?;
+        validate_description(description.as_deref())?;
         let env = cascade(parent_env, &agent_env);
         return Ok(SpecAgent {
             id: id.clone(),

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "PTY producer finalization runs only from the explicit daemon-startup hook, not when constructing a runtime for doctor or repair dry-run reads. Vanished producer reconciliation still checks exact process generation, boot identity and closed scopes before publishing closure.",
+  "replay": { "status": "none", "detail": "No claim or projection changes." },
+  "schema": { "status": "none", "detail": "No additional changes to native producer records or database schemas." },
+  "rules": { "status": "none", "detail": "Identityless runtime construction cannot write producer closure or ownership records. Legacy scope-only records remain conservatively pending while their PID is present." },
+  "compatibility": { "status": "none", "detail": "Existing owner records remain readable. The startup hook uses the same typed closure and server-generation records as native producer finalization." },
+  "downtime": { "status": "none", "detail": "The explicit startup pass runs once when the daemon starts." },
+  "manual": { "status": "none", "detail": "No manual producer-directory changes are required." },
+  "recovery": { "status": "none", "detail": "Removing the startup hook retains pending producers rather than treating runtime construction or registry absence as closure proof." }
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1, "summary": "Recognize both exact fleet adapter owners during recovery and revocation without switching policy producers.",
+  "replay": {"status": "none", "detail": "Pending requests retain their exact owner and request identity."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No claim or checkpoint change."},
+  "compatibility": {"status": "changed", "detail": "Adapter readers recognize st/fleet and fractal/fleet owners for this fleet, including retained pairing journals. Renamed-owner authority can only be retained or reduced; new policy and permits still use the legacy owner. Both protocol families participate in residual-access detection. PTY access remains operator-only."},
+  "downtime": {"status": "none", "detail": "No host or service changes."},
+  "manual": {"status": "none", "detail": "No migration or state rewrite required."},
+  "recovery": {"status": "none", "detail": "Missing journal owner decodes as the original legacy owner."}
+}

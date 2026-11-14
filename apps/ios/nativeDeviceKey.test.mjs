@@ -15,7 +15,7 @@ registerHooks({
 let imports = 0;
 async function adapter(native) {
   globalThis.testDeviceKeyNative = native;
-  return import(`./modules/st-device-key/index.ts?native=${++imports}`);
+  return import(`./modules/fractal-device-key/index.ts?native=${++imports}`);
 }
 
 test('existing pairings retain the old native argument counts', async () => {
@@ -53,4 +53,27 @@ test('new pairings select their committed key handle for native operations', asy
     ['current', key.handle], ['sign', 'message', key.handle], ['remove', key.handle],
     ['verify', 'root', 'receipt', 'signature'],
   ]);
+});
+
+test('renewal uses dedicated enclave creation and native approval without changing ordinary signing', async () => {
+  const key = { key: 'p256:renewed', storage: 'secure-enclave', handle: 'renewal-key' };
+  const calls = [];
+  const module = await adapter({
+    async createRenewal() { calls.push('createRenewal'); return key; },
+    async approveRenewal(...args) { calls.push(['approveRenewal', ...args]); return 'approval-signature'; },
+    async sign(...args) { calls.push(['sign', ...args]); return 'message-signature'; },
+  });
+  assert.deepEqual(await module.createRenewalKey(), key);
+  assert.equal(await module.approveWithDeviceKey('bound-tuple', key.handle), 'approval-signature');
+  assert.equal(await module.signWithDeviceKey('ordinary-message', key.handle), 'message-signature');
+  assert.deepEqual(calls, ['createRenewal', ['approveRenewal', 'bound-tuple', key.handle], ['sign', 'ordinary-message', key.handle]]);
+});
+
+test('older native builds refuse renewal rather than falling back to ordinary key creation or signing', async () => {
+  const module = await adapter({
+    async create() { assert.fail('ordinary creation must not approve renewal'); },
+    async sign() { assert.fail('ordinary signing must not approve renewal'); },
+  });
+  await assert.rejects(module.createRenewalKey(), /cannot approve renewal/);
+  await assert.rejects(module.approveWithDeviceKey('tuple', 'handle'), /cannot approve renewal/);
 });

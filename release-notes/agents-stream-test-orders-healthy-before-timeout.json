@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test-only: the agents publication stream test checks that a healthy socket gets its snapshot before a blocked socket's send times out, instead of within 200 ms of wall time, and gives the blocked socket's release more than one second past its timeout, so a loaded host no longer fails it",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "No client, wire or CLI change; only tests change."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes."},
+  "recovery": {"status": "none", "detail": "No new persistent state."}
+}

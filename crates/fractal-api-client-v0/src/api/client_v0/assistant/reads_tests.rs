@@ -325,7 +325,8 @@ async fn attention_updates_keep_native_payload_in_rich_and_content_reads_only() 
     let missions = read(&state, "missions", &[], MAX_RESPONSE_BYTES).await.unwrap();
     let run = page_items(&missions, "assistant.missions").iter()
         .find(|item| item["id"] == MISSION).unwrap()["run_id"].as_str().unwrap();
-    let request = json!({"version": 1, "type": "update", "about": run});
+    // Speech is source prose: rich and content reads carry it, metadata never does.
+    let request = json!({"version": 1, "type": "update", "about": run, "speech": SECRET});
     let update = state.store.ask_person(&serde_json::from_value(json!({
         "person": OWNER, "actor": AGENT, "title": SECRET, "reason": INJECTION,
         "idempotency_key": "reads-fixture-update",

@@ -2,7 +2,7 @@
 //! This is client state, never a graph replica or a peer configuration.
 mod grant_proof;
 pub(crate) mod transport;
-use crate::{AssistantPairedSession, AssistantPrincipal, Client, DeviceSignature, MessageSendParameters, PersonPairedSession, PairingComplete};
+use crate::{AssistantPairedSession, Client, DeviceSignature, MessageSendParameters, PersonPairedSession, PairingComplete};
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
@@ -190,9 +190,15 @@ impl std::fmt::Debug for Device {
 
 impl Device {
     pub fn client(&self) -> Result<Client> {
-        let mut client = Client::fabric_loopback(&self.endpoint, &self.session.credential);
-        client.http = transport::client(&self.endpoint, self.allow_public_http)?;
-        client.device_http_policy = Some(self.allow_public_http);
+        let mut client = if self.endpoint.starts_with("fabric:") {
+            Client::fabric(crate::fabric::FabricEndpoint::parse(&self.endpoint)?)
+                .with_credential(&self.session.credential)
+        } else {
+            let mut client = Client::fabric_loopback(&self.endpoint, &self.session.credential);
+            client.http = transport::client(&self.endpoint, self.allow_public_http)?;
+            client.device_http_policy = Some(self.allow_public_http);
+            client
+        };
         if self.signing_key.is_some() {
             client.signing_device = Some(Arc::new(self.clone()));
         }
@@ -322,7 +328,7 @@ impl Profile {
         let person = &self
             .devices
             .first()
-            .context("No paired member; run st devices complete URL PAIRING_ID")?
+            .context("No paired member; run fractal devices complete URL PAIRING_ID")?
             .session
             .person_id;
         ensure!(
@@ -430,13 +436,12 @@ impl AssistantDevice {
         ensure!(
             self.session.kind == "assistant-paired-session"
                 && matches!(self.session.api_version.as_str(), "st3.client.v0" | "fractal.client.v0")
-                && self.session.principal == AssistantPrincipal::Chatgpt
                 && self.session.credential.len() >= 32
                 && self.session.device_id == grant.device_id
                 && self.session.principal == grant.principal
                 && self.session.sender_class == grant.sender_class
                 && self.session.session_actor == grant.session_actor
-                && grant.session_actor == format!("assistant/chatgpt/session/{}", grant.id)
+                && grant.session_actor == format!("{}/session/{}", grant.principal.as_str(), grant.id)
                 && self.session.scopes == grant.scopes
                 && self.session.expires_at == grant.expires_at
                 && issuer.is_some_and(|person| {
@@ -604,6 +609,7 @@ pub async fn complete_assistant(
             code: code.trim().into(),
             device_public_key: public,
             key_storage: Some("software".into()),
+            fabric_node_id: None,
         },
     ).await.context("Complete assistant pairing")?;
     let mut device = AssistantDevice { endpoint, allow_public_http, session: session.value, signing_key: key };
@@ -804,6 +810,7 @@ pub async fn complete_with_options(
         code: code.trim().into(),
         device_public_key: public.clone(),
         key_storage: Some("software".into()),
+        fabric_node_id: None,
     },)
         .await
         .context("Complete device pairing")?
@@ -871,9 +878,9 @@ pub async fn complete_with_options(
             suffix.len() == 24 && suffix.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         });
         if safe_id.is_some() {
-            format!("The server consumed the pairing code, but local completion failed. Possible orphaned device {created_device}; inspect it on the trusted member and revoke with `st devices revoke {created_device} --as <your-person-id>` before starting a new pairing. The previous profile was retained")
+            format!("The server consumed the pairing code, but local completion failed. Possible orphaned device {created_device}; inspect it on the trusted member and revoke with `fractal devices revoke {created_device} --as <your-person-id>` before starting a new pairing. The previous profile was retained")
         } else {
-            "The server consumed the pairing code, but local completion failed and returned an unusable device ID. Inspect `st devices ls --as <your-person-id>` on the trusted member and revoke the new device before starting a new pairing. The previous profile was retained".into()
+            "The server consumed the pairing code, but local completion failed and returned an unusable device ID. Inspect `fractal devices ls --as <your-person-id>` on the trusted member and revoke the new device before starting a new pairing. The previous profile was retained".into()
         }
     })
 }
@@ -992,6 +999,43 @@ mod tests {
         assert!(!supports_device_key_proofs(&serde_json::json!({})));
     }
 
+    #[test]
+    fn assistant_session_principal_and_actor_are_grant_bound() {
+        for fixture in [
+            include_str!("../../../docs/st3/client-v0/fixtures/assistant-pairing.json"),
+            include_str!("../../../docs/st3/client-v0/fixtures/assistant-mcp-pairing.json"),
+        ] {
+            let paired: crate::Envelope<AssistantPairedSession> =
+                serde_json::from_str(fixture).unwrap();
+            let mut device = AssistantDevice {
+                endpoint: "https://member.example".into(),
+                allow_public_http: false,
+                session: paired.value,
+                signing_key: SigningKey::generate(KeyAlgorithm::Ed25519).unwrap(),
+            };
+            device.session.grant.key_id = format!(
+                "{:x}",
+                Sha256::digest(device.signing_key.public_key().unwrap().as_bytes())
+            );
+            device.validate().unwrap();
+
+            let principal = device.session.principal.clone();
+            device.session.principal = match principal {
+                crate::AssistantPrincipal::Chatgpt => crate::AssistantPrincipal::Mcp,
+                crate::AssistantPrincipal::Mcp => crate::AssistantPrincipal::Chatgpt,
+            };
+            assert!(device.validate().is_err());
+            device.session.principal = principal;
+
+            device.session.session_actor = format!(
+                "assistant/other/session/{}",
+                device.session.grant.id
+            );
+            device.session.grant.session_actor = device.session.session_actor.clone();
+            assert!(device.validate().is_err());
+        }
+    }
+
 
     #[test]
     fn assistant_session_issuer_is_a_concrete_person_not_a_fixed_deployment_owner() {
@@ -1061,7 +1105,8 @@ mod tests {
                 expires_at: "2026-11-01T00:00:00Z".into(),
                 device_key_chain: serde_json::from_value(case["chain"].clone()).unwrap(),
                 device_key_proofs: Vec::new(),
-                person_root_key_proof: None, },
+                person_root_key_proof: None,
+                fabric_grant: None, },
                 signing_key: Some(key.clone()),
             };
             let fields = &case["fields"];

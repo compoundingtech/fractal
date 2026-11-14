@@ -28,8 +28,12 @@ pub enum Pane {
     NewMission,
     /// An observed graph resource, with open vocabulary facts.
     Resource(String),
-    /// One version of a stored st document (`doc/NAME@HASH`), its text shown as Markdown.
+    /// One document, read-only, by its reference: `doc/NAME` (the latest) or `doc/NAME@HASH`.
     Document(String),
+    /// The documents under a prefix (all of them without one).
+    Documents(Option<String>),
+    /// The person's own availability and directive note.
+    Availability,
 }
 
 impl Pane {
@@ -49,7 +53,9 @@ impl Pane {
             Pane::Usage(subject) => with("usage", subject),
             Pane::NewMission => "new-mission:".into(),
             Pane::Resource(id) => format!("resource:{id}"),
-            Pane::Document(name) => format!("document:{name}"),
+            Pane::Document(reference) => format!("document:{reference}"),
+            Pane::Documents(prefix) => with("documents", prefix),
+            Pane::Availability => "availability:".into(),
         }
     }
 
@@ -74,6 +80,8 @@ impl Pane {
             "new-mission" => Pane::NewMission,
             "resource" => Pane::Resource(subject?),
             "document" => Pane::Document(subject?),
+            "documents" => Pane::Documents(subject),
+            "availability" => Pane::Availability,
             _ => return None,
         })
     }
@@ -101,6 +109,10 @@ mod tests {
             Pane::Usage(None),
             Pane::NewMission,
             Pane::Resource("resource/github/acme/garden/issue/9".into()),
+            Pane::Document("doc/garden/plan".into()),
+            Pane::Documents(None),
+            Pane::Documents(some("doc/garden/")),
+            Pane::Availability,
         ] {
             assert_eq!(
                 Pane::parse(&pane.key()),
@@ -112,6 +124,7 @@ mod tests {
         assert_eq!(Pane::List(1).key(), "list:agents");
         assert_eq!(Pane::parse("list:nowhere"), None);
         assert_eq!(Pane::parse("terminal:"), None, "a terminal needs its agent");
+        assert_eq!(Pane::parse("document:"), None, "a document needs its reference");
         assert_eq!(Pane::parse("a later kind:subject"), None);
         // The new-agent form is gone; a stored tab for it is dropped like any unknown kind.
         assert_eq!(Pane::parse("new-agent:"), None);

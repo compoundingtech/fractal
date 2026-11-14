@@ -111,11 +111,14 @@ let fresh = start(&store, "fresh", "new-first-readiness", root.path());
 creation_order.push(fresh.id.clone());
 let notify = Arc::new(Notify::new());
 let state = AppState {
+    browser_pairing_login: None,
+    seat_admission: Default::default(),
     owning_person: None,
     store: store.clone(),
     notify: notify.clone(),
     event_notify: tokio::sync::watch::channel(0).0,
     node: "node".into(),
+    api_socket: root.path().join("api.sock"),
     state_dir: root.path().into(),
     pty_root: root.path().join("pty"),
     pty_binary: "unused-pty".into(),
@@ -124,6 +127,9 @@ let state = AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
 };
 let socket = root.path().join("st3.sock");
 let server_socket = socket.clone();
@@ -274,11 +280,14 @@ assert!(
 
 let notify = Arc::new(Notify::new());
 let state = AppState {
+    browser_pairing_login: None,
+    seat_admission: Default::default(),
     owning_person: None,
     store: store.clone(),
     notify: notify.clone(),
     event_notify: tokio::sync::watch::channel(0).0,
     node: "node".into(),
+    api_socket: root.path().join("api.sock"),
     state_dir: root.path().into(),
     pty_root: root.path().join("pty"),
     pty_binary: "unused-pty".into(),
@@ -287,6 +296,9 @@ let state = AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
 };
 let socket = root.path().join("st3.sock");
 let server_socket = socket.clone();

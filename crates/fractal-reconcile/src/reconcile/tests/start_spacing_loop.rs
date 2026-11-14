@@ -252,6 +252,21 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
     let first = receive(&mut wake_rx).await;
     let mut counts = vec![first];
     if traffic == QuiescenceTraffic::StartCompletion {
+        // Admission's own signal_changed can wake the next pass while the launch worker still
+        // runs; that pass finds nothing to apply and rests. Hold it until the launch has finished,
+        // so the woken pass is the one that records the completion, whatever the host's load.
+        let (dispatched, helper_done) = std::sync::mpsc::channel();
+        *reconciler.background_dispatch_hook.lock().unwrap() = Some(Box::new({
+            let live = reconciler.start_jobs.live.clone();
+            move || {
+                helper_done.recv().unwrap();
+                let (live, changed) = &*live;
+                let mut live = live.lock().unwrap();
+                while !live.is_empty() {
+                    live = changed.wait(live).unwrap();
+                }
+            }
+        }));
         let reconciler = reconciler.clone();
         tokio::task::spawn_blocking(move || {
             let subject = reconciler.store.desired_subjects().unwrap().into_iter()
@@ -263,6 +278,7 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
                 &subject, subject.member.as_ref().unwrap(), "helper completed start",
             ).unwrap();
             assert!(smallclaims::touched::writes() > before);
+            dispatched.send(()).unwrap();
         }).await.unwrap();
     }
     if first == 64 || traffic == QuiescenceTraffic::StartCompletion {

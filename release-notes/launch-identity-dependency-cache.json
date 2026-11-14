@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Resolve script runtimes from the launch environment and reuse unchanged executable identities",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No storage migration or schema version change."},
+  "rules": {"status": "none", "detail": "No coordination changes."},
+  "compatibility": {"status": "changed", "detail": "Adds an environment-aware identity API and bounded metadata cache while preserving admission identity hashes. Executable, interpreter, symlink, manifest and lockfile changes invalidate cached identities."},
+  "downtime": {"status": "none", "detail": "No additional interruption."},
+  "manual": {"status": "none", "detail": "No manual setup."},
+  "recovery": {"status": "none", "detail": "No migration to reverse on rollback."}
+}

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Carry main into footer-width-diag-20261026 using co-located reviewed scenario exemptions.",
+  "replay": {
+    "status": "none",
+    "detail": "No additional replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No additional schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No additional checkpoint change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Per-file lists equal main's 574 ids plus six width-specific Composer FooterWidthBudget identities, minus the two superseded all-width identities (578 unique ids). Central registry and count pin remain removed."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No additional manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No additional recovery change."
+  }
+}

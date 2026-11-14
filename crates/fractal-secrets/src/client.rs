@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use fractal_client::fabric::FabricEndpoint;
 use futures_util::{SinkExt as _, StreamExt as _};
 use pty_client::tty::{FdWriter, is_tty};
 use pty_client::{
@@ -25,18 +26,31 @@ use crate::model::{
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    DiscoveredUnix(fractal_client::UnixSocketDiscovery),
     Http(String),
+    Fabric(FabricEndpoint),
 }
 
 impl Endpoint {
-    pub fn parse(value: impl AsRef<str>) -> Self {
+    /// Resolve discovery at use time; explicit Unix endpoints remain exact.
+    pub fn unix_socket(&self) -> Option<std::borrow::Cow<'_, Path>> {
+        match self {
+            Self::Unix(path) | Self::DiscoveredUnix(fractal_client::UnixSocketDiscovery::Explicit(path)) =>
+                Some(std::borrow::Cow::Borrowed(path)),
+            Self::DiscoveredUnix(discovery) => Some(std::borrow::Cow::Owned(discovery.resolve())),
+            Self::Http(_) | Self::Fabric(_) => None,
+        }
+    }
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
-        if value.starts_with("http://") || value.starts_with("https://") {
-            Self::Http(value.trim_end_matches('/').into())
+        if value.starts_with("fabric:") {
+            Ok(Self::Fabric(FabricEndpoint::parse(value)?))
+        } else if value.starts_with("http://") || value.starts_with("https://") {
+            Ok(Self::Http(value.trim_end_matches('/').into()))
         } else if let Some(path) = value.strip_prefix("unix://") {
-            Self::Unix(PathBuf::from(format!("/{path}").replace("//", "/")))
+            Ok(Self::Unix(PathBuf::from(format!("/{path}").replace("//", "/"))))
         } else {
-            Self::Unix(PathBuf::from(value))
+            Ok(Self::Unix(PathBuf::from(value)))
         }
     }
 }
@@ -96,6 +110,7 @@ impl Fence {
             token: hex::encode(token),
         }
     }
+
     /// Initial allocation is idempotent under this random request token. Reexec and reconnect
     /// carry the returned epoch; neither the client's clock nor a lost response changes ownership.
     pub async fn bind(&mut self, client: &Client) -> Result<()> {
@@ -109,18 +124,52 @@ impl Fence {
                     *self = bound;
                     return Ok(());
                 }
-                Err(error)
-                    if api_error_code(&error).is_some_and(|code| {
-                        !matches!(code, "internal" | "database-busy" | "database-locked" | "mailbox-session-starting" | "mailbox-authority-unavailable")
-                    }) =>
-                {
-                    return Err(error);
+                Err(error) => {
+                    let retrying = api_error_code(&error).is_none_or(retryable_mailbox_bind_code);
+                    if let Some((status, code, _, _)) = api_error_parts(&error)
+                        && mailbox_bind_refusal(status, code)
+                    {
+                        let action = if retrying { "retrying" } else { "not retrying" };
+                        let _ = write_driver_log(&self.subject, &format!("warning: delivery refused: {code} (HTTP {status}); {action}"));
+                    }
+                    if !retrying { return Err(error); }
+                    tokio::time::sleep(retry.failed(&error)).await;
                 }
-                Err(error) => tokio::time::sleep(retry.failed(&error)).await,
             }
         }
     }
 }
+
+fn retryable_mailbox_bind_code(code: &str) -> bool {
+    matches!(code, "internal" | "database-busy" | "database-locked"
+        | "mailbox-session-starting" | "mailbox-authority-unavailable"
+        | "mailbox-runtime-indeterminate")
+}
+
+/// Runtime indeterminacy needs an explicit diagnostic even though the channel retries it.
+pub fn mailbox_bind_refusal(status: u16, code: &str) -> bool {
+    (400..500).contains(&status)
+        && !matches!(status, 408 | 429)
+        && (!retryable_mailbox_bind_code(code) || code == "mailbox-runtime-indeterminate")
+}
+
+/// Driver notes never go to the terminal shared with the provider.
+pub fn write_driver_log(subject: &str, line: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .context("no state directory for driver warning")?;
+    let directory = state_home.join("st3");
+    std::fs::create_dir_all(&directory)?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600)
+        .open(directory.join("driver-api-warnings.log"))?;
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
+    writeln!(file, "{at} {subject} {}", line.replace('\n', " "))?;
+    Ok(())
+}
+
 
 /// The daemon route a replication worker hands a read to when it must forward it.
 pub const CLIENT_READ_FORWARD_PATH: &str = "/v1/internal/client-read/forward";
@@ -219,6 +268,8 @@ pub struct DaemonUnreachable {
     starting: bool,
     full_replay: bool,
     socket_os_error: Option<i32>,
+    /// Refused, and no daemon holds this socket's readiness lock.
+    abandoned: bool,
 }
 
 impl DaemonUnreachable {
@@ -231,6 +282,7 @@ impl DaemonUnreachable {
             starting: false,
             full_replay: false,
             socket_os_error: None,
+            abandoned: false,
         }
     }
 
@@ -243,6 +295,7 @@ impl DaemonUnreachable {
             starting: false,
             full_replay: false,
             socket_os_error: None,
+            abandoned: false,
         }
     }
 
@@ -273,9 +326,21 @@ impl DaemonUnreachable {
             std::io::ErrorKind::ConnectionRefused => "connection refused".to_owned(),
             _ => error.to_string(),
         };
+        let abandoned = error.kind() == std::io::ErrorKind::ConnectionRefused
+            && crate::startup::abandoned(Path::new(&endpoint));
         let mut outage = Self::connect(endpoint, reason);
         outage.socket_os_error = error.raw_os_error();
+        outage.abandoned = abandoned;
         outage
+    }
+
+    /// Where an abandoned socket may have gone: a daemon started with `--socket` elsewhere.
+    fn elsewhere(&self) -> &'static str {
+        if self.abandoned {
+            "; no daemon holds this socket now, so the daemon may also be listening on another socket (name it with `socket` in config.toml or ST3_ENDPOINT)"
+        } else {
+            ""
+        }
     }
 
     fn after(mut self, waited: Duration) -> Self {
@@ -318,8 +383,8 @@ impl DaemonUnreachable {
         }
         match self.phase {
             OutagePhase::Connect => format!(
-                "the st daemon at {} is not reachable ({}); it may be restarting",
-                self.endpoint, self.reason
+                "the st daemon at {} is not reachable ({}); it may be restarting{}",
+                self.endpoint, self.reason, self.elsewhere()
             ),
             OutagePhase::Response => format!(
                 "the st daemon at {} closed the connection before it answered ({}); it may be restarting, and the request may or may not have been applied",
@@ -338,8 +403,8 @@ impl fmt::Display for DaemonUnreachable {
         match self.phase {
             OutagePhase::Connect => write!(
                 formatter,
-                "the st daemon at {} was not reachable for {seconds}s ({}); it may be restarting or stopped. Nothing was sent; run the command again once the daemon is back",
-                self.endpoint, self.reason
+                "the st daemon at {} was not reachable for {seconds}s ({}); it may be restarting or stopped{}. Nothing was sent; run the command again once the daemon is back",
+                self.endpoint, self.reason, self.elsewhere()
             ),
             OutagePhase::Response => write!(
                 formatter,
@@ -358,6 +423,27 @@ pub fn daemon_unreachable(error: &anyhow::Error) -> Option<&DaemonUnreachable> {
         .chain()
         .find_map(|cause| cause.downcast_ref::<DaemonUnreachable>())
 }
+/// One logical mutation, including refused projection-drain attempts. No body, key or
+/// identity is exposed; `route` omits the query string.
+#[derive(Clone, Copy, Debug)]
+pub struct MutationObservation<'a> {
+    pub method: &'a str,
+    pub route: &'a str,
+    pub attempts: u32,
+    pub took: Duration,
+    pub retry_wait: Duration,
+}
+
+type MutationObserver = Box<dyn Fn(&MutationObservation<'_>) + Send + Sync>;
+static MUTATION_OBSERVER: std::sync::OnceLock<MutationObserver> = std::sync::OnceLock::new();
+
+/// Install optional per-call diagnostics once, before starting calls. Observing sends nothing.
+pub fn set_mutation_observer(
+    observer: impl Fn(&MutationObservation<'_>) + Send + Sync + 'static,
+) {
+    let _ = MUTATION_OBSERVER.set(Box::new(observer));
+}
+
 
 #[derive(Clone, Copy)]
 pub struct ClientDeadlines {
@@ -397,6 +483,12 @@ impl Client {
             #[cfg(any(test, feature = "test-support"))]
             follow_test: None,
         }
+    }
+
+    /// Preserve an endpoint's discovery identity when adding local authority.
+    pub fn with_endpoint(mut self, endpoint: Endpoint) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 
     /// Keep retrying for up to `wait` while the daemon is unreachable. Only requests that are
@@ -456,12 +548,9 @@ impl Client {
         Self::new(Endpoint::Unix(path.into()))
     }
 
-    /// The daemon's Unix socket, when this client talks to one.
-    pub fn socket_path(&self) -> Option<&std::path::Path> {
-        match &self.endpoint {
-            Endpoint::Unix(path) => Some(path),
-            Endpoint::Http(_) => None,
-        }
+    /// A current Unix socket snapshot. Request clients retain the endpoint's discovery identity.
+    pub fn socket_path(&self) -> Option<std::borrow::Cow<'_, Path>> {
+        self.endpoint.unix_socket()
     }
 
     /// Name the concrete human authority carried over the trusted Unix boundary.
@@ -494,6 +583,21 @@ impl Client {
         Ok(client)
     }
 
+    /// Name the mission run a program effect acts as over the trusted Unix boundary. The daemon
+    /// accepts it only when the caller's run credential binds that run.
+    pub fn unix_run(path: impl Into<PathBuf>, run: impl Into<String>) -> Result<Self> {
+        let run = run.into();
+        anyhow::ensure!(
+            run.strip_prefix("mission-run/").is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            }),
+            "Unix run authority must be one concrete `mission-run/<id>` subject"
+        );
+        let mut client = Self::unix(path);
+        client.person = Some(run);
+        Ok(client)
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let first_page = path.starts_with("/v1/client/") && !request_has_page_cursor(path);
         for attempt in 0..3 {
@@ -523,8 +627,8 @@ impl Client {
         &self,
         request: &fractal_schema::deploy::VerifyGoRequest,
     ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
-            return Err(crate::model::St3Error::new(
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
+            return Err(crate::model::FractalError::new(
                 "deploy-local-only",
                 "deploy verification requires the local Unix endpoint",
             ).into());
@@ -591,26 +695,59 @@ impl Client {
         path: &str,
         body: Option<&I>,
     ) -> Result<O> {
+        if matches!(self.endpoint, Endpoint::Fabric(_)) {
+            FabricEndpoint::validate_path(path)?;
+        }
         let bytes = body
             .map(serde_json::to_vec)
             .transpose()?
             .unwrap_or_default();
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
+        let result = loop {
+            attempts += 1;
             let attempt_started = tokio::time::Instant::now();
             let error = match self.request_once(method, path, &bytes).await {
                 Ok(response) => {
                     if let Some(retry) = &self.follow_retry {
                         retry.lock().expect("follow retry lock").unreachable_since = None;
                     }
-                    return decode_api_response(&response);
+                    break decode_api_response(&response);
                 }
                 Err(error) => error,
             };
+            if mutation && api_error_parts(&error).is_some_and(|(status, code, _, details)| {
+                status == 503 && code == "database-busy"
+                    && details.get("reason").and_then(serde_json::Value::as_str)
+                        == Some("run-projection-drain")
+            }) {
+                // The completed refusal guarantees the action never ran. Reserve the entire
+                // next request deadline; never cancel a sent mutation and return this refusal.
+                let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                let delay = jittered(pause);
+                if remaining < request_deadline(path, self.deadlines) + delay {
+                    break Err(error);
+                }
+                draining = true;
+                let slept = tokio::time::Instant::now();
+                tokio::time::sleep(delay).await;
+                retry_wait += slept.elapsed();
+                if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                    < request_deadline(path, self.deadlines)
+                {
+                    break Err(error);
+                }
+                pause = (pause * 2).min(Duration::from_secs(1));
+                continue;
+            }
             if daemon_unreachable(&error).is_some_and(DaemonUnreachable::local_connect_defect) {
-                return Err(error);
+                break Err(error);
             }
             if let Some(retry) = &self.follow_retry
                 && method == "GET"
@@ -625,18 +762,18 @@ impl Client {
                 continue;
             }
             let Some(outage) = daemon_unreachable(&error) else {
-                return Err(error);
+                break Err(error);
             };
             if outage.full_replay && self.announce_outage_wait {
-                return Err(error);
+                break Err(error);
             }
             let repeatable = outage.phase() == OutagePhase::Connect || method == "GET";
             let waited = started.elapsed();
             if !repeatable || self.outage_wait.is_zero() {
-                return Err(error);
+                break Err(error);
             }
             if waited >= self.outage_wait {
-                return Err(outage.clone().after(waited).into());
+                break Err(outage.clone().after(waited).into());
             }
             if self.announce_outage_wait && !announced {
                 eprintln!(
@@ -646,9 +783,31 @@ impl Client {
                 );
                 announced = true;
             }
-            tokio::time::sleep(jittered(pause).min(self.outage_wait - waited)).await;
+            let remaining = if draining {
+                (self.outage_wait - waited).min(drain_deadline.saturating_duration_since(tokio::time::Instant::now()))
+            } else {
+                self.outage_wait - waited
+            };
+            let slept = tokio::time::Instant::now();
+            tokio::time::sleep(jittered(pause).min(remaining)).await;
+            retry_wait += slept.elapsed();
+            if draining && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                < request_deadline(path, self.deadlines)
+            {
+                break Err(error);
+            }
             pause = (pause * 2).min(Duration::from_secs(1));
+        };
+        if mutation && let Some(observer) = MUTATION_OBSERVER.get() {
+            observer(&MutationObservation {
+                method,
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
 
     async fn request_once(&self, method: &str, path: &str, bytes: &[u8]) -> Result<Vec<u8>> {
@@ -683,15 +842,38 @@ impl Client {
         }
         let deadline = request_deadline(path, self.deadlines);
         let response = match &self.endpoint {
-            Endpoint::Unix(socket) => {
+            Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => {
+                let socket = self.endpoint.unix_socket().expect("Unix endpoint");
                 unix_request(
-                    socket,
+                    &socket,
                     method,
                     path,
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    self.person.as_deref(),
+                    RequestAuthority::LocalPerson(self.person.as_deref()),
+                )
+                .await?
+            }
+            Endpoint::Fabric(endpoint) => {
+                let credential = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL")
+                    .map(|value| {
+                        let value = value.into_string().map_err(|_| {
+                            anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL must contain valid UTF-8")
+                        })?;
+                        reqwest::header::HeaderValue::from_str(&format!("Bearer {value}"))
+                            .map_err(|_| anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL is not a valid bearer credential"))
+                    })
+                    .transpose()?;
+                let socket = endpoint.dial().await?;
+                unix_request(
+                    &socket,
+                    method,
+                    path,
+                    bytes,
+                    self.deadlines.connect,
+                    deadline,
+                    RequestAuthority::FabricBearer(credential.as_ref()),
                 )
                 .await?
             }
@@ -734,7 +916,7 @@ impl Client {
     /// read without any graph write. `None` leaves the attach to the WebSocket: an HTTP endpoint
     /// can be another host, and a daemon from before direct attachment has no such route.
     pub async fn local_terminal(&self, subject: &str) -> Result<Option<LocalTerminal>> {
-        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+        if !matches!(self.endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
             return Ok(None);
         }
         match self
@@ -818,10 +1000,9 @@ impl Client {
         &self,
         fence: &Fence,
     ) -> Result<tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>> {
-        let Endpoint::Unix(path) = &self.endpoint else {
-            anyhow::bail!("native mailbox subscriptions require a local Unix socket");
-        };
-        let stream = tokio::net::UnixStream::connect(path).await?;
+        let path = self.endpoint.unix_socket()
+            .context("native mailbox subscriptions require a local Unix socket")?;
+        let stream = tokio::net::UnixStream::connect(path.as_ref()).await?;
         let url = format!(
             "ws://localhost/v1/mailbox?subject={}&incarnation={}&component={}&epoch={}&token={}",
             urlencoding::encode(&fence.subject),
@@ -847,11 +1028,15 @@ impl Client {
 
     async fn open_terminal_bridge(&self, path: &str) -> Result<StdUnixStream> {
         match &self.endpoint {
-            Endpoint::Unix(socket) => {
+            Endpoint::Fabric(_) => {
+                anyhow::bail!("native Fabric endpoints do not support WebSocket requests");
+            }
+            Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => {
+                let socket = self.endpoint.unix_socket().expect("Unix endpoint");
                 let endpoint = socket.display().to_string();
                 let stream = tokio::time::timeout(
                     self.deadlines.connect,
-                    tokio::net::UnixStream::connect(socket),
+                    tokio::net::UnixStream::connect(socket.as_ref()),
                 )
                 .await
                 .map_err(|_| connect_deadline_error(&endpoint, self.deadlines.connect))?
@@ -989,6 +1174,14 @@ pub fn is_missing_route(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.status == 404)
 }
 
+/// Exactly the answer a daemon without the route gives: Axum's 404 with no body. A 404 that says
+/// anything, malformed or not, is an answer from a route that exists.
+pub fn is_absent_route(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UnexpectedResponse>()
+        .is_some_and(|error| error.status == 404 && error.empty)
+}
+
 /// The HTTP status an API call failed with, including an answer without an error body.
 pub fn http_status(error: &anyhow::Error) -> Option<u16> {
     error
@@ -1068,6 +1261,8 @@ impl std::error::Error for ApiResponseError {}
 struct UnexpectedResponse {
     status: u16,
     body: String,
+    /// Whether the answer had no bytes at all; `body` is trimmed for display.
+    empty: bool,
 }
 
 impl fmt::Display for UnexpectedResponse {
@@ -1208,6 +1403,12 @@ where
     Ok(())
 }
 
+/// A tunneled request cannot claim the Unix socket's local-person authority.
+enum RequestAuthority<'a> {
+    LocalPerson(Option<&'a str>),
+    FabricBearer(Option<&'a reqwest::header::HeaderValue>),
+}
+
 async fn unix_request(
     socket: &Path,
     method: &str,
@@ -1215,9 +1416,14 @@ async fn unix_request(
     body: &[u8],
     connect_deadline: Duration,
     deadline: Duration,
-    person: Option<&str>,
+    authority: RequestAuthority<'_>,
 ) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let (person, authorization) = match authority {
+        RequestAuthority::LocalPerson(person) => (person, None),
+        RequestAuthority::FabricBearer(credential) => (None, credential),
+    };
 
     let started = tokio::time::Instant::now();
     let endpoint = socket.display().to_string();
@@ -1238,6 +1444,11 @@ async fn unix_request(
             body.len()
         )
         .into_bytes();
+        if let Some(authorization) = authorization {
+            request.extend_from_slice(b"Authorization: ");
+            request.extend_from_slice(authorization.as_bytes());
+            request.extend_from_slice(b"\r\n");
+        }
         fractal_client::propagation::inject_current_context(|key, value| {
             request.extend_from_slice(key.as_bytes());
             request.extend_from_slice(b": ");
@@ -1444,11 +1655,11 @@ impl MailboxRetry {
 }
 
 /// The window over which drivers re-executed by one deploy spread what their seats' delivery does
-/// not need. At hetz2's 07:30:58Z restart, about 60 drivers sent their harness events, presence
+/// not need. At one host's 07:30:58Z restart, about 60 drivers sent their harness events, presence
 /// diagnostics and native sessions in the new daemon's first eight seconds. Those requests added
 /// about seven seconds of writer time to those eight, and write-acks queued behind them. Over 30
-/// seconds the same work takes under a quarter of the writer. Harness evidence stays fresh for 90
-/// seconds, so nothing ages out while a driver waits.
+/// seconds the same work takes under a quarter of the writer. The shared harness observation
+/// freshness window exceeds this settling interval, so nothing ages out while a driver waits.
 pub const RESUME_SETTLE: Duration = Duration::from_secs(30);
 
 /// How long a driver re-executed into a new binary waits before it sends what its seat's delivery
@@ -1632,6 +1843,7 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     UnexpectedResponse {
         status,
         body: String::from_utf8_lossy(bytes).trim().to_owned(),
+        empty: bytes.is_empty(),
     }
     .into()
 }
@@ -1661,6 +1873,129 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unix_run_client_names_exactly_one_mission_run() {
+        let client = Client::unix_run("/tmp/socket", "mission-run/0123abcd").unwrap();
+        assert_eq!(client.person.as_deref(), Some("mission-run/0123abcd"));
+        for run in ["mission-run/", "mission-run/a/b", "person/operator", "mission-run/a b"] {
+            assert!(Client::unix_run("/tmp/socket", run).is_err(), "{run}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_422_warns_and_keeps_retrying() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        if std::env::var_os("FRACTAL_BIND_WARNING_TEST").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "client::tests::bind_422_warns_and_keeps_retrying", "--nocapture"])
+                .env("FRACTAL_BIND_WARNING_TEST", "1")
+                .env("XDG_STATE_HOME", root.path())
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let log = std::fs::read_to_string(root.path().join("st3/driver-api-warnings.log")).unwrap();
+            assert!(log.contains("delivery refused: mailbox-runtime-indeterminate (HTTP 422)"), "{log}");
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Endpoint::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let _ = stream.read(&mut bytes).await.unwrap();
+            let body = r#"{"code":"mailbox-runtime-indeterminate","message":"forced refusal","details":{}}"#;
+            stream.write_all(format!("HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let mut fence = Fence::new("agent/example/refused-bind", "current", "delivery");
+        assert!(tokio::time::timeout(Duration::from_millis(250), fence.bind(&Client::new(endpoint))).await.is_err());
+        assert_eq!(fence.epoch, 0);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fabric_unix_http_roundtrip_carries_bearer_without_local_authority() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fabric.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let byte = stream.read_u8().await.unwrap();
+                request.push(byte);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /v1/client/capabilities HTTP/1.1\r\n"));
+            assert!(request.contains("\r\nAuthorization: Bearer paired-test-token\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("x-st3-person:"));
+            let body = br#"{"api_version":"st3.client.v0","value":{"accepted":true}}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let credential = reqwest::header::HeaderValue::from_static("Bearer paired-test-token");
+        let bytes = unix_request(
+            &socket, "GET", "/v1/client/capabilities", &[],
+            Duration::from_secs(1), Duration::from_secs(1),
+            RequestAuthority::FabricBearer(Some(&credential)),
+        ).await.unwrap();
+        assert_eq!(decode_api_response::<Value>(&bytes).unwrap(), json!({"accepted": true}));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn endpoint_parsing_preserves_local_and_http_and_roundtrips_fabric() {
+        assert!(matches!(Endpoint::parse("/run/fractal.sock").unwrap(),
+            Endpoint::Unix(path) if path == Path::new("/run/fractal.sock")));
+        assert!(matches!(Endpoint::parse("unix:///run/fractal.sock").unwrap(),
+            Endpoint::Unix(path) if path == Path::new("/run/fractal.sock")));
+        assert!(matches!(Endpoint::parse("https://example.invalid/").unwrap(),
+            Endpoint::Http(base) if base == "https://example.invalid"));
+        for target in ["devbox", "DEVBOX", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"] {
+            let value = format!("fabric://{target}/st3-client-v0");
+            let Endpoint::Fabric(endpoint) = Endpoint::parse(&value).unwrap() else {
+                panic!("a Fabric URI must not become a Unix socket");
+            };
+            assert_eq!(endpoint.to_string(), value);
+            assert!(matches!(Endpoint::parse(endpoint.to_string()).unwrap(),
+                Endpoint::Fabric(parsed) if parsed == endpoint));
+        }
+        for value in [
+            "fabric:", "fabric://", "fabric://devbox", "fabric://devbox/",
+            "fabric://devbox/other", "fabric://devbox/st3-client-v0/extra",
+            "fabric://devbox/st3-client-v0?token=secret",
+            "fabric://devbox/st3-client-v0#fragment",
+        ] {
+            assert!(Endpoint::parse(value).is_err(), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_refuses_private_paths_and_websockets_before_dialing() {
+        let client = Client::new(Endpoint::parse("fabric://unresolved/st3-client-v0").unwrap());
+        assert!(client.socket_path().is_none());
+        assert!(client.local_terminal("agent/test").await.unwrap().is_none());
+        for path in [
+            "/v1/status", "/v1/backup", "/v1/mailbox", "/v1/claims",
+            "/v1/internal/client-read/forward", "/v1/clientish/actions",
+            "/v1/client/../claims", "/v1/client/%2e%2e/claims",
+            "/v1/client/%252e%252e/claims", "/v1/client/%2f..%2fclaims",
+            "//v1/client/actions", "https://example.invalid/v1/client/actions",
+        ] {
+            let error = client.get::<Value>(path).await.unwrap_err();
+            assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{path}: {error:#}");
+            assert!(daemon_unreachable(&error).is_none(), "{path}: {error:#}");
+        }
+        let error = client.open_terminal_bridge("/v1/client/terminal/stream").await.unwrap_err();
+        assert!(error.to_string().contains("do not support WebSocket"));
+        let error = client.open_mailbox(&Fence::default()).await.unwrap_err();
+        assert!(error.to_string().contains("require a local Unix socket"));
+    }
 
     #[test]
     fn local_api_transport_envelopes_accept_old_and_fractal_versions() {
@@ -1874,6 +2209,30 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_socket_no_daemon_holds_says_the_daemon_may_listen_elsewhere() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("st3.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let refused = std::io::Error::from_raw_os_error(libc::ECONNREFUSED);
+        let outage = || DaemonUnreachable::connect_io(socket.display().to_string(), &refused);
+        // No daemon ever observed startup here: refused, as before.
+        assert!(!outage().summary().contains("another socket"), "{}", outage().summary());
+        {
+            let startup = crate::startup::Startup::begin(&socket).unwrap();
+            startup.serving();
+            // A daemon holds it: a restart or a slow accept, not a socket left behind.
+            assert!(!outage().summary().contains("another socket"), "{}", outage().summary());
+        }
+        // That daemon has exited and nothing holds the socket.
+        let summary = outage().summary();
+        assert!(summary.contains("it may be restarting; no daemon holds this socket now"), "{summary}");
+        assert!(summary.contains("`socket` in config.toml or ST3_ENDPOINT"), "{summary}");
+        let waited = outage().after(Duration::from_secs(30)).to_string();
+        assert!(waited.contains("restarting or stopped; no daemon holds this socket now"), "{waited}");
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn interactive_startup_fails_promptly_but_drivers_keep_a_connect_outage() {
         let root = tempfile::tempdir().unwrap();
@@ -2048,6 +2407,22 @@ mod tests {
             let base = Duration::from_secs(seconds);
             let pause = retry.failed(&error);
             assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
+        }
+    }
+    #[test]
+    fn mailbox_bind_retries_only_transient_authority_failures() {
+        for code in [
+            "internal",
+            "database-busy",
+            "database-locked",
+            "mailbox-session-starting",
+            "mailbox-authority-unavailable",
+            "mailbox-runtime-indeterminate",
+        ] {
+            assert!(retryable_mailbox_bind_code(code), "{code}");
+        }
+        for code in ["stale-mailbox-session", "unbound-mailbox", "forbidden"] {
+            assert!(!retryable_mailbox_bind_code(code), "{code}");
         }
     }
 
@@ -2295,6 +2670,44 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("was not reachable for 0s"), "{message}");
         assert!(message.contains("Nothing was sent"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn default_discovery_retries_a_legacy_daemon_restored_during_the_wait() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let directory = tempfile::tempdir().unwrap();
+        let primary = directory.path().join("fractal.sock");
+        let legacy = directory.path().join("st3.sock");
+        let discovery = fractal_client::UnixSocketDiscovery::Defaults {
+            runtime: primary.clone(),
+            published: primary.clone(),
+        };
+        assert_eq!(discovery.resolve(), primary);
+        let client = Client::new(Endpoint::DiscoveredUnix(discovery))
+            .with_outage_wait(Duration::from_secs(2), false);
+        let request = tokio::spawn(async move { client.get::<usize>("/v1/test").await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let listener = UnixListener::bind(&legacy).unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4096];
+                if stream.read(&mut bytes).await.unwrap() == 0 {
+                    continue; // Discovery probes do not issue an HTTP request.
+                }
+                let body = r#"{"api_version":"st3.v1","value":42}"#;
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await.unwrap();
+                break;
+            }
+        });
+        assert_eq!(request.await.unwrap().unwrap(), 42);
+        server.await.unwrap();
+        assert!(!primary.exists());
+        assert!(Client::unix(primary).with_outage_wait(Duration::from_millis(50), false)
+            .get::<usize>("/v1/test").await.is_err());
     }
 
     #[tokio::test]
@@ -2594,6 +3007,22 @@ mod tests {
         runtime_id: &str,
         created_at: &str,
     ) -> std::thread::JoinHandle<Vec<u8>> {
+        pty_session_with_tail(
+            root,
+            runtime_id,
+            created_at,
+            pty_core::protocol::encode_exit(0),
+            false,
+        )
+    }
+
+    fn pty_session_with_tail(
+        root: &Path,
+        runtime_id: &str,
+        created_at: &str,
+        tail: Vec<u8>,
+        close: bool,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
         use std::io::{Read as _, Write as _};
         std::fs::create_dir_all(root).unwrap();
         std::fs::write(
@@ -2623,9 +3052,10 @@ mod tests {
                     stream
                         .write_all(&pty_core::protocol::encode_screen(b"straight from the pty"))
                         .unwrap();
-                    stream
-                        .write_all(&pty_core::protocol::encode_exit(0))
-                        .unwrap();
+                    stream.write_all(&tail).unwrap();
+                    if close {
+                        return received;
+                    }
                 }
             }
         })
@@ -2674,6 +3104,41 @@ mod tests {
         output.rewind().unwrap();
         output.read_to_string(&mut shown).unwrap();
         assert!(shown.contains("straight from the pty"), "{shown:?}");
+    }
+
+    #[tokio::test]
+    async fn a_local_attachment_loss_never_claims_that_the_child_exited() {
+        use std::io::{Read as _, Seek as _};
+        for tail in [Vec::new(), vec![12, 0, 0], vec![12, 0, 0, 0, 1, 0]] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("pty");
+            let session = pty_session_with_tail(
+                &root,
+                "worker",
+                "2026-09-29T08:00:00.000Z",
+                tail.clone(),
+                true,
+            );
+            let terminal = LocalTerminal {
+                subject: "agent/worker".into(),
+                runtime_id: "worker".into(),
+                incarnation_id: format!("{}:2026-09-29T08:00:00.000Z", std::process::id()),
+                pty_root: root,
+            };
+            let (io, _input, mut output) = silent_io();
+            let exit = attach_local_terminal_with_io(&terminal, io).await.unwrap();
+            session.join().unwrap();
+            let mut shown = String::new();
+            output.rewind().unwrap();
+            output.read_to_string(&mut shown).unwrap();
+            assert_eq!(exit, 1, "attachment tail {tail:?}: {shown:?}");
+            assert!(shown.contains("connection lost"), "{shown:?}");
+            assert!(!shown.contains("session ended"), "{shown:?}");
+            assert!(!shown.contains("exited with code"), "{shown:?}");
+            if tail.len() == 6 {
+                assert!(shown.contains("client too slow"), "{shown:?}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2747,4 +3212,23 @@ mod tests {
             "a session the registry did not name must receive nothing"
         );
     }
+}
+
+#[cfg(test)]
+mod absent_route_tests {
+    use super::*;
+
+    /// Only Axum's empty 404 says a route is absent; a 404 with any body comes from a route that
+    /// exists, and another status is not about routes.
+    #[test]
+    fn only_an_empty_404_is_an_absent_route() {
+        // Through the decoder that builds the error from the answer's bytes.
+        let answer = |status, body: &[u8]| api_error(status, body);
+        assert!(is_absent_route(&answer(404, b"")));
+        assert!(!is_absent_route(&answer(404, b"not json")));
+        assert!(!is_absent_route(&answer(404, b"  \n")), "a body of whitespace is still a body");
+        assert!(!is_absent_route(&answer(500, b"")));
+        assert!(!is_absent_route(&anyhow::anyhow!("another failure")));
+    }
+
 }

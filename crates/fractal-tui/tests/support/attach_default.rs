@@ -31,6 +31,9 @@ const AGENT: &str = "agent/example/atlas/builder";
 
 fn ask(agent: &str) -> Attention {
     Attention {
+        deadline: None,
+        requested_at: None,
+        snoozed_until: None,
         id: "ask/probe".into(),
         tier: Tier::Stopped,
         title: "Ship the release?".into(),
@@ -57,11 +60,11 @@ fn ask(agent: &str) -> Attention {
 #[test]
 #[ignore = "worker for attach_default_probe; needs harness-owned PTYs"]
 fn attach_default_probe_worker() -> Result<()> {
-    let root = PathBuf::from(std::env::var_os("STUI_PROBE_ROOT").expect("probe root"));
-    let socket = PathBuf::from(std::env::var_os("STUI_PROBE_SOCKET").expect("probe socket"));
+    let root = PathBuf::from(std::env::var_os("FRACTAL_TUI_PROBE_ROOT").expect("probe root"));
+    let socket = PathBuf::from(std::env::var_os("FRACTAL_TUI_PROBE_SOCKET").expect("probe socket"));
     let _guard = Guard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut ui = Ui::new(demo::world());
+    let mut ui = Ui::new(demo::test_world());
     ui.live = true;
     // This device's own choice, from the isolated XDG_STATE_HOME the harness wrote (or none).
     ui.load_prefs();
@@ -114,6 +117,7 @@ fn attach_default_probe_worker() -> Result<()> {
                             "one".into(),
                             24,
                             80,
+                            None,
                         )),
                     });
                 }
@@ -191,16 +195,16 @@ fn attach_default_probe_worker() -> Result<()> {
 }
 
 /// What a key costs from press to drawn frame with an agent's terminal attached in a space,
-/// with an alert on top when `STUI_BENCH_ALERT` is set: `cargo test -p fractal-tui --lib --release
+/// with an alert on top when `FRACTAL_TUI_BENCH_ALERT` is set: `cargo test -p fractal-tui --lib --release
 /// attach_redraw_cost -- --ignored --nocapture`. Run it on two trees to compare them.
 #[test]
 #[ignore = "a measurement, not a check"]
 fn attach_redraw_cost() {
     use ratatui::backend::TestBackend;
-    let mut ui = Ui::new(demo::world());
+    let mut ui = Ui::new(demo::test_world());
     ui.glasses = glass::Glasses::open(None, None);
     ui.open_in_glass(Pane::Terminal(AGENT.into()), glass::Open::Tab);
-    let (stui, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (tui, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
     ui.terminal = Some(TerminalView {
         agent: AGENT.into(),
         name: "Probe".into(),
@@ -209,9 +213,9 @@ fn attach_redraw_cost() {
         cursor: None,
         stale: None,
         ended: None,
-        native: Some(pty::NativeTerminal::spawn(stui, "bench", "one".into(), 38, 120)),
+        native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120, None)),
     });
-    if std::env::var_os("STUI_BENCH_ALERT").is_some() {
+    if std::env::var_os("FRACTAL_TUI_BENCH_ALERT").is_some() {
         ui.world.attention = Load::Ready(vec![ask(AGENT)]);
     }
     let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();

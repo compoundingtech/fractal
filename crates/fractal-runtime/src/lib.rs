@@ -12,11 +12,22 @@
 //! evidence. This API observes only; it never stops a process or unloads a scope.
 
 mod environment;
+pub mod host;
+pub mod host_envelope;
 mod isolate;
+mod lane;
 mod priority;
+mod peer_process;
 mod process;
 mod procfs;
 mod pty;
+mod seat_placement;
+pub mod transcript;
+#[cfg(test)]
+mod test_executable;
+pub mod seat_admission;
+pub mod seat_admission_status;
+pub use seat_placement::UnlanedSeatPlacement;
 mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
@@ -36,11 +47,23 @@ pub use priority::{
     protect_server, protect_servers, report as priority_report, server_unit,
     set_configured as set_configured_seat_priority, work_prefix,
 };
+pub use host::installed_memory_bytes;
+pub use lane::{
+    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, Raise, end as end_lane, resize as resize_lane, held_memory as lane_held_memory, live as live_lane, enforced as lanes_enforced,
+    parse_memory as parse_lane_memory, sccache_socket as lane_sccache_socket, seat_slice,
+    show_memory as show_lane_memory,
+    set_enforced as set_lanes_enforced,
+};
+pub use peer_process::PeerProcessIdentity;
+#[cfg(target_os = "macos")]
+pub use peer_process::{macos_process_identity, macos_process_owner};
 pub use process::{
-    ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
+    ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token, process_generation_alive,
+    FiniteLane, FiniteExecutionAuthorization, ResourceCoverage, ResourceExecutionBinding, UnsupportedCoverage,
 };
 pub use procfs::ProcessNamespaceMismatch;
 pub use pty::{
-    Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses, PtyObservation, PtyRuntime,
-    PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
+    Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable,
+    ProcfsHidesProcesses, PtyExitEvidence, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
+    PtySpawnTimeoutPhase, TerminalSize, mailbox_legacy_admissions_total,
 };

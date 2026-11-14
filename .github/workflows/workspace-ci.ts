@@ -176,6 +176,30 @@ export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${names
 // Non-PR events retain their original shape and controls; merge-group exclusion is in fleet.
 export const performanceCostRunsOn = `\${{ fromJSON(github.event_name == 'pull_request' && needs.${pickRunnerJobId}.outputs.namespace_pr_optional || format('${JSON.stringify(linuxStageRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll(linuxJobPriority, '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}`
 
+/** Execution identity stays in github.*; topology controls only scheduling and test coverage. */
+export type FleetBuildContext = { topology: 'event' | 'merge-group' }
+export const workspaceRunners = (context: FleetBuildContext) => {
+  const ordinary = { pickRunnerJob, supportingStageRunsOn, primaryTestRunsOn, secondaryStageRunsOn, testBuildRunsOn }
+  if (context.topology === 'event') return ordinary
+  const merge = `needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-priority"]'`
+  const queueRunner = `\${{ fromJSON(${merge}) }}`
+  const namespace = `format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE || 'linux-x86-64', github.run_id)`
+  return {
+    ...ordinary,
+    pickRunnerJob: {
+      ...pickRunnerJob, if: '!cancelled()', outputs: priorityRunnerJob.outputs,
+      // PR-profile admission is not queue topology. Keep the real event for every other script.
+      steps: pickRunnerJob.steps.filter(step => step.id === 'pick').map(({ if: _if, ...step }) => ({
+        ...step, env: { ...step.env, EVENT: 'merge_group' },
+      })),
+    },
+    supportingStageRunsOn: queueRunner,
+    primaryTestRunsOn: queueRunner,
+    secondaryStageRunsOn: queueRunner,
+    testBuildRunsOn: `\${{ fromJSON(vars.CI_MERGE_TEST_BUILD_OWNED && (needs.${pickRunnerJobId}.outputs.ci1_build || ${namespace}) || ${merge}) }}`,
+  }
+}
+
 /** A job that needs `pick-runner` still runs when it was skipped (ci1 off). */
 export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled() }}' } as const
 
@@ -185,8 +209,12 @@ export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled()
  * record up to the GC cap, and `fetch-depth: 0` fetches every tag: 5,000 of them added 81.5 MiB and 16 s to a full fetch
  * (measured 2026-10-19), mostly source objects of tested commits that no branch holds. So check out one commit, then fetch the
  * rest with a negative refspec (git 2.29 or later). Deepening the shallow clone (`--unshallow`) took 21 s against 11 s for a
- * full fetch (2026-10-20, from hetz2): the server cannot reuse its packs for it. So the shallow marker goes and the history is
+ * full fetch (2026-10-20, from a build host): the server cannot reuse its packs for it. So the shallow marker goes and the history is
  * fetched as a fresh clone would (`--refetch`, git 2.36 or later), then checked: the whole history is here or the step fails.
+ * The marker is only moved aside: a fetch that fails installs no pack and updates no ref, so putting the marker back leaves the
+ * one-commit checkout exactly as it was, never a checkout without the marker whose parents are missing (a 408 did that to a merge
+ * group on 2026-11-03). git does not retry a dropped transfer, and GitHub answers a slow pack negotiation with HTTP 408, so a
+ * transport failure, and only one, is tried once more; any other failure ends the step at once.
  * The job token is used only when checkout did not persist its own.
  */
 export const fullHistoryFetchScript = `if [ -z "$(git config --local --get-regexp '^http\\..*\\.extraheader$' || true)" ]; then
@@ -195,8 +223,21 @@ export const fullHistoryFetchScript = `if [ -z "$(git config --local --get-regex
   export GIT_CONFIG_VALUE_0
 fi
 head=$(git rev-parse HEAD)
-rm -f "$(git rev-parse --git-path shallow)"
-git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+shallow=$(git rev-parse --git-path shallow)
+errors=$(mktemp)
+fetch() {
+  status=0
+  git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
+  cat "$errors" >&2
+  return "$status"
+}
+transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
+[ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
+if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
+  [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
+  exit 1
+fi
+rm -f "$shallow.full-fetch"
 git fsck --connectivity-only --no-dangling --no-progress`
 
 /**
@@ -220,6 +261,9 @@ export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 /** Dev/test builds without debug information or incremental state, as on the fleet runners. */
 export const buildEnv = { CARGO_PROFILE_DEV_DEBUG: '0', CARGO_PROFILE_TEST_DEBUG: '0', CARGO_INCREMENTAL: '0' }
 
+// This archive is dependency-only evidence, even on an exact key hit: its key
+// omits Rust sources. buildSnapshotPrepare discards local package fingerprints
+// and outputs after restoration; only exact-source snapshots retain them.
 export const cargoCacheStep = {
   name: 'Restore the Cargo target and registry',
   id: 'cargo-cache',
@@ -238,7 +282,7 @@ export const nixCacheStep = {
   if: "env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'",
   uses: 'actions/cache/restore@v4',
   with: {
-    path: '${{ runner.temp }}/st-ci-cache',
+    path: '${{ runner.temp }}/fractal-ci-cache',
     key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}",
     'restore-keys': 'nix5-${{ github.job }}-${{ runner.os }}-\nnix4-${{ github.job }}-${{ runner.os }}-',
   },
@@ -277,11 +321,11 @@ export const commonSetupSteps = [
   {
     name: 'Use the runner\'s own caches',
     run: `if [ -n "\${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"`,
+printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"`,
   },
   // actions/cache is served by Namespace's accelerated cache backend and is keyed, not tied to a node.
   // Namespace cache volumes are per node and replicate in the background, so a job on another node
-  // starts empty. /nix itself cannot be cached (see scripts/ci-nix-cache); RUNNER_TEMP/st-ci-cache holds a
+  // starts empty. /nix itself cannot be cached (see scripts/ci-nix-cache); RUNNER_TEMP/fractal-ci-cache holds a
   // local Nix binary cache instead. Linux only: the key names the job, so each stage keeps its own.
   buildSnapshotRestore,
   cargoCacheStep,
@@ -292,7 +336,7 @@ printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEM
     name: 'Isolate test home and XDG state',
     run: `# Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
 # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
 home="$RUNNER_TEMP/test-home"
 mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
 printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_STATE_HOME=%s/.local/state\\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"`,
@@ -314,6 +358,7 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    env: { GH_TOKEN: '${{ github.token }}' },
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
 printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
@@ -433,7 +478,7 @@ export const testArchiveProducer = {
 }
 
 /**
- * isolation-vm's work: the retained st2 controls and current-runtime scope proofs need a real systemd user manager, which the
+ * isolation-vm's work: the current-runtime scope proofs need a real systemd user manager, which the
  * runner image lacks, so a NixOS VM runs the shared producer's prebuilt test binary and compiles nothing; a
  * second VM runs the sekrets gateway. Workspace CI and the daily long-lane run share these steps.
  */
@@ -768,7 +813,10 @@ export const linuxStageJob = ({
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
     ...before,
-    nixDevelopStep({ name: description ?? 'Run nextest', command }),
+    {
+      ...nixDevelopStep({ name: description ?? 'Run nextest', command }),
+      ...(stage === 'fleet-compat' ? { env: { GH_TOKEN: '${{ github.token }}' } } : {}),
+    },
     ...after,
     {
       name: 'Save Nix outputs to the local Nix cache',
@@ -815,14 +863,15 @@ export const pnpmStoreEnv = { pnpm_config_store_dir: '${{ runner.temp }}/pnpm-st
 export const megarepoApplyStep = {
   name: 'Materialize megarepo members',
   env: { MEGAREPO_STORE: '${{ runner.temp }}/megarepo' },
-  run: `nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+  run: `python3 scripts/prepare-pnpm-source-inputs.py apply
 printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 } as const
 
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
-  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  'restore-keys': 'fractal-web-pnpm-${{ runner.os }}-pnpm12.17.0-node24.20.0-',
 } as const
 
 /**
@@ -844,7 +893,7 @@ export const fractalWebShellKeyStep = {
   id: 'web-shell-key',
   shell: 'bash',
   env: {
-    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq') }}",
+    CI_WEB_SHELL_SOURCE_HASH: "${{ hashFiles('nix/web-shell.nix', 'nix/web-shell-inputs.json', 'scripts/ci-web-shell', 'scripts/ci-web-shell-inputs.jq', 'scripts/prepare-pnpm-source-inputs.py') }}",
   },
   run: 'bash scripts/ci-web-shell key',
 } as const
@@ -863,7 +912,8 @@ const embeddedPython = (script: string) =>
 // SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
 // full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
 // per-commit set unsharded on shard 0.
-const kitShardCount = 2
+// Four shards leave room for shard 0's non-play lanes within the unchanged 25-minute job budget.
+const kitShardCount = 4
 const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
 // What one run of the lane covers, written once: the matrix, the run step, each shard's note and the whole-check note
 // all read these, so a note can never claim more shards or a fuller test set than the run had.
@@ -887,11 +937,12 @@ export const fractalWebNoteEnv = {
  * needs no checkout; the gate checks out only to aggregate sharded kit receipts. Execution
  * runs after generated files are fresh. Workflow path filters would leave checks pending.
  */
-export const fractalWebJobs = {
+export const buildFractalWebJobs = (context: FleetBuildContext) => ({
   'fractal-web-changes': {
     name: 'fractal-web-changes',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the detection steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     outputs: {
       relevant: '${{ steps.detect.outputs.relevant }}',
@@ -920,7 +971,7 @@ export const fractalWebJobs = {
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
-    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
+    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.refuse == 'true') }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
@@ -932,7 +983,7 @@ export const fractalWebJobs = {
       fractalWebRunnerStep,
       // A pull request needs its history: the signing guard lists the commits between the base and the head to
       // check their authors, and without them a web-relevant run is never signed and its lane reads as not run.
-      ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'"),
+      ...fullHistoryCheckoutSteps({ 'persist-credentials': false }, {}, "github.event_name == 'pull_request'").slice(0, context.topology === 'merge-group' ? 1 : undefined),
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
       megarepoApplyStep,
       { name: 'Check web shell identity invariants', run: 'python3 scripts/ci-web-shell-test' },
@@ -957,11 +1008,11 @@ export const fractalWebJobs = {
           KIT_SHARD_COUNT: kitShardCountExpression,
           KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
           // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
-          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
+          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out), with a raw CPU ceiling;
           // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
           KIT_PLAY_SET: kitPlaySetExpression,
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
-          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
+          KIT_PLAY_WALL_GUARD_SECONDS: "${{ github.event_name == 'pull_request' && '268' || '' }}",
           // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
           // placed in the import graph); merge groups and manual runs run every test file.
           APP_TEST_SET: appTestSetExpression,
@@ -996,12 +1047,12 @@ export const fractalWebJobs = {
   'fractal-web': {
     name: 'fractal-web',
     needs: ['fractal-web-changes', 'fractal-web-execution', 'evidence-gate-fractal-web'],
-    // A failed, cancelled or unexpectedly skipped execution must fail this check. Under an evidence skip the execution
-    // shards end in success with their steps skipped (fleet.yml.genie.ts), so the verdict passes and the cost steps,
-    // which have no receipts to read, do not run.
+    // Explicit trusted evidence covers PR and merge-group trees; all other relevant runs
+    // require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
-    'timeout-minutes': 1,
+    // The job budget includes runner setup and teardown, not just the gate steps.
+    'timeout-minutes': 3,
     permissions: { contents: 'read' },
     steps: [
       fractalWebRunnerStep,
@@ -1011,6 +1062,10 @@ export const fractalWebJobs = {
           CHANGES_RESULT: '${{ needs.fractal-web-changes.result }}',
           RELEVANT: '${{ needs.fractal-web-changes.outputs.relevant }}',
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
+          EVIDENCE_SKIP: '${{ needs.evidence-gate-fractal-web.outputs.skip }}',
+          // An unsigned signed-only pull request with web changes: execution did not run, and the check fails with what to do instead.
+          EVIDENCE_REFUSAL: "${{ needs.evidence-gate-fractal-web.outputs.refuse == 'true' && needs.evidence-gate-fractal-web.outputs.refusal || '' }}",
+          EVENT_NAME: '${{ github.event_name }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),
       },
@@ -1036,11 +1091,12 @@ export const fractalWebJobs = {
       },
       {
         name: 'Require every kit shard and exact full-index coverage',
-        // Never conditioned on the evidence gate: only merge groups and manual runs shard, a skip is for pull requests
-        // only (the policy's events), and a skip taken anyway leaves no receipts, so this step would fail the check.
-        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        // A trusted evidence skip produces no receipts, just as it suppresses execution and download.
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'`,
         run: `node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" ${kitShardCount}`,
       },
     ],
   },
-} as const
+} as const)
+
+export const fractalWebJobs = buildFractalWebJobs({ topology: 'event' })

@@ -54,7 +54,8 @@ def signal_private(pid, sig, *, endpoint=None, root=None, environment=None,
             if not matches_private_process(pid, endpoint, root, environment,
                                            start_ticks, contains, parent, process_group):
                 return False
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError) as error:
+            print(f'{pid}: skipped unreadable process identity: {error}', file=sys.stderr)
             return False
         # The numeric PID can exit/recycle after the checks; the fd still names
         # only the process opened above. A replacement cannot receive the signal.
@@ -77,7 +78,12 @@ def matches_private_process(pid, endpoint, root, environment, start_ticks, conta
         return False
     if process_group is not None and int(stat[2]) != process_group:
         return False
-    env = dict(item.split(b"=", 1) for item in (proc / "environ").read_bytes().split(b"\0") if b"=" in item)
+    raw_environment = (proc / "environ").read_bytes()
+    if (endpoint is not None or environment) and not raw_environment:
+        # A process still in exec can expose no environment yet. It cannot prove
+        # marker ownership; report this separately from a readable non-match.
+        raise ValueError('empty process environment')
+    env = dict(item.split(b"=", 1) for item in raw_environment.split(b"\0") if b"=" in item)
     if endpoint is not None:
         preferred, legacy = env.get(b"FRACTAL_ENDPOINT"), env.get(b"ST3_ENDPOINT")
         if preferred is not None and legacy is not None and preferred != legacy:

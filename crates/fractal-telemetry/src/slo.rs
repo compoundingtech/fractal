@@ -1,33 +1,33 @@
-//! The daemon's targets, from `slo/targets.toml`, which is built in. The same file is what
-//! `st doctor` and CI's daemon_load read. A target describes what we aim for; it gates nothing.
+//! The daemon's targets, from the objectives it ships in `slo/objectives.kdl`, which is built in
+//! and read by the same reader as a declared objective (`fractal_kernel::objective`). The same
+//! file is what `st doctor` and CI's daemon_load read. A target describes what we aim for; it
+//! gates nothing.
 
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use fractal_kernel::objective::{self, Bound, Indicator, Objective};
+use serde::Serialize;
 use serde_json::{Value, json};
 use smallclaims::windows::StoreWork;
 
-/// The targets file this daemon was built with.
-pub const SOURCE: &str = include_str!("../../../slo/targets.toml");
+/// The objectives file this daemon was built with.
+pub const SOURCE: &str = include_str!("../../../slo/objectives.kdl");
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Targets {
     pub latency: Vec<Latency>,
     pub share: Vec<Share>,
     pub statement: Statement,
     pub transaction: Transaction,
+    pub writer_hold: WriterHold,
     pub cpu: Cpu,
     pub divergence: Divergence,
     pub database: Database,
-    pub duration: Vec<DurationTarget>,
-    pub count: Vec<CountTarget>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Latency {
     pub name: String,
     pub about: String,
@@ -37,8 +37,7 @@ pub struct Latency {
     pub paths: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Share {
     pub name: String,
     pub about: String,
@@ -46,87 +45,57 @@ pub struct Share {
     pub path: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Statement {
     pub about: String,
     pub p99_ms: u64,
     pub max_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Transaction {
     pub about: String,
     pub max_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Each hold of the store's single writer, and each read transaction past the same bound, by who
+/// held it.
+#[derive(Debug)]
+pub struct WriterHold {
+    pub about: String,
+    pub max_ms: u64,
+}
+
+/// The member's CPU: its daemon process and every replication worker process beside it, over
+/// closed UTC minutes. See `smallclaims::windows::cpu_minutes` for what makes a minute idle.
+#[derive(Debug)]
 pub struct Cpu {
     pub about: String,
+    /// The most cores the member may use over the hour.
     pub max_cores: f64,
+    /// The most cores the member may use over the hour's idle minutes, on average.
+    pub idle_max_cores: f64,
+    /// The idle minutes an hour needs before the idle target judges it; with fewer it is unknown.
+    pub idle_min_minutes: u64,
+    /// The bound daemon_load holds the daemon to under its synthetic load in CI.
+    pub load_max_cores: f64,
 }
 
 /// Projection divergences, counted fleet-wide from their open faults. A projection is a pure
 /// function of the claims, so each one is a bug.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Divergence {
     pub about: String,
     pub max_open: u64,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Database {
     pub about: String,
     /// The pages in use, not counting free pages SQLite reuses before the file grows.
     pub max_live_gb: f64,
     /// Net daily growth of the pages in use: what is written less what checkpoints free.
     pub max_growth_mb_per_day: f64,
-}
-
-/// One percentile of a duration observed outside the daemon, such as a CI run: the objective
-/// `NAME/pPERCENTILE`. A name may declare several percentiles, each its own objective.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DurationTarget {
-    pub name: String,
-    pub about: String,
-    /// Between 1 and 99: that many of every 100 samples finish within `target_ms`.
-    pub percentile: u64,
-    pub target_ms: u64,
-    /// The series that feeds it, `ci/NAME`.
-    pub path: String,
-}
-
-impl DurationTarget {
-    /// The objective's id: its name and percentile, `merge-latency/p95`.
-    pub fn id(&self) -> String {
-        format!("{}/p{}", self.name, self.percentile)
-    }
-}
-
-/// Events observed outside the daemon, such as flaky CI results, counted per hour: the
-/// objective `NAME`.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CountTarget {
-    pub name: String,
-    pub about: String,
-    pub max_per_hour: u64,
-    /// The series that feeds it, `ci/NAME`.
-    pub path: String,
-}
-
-/// Whether `path` names a series observed in CI: `ci/` and lowercase words joined by `-` or `/`.
-fn is_ci_path(path: &str) -> bool {
-    path.strip_prefix("ci/").is_some_and(|rest| {
-        rest.split('/').all(|part| {
-            !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
-    })
 }
 
 impl Latency {
@@ -141,10 +110,121 @@ impl Latency {
     }
 }
 
-/// Read and check a targets file. A missing, unknown or nonsensical field is an error, never a
-/// default.
+/// Read and check an objectives file of the objectives Fractal ships. A missing, unknown or
+/// nonsensical child is an error, never a default.
 pub fn parse(text: &str) -> Result<Targets> {
-    let targets: Targets = toml::from_str(text).context("the targets file is not valid")?;
+    read(text).map(|(_, targets)| targets)
+}
+
+fn read(text: &str) -> Result<(Vec<Objective>, Targets)> {
+    let objectives =
+        objective::parse_document(text).map_err(|error| anyhow!("the objectives file is not valid: {error}"))?;
+    let targets = build(&objectives)?;
+    check(&targets)?;
+    Ok((objectives, targets))
+}
+
+/// Put `value` in the one slot its indicator has, named `expected`: `fractal doctor` and the OTLP
+/// export read these by name.
+fn one<T>(slot: &mut Option<T>, indicator: &str, expected: &str, name: &str, value: T) -> Result<()> {
+    ensure!(name == expected, "the {indicator} objective is named {name}, not {expected}");
+    ensure!(slot.is_none(), "there are two {indicator} objectives");
+    *slot = Some(value);
+    Ok(())
+}
+
+/// The targets the shipped objectives say. Every one is a single segment; an interval is only
+/// ever declared.
+fn build(objectives: &[Objective]) -> Result<Targets> {
+    let mut latency = Vec::new();
+    let mut share = Vec::new();
+    let mut statement = None;
+    let mut transaction = None;
+    let mut writer_hold = None;
+    let mut cpu = None;
+    let mut divergence = None;
+    let mut database = None;
+    for objective in objectives {
+        let name = objective.name.as_str();
+        ensure!(!name.contains('/'), "objective {name} is not one segment: only a declared objective has a namespace");
+        let about = objective.about.clone();
+        let within = |stat: &str, remote: bool| objective.target(stat, remote).and_then(objective::Target::within_ms);
+        let required = |stat: &str| within(stat, false).with_context(|| format!("objective {name} has no {stat} duration"));
+        let max = |stat: &str| {
+            objective.target(stat, false).and_then(objective::Target::max).with_context(|| format!("objective {name} has no {stat} maximum"))
+        };
+        let whole = |value: f64, what: &str| -> Result<u64> {
+            ensure!(value >= 0.0 && value.fract() == 0.0, "objective {name}'s {what} is not a whole number");
+            Ok(value as u64)
+        };
+        match &objective.indicator {
+            Indicator::Latency { paths } => latency.push(Latency {
+                name: name.to_owned(),
+                about,
+                p99_ms: required("p99")?,
+                remote_p99_ms: within("p99", true),
+                paths: paths.clone(),
+            }),
+            Indicator::Share { path } => {
+                let min_percent = match objective.target("live-share", false).map(|target| target.bound) {
+                    Some(Bound::MinPercent(min)) => whole(min, "minimum percent")?,
+                    _ => bail!("objective {name} has no live-share minimum"),
+                };
+                share.push(Share { name: name.to_owned(), about, min_percent, path: path.clone() });
+            }
+            Indicator::Statement => {
+                let value = Statement { about, p99_ms: required("p99")?, max_ms: required("max")? };
+                one(&mut statement, "statement", "sql-statement", name, value)?;
+            }
+            Indicator::Transaction => {
+                let value = Transaction { about, max_ms: required("max")? };
+                one(&mut transaction, "transaction", "transaction", name, value)?;
+            }
+            Indicator::WriterHold => {
+                let value = WriterHold { about, max_ms: required("max")? };
+                one(&mut writer_hold, "writer-hold", "writer-hold", name, value)?;
+            }
+            Indicator::Cpu { idle_min_minutes, load_max_cores } => {
+                let value = Cpu {
+                    about,
+                    max_cores: max("cores")?,
+                    idle_max_cores: max("idle-cores")?,
+                    idle_min_minutes: *idle_min_minutes,
+                    load_max_cores: *load_max_cores,
+                };
+                one(&mut cpu, "cpu", "cpu", name, value)?;
+            }
+            Indicator::Database => {
+                let value = Database {
+                    about,
+                    max_live_gb: max("live-gb")?,
+                    max_growth_mb_per_day: max("growth-mb-per-day")?,
+                };
+                one(&mut database, "database", "database", name, value)?;
+            }
+            Indicator::Divergence => {
+                let value = Divergence { about, max_open: whole(max("open")?, "open maximum")? };
+                one(&mut divergence, "divergence", "projection-divergence", name, value)?;
+            }
+            Indicator::Interval(_) | Indicator::Count(_) => {
+                bail!("objective {name} is an interval or count over claims: Fractal ships none; a fleet declares one with `fractal apply`")
+            }
+        }
+    }
+    let missing = |indicator: &str| format!("there is no {indicator} objective");
+    Ok(Targets {
+        latency,
+        share,
+        statement: statement.with_context(|| missing("statement"))?,
+        transaction: transaction.with_context(|| missing("transaction"))?,
+        writer_hold: writer_hold.with_context(|| missing("writer-hold"))?,
+        cpu: cpu.with_context(|| missing("cpu"))?,
+        divergence: divergence.with_context(|| missing("divergence"))?,
+        database: database.with_context(|| missing("database"))?,
+    })
+}
+
+fn check(targets: &Targets) -> Result<()> {
     let mut names = std::collections::BTreeSet::new();
     let mut paths = std::collections::BTreeSet::new();
     for latency in &targets.latency {
@@ -192,9 +272,18 @@ pub fn parse(text: &str) -> Result<Targets> {
         "the statement targets are inconsistent"
     );
     ensure!(targets.transaction.max_ms > 0, "the transaction target is zero");
+    ensure!(targets.writer_hold.max_ms > 0, "the writer-hold target is zero");
+    let cpu = &targets.cpu;
     ensure!(
-        targets.cpu.max_cores.is_finite() && targets.cpu.max_cores > 0.0,
-        "the CPU target is not a positive number of cores"
+        [cpu.max_cores, cpu.idle_max_cores, cpu.load_max_cores]
+            .iter()
+            .all(|cores| cores.is_finite() && *cores > 0.0),
+        "the CPU targets are not positive numbers of cores"
+    );
+    ensure!(cpu.idle_max_cores <= cpu.max_cores, "the idle CPU target is above the member's");
+    ensure!(
+        (1..=smallclaims::windows::cpu_minutes::MINUTES).contains(&cpu.idle_min_minutes),
+        "the idle CPU target's minimum is not between 1 and 60 minutes"
     );
     ensure!(
         [targets.database.max_live_gb, targets.database.max_growth_mb_per_day]
@@ -202,39 +291,22 @@ pub fn parse(text: &str) -> Result<Targets> {
             .all(|value| value.is_finite() && *value > 0.0),
         "the database targets are not positive sizes"
     );
-    // A CI series feeds one name's targets: a duration's percentiles share it, nothing else does.
-    let mut series = std::collections::BTreeMap::new();
-    for duration in &targets.duration {
-        let id = duration.id();
-        ensure!(
-            (1..=99).contains(&duration.percentile),
-            "target {id}'s percentile is not between 1 and 99"
-        );
-        ensure!(duration.target_ms > 0, "target {id} has no duration");
-        ensure!(names.insert(id.clone()), "target {id} is named twice");
-        ensure!(is_ci_path(&duration.path), "path {:?} is not a CI series", duration.path);
-        ensure!(
-            *series.entry(duration.path.as_str()).or_insert(duration.name.as_str()) == duration.name,
-            "path {:?} has two targets",
-            duration.path
-        );
-    }
-    for count in &targets.count {
-        ensure!(names.insert(count.name.clone()), "target {} is named twice", count.name);
-        ensure!(is_ci_path(&count.path), "path {:?} is not a CI series", count.path);
-        ensure!(
-            series.insert(count.path.as_str(), count.name.as_str()).is_none(),
-            "path {:?} has two targets",
-            count.path
-        );
-    }
-    Ok(targets)
+    Ok(())
 }
 
-/// The built-in targets. The file is checked by a test, so this cannot fail in a release.
+/// The shipped objectives and the targets they say. The file is checked by a test, so this cannot
+/// fail in a release.
+static BUILT_IN: LazyLock<(Vec<Objective>, Targets)> =
+    LazyLock::new(|| read(SOURCE).expect("the built-in objectives file is valid"));
+
+/// The objectives Fractal ships, as the objective reader reads them.
+pub fn shipped() -> &'static [Objective] {
+    &BUILT_IN.0
+}
+
+/// The built-in targets.
 pub fn targets() -> &'static Targets {
-    static TARGETS: OnceLock<Targets> = OnceLock::new();
-    TARGETS.get_or_init(|| parse(SOURCE).expect("the built-in targets file is valid"))
+    &BUILT_IN.1
 }
 
 impl Targets {
@@ -257,6 +329,10 @@ impl Targets {
     pub fn transaction_target(&self) -> Duration {
         Duration::from_millis(self.transaction.max_ms)
     }
+
+    pub fn writer_hold_target(&self) -> Duration {
+        Duration::from_millis(self.writer_hold.max_ms)
+    }
 }
 
 /// Give the store's windows their targets, once per process.
@@ -268,13 +344,10 @@ pub fn install() {
             StoreWork::Statement,
             Some(targets.statement_target()),
         );
-        for work in [
-            StoreWork::ReadTransaction,
-            StoreWork::WriteTransaction,
-            StoreWork::WriterHold,
-        ] {
+        for work in [StoreWork::ReadTransaction, StoreWork::WriteTransaction] {
             smallclaims::windows::set_store_target(work, Some(targets.transaction_target()));
         }
+        smallclaims::windows::set_store_target(StoreWork::WriterHold, Some(targets.writer_hold_target()));
     });
 }
 
@@ -373,7 +446,8 @@ pub fn database_size() -> Option<DatabaseSize> {
     DATABASE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
-/// The store's windows and the CPU's, and the store's size, with their targets.
+/// The store's windows and the member's CPU minutes (`CpuMinutes::report`), and the store's size,
+/// with their targets.
 pub fn store_report(cpu: Value) -> Vec<Value> {
     let targets = targets();
     let series = |work| smallclaims::windows::store_series(work).snapshot(std::time::Instant::now());
@@ -394,12 +468,7 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "writer_hold": series(StoreWork::WriterHold),
         }),
         writer_hold_row(),
-        json!({
-            "name": "cpu",
-            "about": targets.cpu.about,
-            "max_cores": targets.cpu.max_cores,
-            "windows": cpu,
-        }),
+        cpu_row(cpu),
         json!({
             "name": "database",
             "about": targets.database.about,
@@ -410,23 +479,81 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
     ]
 }
 
+/// The CPU row: the targets beside the minutes' `windows`, `minutes` and `idle`.
+fn cpu_row(minutes: Value) -> Value {
+    let targets = targets();
+    let mut row = json!({
+        "name": "cpu",
+        "about": targets.cpu.about,
+        "max_cores": targets.cpu.max_cores,
+        "idle_max_cores": targets.cpu.idle_max_cores,
+        "idle_min_minutes": targets.cpu.idle_min_minutes,
+    });
+    if let (Value::Object(row), Value::Object(minutes)) = (&mut row, minutes) {
+        row.extend(minutes);
+    }
+    row
+}
+
+/// How the member's CPU fares against its two targets; a `None` is unknown, never met.
+#[derive(Debug, PartialEq)]
+pub struct CpuVerdict {
+    /// Cores over the hour, when every one of its minutes is held with its CPU known.
+    pub hour: Option<f64>,
+    pub hour_met: Option<bool>,
+    /// Closed minutes the hour holds, of 60.
+    pub minutes: u64,
+    pub idle_minutes: u64,
+    /// Cores over the idle minutes, when the hour is whole and holds enough of them.
+    pub idle: Option<f64>,
+    pub idle_met: Option<bool>,
+}
+
+/// Judge the CPU row: the hour against `max_cores`; the idle minutes against `idle_max_cores`
+/// only when the hour is whole (the daemon has been up all of it) and holds at least
+/// `idle_min_minutes` of them.
+pub fn cpu_verdict(row: &Value) -> CpuVerdict {
+    let max = row["max_cores"].as_f64().unwrap_or_default();
+    let idle_max = row["idle_max_cores"].as_f64().unwrap_or_default();
+    let needed = row["idle_min_minutes"].as_u64().unwrap_or(u64::MAX);
+    let hour = row["windows"]["1h"]["cores"].as_f64();
+    let minutes = row["minutes"].as_u64().unwrap_or_default();
+    let idle_minutes = row["idle"]["minutes"].as_u64().unwrap_or_default();
+    let idle = row["idle"]["cores"]
+        .as_f64()
+        .filter(|_| minutes >= smallclaims::windows::cpu_minutes::MINUTES && idle_minutes >= needed);
+    CpuVerdict {
+        hour,
+        hour_met: hour.map(|cores| cores <= max),
+        minutes,
+        idle_minutes,
+        idle,
+        idle_met: idle.map(|cores| cores <= idle_max),
+    }
+}
+
+/// `n` cores, as a target or a reading says it.
+pub fn cores(n: f64) -> String {
+    format!("{n} core{}", if n <= 1.0 { "" } else { "s" })
+}
+
 /// Open read snapshots reported beside the writer's holds.
 const OPEN_READS: usize = 8;
 /// Routes whose read loans are reported beside the writer's holds; the rest are summed.
 const LOAN_ROUTES: usize = 8;
 
-/// The writer-hold objective: each hold of the store's single writer against the transaction
-/// target, and who held it; each read transaction past that target, and who kept it open.
+/// The writer-hold objective: each hold of the store's single writer against its target, and who
+/// held it; each read transaction past that target, and who kept it open.
 fn writer_hold_row() -> Value {
     let targets = targets();
     let series = |work| smallclaims::windows::store_series(work).snapshot(std::time::Instant::now());
     let mut row = json!({
         "name": "writer-hold",
-        "about": "Each hold of the store's single writer, and each read transaction past the same target, by who held it: a request route or background task, its client, and the code that asked",
-        "max_ms": targets.transaction.max_ms,
+        "about": targets.writer_hold.about,
+        "max_ms": targets.writer_hold.max_ms,
         "windows": series(StoreWork::WriterHold),
         "read_windows": series(StoreWork::ReadTransaction),
-        "open_reads": smallclaims::sqlite::open_snapshots_over(targets.transaction_target(), OPEN_READS),
+        "open_reads": smallclaims::sqlite::open_snapshots_over(targets.writer_hold_target(), OPEN_READS),
         // Every read loan by the route it works for, checked out or with a confirmed snapshot:
         // a loan held past its budget keeps the WAL from recycling even before it reads.
         "read_loans": smallclaims::sqlite::loans_by_route(LOAN_ROUTES),
@@ -567,22 +694,7 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
                     ));
                 }
             }
-            "cpu" => {
-                let max = target["max_cores"].as_f64().unwrap_or_default();
-                let cores = |w: &str| target["windows"][w]["cores"].as_f64().unwrap_or_default();
-                lines.push((
-                    format!("slo/{name}"),
-                    status(WINDOWS.iter().all(|w| cores(w) <= max)),
-                    format!(
-                        "≤ {max} cores under load, near zero idle: {}",
-                        WINDOWS
-                            .iter()
-                            .map(|w| format!("{w} {:.2} cores", cores(w)))
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    ),
-                ));
-            }
+            "cpu" => lines.extend(cpu_lines(target)),
             "database" => lines.push(database_line(target)),
             "writer-hold" => lines.push(writer_hold_line(target)),
             _ => {
@@ -626,6 +738,51 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
         ));
     }
     lines
+}
+
+/// `st doctor`'s two CPU lines: the member over the hour, and over the hour's idle minutes. Each
+/// says PASS, MISS or UNKNOWN; an unknown one is `info`, never `pass`.
+fn cpu_lines(target: &Value) -> [(String, &'static str, String); 2] {
+    let verdict = cpu_verdict(target);
+    let word = |met: Option<bool>| match met {
+        Some(true) => "PASS",
+        Some(false) => "MISS",
+        None => "UNKNOWN",
+    };
+    let status = |met: Option<bool>| if met == Some(true) { "pass" } else { "info" };
+    let max = target["max_cores"].as_f64().unwrap_or_default();
+    let windows = WINDOWS
+        .iter()
+        .map(|w| {
+            let window = &target["windows"][*w];
+            window["cores"].as_f64().map_or_else(
+                || format!("{w} unknown ({} minutes known)", window["minutes"].as_u64().unwrap_or_default()),
+                |cores| format!("{w} {cores:.2} cores"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let idle_max = target["idle_max_cores"].as_f64().unwrap_or_default();
+    let needed = target["idle_min_minutes"].as_u64().unwrap_or_default();
+    let idle = match verdict.idle {
+        Some(cores) => format!("{cores:.2} cores over {} idle minutes", verdict.idle_minutes),
+        None if verdict.minutes < smallclaims::windows::cpu_minutes::MINUTES => {
+            format!("the hour holds {} of 60 minutes, {} idle", verdict.minutes, verdict.idle_minutes)
+        }
+        None => format!("{} idle minutes, fewer than {needed}", verdict.idle_minutes),
+    };
+    [
+        (
+            "slo/cpu".into(),
+            status(verdict.hour_met),
+            format!("{}: ≤ {} over the hour, daemon and replication workers: {windows}", word(verdict.hour_met), cores(max)),
+        ),
+        (
+            "slo/cpu/idle".into(),
+            status(verdict.idle_met),
+            format!("{}: ≤ {} over the hour's idle minutes: {idle}", word(verdict.idle_met), cores(idle_max)),
+        ),
+    ]
 }
 
 /// `st doctor`'s line for open projection divergences: met while there are no more open than the
@@ -676,8 +833,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_built_in_targets_file_is_valid_and_names_the_mission_targets() {
+    fn the_built_in_objectives_file_is_valid_and_names_the_mission_targets() {
         let targets = parse(SOURCE).unwrap();
+        assert_eq!(shipped().len(), 18);
+        assert!(shipped().iter().all(|objective| !objective.declarable()));
         let read = targets.for_path("GET /v1/client/agents").unwrap();
         assert_eq!((read.p99_ms, read.remote_p99_ms), (300, Some(300)));
         assert_eq!(read.target(true), Duration::from_millis(300));
@@ -718,31 +877,17 @@ mod tests {
         let attach = targets.for_path("stream terminal").unwrap();
         assert_eq!(attach.p99_ms, 200);
         assert_eq!((targets.statement.p99_ms, targets.statement.max_ms), (10, 100));
-        assert_eq!(targets.transaction.max_ms, 300);
-        assert_eq!(targets.cpu.max_cores, 2.0);
+        assert_eq!((targets.transaction.max_ms, targets.writer_hold.max_ms), (300, 300));
+        assert_eq!(
+            (targets.cpu.max_cores, targets.cpu.idle_max_cores, targets.cpu.idle_min_minutes, targets.cpu.load_max_cores),
+            (1.0, 0.5, 10, 2.0)
+        );
         assert_eq!((targets.database.max_live_gb, targets.database.max_growth_mb_per_day), (8.0, 300.0));
         assert!(targets.for_path("GET /v1/health").is_none());
-        let durations = targets
-            .duration
-            .iter()
-            .map(|d| (d.id(), d.target_ms, d.path.as_str()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            durations,
-            [
-                ("merge-latency/p50".to_owned(), 600_000, "ci/merge-queue"),
-                ("merge-latency/p95".to_owned(), 600_000, "ci/merge-queue"),
-                ("ci-critical-path/p95".to_owned(), 780_000, "ci/workspace-critical-path"),
-            ]
-        );
-        let flakes = &targets.count[0];
-        assert_eq!((flakes.name.as_str(), flakes.max_per_hour, flakes.path.as_str()), ("flakes", 0, "ci/flakes"));
-        // A CI series is not a daemon path: no request counts toward it.
-        assert!(targets.for_path("ci/merge-queue").is_none());
     }
 
     #[test]
-    fn every_route_path_in_the_targets_file_is_a_route_the_daemon_serves() {
+    fn every_route_path_in_the_objectives_file_is_a_route_the_daemon_serves() {
         // api.rs's route table and the route families the daemon adds to it (fractal-daemon's `api::router`).
         let source = [
             include_str!("../../fractal-api-core/src/api.rs"),
@@ -825,7 +970,7 @@ mod tests {
         install();
         let rows = store_report(json!({}));
         let row = rows.iter().find(|row| row["name"] == "writer-hold").unwrap();
-        assert_eq!(row["max_ms"], targets().transaction.max_ms);
+        assert_eq!(row["max_ms"], targets().writer_hold.max_ms);
         for field in ["windows", "read_windows", "open_reads", "holders", "long_holds", "long_reads", "in_progress", "waiting"] {
             assert!(row.get(field).is_some(), "{field} missing from {row}");
         }
@@ -838,47 +983,54 @@ mod tests {
         assert!(row["windows"]["1h"].is_object());
     }
 
-    #[test]
-    fn a_broken_targets_file_is_refused_not_defaulted() {
-        let without_cpu = SOURCE.split("[cpu]").next().unwrap();
-        assert!(parse(without_cpu).is_err());
-        assert!(parse(&SOURCE.replace("max_cores = 2.0", "max_cores = -1.0")).is_err());
-        assert!(parse(SOURCE.split("[database]").next().unwrap()).is_err());
-        assert!(parse(&SOURCE.replace("max_live_gb = 8.0", "max_live_gb = 0.0")).is_err());
-        assert!(parse(&SOURCE.replace("p99_ms = 10\n", "p99_ms = 10\ntypo = 1\n")).is_err());
-        let twice = format!(
-            "{SOURCE}\n[[latency]]\nname = \"again\"\nabout = \"\"\np99_ms = 1\npaths = [\"GET /v1/client/now\"]\n"
-        );
-        assert!(parse(&twice).unwrap_err().to_string().contains("two targets"));
+    /// The shipped file without objective `name`.
+    fn without(name: &str) -> String {
+        let start = SOURCE.find(&format!("\nobjective \"{name}\" {{")).unwrap() + 1;
+        let end = start + SOURCE[start..].find("\n}\n").unwrap() + 3;
+        format!("{}{}", &SOURCE[..start], &SOURCE[end..])
+    }
+
+    fn error(text: &str) -> String {
+        parse(text).unwrap_err().to_string()
     }
 
     #[test]
-    fn ci_durations_and_counts_are_checked() {
-        let error = |text: &str| parse(text).unwrap_err().to_string();
-        let p95 = "percentile = 95\ntarget_ms = 600000\npath = \"ci/merge-queue\"";
-        assert!(parse(SOURCE.split("[[count]]").next().unwrap()).is_err(), "the count kind is required");
-        for percentile in ["0", "100", "250"] {
-            let text = SOURCE.replacen("percentile = 95", &format!("percentile = {percentile}"), 1);
-            assert!(error(&text).contains("between 1 and 99"), "{percentile}");
+    fn a_broken_objectives_file_is_refused_not_defaulted() {
+        for name in ["sql-statement", "transaction", "writer-hold", "cpu", "database", "projection-divergence"] {
+            assert!(error(&without(name)).contains("there is no"), "{name}");
         }
-        assert!(parse(&SOURCE.replacen("percentile = 95", "percentile = -5", 1)).is_err());
-        assert!(error(&SOURCE.replacen("target_ms = 780000", "target_ms = 0", 1)).contains("no duration"));
-        assert!(parse(&SOURCE.replace("max_per_hour = 0", "max_per_hour = -1")).is_err());
-        assert!(parse(&SOURCE.replace("max_per_hour = 0", "max_per_hour = 0.5")).is_err());
-        assert!(parse(&SOURCE.replace("max_per_hour = 0", "max_per_hour = 0\nmin_per_hour = 0")).is_err());
-        assert!(error(&SOURCE.replace("\"ci/flakes\"", "\"GET /v1/flakes\"")).contains("not a CI series"));
-        assert!(error(&SOURCE.replace("\"ci/flakes\"", "\"ci/Flakes\"")).contains("not a CI series"));
-        assert!(error(&SOURCE.replace("\"ci/flakes\"", "\"ci/\"")).contains("not a CI series"));
-        // The same percentile twice is one objective named twice.
-        let again = format!("{SOURCE}\n[[duration]]\nname = \"merge-latency\"\nabout = \"\"\n{p95}\n");
-        assert!(error(&again).contains("named twice"));
-        // Another name may not take a series that feeds one already.
-        let other = format!("{SOURCE}\n[[duration]]\nname = \"other\"\nabout = \"\"\n{p95}\n");
-        assert!(error(&other).contains("two targets"));
-        let count = format!("{SOURCE}\n[[count]]\nname = \"other\"\nabout = \"\"\nmax_per_hour = 1\npath = \"ci/merge-queue\"\n");
-        assert!(error(&count).contains("two targets"));
-        let named = SOURCE.replace("name = \"flakes\"", "name = \"write-ack\"");
-        assert!(error(&named).contains("named twice"));
+        for (from, to) in [
+            ("target \"cores\" max=1", "target \"cores\" max=-1.0"),
+            ("target \"cores\" max=1", "target \"cores\" max=0.4"),
+            ("target \"idle-cores\" max=0.5", "target \"idle-cores\" max=0.0"),
+            ("target \"idle-cores\" max=0.5", "target \"idle-cores\" max=#nan"),
+            ("load-max-cores 2", "load-max-cores #inf"),
+            ("idle-min-minutes 10", "idle-min-minutes 0"),
+            ("idle-min-minutes 10", "idle-min-minutes 61"),
+            ("idle-min-minutes 10", "idle-min-minutes 10.5"),
+            ("    load-max-cores 2\n", ""),
+            ("  target \"idle-cores\" max=0.5\n", ""),
+            ("target \"live-gb\" max=8", "target \"live-gb\" max=0.0"),
+            ("  indicator \"statement\"\n", "  indicator \"statement\"\n  typo 1\n"),
+            ("target \"live-share\" min-percent=99", "target \"live-share\" min-percent=99.5"),
+            ("target \"open\" max=0", "target \"open\" max=0.5"),
+        ] {
+            assert!(SOURCE.contains(from), "{from}");
+            assert!(parse(&SOURCE.replace(from, to)).is_err(), "{to}");
+        }
+        let twice = format!(
+            "{SOURCE}\nobjective \"again\" {{\n  about \"x\"\n  indicator \"latency\" {{\n    path \"GET /v1/client/now\"\n  }}\n  target \"p99\" within=\"1ms\"\n}}\n"
+        );
+        assert!(error(&twice).contains("two targets"));
+        // Each statement, transaction, writer-hold, CPU, database and divergence objective is
+        // the one of its name; the shipped ones are one segment, and none is an interval.
+        assert!(error(&SOURCE.replace("objective \"database\"", "objective \"store-size\"")).contains("named store-size, not database"));
+        assert!(error(&SOURCE.replace("objective \"database\"", "objective \"ops/database\"")).contains("not one segment"));
+        assert!(error(&SOURCE.replace("objective \"database\"", "objective \"write-ack\"")).contains("declared twice"));
+        let interval = format!(
+            "{SOURCE}\nobjective \"change-rollout\" {{\n  about \"x\"\n  indicator \"interval\" {{\n    subject-prefix \"custom/acme/change/\"\n    start \"custom.acme.change-ready\"\n    stop \"custom.acme.change-applied\"\n  }}\n  window \"7d\"\n  target \"p95\" within=\"5m\"\n}}\n"
+        );
+        assert!(error(&interval).contains("is an interval"), "{}", error(&interval));
     }
 
     #[test]
@@ -895,6 +1047,44 @@ mod tests {
         assert!(verdict(&windows(0), false).met);
         assert!(verdict(&windows(0), true).message.contains("1m p99 2 ms, max 3 ms, 0.0% over of 100"));
     }
+    #[test]
+    fn the_cpu_lines_say_pass_miss_or_unknown_for_the_hour_and_its_idle_minutes() {
+        let row = |hour: Option<f64>, minutes: u64, idle_minutes: u64, idle: Option<f64>| {
+            cpu_row(json!({
+                "windows": {"1m": {"cores": 0.25, "minutes": 1}, "5m": {"cores": 0.2, "minutes": 5},
+                    "1h": {"cores": hour, "minutes": minutes}},
+                "minutes": minutes,
+                "idle": {"minutes": idle_minutes, "cores": idle, "not_idle": {}},
+            }))
+        };
+        let [hour, idle] = cpu_lines(&row(Some(0.4), 60, 24, Some(0.12)));
+        assert_eq!((hour.0.as_str(), hour.1), ("slo/cpu", "pass"));
+        assert_eq!(
+            hour.2,
+            "PASS: ≤ 1 core over the hour, daemon and replication workers: 1m 0.25 cores · 5m 0.20 cores · 1h 0.40 cores"
+        );
+        assert_eq!((idle.0.as_str(), idle.1), ("slo/cpu/idle", "pass"));
+        assert_eq!(idle.2, "PASS: ≤ 0.5 core over the hour's idle minutes: 0.12 cores over 24 idle minutes");
+        let [hour, idle] = cpu_lines(&row(Some(1.3), 60, 24, Some(0.7)));
+        assert_eq!((hour.1, idle.1), ("info", "info"));
+        assert!(hour.2.starts_with("MISS: ") && idle.2.starts_with("MISS: "), "{hour:?} {idle:?}");
+        // Too few idle minutes judge nothing, however low their CPU.
+        let [_, idle] = cpu_lines(&row(Some(0.4), 60, 9, Some(0.01)));
+        assert_eq!(idle.1, "info");
+        assert_eq!(idle.2, "UNKNOWN: ≤ 0.5 core over the hour's idle minutes: 9 idle minutes, fewer than 10");
+        // A daemon up less than the hour knows neither.
+        let [hour, idle] = cpu_lines(&row(None, 42, 30, Some(0.01)));
+        assert_eq!((hour.1, idle.1), ("info", "info"));
+        assert!(hour.2.starts_with("UNKNOWN: ") && hour.2.ends_with("1h unknown (42 minutes known)"), "{}", hour.2);
+        assert_eq!(idle.2, "UNKNOWN: ≤ 0.5 core over the hour's idle minutes: the hour holds 42 of 60 minutes, 30 idle");
+        assert_eq!(
+            cpu_verdict(&row(None, 42, 30, Some(0.01))),
+            CpuVerdict { hour: None, hour_met: None, minutes: 42, idle_minutes: 30, idle: None, idle_met: None }
+        );
+        let lines = doctor_lines(&json!({"targets": [row(Some(0.4), 60, 24, Some(0.12))], "paths": []}));
+        assert_eq!(lines.iter().map(|line| line.0.as_str()).collect::<Vec<_>>(), ["slo/cpu", "slo/cpu/idle"]);
+    }
+
     #[test]
     fn client_share_doctor_uses_declared_minimum_and_empty_population_is_info() {
         let window=json!({"count":10000,"foreground_ms":10000,"live_ms":9500,"over_target":500,"over_target_share":0.05});

@@ -1,8 +1,39 @@
 import { expect, it, vi } from 'vitest'
 import type { CollectionSocket } from '@fractal/client'
 import { createTestGateway, testSelection, testSnapshot } from './testGateway.ts'
-import { selectionParts } from './client.ts'
+import { selectionParts, sidebarFolders } from './client.ts'
 import { followArrangementInventory, type InventoryEvent } from '../data/arrangements.ts'
+import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import { Effect } from 'effect'
+import { loadMutations } from '../data/lazySdk.ts'
+import { credentialExpiredMessage } from '../data/source.ts'
+
+it.each(['discover', 'arrangements'] as const)('classifies real HTTP credential rejection during folder %s reads', async stage => {
+  const gateway = await createTestGateway()
+  gateway.state.credentialRejected = stage
+  const registry = AtomRegistry.make()
+  const socket: CollectionSocket = { onopen: null, onmessage: null, onclose: null, onerror: null, close: () => {}, send: () => {} }
+  const actions = loadMutations.pipe(Effect.map(({ arrangementActions }) => arrangementActions(gateway.sdk)))
+  const atom = sidebarFolders({ gateway: () => ({
+    discover: () => gateway.sdk.discover(),
+    arrangementsList: (...args) => gateway.sdk.arrangementsList(...args),
+    collectionStream: (...args) => gateway.sdk.collectionStream(...args),
+    actions: { snapshot: actions.pipe(Effect.flatMap(port => port.snapshot)), submitAction: request => actions.pipe(Effect.flatMap(port => port.submitAction(request))) },
+  }), socket: () => socket })
+  const release = registry.mount(atom)
+  try {
+    if (stage === 'arrangements') {
+      await vi.waitFor(() => expect(socket.onopen).not.toBeNull())
+      socket.onopen?.()
+      await vi.waitFor(() => expect(socket.onmessage).not.toBeNull())
+      socket.onmessage?.({ data: JSON.stringify({ kind: 'snapshot', id: 'arrangements-inventory', collection: 'arrangements', has_more: false, items: [], order: [], snapshot: testSnapshot }) })
+    }
+    await expect.poll(() => registry.get(atom)).toMatchObject({ phase: 'unavailable', reason: 'unauthorized', detail: credentialExpiredMessage, readOnly: true })
+    expect(registry.get(atom).retry ?? registry.get(atom).retryEdit).toBeUndefined()
+    expect(JSON.stringify(registry.get(atom))).not.toContain('private credential diagnostic')
+    expect(gateway.calls.some(call => call.url.startsWith(stage === 'discover' ? '/v1/client/capabilities' : '/v1/client/arrangements?'))).toBe(true)
+  } finally { release(); registry.dispose(); await gateway.close() }
+})
 
 it('uses real generated SDK arrangements routes, explicit owner and action request shape', async () => {
   const gateway = await createTestGateway()
@@ -14,6 +45,14 @@ it('uses real generated SDK arrangements routes, explicit owner and action reque
     expect(gateway.calls.map((call) => call.url)).toContain('/v1/client/arrangements?person=person%2Fexample&cursor=cursor%2Fexample')
     expect(gateway.calls.find((call) => call.url === '/v1/client/actions')?.body).toMatchObject({ api_version: 'st3.client.v0', type: 'arrangement.edit', parameters: { owner: testSelection.owner, subject: testSelection.subject } })
     expect(gateway.calls.every((call) => call.url.startsWith('/v1/client/'))).toBe(true)
+  } finally { await gateway.close() }
+})
+it('accepts arrangements capability v2 while reading legacy v1 layouts', async () => {
+  const gateway = await createTestGateway()
+  gateway.state.capabilityVersion = 2
+  try {
+    await expect(gateway.client.discover()).resolves.toMatchObject({ value: { capabilities: [{ id: 'arrangements', state: 'granted', version: 2 }] } })
+    await expect(gateway.client.read()).resolves.toMatchObject({ value: { body: { version: 1 } } })
   } finally { await gateway.close() }
 })
 it('refuses missing arrangements grants before any arrangement read or mutation', async () => {

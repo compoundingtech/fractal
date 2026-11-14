@@ -45,7 +45,7 @@ pub async fn chunk(
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let (session_id, resolved) = resolve_conversation(&state, &id)?;
-    if let Some(owner) = conversation_owner_host(&state, &session, resolved.managed.as_ref())? {
+    if let Some(owner) = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())? {
         let value = state
             .client_relay
             .as_ref()
@@ -87,7 +87,7 @@ pub async fn chunk_local(
     require_scope(session, "read.projections")?;
     let locator = locator(wanted, session_id)?;
     let slots = read_slots(&locator.source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
     let (bytes, media) =
@@ -708,6 +708,8 @@ mod tests {
             crate::external_sessions::TimelineOrder::Sequence,
             None,
             10,
+            true,
+            &mut NativeReadAdmission::default(),
         )
         .unwrap();
         let item = page
@@ -790,6 +792,270 @@ mod tests {
                 assert!(image["metadata"].get("continuation").is_none());
             }
         }
+    }
+
+    #[test]
+    fn header_projection_preserves_normal_todos_jobs_subagents_and_pending_questions() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"views", "type":"tool_result", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[
+                {"kind":"tool_output", "payload":{}, "view":{"type":"todo","phases":[{"items":["ship"]}]}},
+                {"kind":"tool_output", "payload":{}, "view":{"type":"job","jobs":[{"id":"job","status":"running"}]}},
+                {"kind":"tool_output", "payload":{}, "view":{"type":"task","agents":[{"id":"child","name":"Worker","status":"running"}]}},
+                {"kind":"tool_call", "payload":{"call_id":"ask"}, "view":{"type":"ask","questions":[{"question":"Continue?"}]}}
+            ]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let expected = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut actual = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut actual);
+        for key in ["todos", "jobs", "subagents", "ask"] {
+            assert!(actual.get(key).is_some(), "{key}");
+        }
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    // The pre-change path: prepare the entire newest head, then derive its header and
+    // truncate its entries for the page. Keep it independent of header_items.
+    fn legacy_head(
+        state: &AppState, native: &ExternalSession, session: &ClientSession,
+        snapshot: &ClientSnapshot, limit: usize,
+    ) -> (Value, Vec<Value>) {
+        let (slice, _) = super::super::canonical_native_slice(
+            state, snapshot, native, session, &native.id, &[],
+            crate::external_sessions::TimelineOrder::TimestampSequence, None,
+            (limit + 1).max(CLIENT_MAX_PAGE_ITEMS), None, true,
+            &mut NativeReadAdmission::default(),
+        ).unwrap();
+        let count = slice.items.len().min(CLIENT_MAX_PAGE_ITEMS);
+        let header = fractal_api_core::conversation_header::derive(
+            &slice.items[..count], slice.has_more || slice.items.len() > count,
+        );
+        let items = slice.items.into_iter().take(limit).rev().collect();
+        (header, items)
+    }
+
+    #[test]
+    fn native_read_admission_survives_slice_refills_header_and_display_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([{"type":"text","text":"reply"}]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let slots = read_slots(&native.transcript);
+        let mut admission = NativeReadAdmission::default();
+        let mut slice = read_slice(&native, &session, &native.id,
+            crate::external_sessions::TimelineOrder::Sequence, None, 1, false, &mut admission,
+        ).unwrap();
+        assert_eq!(slots.available_permits(), 3);
+        let other_reads = slots.try_acquire_many(3).unwrap();
+        // Refill/head reads reuse the first decision even when no second permit exists.
+        read_slice(&native, &session, &native.id,
+            crate::external_sessions::TimelineOrder::Sequence, None, 1, false, &mut admission,
+        ).unwrap();
+        let header = header_items(&native, &native.id, &slice.items);
+        assert!(!header.is_empty());
+        for item in &mut slice.items {
+            prepare_one(&native, &session, &native.id, &slice.basis, item).unwrap();
+        }
+        assert_eq!(slots.available_permits(), 0);
+        drop(admission);
+        assert_eq!(slots.available_permits(), 1);
+        drop(other_reads);
+        assert_eq!(slots.available_permits(), 4);
+    }
+
+    #[test]
+    fn header_projection_is_byte_equal_for_an_ordinary_9000_byte_model() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"model", "type":"assistant", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[{"kind":"text","payload":{},"metadata":{"model":"m".repeat(9000)}}]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let expected = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut actual = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut actual);
+        assert!(actual["model"]["value"].as_str().unwrap().ends_with("size limit; 9000 bytes]"));
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    #[test]
+    fn header_page_and_continuation_match_legacy_with_a_managed_graph_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let mut native = fixture(root.path(), json!([]));
+        let transcript = (0..4).map(|index| {
+            let record = json!({"type":"message", "id":format!("overlay-{index}"),
+                "timestamp":format!("2026-10-06T12:00:0{index}Z"),
+                "message":{"role":"assistant","content":[{"type":"text","text":format!("reply {index}")}]}});
+            format!("{record}\n")
+        }).collect::<String>();
+        std::fs::write(&native.transcript, transcript).unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "header-overlay");
+        let owner = "agent/header-overlay";
+        let incarnation = "header-overlay:i1";
+        native.id = super::super::managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject:"message/header-overlay".into(), kind:"message.sent".into(), actor:Some("person/example".into()),
+            fields:serde_json::from_value(json!({"from":"person/example", "to":owner,
+                "session_id":native.id, "status":"sent", "content":"graph overlay"})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        let managed = (owner.to_owned(), Some(incarnation.to_owned()), None);
+        let snapshot = super::super::new_client_snapshot(&state);
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let mut query = super::super::ClientListQuery { limit: Some(2), ..Default::default() };
+        let page = super::super::native_slice_page_at_generation(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert!(page["items"].as_array().unwrap().iter().any(|item| item["type"] == "message"));
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(page.clone(), expected, true);
+        query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        let older = super::super::native_slice_page_at_generation(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, Some(&managed),
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(older, expected, false);
+    }
+
+    fn assert_complete_page_matches_legacy(mut actual: Value, mut expected: Value, first: bool) {
+        if first {
+            // Independently issued first pages have different wall-clock TTLs (and MACs).
+            // Compare every other cursor position field; continuation cursors below are
+            // byte-equal because both paths receive the same incoming expiration.
+            for page in [&mut actual, &mut expected] {
+                let cursor = page["page"]["next_cursor"].as_str().unwrap();
+                let mut cursor: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(
+                    cursor.strip_prefix(super::super::NATIVE_PAGE_CURSOR_PREFIX).unwrap(),
+                ).unwrap()).unwrap();
+                cursor["position"].as_object_mut().unwrap().remove("expires_at_unix_ms");
+                page["page"]["next_cursor"] = cursor["position"].take();
+                page["page"].as_object_mut().unwrap().remove("cursor_expires_at");
+            }
+        }
+        assert_eq!(serde_json::to_vec(&actual).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+
+    fn assert_header_page_matches_legacy(limit: usize) {
+        let _counter = prepared_counter_guard();
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut transcript = String::new();
+        for index in 0..240 {
+            let record = json!({
+                "type":"message", "id":format!("message-{index:03}"),
+                "timestamp":format!("2026-10-06T12:{:02}:{:02}Z", index / 60, index % 60),
+                "message":{"role":"assistant", "model":"example/model",
+                    "usage":{"cost":{"total":0.01}}, "contextSnapshot":{"promptTokens":1000 + index},
+                    "content":[{"type":"text","text":format!("reply {index}")}]},
+            });
+            transcript.push_str(&format!("{record}\n"));
+        }
+        std::fs::write(&native.transcript, transcript).unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "header-equality");
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let snapshot = super::super::new_client_snapshot(&state);
+        let mut query = super::super::ClientListQuery { limit: Some(limit), ..Default::default() };
+        reset_prepared_bodies(&native.id);
+        let page = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id, &query, &native,
+        ).unwrap().0;
+        assert_eq!(prepared_bodies(), limit + 1);
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, None,
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(page.clone(), expected, true);
+        query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+        let older = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id, &query, &native,
+        ).unwrap().0;
+        let expected = super::super::legacy_native_slice_page_for_test(
+            &state, &snapshot, &session, &native.id, &query, &native, None,
+        ).unwrap().0.0;
+        assert_complete_page_matches_legacy(older, expected, false);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_1() {
+        assert_header_page_matches_legacy(1);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_20() {
+        assert_header_page_matches_legacy(20);
+    }
+
+    #[test]
+    fn header_page_is_byte_equal_to_legacy_at_limit_200() {
+        assert_header_page_matches_legacy(200);
+    }
+
+    #[test]
+    fn header_keeps_bounded_facts_from_a_pathological_entry_replaced_for_display() {
+        let root = tempfile::tempdir().unwrap();
+        let mut details = serde_json::Map::from_iter((0..6_000)
+            .map(|index| (format!("key-{index:0>196}"), json!(0))));
+        details.insert("model".into(), json!(format!("{}\u{001b}", "m".repeat(20_000))));
+        let native = fixture(root.path(), json!([
+            {"type":"toolResult", "call_id":"pathological", "content":"ok", "details":details},
+        ]));
+        let state = super::super::tests::test_state_named(root.path(), "header-pathological");
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let snapshot = super::super::new_client_snapshot(&state);
+        let (old_header, _) = legacy_head(&state, &native, &session, &snapshot, 1);
+        let page = super::super::native_slice_page(
+            &state, &snapshot, &session, &native.id,
+            &super::super::ClientListQuery { limit: Some(1), ..Default::default() }, &native,
+        ).unwrap().0;
+        assert!(old_header.get("model").is_none());
+        let model = page["header"]["model"]["value"].as_str().unwrap();
+        assert!(model.len() < VALUE_BYTES + 256);
+        assert!(!model.chars().any(char::is_control));
+        assert!(serde_json::to_vec(&page["header"]).unwrap().len() < VALUE_BYTES + 1024);
+        assert_eq!(page["items"][0]["body"]["code"], "native-entry-too-large");
+    }
+
+    #[test]
+    fn header_uses_raw_pending_question_call_id_when_display_payload_exceeds_8kib() {
+        let root = tempfile::tempdir().unwrap();
+        let native = fixture(root.path(), json!([]));
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let raw = json!({
+            "id":"ask", "type":"tool_call", "timestamp":"2026-10-06T12:00:00Z", "sequence":1,
+            "body":{"blocks":[{"kind":"tool_call", "payload":{"call_id":"raw-call", "padding":"p".repeat(9000)},
+                "view":{"type":"ask", "questions":[{"question":"Continue?"}]}}]},
+        });
+        let mut display = raw.clone();
+        prepare_one(&native, &session, &native.id, &basis(&native).unwrap(), &mut display).unwrap();
+        let old = fractal_api_core::conversation_header::derive(&[display], false);
+        let mut new = fractal_api_core::conversation_header::derive(
+            &header_items(&native, &native.id, &[raw]), false,
+        );
+        bound_header(&mut new);
+        assert_eq!(old["ask"]["value"]["call_id"], "");
+        assert_eq!(new["ask"]["value"]["call_id"], "raw-call");
+        assert_eq!(old["ask"]["value"]["questions"], new["ask"]["value"]["questions"]);
     }
 
     fn assert_native_keyset_pages_match_full_read(
@@ -1386,8 +1652,10 @@ mod tests {
         use tower::ServiceExt as _;
         let root = tempfile::tempdir().unwrap();
         let details = Value::Object(
-            (0..200_000)
-                .map(|index| (format!("key-{index}"), json!(0)))
+            // Keys are never bounded, so many long keys with small values stay over the transport
+            // budget after the values are bounded: 6,000 keys of 200 bytes, about 1.2 MiB.
+            (0..6_000)
+                .map(|index| (format!("key-{index:0>196}"), json!(0)))
                 .collect(),
         );
         let native = fixture(
@@ -2056,7 +2324,7 @@ mod tests {
         ] {
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: "custom/client/invented-display".into(),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/example".into()),
@@ -2103,7 +2371,7 @@ mod tests {
         }
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/invented-display".into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/example".into()),
@@ -2128,9 +2396,18 @@ mod tests {
 
     #[test]
     fn concurrent_read_limit_has_no_waiting_backlog() {
-        let slots = tokio::sync::Semaphore::new(4);
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let slots = read_slots(&root.path().join("one.jsonl"));
         let held: Vec<_> = (0..4).map(|_| slots.try_acquire().unwrap()).collect();
         assert_eq!(read_slot(&slots).unwrap_err().code, "rate-limited");
+        let same_scope = read_slots(&root.path().join("two.jsonl"));
+        assert_eq!(read_slot(&same_scope).unwrap_err().code, "rate-limited");
+        let other_scope = read_slots(&other.path().join("one.jsonl"));
+        assert!(
+            read_slot(&other_scope).is_ok(),
+            "parallel test scopes must not consume each other's read budget"
+        );
         drop(held);
         assert!(read_slot(&slots).is_ok());
     }
@@ -2194,54 +2471,83 @@ mod tests {
         }
     }
 
-    #[test]
-    fn same_fold_viewers_wait_without_holding_global_read_slots() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().to_owned();
-        let shared = fold_fixture(&home, "shared").transcript;
-        crate::external_sessions::timeline_test_support::arm_refresh(&shared);
-        let identities = |items: &[Value]| {
-            items
-                .iter()
-                .map(|item| (item["id"].clone(), item["sequence"].clone()))
-                .collect::<Vec<_>>()
-        };
-        let viewer = |name: &'static str| {
-            let source = fold_fixture(&home, name);
-            let session = ClientSession::local(Some("person/example")).unwrap();
-            std::thread::spawn(move || {
-                read_slice(
-                    &source,
-                    &session,
-                    &source.id,
-                    crate::external_sessions::TimelineOrder::Sequence,
-                    None,
-                    10,
-                )
-            })
-        };
-        let first = viewer("shared");
-        crate::external_sessions::timeline_test_support::wait_refresh_arrived(&shared);
-        let parked: Vec<_> = (0..4).map(|_| viewer("shared")).collect();
-        // Every viewer of the shared transcript is queued on its fold, none on a read slot.
-        crate::external_sessions::timeline_test_support::wait_fold_waiters(4);
-        let unrelated = viewer("other");
-        let unrelated = unrelated.join().unwrap().unwrap();
-        assert!(
-            serde_json::to_string(&unrelated.items)
-                .unwrap()
-                .contains("content of other"),
-            "another conversation is admitted while the shared fold is contended"
-        );
-        crate::external_sessions::timeline_test_support::release_refresh(&shared);
-        let first = first.join().unwrap().unwrap();
-        assert!(!first.items.is_empty());
-        for viewer in parked {
-            assert_eq!(
-                identities(&viewer.join().unwrap().unwrap().items),
-                identities(&first.items)
-            );
+    /// Run blocking coordination away from the runtime thread so its deadline can fire even
+    /// if a refresh gate, fold wait, or thread join never completes.
+    async fn coordination_deadline(name: &'static str, test: impl FnOnce() + Send + 'static) {
+        let (done, result) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(test)));
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(30), result)
+            .await
+            .unwrap_or_else(|_| panic!("{name}: coordination did not finish within 30 seconds"))
+            .expect("coordination worker must report its outcome");
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
         }
+    }
+
+    #[tokio::test]
+    async fn same_fold_viewers_wait_without_holding_global_read_slots() {
+        coordination_deadline(
+            "same_fold_viewers_wait_without_holding_global_read_slots",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let home = root.path().to_owned();
+                let shared = fold_fixture(&home, "shared").transcript;
+                // A parallel test can fill its own budget before this first viewer starts.
+                let other_test = tempfile::tempdir().unwrap();
+                let other_slots = read_slots(&other_test.path().join("busy.jsonl"));
+                let _other_reads: Vec<_> =
+                    (0..4).map(|_| other_slots.try_acquire().unwrap()).collect();
+                crate::external_sessions::timeline_test_support::arm_refresh(&shared);
+                let identities = |items: &[Value]| {
+                    items
+                        .iter()
+                        .map(|item| (item["id"].clone(), item["sequence"].clone()))
+                        .collect::<Vec<_>>()
+                };
+                let viewer = |name: &'static str| {
+                    let source = fold_fixture(&home, name);
+                    let session = ClientSession::local(Some("person/example")).unwrap();
+                    std::thread::spawn(move || {
+                        read_slice(
+                            &source,
+                            &session,
+                            &source.id,
+                            crate::external_sessions::TimelineOrder::Sequence,
+                            None,
+                            10,
+                            true,
+                            &mut NativeReadAdmission::default(),
+                        )
+                    })
+                };
+                let first = viewer("shared");
+                crate::external_sessions::timeline_test_support::wait_refresh_arrived(&shared);
+                let parked: Vec<_> = (0..4).map(|_| viewer("shared")).collect();
+                // Every shared viewer queues on its fold, not on a read slot.
+                crate::external_sessions::timeline_test_support::wait_fold_waiters(4);
+                let unrelated = viewer("other");
+                let unrelated = unrelated.join().unwrap().unwrap();
+                assert!(
+                    serde_json::to_string(&unrelated.items)
+                        .unwrap()
+                        .contains("content of other"),
+                    "another conversation is admitted while the shared fold is contended"
+                );
+                crate::external_sessions::timeline_test_support::release_refresh(&shared);
+                let first = first.join().unwrap().unwrap();
+                assert!(!first.items.is_empty());
+                for viewer in parked {
+                    assert_eq!(
+                        identities(&viewer.join().unwrap().unwrap().items),
+                        identities(&first.items)
+                    );
+                }
+            },
+        )
+        .await;
     }
 
     #[test]
@@ -2389,21 +2695,40 @@ mod tests {
         })];
         let mut session = ClientSession::local(Some("person/example")).unwrap();
         session.conversation_blocks = true;
-        let prepared = prepare(&parent, &session, &parent.id, items).unwrap();
+        let routing_parent = managed_session_id("agent/child-owner", "runtime:i1");
+        let prepared = prepare(&parent, &session, &routing_parent, items.clone()).unwrap();
         let agents = prepared[0]["body"]["blocks"][0]["view"]["agents"]
             .as_array()
             .unwrap();
         let linked = agents[0]["conversation"]["session_id"].as_str().unwrap();
         assert_eq!(
             linked,
-            crate::subagent_sessions::child_session_id(&parent, "sub-lived")
+            crate::subagent_sessions::child_session_id(&parent, "sub-lived", &routing_parent)
         );
         assert!(linked.starts_with("session/external-child-"));
         assert!(agents[1].get("conversation").is_none());
+        let parts = crate::subagent_sessions::child_parts(linked).unwrap();
+        assert_eq!(parts.external_parent_id, parent.id);
+        assert_eq!(parts.routing_parent_session_id, routing_parent);
+
+        let child = crate::subagent_sessions::resolve_child_of(&parent, linked, "sub-lived")
+            .unwrap()
+            .unwrap();
+        let descendants = child.transcript.with_extension("");
+        std::fs::create_dir_all(&descendants).unwrap();
+        std::fs::copy(&child.transcript, descendants.join("sub-lived.jsonl")).unwrap();
+        let prepared = prepare(&child, &session, linked, items).unwrap();
+        let descendant = prepared[0]["body"]["blocks"][0]["view"]["agents"][0]
+            ["conversation"]["session_id"]
+            .as_str()
+            .unwrap();
+        let parts = crate::subagent_sessions::child_parts(descendant).unwrap();
+        assert_eq!(parts.external_parent_id, child.id);
+        assert_eq!(parts.routing_parent_session_id, routing_parent);
     }
 
     #[tokio::test]
-    async fn child_session_ids_open_their_own_timeline_and_header_follows_negotiation() {
+    async fn managed_child_session_ids_open_their_own_timeline_and_header_follows_negotiation() {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -2425,7 +2750,27 @@ mod tests {
         );
         std::fs::write(child_directory.join("sub-1.jsonl"), child).unwrap();
         let mut state = super::super::tests::test_state_named(root.path(), "child-owner-test");
-        state.native_session_home = Some(root.path().to_path_buf());
+        let owner = "agent/child-owner";
+        let incarnation = "child-runtime:i1";
+        let routing_parent = managed_session_id(owner, incarnation);
+        // Only the durable managed binding can find this parent: no native inventory home.
+        state.native_session_home = None;
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "runtime_id":"child-runtime", "incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"idle", "driver":"omp", "incarnation_id":incarnation})),
+            ("harness.session-file", json!({"harness":"omp", "agent":owner, "incarnation_id":incarnation,
+                "session_id":parent.native_id, "path":parent.transcript})),
+        ] {
+            state.store.append_claim(&ClaimInput {
+                subject: owner.into(),
+                kind: kind.into(),
+                actor: Some(owner.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
         let app = super::super::super::router(state.clone());
         let request = |uri: String, blocks: bool| {
             let app = app.clone();
@@ -2445,12 +2790,13 @@ mod tests {
                 (status, serde_json::from_slice::<Value>(&bytes).unwrap())
             }
         };
-        let child_id = crate::subagent_sessions::child_session_id(&parent, "sub-1");
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "sub-1", &routing_parent);
         let leaf = child_id.trim_start_matches("session/");
         // Negotiated: the child's own window, with a header describing it.
         let (status, page) =
             request(format!("/v1/client/sessions/{leaf}/timeline?limit=5"), true).await;
         assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["value"]["session_id"], child_id);
         let items = page["value"]["items"].as_array().unwrap();
         assert!(items.iter().any(|item| {
             item["body"]["text"]
@@ -2469,14 +2815,26 @@ mod tests {
         assert_eq!(page["value"]["page"]["has_more"], json!(true));
         // Keyset continuations derive the same bounded newest head while the source is unchanged.
         let cursor = page["value"]["page"]["next_cursor"].as_str().unwrap();
+        let (status, mismatch) = request(
+            format!("/v1/client/sessions/{leaf}/timeline?limit=100&cursor={cursor}"),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE, "{mismatch}");
+        assert_eq!(mismatch["code"], "page-cursor-expired");
         let (status, older) = request(
             // The cursor is `page/native/` plus base64url, so it needs no percent-encoding.
-            format!("/v1/client/sessions/{leaf}/timeline?limit=5&cursor={cursor}"),
+            format!("/v1/client/sessions/{leaf}/timeline?cursor={cursor}"),
             true,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{older}");
+        assert_eq!(older["value"]["page"]["limit"], 5);
         assert_eq!(older["value"]["header"], header);
+        assert_eq!(older["value"]["session_id"], child_id);
+        assert!(older["value"]["items"].as_array().unwrap().iter().all(|item| {
+            item["body"]["text"] != "parent only"
+        }));
         // Without negotiation: the same conversation, but no header and no blocks.
         let (status, legacy) = request(
             format!("/v1/client/sessions/{leaf}/timeline?limit=5"),
@@ -2484,6 +2842,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert_eq!(legacy["value"]["session_id"], child_id);
         assert!(legacy["value"].get("header").is_none());
         assert!(
             legacy["value"]["items"]
@@ -2493,7 +2852,7 @@ mod tests {
                 .all(|item| item["body"].get("blocks").is_none())
         );
         // A child id whose transcript never existed names no conversation.
-        let missing = crate::subagent_sessions::child_session_id(&parent, "never-ran");
+        let missing = crate::subagent_sessions::child_session_id(&parent, "never-ran", &routing_parent);
         let (status, absent) = request(
             format!(
                 "/v1/client/sessions/{}/timeline",
@@ -2503,5 +2862,17 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{absent}");
+
+        // A valid managed routing key does not authorize a different native parent.
+        let mut different_parent = parent.clone();
+        different_parent.id = "session/external-0123456789abcdef01234567".into();
+        let mismatched = crate::subagent_sessions::child_session_id(
+            &different_parent, "sub-1", &routing_parent,
+        );
+        let (status, refused) = request(
+            format!("/v1/client/sessions/{}/timeline", mismatched.trim_start_matches("session/")),
+            true,
+        ).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
     }
 }

@@ -7,10 +7,10 @@
  * aborted and counted as a violation. It only clicks the header terminal toggle.
  * Pass = the thread transcript, composer, header Resources control and breadcrumb host stay in place
  * (the same DOM nodes across the toggle and an in-app route change) while the terminal surface shows
- * either a live grid or a specific unavailable reason: in the drawer when the toggle is enabled, in
+ * either a live grid or a specific unavailable reason: in the pane when the toggle is enabled, in
  * the disabled toggle's description otherwise. A disabled toggle also gets an in-app route change to
- * `?open=terminal/<host>/<name>:detail`, which must show that reason in a drawer beside the same
- * thread nodes; both toggles then load that route cold. The receipt records runtime reads, terminal
+ * `?open=terminal/<host>/<name>:detail`, which must show that reason in the pane replacing the same
+ * retained thread nodes; both toggles then load that route cold. The receipt records runtime reads, terminal
  * attaches and the selected roster row's `runtime_ids` as observed over HTTP and the collections socket.
  * NO_TERMINAL=1 requires the named toggle to be disabled and explained from its first visible render,
  * before waiting for the transcript or roster; this catches an enabled control during roster loading.
@@ -125,9 +125,9 @@ await page.route('**/v1/client/actions', async (route) => {
 
 const header = page.locator('[data-testid="thread-header"]')
 // Match the live probe's page-level accessible control, not a wrapper or a second app-only toggle.
-const toggle = page.getByRole('button', { name: 'Toggle terminal drawer', exact: true })
+const toggle = page.getByRole('button', { name: /^Show (terminal|conversation)$/ })
 const disabledWrap = header.locator('[data-testid="terminal-toggle-disabled"]')
-const drawer = page.locator('[data-testid="terminal-pane"]')
+const drawer = page.locator('[data-testid="terminal-pane"][data-terminal-shown="true"]')
 const grid = drawer.locator('[aria-roledescription="terminal"]')
 const composer = page.getByRole('textbox', { name: 'Message', exact: true })
 
@@ -162,6 +162,7 @@ const surroundings = () => page.evaluate(() => {
   const composer = document.querySelector('textarea[aria-label="Message"]') ?? document.querySelector('textarea')
   return {
     transcriptVisible: visible(transcript),
+    threadHidden: transcript?.closest('[aria-hidden]')?.getAttribute('aria-hidden') === 'true',
     transcriptSameNode: transcript != null && pinned.transcript === transcript,
     composerVisible: visible(composer),
     composerSameNode: composer != null && pinned.composer === composer,
@@ -171,9 +172,14 @@ const surroundings = () => page.evaluate(() => {
     breadcrumb: crumb?.textContent.trim() ?? '',
     breadcrumbHost: slash?.previousElementSibling?.textContent.trim() ?? '',
     breadcrumbSameNode: crumb != null && pinned.breadcrumb === crumb,
-    drawers: document.querySelectorAll('[data-testid="terminal-pane"]').length,
+    drawers: document.querySelectorAll('[data-testid="terminal-pane"][data-terminal-shown="true"]').length,
   }
 })
+/** The terminal replaced the thread: the header holds and the retained thread keeps its nodes and draft, hidden. */
+const surroundingsHidden = (state, before) =>
+  state.threadHidden && state.resourcesVisible && state.breadcrumb === before.breadcrumb
+  && state.breadcrumbHost === before.breadcrumbHost && state.composerValueLength === before.composerValueLength
+  && state.transcriptSameNode && state.composerSameNode && state.breadcrumbSameNode
 const surroundingsHold = (state, before, identity) =>
   state.transcriptVisible && state.composerVisible && state.resourcesVisible && state.breadcrumb === before.breadcrumb
   && state.breadcrumbHost === before.breadcrumbHost && state.composerValueLength === before.composerValueLength
@@ -212,7 +218,7 @@ try {
   step('on-seat', decodeURIComponent(new URL(page.url()).pathname) === `/w/${agentRef}`, { path: new URL(page.url()).pathname })
   await header.waitFor({ state: 'visible', timeout: 90_000 })
   await toggle.waitFor({ state: 'visible', timeout: 60_000 })
-  step('single-header-toggle', await toggle.count() === 1 && await header.getByRole('button', { name: 'Toggle terminal drawer', exact: true }).count() === 1)
+  step('single-header-toggle', await toggle.count() === 1 && await header.getByRole('button', { name: /^Show (terminal|conversation)$/ }).count() === 1)
   // Capture the same button attributes at the same early point as the live baseline probe.
   report.firstToggle = await toggleState()
   if (process.env.NO_TERMINAL) check('no-terminal-first-control', report.firstToggle.disabled
@@ -241,13 +247,13 @@ try {
     && /terminal/i.test(settledToggle.describedBy || settledToggle.title), settledToggle)
 
   if (enabled) {
-    if ((await toggle.getAttribute('aria-pressed')) === 'true') step('drawer-initially-closed', false)
+    if ((await toggle.getAttribute('aria-label')) !== 'Show terminal') step('terminal-initially-hidden', false)
     await toggle.click()
     const outcome = await drawerOutcome()
     report.drawer = outcome
     await shot('drawer-open')
     const after = await surroundings()
-    check('thread-retained-with-drawer', surroundingsHold(after, before, true) && after.drawers === 1, after)
+    check('thread-retained-behind-terminal', surroundingsHidden(after, before) && after.drawers === 1, after)
     check('drawer-shows-terminal-or-specific-reason', outcome.kind === 'grid' || (outcome.kind === 'reason' && specific(outcome.text)), outcome)
     await toggle.click()
     await drawer.waitFor({ state: 'detached', timeout: 15_000 })
@@ -260,7 +266,7 @@ try {
     check('disabled-toggle-reason', specific(reason) && description === reason
       && await toggle.isDisabled(), { reason, description, control: settledToggle })
 
-    // In-app route change: the shell keeps the thread nodes while the drawer opens beside them.
+    // In-app route change: the shell keeps the thread nodes behind the terminal pane.
     await page.evaluate((url) => {
       window.history.pushState(null, '', url)
       window.dispatchEvent(new PopStateEvent('popstate'))
@@ -269,22 +275,21 @@ try {
     report.routedDrawer = routed
     await shot('routed-drawer')
     const routedState = await surroundings()
-    check('routed-thread-retained', surroundingsHold(routedState, before, true) && routedState.drawers === 1, routedState)
+    check('routed-thread-retained', surroundingsHidden(routedState, before) && routedState.drawers === 1, routedState)
+    check('routed-way-back-enabled', await toggle.getAttribute('aria-label') === 'Show conversation' && await toggle.getAttribute('aria-disabled') === null)
     check('routed-drawer-reason', routed.kind === 'reason' && specific(routed.text) && routed.retry === 0, routed)
   }
 
-  // Cold explicit deep link: a fresh load lands on the drawer beside the thread. Required for a
+  // Cold explicit deep link: a fresh load lands on the terminal alone. Required for a
   // disabled toggle; for an enabled one it shows the same surface without the click.
   await page.goto(origin + terminalUrl)
   await header.waitFor({ state: 'visible', timeout: 90_000 })
-  // A hidden thread is a finding, not a precondition failure: the checks below record it.
-  await settledThread().catch(() => {})
   const direct = await drawerOutcome()
   report.directDrawer = direct
   await shot('direct-drawer')
   await pin()
   const directState = await surroundings()
-  check('direct-thread-retained', surroundingsHold(directState, before, false) && directState.drawers === 1, directState)
+  check('direct-terminal-alone', directState.resourcesVisible && directState.breadcrumb === before.breadcrumb && directState.drawers === 1, directState)
   check('direct-drawer-reason', enabled
     ? direct.kind === 'grid' || (direct.kind === 'reason' && specific(direct.text))
     : direct.kind === 'reason' && specific(direct.text) && direct.retry === 0, direct)

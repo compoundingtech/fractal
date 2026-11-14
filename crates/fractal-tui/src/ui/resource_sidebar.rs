@@ -11,6 +11,30 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
+/// The sidebar edits version 1 arrangement layouts. Version 2 arrangements are folder-only and
+/// ordered by membership, so the window loader drops them before this accessor is reached.
+pub(super) trait ArrangementV1 {
+    fn v1(&self) -> &fractal_schema::arrangements::Body;
+    #[cfg(test)]
+    fn v1_mut(&mut self) -> &mut fractal_schema::arrangements::Body;
+}
+
+impl ArrangementV1 for fractal_client::Arrangement {
+    fn v1(&self) -> &fractal_schema::arrangements::Body {
+        match &self.body {
+            fractal_client::ArrangementBody::V1(body) => body,
+            fractal_client::ArrangementBody::V2(_) => unreachable!("version 2 arrangements are not loaded into the sidebar"),
+        }
+    }
+    #[cfg(test)]
+    fn v1_mut(&mut self) -> &mut fractal_schema::arrangements::Body {
+        match &mut self.body {
+            fractal_client::ArrangementBody::V1(body) => body,
+            fractal_client::ArrangementBody::V2(_) => unreachable!("version 2 arrangements are not loaded into the sidebar"),
+        }
+    }
+}
+
 pub(super) fn folder_name(name: &str) -> Result<&str, String> {
     if name.trim().is_empty() || name.trim().len() > 256 || name.chars().any(char::is_control) {
         return Err("Use a folder name of at most 256 bytes without control characters.".into());
@@ -118,45 +142,35 @@ impl Sidebar {
             .find(|a| a.header.id.ends_with(&reserved))
             .or_else(|| {
                 live()
-                    .filter(|a| a.body.name.value == "Sidebar")
+                    .filter(|a| a.v1().name.value == "Sidebar")
                     .min_by(|a, b| a.header.id.cmp(&b.header.id))
             })
     }
     pub(super) fn location(&self, subject: &str) -> Option<&str> {
-        let a = self.arrangement()?;
-        let placement = a.body.placements.get(subject)?;
-        let folder = a
-            .resolved
-            .as_ref()
-            .and_then(|r| r.folders.get(subject))
-            .unwrap_or(&placement.value.folder);
-        folder.as_deref().filter(|id| {
-            a.body
-                .folders
-                .get(*id)
-                .is_some_and(|f| f.tombstone.is_none())
-        })
+        self.arrangement()?.resolved.as_ref()?.folders.get(subject)?.as_deref()
     }
     pub(super) fn resources(&self) -> Vec<ResourceRow> {
         let mut rows = self.seen.values().cloned().collect::<Vec<_>>();
         rows.sort_by(|a, b| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
         rows
     }
+    fn project(&self, a: &fractal_client::Arrangement) -> Result<fractal_sidebar::projection::AvailableProjection, fractal_sidebar::model::ProjectionError> {
+        use fractal_sidebar::model::{ArrangementInput, ResolvedInput};
+        fractal_sidebar::projection::build_available(&ArrangementInput {
+            subject: a.header.id.clone(), owner: a.owner.clone(), revision: a.header.revision.clone(),
+            deleted: a.deleted, body: a.body.clone(),
+            resolved: a.resolved.as_ref().map(|r| ResolvedInput { parents: r.parents.clone(), folders: r.folders.clone() }),
+        }, &self.seen.keys().cloned().collect::<Vec<_>>())
+    }
     pub(super) fn folders(&self) -> Vec<(String, String)> {
-        let Some(a) = self.arrangement() else {
-            return Vec::new();
-        };
-        let mut folders = a
-            .body
-            .folders
-            .iter()
-            .filter(|(_, f)| f.tombstone.is_none())
-            .collect::<Vec<_>>();
-        folders.sort_by_key(|(id, f)| (&f.position.value.key, *id));
-        folders
-            .into_iter()
-            .map(|(id, f)| (id.clone(), f.name.value.clone()))
-            .collect()
+        let Some(a) = self.arrangement() else { return Vec::new() };
+        let Ok(tree) = self.project(a) else { return Vec::new() };
+        let mut folders = tree.tree.nodes.values().filter_map(|node| match &node.node {
+            fractal_sidebar::model::NodeRef::Folder { id } => Some((id, &a.v1().folders[id])),
+            _ => None,
+        }).collect::<Vec<_>>();
+        folders.sort_by_key(|(id, folder)| (&folder.position.value.key, *id));
+        folders.into_iter().map(|(id, folder)| (id.clone(), folder.name.value.clone())).collect()
     }
     pub(super) fn placement(
         &self,
@@ -168,7 +182,7 @@ impl Sidebar {
         let mut siblings = self
             .arrangement()
             .into_iter()
-            .flat_map(|a| a.body.placements.iter())
+            .flat_map(|a| a.v1().placements.iter())
             .filter(|(id, _)| id.as_str() != subject && self.location(id) == folder)
             .map(|(id, p)| (id.clone(), p.value.key.clone()))
             .collect::<Vec<_>>();
@@ -178,7 +192,7 @@ impl Sidebar {
             && folder.is_none()
             && !siblings.iter().any(|(id, _)| id == before)
         {
-            let key = super::arrangement_keys::between(
+            let key = fractal_sidebar::keys::between(
                 siblings.last().map(|(_, key)| key.as_str()),
                 None,
             )?;
@@ -199,7 +213,7 @@ impl Sidebar {
                 .ok_or("The destination changed; choose it again.")?,
             None => siblings.len(),
         };
-        let (key, rekeys) = super::arrangement_keys::insertion(
+        let (key, rekeys) = fractal_sidebar::keys::insertion(
             &siblings
                 .iter()
                 .map(|(_, key)| key.as_str())
@@ -237,12 +251,12 @@ impl Sidebar {
             .arrangement()
             .ok_or("The sidebar has not loaded yet.")?;
         let folder = a
-            .body
+            .v1()
             .folders
             .get(id)
             .ok_or("That folder no longer exists.")?;
         let mut siblings = a
-            .body
+            .v1()
             .folders
             .iter()
             .filter(|(other, f)| other.as_str() != id && f.tombstone.is_none())
@@ -255,7 +269,7 @@ impl Sidebar {
                 .ok_or("The destination changed; choose it again.")?,
             None => siblings.len(),
         };
-        let (key, rekeys) = super::arrangement_keys::insertion(
+        let (key, rekeys) = fractal_sidebar::keys::insertion(
             &siblings
                 .iter()
                 .map(|(_, f)| f.position.value.key.as_str())
@@ -293,7 +307,9 @@ impl Sidebar {
         self.choices = self
             .path
             .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+            .and_then(|path| std::fs::read(fractal_client::product_dirs::tui_read_path(path)).ok())
+            // LIVE-MIGRATION END
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         self.seen
@@ -379,9 +395,24 @@ impl Sidebar {
     }
     pub fn rows(&self) -> Vec<Row> {
         let arrangement = self.arrangement();
+        use fractal_sidebar::model::{NodeRef, Parent};
+        let mut rows = Vec::new();
+        let projected = match arrangement.map(|a| self.project(a)).transpose() {
+            Ok(projected) => projected,
+            Err(error) => { rows.push(Row::Notice(format!("Sidebar layout unavailable: {error:?}"))); None }
+        };
+        let tree = projected.as_ref().map(|p| &p.tree);
         let mut catalog = self.seen.clone();
-        if let Some(a) = arrangement {
-            for id in a.body.placements.keys() {
+        if let Some(projected) = &projected {
+            for (key, error) in &projected.unavailable {
+                rows.push(Row::Notice(format!("{key} unavailable: {error:?}")));
+                if let Some(subject) = key.strip_prefix("subject:") { catalog.remove(subject); }
+            }
+        } else if let Some(a) = arrangement {
+            catalog.retain(|id, _| !a.v1().placements.contains_key(id));
+        }
+        if let Some(tree) = &tree {
+            for id in tree.nodes.values().filter_map(|node| match &node.node { NodeRef::Subject { subject } => Some(subject), _ => None }) {
                 catalog.entry(id.clone()).or_insert_with(|| ResourceRow {
                     id: id.clone(),
                     kind: "Unavailable".into(),
@@ -391,35 +422,17 @@ impl Sidebar {
                 });
             }
         }
-        let mut folders = arrangement
-            .map(|a| {
-                a.body
-                    .folders
-                    .iter()
-                    .filter(|(_, f)| f.tombstone.is_none())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let mut folders = tree.iter().flat_map(|tree| tree.nodes.values()).filter_map(|node| {
+            let NodeRef::Folder { id } = &node.node else { return None };
+            Some((id, &arrangement.expect("projected arrangement").v1().folders[id]))
+        }).collect::<Vec<_>>();
         folders.sort_by_key(|(id, folder)| (&folder.position.value.key, *id));
         // One level: nested folders remain visible, and their placements keep their real folder.
-        let location = |id: &str| {
-            arrangement.and_then(|a| {
-                a.body.placements.get(id).and_then(|placement| {
-                    let folder = a
-                        .resolved
-                        .as_ref()
-                        .and_then(|r| r.folders.get(id))
-                        .unwrap_or(&placement.value.folder);
-                    folder.as_deref().filter(|folder| {
-                        a.body
-                            .folders
-                            .get(*folder)
-                            .is_some_and(|f| f.tombstone.is_none())
-                    })
-                })
-            })
-        };
-        let mut rows = Vec::new();
+        let locations: BTreeMap<_, _> = tree.iter().flat_map(|tree| tree.nodes.values()).filter_map(|node| {
+            let NodeRef::Subject { subject } = &node.node else { return None };
+            Some((subject.as_str(), &node.shown_under))
+        }).collect();
+        let location = |id: &str| locations.get(id).and_then(|parent| match parent { Parent::Folder { id } => Some(id.as_str()), _ => None });
         for name in &self.inventory_partial {
             rows.push(Row::Notice(format!("More {name} exist beyond this inventory window.")));
         }
@@ -475,7 +488,7 @@ impl Sidebar {
                 .collect::<Vec<_>>();
             if let Some(a) = arrangement {
                 resources
-                    .sort_by_key(|row| (&a.body.placements[&row.id].value.key, row.id.clone()));
+                    .sort_by_key(|row| (&a.v1().placements[&row.id].value.key, row.id.clone()));
             }
             append(
                 format!("folder/{id}"),
@@ -492,7 +505,7 @@ impl Sidebar {
         unfiled.sort_by_key(|row| {
             (
                 arrangement
-                    .and_then(|a| a.body.placements.get(&row.id))
+                    .and_then(|a| a.v1().placements.get(&row.id))
                     .map(|p| p.value.key.clone())
                     .unwrap_or_else(|| "~".into()),
                 row.title.clone(),
@@ -652,11 +665,11 @@ impl Ui {
             .resource_sidebar
             .arrangement()
             .into_iter()
-            .flat_map(|a| a.body.folders.values())
+            .flat_map(|a| a.v1().folders.values())
             .filter(|f| f.tombstone.is_none())
             .map(|f| f.position.value.key.as_str())
             .max();
-        let key = match super::arrangement_keys::between(last, None) {
+        let key = match fractal_sidebar::keys::between(last, None) {
             Ok(key) => key,
             Err(error) => {
                 self.flash(error);
@@ -679,96 +692,51 @@ impl Ui {
         self.sidebar_edit(operations);
     }
     pub(crate) fn draw_resource_sidebar(&self, buf: &mut Buffer, area: Rect) {
-        buf.set_style(area, Style::default().bg(theme::MANTLE));
+        use fractal_sidebar::widget::{self, Action, Kind, Presentation, Styles};
         self.frame.borrow_mut().glass_sidebar = area;
-        let filter = format!(" / Filter: {}", self.resource_sidebar.filter);
-        buf.set_stringn(area.x, area.y, filter, area.width as usize, theme::dim());
-        self.hit(Rect { height: 1, ..area }, Hit::ResourceFilter);
-        if area.width >= 8 {
-            let rect = Rect::new(area.right() - 5, area.y, 5, 1);
-            buf.set_stringn(rect.x, rect.y, " +New", 5, theme::fg(theme::ACCENT));
-            self.hit(rect, Hit::ResourceNewFolder);
-        }
-        let rows = self.resource_sidebar.rows();
+        let source = self.resource_sidebar.rows();
         let height = area.height.saturating_sub(1) as usize;
-        let top = self
-            .resource_sidebar
-            .selected
-            .saturating_sub(height.saturating_sub(1));
-        for (index, row) in rows.iter().enumerate().skip(top).take(height) {
-            let y = area.y + 1 + (index - top) as u16;
-            let (label, style) = match row {
-                Row::Group {
-                    title,
-                    count,
-                    closed,
-                    ..
-                } => (
-                    format!(" {} {title} {count}", if *closed { "▸" } else { "▾" }),
-                    theme::label(),
-                ),
-                Row::Resource(row) => (
-                    format!(
-                        "   {}{}",
-                        row.title,
-                        if row.missing { " · unavailable" } else { "" }
-                    ),
-                    if row.missing {
-                        theme::dim()
-                    } else {
-                        theme::fg(theme::TEXT)
-                    },
-                ),
-                Row::Notice(message) => (format!(" {message}"), theme::dim()),
-                Row::Welcome => (
-                    " Welcome · Ctrl+K: New terminal".into(),
-                    theme::fg(theme::ACCENT),
-                ),
+        let top = self.resource_sidebar.selected.saturating_sub(height.saturating_sub(1));
+        let prepared: Vec<_> = source.iter().skip(top).take(height).map(|row| {
+            let (id, label, kind) = match row {
+                Row::Group { id, title, count, closed } => {
+                    let (id, kind) = id.strip_prefix("folder/").map_or_else(
+                        || (format!("group:{id}"), Kind::Group), |id| (format!("folder:{id}"), Kind::Folder));
+                    (id, format!(" {} {title} {count}", if *closed { "▸" } else { "▾" }), kind)
+                }
+                Row::Resource(row) => (format!("subject:{}", row.id),
+                    format!("   {}{}", row.title, if row.missing { " · unavailable" } else { "" }),
+                    Kind::Resource { available: !row.missing }),
+                Row::Notice(message) => (format!("notice:{message}"), format!(" {message}"), Kind::Notice),
+                Row::Welcome => ("welcome".into(), " Welcome · Ctrl+K: New terminal".into(), Kind::Welcome),
             };
-            let style = if index == self.resource_sidebar.selected
-                && (self.resource_sidebar.focused || self.glasses.sidebar.focused)
-            {
-                Style::default().fg(theme::CRUST).bg(theme::ACCENT)
-            } else {
-                style
+            (id, text::sanitize(&label), kind)
+        }).collect();
+        let indices: BTreeMap<_, _> = prepared.iter().enumerate().map(|(i, row)| (row.0.as_str(), i + top)).collect();
+        let rows: Vec<_> = prepared.iter().map(|(id, label, kind)| widget::Row { id, label, kind: *kind }).collect();
+        let regions = widget::render(buf, area, &rows, &Presentation {
+            filter: &self.resource_sidebar.filter, selected: self.resource_sidebar.selected - top,
+            focused: self.resource_sidebar.focused || self.glasses.sidebar.focused,
+        }, &Styles {
+            background: Style::default().bg(theme::MANTLE), dim: theme::dim(), label: theme::label(),
+            text: theme::fg(theme::TEXT), accent: theme::fg(theme::ACCENT),
+            selected: Style::default().fg(theme::CRUST).bg(theme::ACCENT),
+        });
+        for hit in regions.hits {
+            let id = hit.row.unwrap_or("");
+            let folder = || id.strip_prefix("folder:").expect("widget folder identity").to_owned();
+            let action = match hit.action {
+                Action::Filter => Hit::ResourceFilter, Action::New => Hit::ResourceNewFolder,
+                Action::Row => Hit::ResourceRow(indices[id]),
+                Action::Add => Hit::ResourceAdd(folder()), Action::Menu => Hit::ResourceFolderMenu(folder()),
+                Action::Drag => Hit::ResourceFolderDrag(folder()),
             };
-            buf.set_stringn(
-                area.x,
-                y,
-                text::sanitize(&label),
-                area.width as usize,
-                style,
-            );
-            let rect = Rect {
-                y,
-                height: 1,
-                ..area
-            };
-            self.hit(rect, Hit::ResourceRow(index));
-            if let Row::Group { id, .. } = row
-                && let Some(folder) = id.strip_prefix("folder/")
-                && area.width >= 12
-            {
-                let x = area.right() - 9;
-                buf.set_stringn(x, y, "+  …  ≡", 8, theme::fg(theme::ACCENT));
-                self.hit(Rect::new(x, y, 2, 1), Hit::ResourceAdd(folder.into()));
-                self.hit(
-                    Rect::new(x + 3, y, 2, 1),
-                    Hit::ResourceFolderMenu(folder.into()),
-                );
-                self.hit(
-                    Rect::new(x + 6, y, 3, 1),
-                    Hit::ResourceFolderDrag(folder.into()),
-                );
-            }
-            if let Row::Resource(row) = row
-                && !row.missing
-            {
-                let mut frame = self.frame.borrow_mut();
-                let layer = frame.covers.len();
-                frame.context_rows.push((rect, row.id.clone(), layer));
-            }
+            self.hit(hit.rect, action);
         }
+        let mut frame = self.frame.borrow_mut();
+        let layer = frame.covers.len();
+        frame.context_rows.extend(regions.contexts.into_iter().map(|(rect, id)|
+            (rect, id.strip_prefix("subject:").expect("widget resource identity").to_owned(), layer)));
     }
     pub(crate) fn open_resource_row(&mut self, index: usize) {
         self.resource_sidebar.selected = index;
@@ -877,6 +845,35 @@ impl Ui {
 }
 
 #[cfg(test)]
+pub(super) fn golden_sidebar(state: &str) -> Sidebar {
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../fixtures/clients/sidebar/behavior-v1.json"
+    )).unwrap();
+    let case = &fixtures["cases"][1];
+    let mut legacy: fractal_client::Arrangement =
+        serde_json::from_value(case["initial"]["arrangement"].clone()).unwrap();
+    legacy.header.id = "arrangement/person/test/00000000-0000-7000-8000-000000000002".into();
+    let mut reserved = legacy.clone();
+    reserved.header.id = format!("arrangement/person/test/{}", fractal_client::SIDEBAR_ARRANGEMENT_UUID);
+    reserved.v1_mut().name.value = "Folder".into();
+    let mut sidebar = Sidebar { writable: true, focused: state != "unfocused", ..Sidebar::default() };
+    for (index, id) in case["catalog"].as_array().unwrap().iter().enumerate() {
+        let id = id.as_str().unwrap();
+        sidebar.seen.insert(id.into(), ResourceRow {
+            id: id.into(), kind: "Agents".into(), title: format!("Synthetic Resource {index}"),
+            open: id.into(), missing: false,
+        });
+    }
+    if state == "legacy" { reserved.deleted = true; }
+    if state == "retired" { legacy.deleted = true; reserved.deleted = true; sidebar.reserved_retired = true; }
+    sidebar.arrangements = vec![legacy, reserved];
+    if state == "fold" { sidebar.toggle(0); }
+    if state == "search" { sidebar.filter = "test".into(); sidebar.filtering = true; }
+    if state == "scroll" { sidebar.selected = sidebar.rows().len().saturating_sub(1); }
+    sidebar
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -884,6 +881,7 @@ mod tests {
         serde_json::from_value(json!({
             "id":"arrangement/person/avery/019a0000-0000-7000-8000-000000000001",
             "revision":"claim/1", "updated_at":"2026-10-01T00:00:00Z", "owner":"person/avery", "deleted":false,
+            "resolved":{"parents":{"first":null,"second":"first"},"folders":{"agent/atlas":"first","mission/build":"first"}},
             "body":{"version":1, "name":{"value":"Sidebar", "revision":"claim/1"},
                 "folders": {
                     "first":{"name":{"value":"First", "revision":"claim/1"}, "position":{"value":{"parent":null,"key":"a0"},"revision":"claim/1"}, "tombstone":null},
@@ -918,10 +916,7 @@ mod tests {
         assert!(matches!(&rows[2], Row::Resource(row) if row.id == "agent/atlas" && !row.missing));
         assert!(matches!(&rows[3], Row::Group { title, .. } if title == "Second"));
         // A resolved null takes precedence over the raw placement, and a deleted folder unfiles.
-        sidebar.arrangements[0].resolved = Some(fractal_client::ArrangementResolved {
-            parents: BTreeMap::new(),
-            folders: BTreeMap::from([("agent/atlas".into(), None)]),
-        });
+        sidebar.arrangements[0].resolved.as_mut().unwrap().folders.insert("agent/atlas".into(), None);
         assert!(
             sidebar
                 .rows()
@@ -929,7 +924,7 @@ mod tests {
                 .any(|row| matches!(row, Row::Group { title, .. } if title == "Agents"))
         );
         sidebar.arrangements[0]
-            .body
+            .v1_mut()
             .folders
             .get_mut("first")
             .unwrap()
@@ -937,6 +932,9 @@ mod tests {
             value: true,
             revision: "claim/2".into(),
         });
+        let resolved = sidebar.arrangements[0].resolved.as_mut().unwrap();
+        resolved.parents.insert("second".into(), None);
+        resolved.folders.insert("mission/build".into(), None);
         assert!(
             !sidebar
                 .rows()
@@ -945,11 +943,30 @@ mod tests {
         );
     }
     #[test]
+    fn core_projection_contains_bad_entries_and_preserves_unrelated_resources() {
+        for problem in ["missing", "cycle", "all-missing"] {
+            let mut sidebar = golden_sidebar("reserved");
+            let good = "mission/independent";
+            sidebar.seen.insert(good.into(), ResourceRow { id: good.into(), kind: "Missions".into(), title: "Independent".into(), open: good.into(), missing: false });
+            let a = sidebar.arrangements.last_mut().unwrap();
+            let bad = a.resolved.as_ref().unwrap().parents.keys().next().unwrap().clone();
+            match problem {
+                "missing" => { a.resolved.as_mut().unwrap().parents.remove(&bad); }
+                "cycle" => { a.resolved.as_mut().unwrap().parents.insert(bad.clone(), Some(bad.clone())); }
+                _ => a.resolved = None,
+            }
+            let rows = sidebar.rows();
+            assert!(rows.iter().any(|row| matches!(row, Row::Notice(message) if message.contains("unavailable"))));
+            assert!(rows.iter().any(|row| matches!(row, Row::Resource(resource) if resource.id == good)));
+            assert!(!rows.iter().any(|row| matches!(row, Row::Group { id, .. } if id == &format!("folder/{bad}"))));
+        }
+    }
+    #[test]
     fn the_reserved_subject_is_the_sidebar_and_legacy_ones_pick_the_oldest_by_name() {
         let named = |uuid: &str, name: &str| {
             let mut a = arrangement();
             a.header.id = format!("arrangement/person/avery/{uuid}");
-            a.body.name.value = name.into();
+            a.v1_mut().name.value = name.into();
             a
         };
         let picked = |sidebar: &Sidebar| sidebar.arrangement().map(|a| a.header.id.clone());
@@ -1066,7 +1083,7 @@ mod tests {
     fn placements_rekey_collisions_and_can_anchor_unfiled_rows_without_losing_subjects() {
         let mut sidebar = Sidebar::default();
         let mut a = arrangement();
-        a.body.placements.get_mut("agent/atlas").unwrap().value.key = "a0".into();
+        a.v1_mut().placements.get_mut("agent/atlas").unwrap().value.key = "a0".into();
         sidebar.arrangements.push(a);
         let ops = sidebar
             .placement("agent/new", Some("first"), Some("mission/build"))
@@ -1100,7 +1117,7 @@ mod tests {
     }
     #[test]
     fn opening_and_collapsing_only_navigate_and_do_not_edit_arrangements() {
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         ui.resource_sidebar.arrangements.push(arrangement());
         let before = ui.resource_sidebar.arrangements.clone();
         ui.open_resource_row(0);
@@ -1121,7 +1138,7 @@ mod tests {
     }
     #[test]
     fn a_fresh_install_shows_the_host_and_how_to_start() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.agents = super::super::view::Load::Ready(Vec::new());
         world.missions = super::super::view::Load::Ready(Vec::new());
         world.attention = super::super::view::Load::Ready(Vec::new());

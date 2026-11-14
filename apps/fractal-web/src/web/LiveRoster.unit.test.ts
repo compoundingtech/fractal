@@ -1,9 +1,9 @@
-import type { Undecodable } from '@fractal/sdk/effect'
+import type { Undecodable } from '@fractal/sdk/read'
 import { expect, test, vi } from 'vitest'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
-import { hiddenRoster, rosterDecodeNotice } from './LiveRoster.tsx'
+import { decodeNotice, hiddenRoster } from './LiveRoster.tsx'
 
 const failure = (fields: Omit<Undecodable, '_tag'>): Undecodable => ({ _tag: 'Rejected', ...fields })
 const omittedLeaf: Undecodable = { _tag: 'Degraded', id: 'agent/kept', path: 'usage.aggregation', reason: 'Unrecognized leaf value' }
@@ -36,7 +36,9 @@ test('a fully decoded roster has no notice', () => {
   expect(hiddenRoster({ decode: { undecodable: [omittedLeaf], decodeStale: false }, shown: new Set(['agent/kept']) }).count).toBe(0)
 })
 
-test('the notice wording is the contract sentence', () => {
-  expect(rosterDecodeNotice(1)).toBe('1 agent could not be shown · this view is older than the daemon')
-  expect(rosterDecodeNotice(2)).toBe('2 agents could not be shown · this view is older than the daemon')
+test('the notice wording is the contract sentence for either feed', () => {
+  expect(decodeNotice(1, 'agent')).toBe('1 agent could not be shown · their data does not match the expected format')
+  expect(decodeNotice(2, 'agent')).toBe('2 agents could not be shown · their data does not match the expected format')
+  expect(decodeNotice(1, 'mission')).toBe('1 mission could not be shown · their data does not match the expected format')
+  expect(decodeNotice(3, 'mission')).toBe('3 missions could not be shown · their data does not match the expected format')
 })

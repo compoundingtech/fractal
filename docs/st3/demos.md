@@ -10,7 +10,7 @@ The agents are scripted, not harnesses. A demo uses no model tokens and plays th
 every time.
 
 ```sh
-st --instance demo demo play examples/demos/release-day.kdl
+fractal --instance demo demo play examples/demos/release-day.kdl
 ```
 
 A demo always plays in an [instance](instances.md), so your own fleet is never touched. Each
@@ -23,10 +23,12 @@ nothing.
 A demo erases only an instance a demo made. The first play marks the instance with a
 `.st-demo` file in `~/.st-instance/NAME`. If the instance already holds a graph, an interface
 cache or a config without that mark, the play lists them and stops without touching anything.
-Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's:
+Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's.
+The mark stays, so every later play erases the instance without asking: keep a marked instance
+for demos only.
 
 ```sh
-st --instance demo demo play --reset examples/demos/release-day.kdl
+fractal --instance demo demo play --reset examples/demos/release-day.kdl
 ```
 
 Two examples are in [`examples/demos`](../../examples/demos):

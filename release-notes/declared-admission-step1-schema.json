@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Define optional declared admission metadata in kernel and client models without enforcement",
+  "replay": {"status": "changed", "detail": "Agent and mission declaration models retain optional declared priority, lane and budgets. Absence preserves prior canonical serialization and hashes; no backfill is required."},
+  "schema": {"status": "changed", "detail": "Client-v0 schemas and generated clients define an optional nonnullable declared_admission group. No claim kind, table, index, storage version or migration is added."},
+  "rules": {"status": "none", "detail": "These are data definitions only; scheduling, admission, process priority and resource limits are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Kernel enums and tolerant TypeScript codecs retain unknown future priority and lane values; strict TypeScript codecs reject them. Historical declarations without metadata retain their previous serialized bytes and hashes."},
+  "downtime": {"status": "none", "detail": "Normal binary restart only; no storage migration or backfill."},
+  "manual": {"status": "none", "detail": "This schema-only change does not enable declaration authoring or enforce budgets. ST_SEAT_PRIORITY behavior is unchanged."},
+  "recovery": {"status": "changed", "detail": "Older readers may discard added typed fields or refuse mission hashes. Remove metadata through upgraded readers before reverting a fleet that has declarations containing it."}
+}

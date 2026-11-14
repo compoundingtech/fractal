@@ -10,11 +10,15 @@ import { fixtureSource, type FixtureProjections } from '../data/fixtureSource.ts
 import { DataSourceProvider } from '../data/react.tsx'
 import { observed } from '../data/source.ts'
 import { AgentAttentionSignals } from './AgentAttention.tsx'
+import { AgentUsageSignals } from './AgentUsage.tsx'
 
 const world: FixtureProjections = {
   now: 0, events: [], agents: [], missions: [], attention: [], conversations: {},
   terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
 }
+it('keeps public AgentUsage on the attention fallback without a private usage view', () => {
+  expect(AgentUsageSignals).toBe(AgentAttentionSignals)
+})
 it.each(attentionAnswerFixtures)('badge counts only supported open asks: $name', ({ item, waiting }) => {
   const registry = AtomRegistry.make()
   const attention = Atom.make(observed({ value: [item] })).pipe(Atom.keepAlive)
@@ -24,7 +28,7 @@ it.each(attentionAnswerFixtures)('badge counts only supported open asks: $name',
   try {
     flushSync(() => root.render(
       <DataSourceProvider source={source} registry={registry}>
-        <AgentAttentionSignals agentRef={item.source_id} />
+        <AgentUsageSignals agentRef={item.source_id} />
       </DataSourceProvider>,
     ))
     expect(host.querySelector('[aria-label="1 waiting for answer"]') !== null).toBe(waiting)

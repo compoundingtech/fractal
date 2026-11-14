@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep keyboard focus and success announcements stable during transcript image reads, share the bounded cache across retained viewer panes, and keep unsupported attachments non-actionable",
+  "replay": { "status": "none", "detail": "No replay or storage changes." },
+  "schema": { "status": "none", "detail": "No generated client or wire contract changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "The 24-entry/40-MiB limit is shared per data-source/viewer rather than multiplied by retained panes. Final pane release revokes cached URLs. Unsupported references and image types remain plain deferred cards without retry." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual steps required." },
+  "recovery": { "status": "none", "detail": "Revert the review correction; no persistent data is changed." }
+}

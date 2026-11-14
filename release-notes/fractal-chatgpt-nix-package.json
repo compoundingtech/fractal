@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Publish the ChatGPT adapter Nix package as fractal-chatgpt with the st-chatgpt bridge",
+  "replay": {"status": "none", "detail": "No graph replay or data changes."},
+  "schema": {"status": "none", "detail": "No storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordination rule changes."},
+  "compatibility": {"status": "changed", "detail": "packages.fractal-chatgpt is canonical. packages.st-chatgpt selects the same derivation, and bin/st-chatgpt is a symlink to fractal-chatgpt. The Cargo st-chatgpt target remains. Source exercises that launch the adapter select fractal-chatgpt."},
+  "downtime": {"status": "none", "detail": "No daemon restart or service interruption is required."},
+  "manual": {"status": "changed", "detail": "New Nix consumers can select fractal-chatgpt. Existing st-chatgpt package and executable consumers continue to work. The prototype exercise builds and launches fractal-chatgpt."},
+  "recovery": {"status": "none", "detail": "No persistent data is changed. The retained package attribute and executable symlink continue to invoke the same adapter."}
+}

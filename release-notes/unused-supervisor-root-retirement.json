@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove the unused supervisor root predicate",
+  "replay": {
+    "status": "none",
+    "detail": "Supervisor traversal, relationship markers, validation and resync behavior are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No declaration, desired-state or stored format changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Only the uncalled supervisor_chain::is_counted_root predicate and its comment are removed. All remaining module bytes and all tests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Removes one unused workspace Rust function. Unknown external source consumers are not claimed absent and must remove any use. Published client, wire, CLI and stored-format contracts are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart required for removal of uncalled code."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or state cleanup required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the predicate without changing stored state."
+  }
+}

@@ -4,7 +4,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
-import { alertsHeading, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@fractal/views';
+import { alertsHeading, detailRow, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@fractal/views';
 import type { RootParams } from '../navigation';
 import { agentName } from '../agentsView';
 import { alertsEmptyText } from '../alertsEmpty';
@@ -13,17 +13,18 @@ import { missionTitle } from '../missionsView';
 import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
+import { AvailabilitySection } from './Availability';
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
-// Now: what needs the person, as stui's Home lists it.
+// Now: what needs the person, as the Fractal terminal UI's Home lists it.
 export function NowScreen() {
-  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
+  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions, readAvailability } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
   useDebugScroll(list as never);
-  const refresh = useRefresh();
+  const refresh = useRefresh([], readAvailability);
   const agentOf = (row: HomeRow) => [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
   const rows = useMemo(() => homeRows(data.attention, caps?.session_actor), [data.attention, caps?.session_actor]);
   const requesterOf = (row: HomeRow) => {
@@ -31,7 +32,7 @@ export function NowScreen() {
     const agent = data.agents.find(candidate => candidate.id === id);
     return agent ? agentName(agent) : id.replace(/^agent\//, '');
   };
-  // Start something, as stui's launcher does: a shell or a mission.
+  // Start something, as the Fractal terminal UI's launcher does: a shell or a mission.
   useLayoutEffect(() => {
     navigation.setOptions({
       unstable_headerRightItems: () => [{
@@ -46,7 +47,7 @@ export function NowScreen() {
   // The count of what waits on the person, as the other clients print it: nothing at zero.
   const heading = alertsHeading(openAlerts(data.attention, caps?.session_actor).length);
   const sections = useMemo(() => homeSections(rows).map(section => ({ ...section, data: section.rows })), [rows]);
-  // Dismiss, as stui's x: a request is closed with word to its asker that there is nothing for
+  // Dismiss, as the Fractal terminal UI's x: a request is closed with word to its asker that there is nothing for
   // the person to do (after a confirm), an update or a message is read. A decision has none.
   const dismiss = (row: HomeRow): (() => void) | undefined => {
     const item = row.item;
@@ -85,11 +86,11 @@ export function NowScreen() {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />
       </ContextMenu>}
-      ListHeaderComponent={<View><StatusLine />{heading ? <T bold style={{ paddingHorizontal: 32, paddingTop: 16 }}>{heading}</T> : null}</View>}
+      ListHeaderComponent={<View><StatusLine /><AvailabilitySection />{heading ? <T bold style={{ paddingHorizontal: 32, paddingTop: 16 }}>{heading}</T> : null}</View>}
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
-        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `st now` lists them all.</Note> : null}
+        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
       </View>}
       style={{ flex: 1 }}
     />
@@ -106,7 +107,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   if (found) kept.current = found;
   const item = found ?? kept.current;
   if (!item) return <Screen><Banners /><Empty text={loadErrors.attention ? 'This alert could not be loaded.' : !hasSynced ? 'Checking for this alert…' : status !== 'online' ? 'This alert is not in the offline snapshot. Reconnect to check it.' : 'This item is no longer open.'} /></Screen>;
-  const [row] = homeRows([item], undefined);
+  const row = detailRow(item);
   const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const mission = item.mission_id ? data.missions.find(candidate => candidate.id === item.mission_id) : undefined;
@@ -175,7 +176,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       <T bold selectable>{row.title}</T>
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'
         // A prompt is allowed from its conversation, where the call it asks about is shown.
-        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} calls={null} seats={[]} />
+        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} seats={[]} />
         : item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
       {item.because ? <T soft>because {item.because}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}

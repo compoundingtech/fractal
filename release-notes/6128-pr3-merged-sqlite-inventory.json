@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refresh the SQLite exception fingerprint after the mail expiry migration guard merge",
+  "replay": {"status": "none", "detail": "Inventory metadata and source marker only; replay is unchanged."},
+  "schema": {"status": "none", "detail": "No database schema or inventory format changes."},
+  "rules": {"status": "none", "detail": "No runtime behavior changes; the moved SQL literal retains its allow-for-now exception without size proof."},
+  "compatibility": {"status": "none", "detail": "No wire format or persisted state changes."},
+  "downtime": {"status": "none", "detail": "No deployment or migration required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persistent runtime state changes; no recovery action required."}
+}

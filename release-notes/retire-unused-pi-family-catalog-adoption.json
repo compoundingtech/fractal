@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retire unused pi-family catalog adoption",
+  "replay": {
+    "status": "none",
+    "detail": "Native pi and OMP adoption keeps its existing process supervision and terminal fencing."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No stored or wire format changes and no historical data cleanup."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Native ownership and session incarnation checks remain unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Removes the uncalled workspace-internal OMP catalog adopt API and its private resolver. Current callers retain the explicit-path native adoption APIs, which already omit legacy presence transport. The Clippy baseline is tightened by the one too-many-arguments warning removed with the unused resolver."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No active provider restart is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or data cleanup is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the unused source entrypoint without rewriting stored state."
+  }
+}

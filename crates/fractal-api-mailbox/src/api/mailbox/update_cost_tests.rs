@@ -15,7 +15,7 @@ struct Mailbox {
     store: Store,
     fence: Fence,
     floor: (u128, u64),
-    admitted: std::collections::BTreeSet<String>,
+    admitted: MailRecovery,
     policies: std::collections::BTreeSet<String>,
     order: MailboxOrder,
     previous: Option<(crate::store::MailboxWatermark, Snapshot)>,
@@ -97,7 +97,7 @@ impl Mailbox {
             &mut oracle.1,
             self.floor.0,
             Some(self.floor.1),
-            &mut self.admitted,
+            &mut self.admitted, true,
         )
         .unwrap();
         MailboxOrder::default().bound_held(&mut oracle.1, true);

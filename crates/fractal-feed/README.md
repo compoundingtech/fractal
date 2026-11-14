@@ -10,6 +10,14 @@ sixteen-slot collections are granted, keeping the three conversation slots on ol
 daemons. Its authoritative windows arrive as `Window::Arrangements`, including retirement
 removals and remote register edits; it never creates or edits an arrangement.
 
+With the same person and the `read-positions` capability, it also follows that person's
+`read-positions` collection as `Window::ReadPositions`. Its frames are invalidations only: the UI
+reads `read-positions.list` again. A dedicated collection socket holds only this subscription,
+so all six screen inventories, three conversations and the terminal retain their existing slots.
+The socket exists only when read positions are supported and is scoped to the selected member's
+connection: member replacement or feed shutdown cancels it. Unreachable connections reconnect
+with the feed's backoff; a subscription refusal is reported and logged, never replaced by polling.
+
 ## Start a feed
 
 Supply a `Client` for each member, already configured with that member's identity and credentials.
@@ -47,7 +55,7 @@ async fn main() {
 
 | Caller subscribes to | Updates it receives |
 | --- | --- |
-| Attention, missions and agents automatically | `Window` replaces the entire joined window, with its snapshot and `has_more`; `WindowFailed` leaves the last successful items visible. Each window holds at most 200 rows. |
+| Attention, missions and agents automatically | `Window` replaces the entire joined window, with its snapshot and `has_more`; `WindowFailed` leaves the last successful items visible. Legacy windows hold at most 200 rows. When `collections.agents.revisioned.v1` is granted, agents instead follow the complete current roster: snapshot chunks become visible atomically, and whole-row deltas are fenced by epoch and base revision. Reconnects start from a complete snapshot; older daemons keep the legacy agents window. |
 | Glasses via the `glasses` argument, if granted at version 1 or newer | `GlassesVersion` precedes the glasses `Window`, so the application can select the matching storage shape. The window holds at most 100 glasses. |
 | `Converse { targets }` | Up to `MAX_CONVERSATIONS` (three) agent or session conversations. `Conversation` identifies its target and resolved session; `replace` resets the newest page, otherwise merge entries by ID. Preserve `has_more` for older-page navigation. `ConversationFailed` retries unless history is permanently incomplete. |
 | `Resubscribe { target }` | Resolve a followed agent's current session again after a restart; subsequent conversation updates replace the previous page. |
@@ -57,6 +65,8 @@ async fn main() {
 data before enabling them. `Offline` retains the last display while the feed retries. The waits
 grow through 1, 2, 5, 10 and 30 seconds with jitter. `Reconnect` interrupts an offline wait.
 Dropping the command sender stops the task.
+Revisioned agents errors or resync refusals with `retryable: false` immediately emit
+`WindowFailed` and cancel automatic window retries; an oversized row is not prepared repeatedly.
 
 The feed resubscribes windows and conversations and reattaches a followed terminal after a
 disconnect. Window resync frames request fresh subscriptions. While connected, projection
@@ -69,8 +79,8 @@ retries a stale fence with a fresh read.
 ## Snapshot model and cache
 
 `model::Model` and `tree::MissionsTree` hold renderer-independent snapshots compatible with
-stui's cache. The crate also preserves the bounded snapshot and event-cursor read APIs for
-callers that use the event feed. stui's live screens use collection subscriptions; they run no
+the Fractal terminal UI's cache. The crate also preserves the bounded snapshot and event-cursor read APIs for
+callers that use the event feed. the Fractal terminal UI's live screens use collection subscriptions; they run no
 event-polling loop. `Model::bootstrap` reads the capability cursor and first collections;
 `reload` fills the remaining bounded projections. `sync` consumes events, deduplicates them and
 coalesces projection refreshes. Its result is `(changed, invalidated_sessions, cursor_gap)`.
@@ -94,7 +104,8 @@ Optional screen inventories use `Command::Inventories(Inventories { .. })`.
 `InventorySupport` reports admission and the member build once per connection;
 only granted `inventory-collections` and sixteen-slot `collections` capabilities
 activate them. At most six inventory slots (one usage period) coexist with the
-existing ten reserved window, conversation and terminal slots.
+existing ten reserved window, conversation and terminal slots; the sixth is shared
+with the read positions, which yield it.
 `Window::Inventory(Inventory::Usage(hours))` identifies the requested period, so
 a late old-period frame cannot overwrite the new period. Retained server resyncs
 report staleness; a permanent refusal does not silently switch to HTTP. The UI

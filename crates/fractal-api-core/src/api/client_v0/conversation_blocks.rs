@@ -8,12 +8,23 @@ use ring::aead;
 use std::sync::LazyLock;
 
 // Bound expensive reads without a queued backlog or a second content cache.
+#[cfg(not(any(test, feature = "test-support")))]
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 /// The read budget serving `transcript`: the process-wide one, or under test the budget of
 /// the test's own scope, so parallel tests never take each other's slots.
+#[cfg(not(any(test, feature = "test-support")))]
 pub fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore {
     &READ_SLOTS
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<tokio::sync::Semaphore> =
+        LazyLock::new(std::sync::Mutex::default);
+    crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
+        tokio::sync::Semaphore::new(4)
+    })
 }
 
 static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
@@ -21,13 +32,39 @@ static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
     getrandom::fill(&mut key).expect("owner reference key entropy");
     key
 });
-pub fn read_slot(slots: &tokio::sync::Semaphore) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
-    slots.try_acquire().map_err(|_| ApiError {
+fn reads_busy() -> ApiError {
+    ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
         code: "rate-limited".into(),
         message: "owner conversation reads are busy; retry this read".into(),
         details: Box::default(),
-    })
+    }
+}
+
+pub fn read_slot(slots: &tokio::sync::Semaphore) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
+    slots.try_acquire().map_err(|_| reads_busy())
+}
+
+/// One admission decision, taken after the first fold lock and retained through all
+/// refills, the header head read, projection and display preparation for this request.
+#[derive(Default)]
+pub struct NativeReadAdmission {
+    #[cfg(not(any(test, feature = "test-support")))]
+    permit: Option<tokio::sync::SemaphorePermit<'static>>,
+    #[cfg(any(test, feature = "test-support"))]
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl NativeReadAdmission {
+    fn acquire(&mut self, source: &ExternalSession) -> Result<(), ApiError> {
+        if self.permit.is_none() {
+            #[cfg(not(any(test, feature = "test-support")))]
+            { self.permit = Some(read_slot(read_slots(&source.transcript))?); }
+            #[cfg(any(test, feature = "test-support"))]
+            { self.permit = Some(read_slots(&source.transcript).try_acquire_owned().map_err(|_| reads_busy())?); }
+        }
+        Ok(())
+    }
 }
 
 pub const VALUE_BYTES: usize = 8 * 1024;
@@ -40,6 +77,29 @@ pub fn invalidated() -> ApiError {
 pub fn source(
     state: &AppState, session_id: &str, managed: Option<&super::super::ManagedSessionOwner>,
 ) -> Result<ExternalSession, ApiError> {
+    if let Some(parts) = crate::subagent_sessions::child_parts(session_id) {
+        let index = state.store.index().map_err(ApiError::internal)?;
+        let routing_owner = super::super::managed_session_owner_at(
+            &state.store, index, &parts.routing_parent_session_id,
+        ).map_err(ApiError::internal)?;
+        let parent = if crate::subagent_sessions::child_parts(&parts.external_parent_id).is_some()
+            || parts.routing_parent_session_id.starts_with("session/external-")
+        {
+            source(state, &parts.external_parent_id, None)?
+        } else {
+            let owner = routing_owner.as_ref().ok_or_else(|| {
+                ApiError::not_found("the child routing parent does not exist")
+            })?;
+            let parent = source(state, &parts.routing_parent_session_id, Some(owner))?;
+            if parent.id != parts.external_parent_id {
+                return Err(ApiError::not_found("the child native parent does not match its owner binding"));
+            }
+            parent
+        };
+        return crate::subagent_sessions::resolve_child_of(&parent, session_id, &parts.task_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("the session does not exist"));
+    }
     if let Some((owner, incarnation, origin)) = managed {
         if origin
             .as_deref()
@@ -469,7 +529,7 @@ pub fn read(
     // The fold is held before the slot is taken: waiting viewers of this conversation hold
     // no global read slot, so they never crowd an unrelated conversation out of the budget.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     let before = basis(source)?;
     let items = held.read(source).map_err(ApiError::internal)?;
     if before != basis(source)? {
@@ -490,6 +550,9 @@ pub struct PreparedSlice {
     pub generation: u64,
 }
 
+/// Read a bounded source slice with optional display preparation. Replay extents only
+/// inspect identity, sequence and echo correlation; they must not expand display bodies.
+#[allow(clippy::too_many_arguments)]
 pub fn read_slice(
     source: &ExternalSession,
     session: &ClientSession,
@@ -497,23 +560,30 @@ pub fn read_slice(
     order: crate::external_sessions::TimelineOrder,
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
+    prepare_display: bool,
+    admission: &mut NativeReadAdmission,
 ) -> Result<PreparedSlice, ApiError> {
     let queue = crate::profile::span("conversation/native-fold-queue");
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
-    let mut held = timeline.hold();
+    let mut held = crate::otel::conversation_phase("st.conversation.fold_mutex_wait_ms", || timeline.hold());
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
-    let slots = read_slots(&source.transcript);
-    let _slot = read_slot(slots)?;
+    crate::otel::conversation_phase("st.conversation.native_admission_ms", || admission.acquire(source))?;
     drop(queue);
     let basis = basis(source)?;
     let fold = crate::profile::span("conversation/native-fold");
-    let mut slice = held
-        .slice(source, order, before, limit)
-        .map_err(ApiError::internal)?;
+    crate::otel::conversation_count("st.conversation.native_read_limit", limit);
+    let mut slice = crate::otel::conversation_phase("st.conversation.native_fold_ms", ||
+        held.slice(source, order, before, limit)).map_err(ApiError::internal)?;
     drop(fold);
-    let _preparation = crate::profile::span("conversation/native-display-preparation");
-    for item in &mut slice.items {
-        prepare_one(source, session, session_id, &basis, item)?;
+    if prepare_display {
+        let _preparation = crate::profile::span("conversation/native-display-preparation");
+        crate::otel::conversation_phase("st.conversation.display_preparation_ms", || -> Result<(), ApiError> {
+        for item in &mut slice.items {
+            prepare_one(source, session, session_id, &basis, item)?;
+        }
+        crate::otel::conversation_count("st.conversation.native_prepared_items", slice.items.len());
+            Ok(())
+        })?;
     }
     if basis != self::basis(source)? {
         return Err(invalidated());
@@ -570,6 +640,101 @@ pub fn prepared_bodies() -> usize {
 pub fn prepared_counter_guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Cap aggregate header values without clipping display previews a second time.
+/// Each constituent value was already cleaned and bounded by `header_items`.
+pub fn bound_header(value: &mut Value) {
+    if let Some(fields) = value.as_object_mut() {
+        for field in fields.values_mut() {
+            if let Some(value) = field.get_mut("value")
+                && matches!(value, Value::Array(_) | Value::Object(_))
+            {
+                let encoded = serde_json::to_string(value).expect("JSON value encodes");
+                if encoded.len() > VALUE_BYTES * 2 {
+                    *value = json!(clipped(&encoded));
+                }
+            }
+        }
+    }
+}
+
+fn clean_header_value(value: &mut Value) {
+    match value {
+        Value::String(text) => text.retain(|character| !character.is_control()),
+        Value::Array(values) => values.iter_mut().for_each(clean_header_value),
+        Value::Object(values) => values.values_mut().for_each(clean_header_value),
+        _ => {}
+    }
+}
+
+/// Header-only projection of folded entries. Large native payloads never enter this path.
+/// Unlike display preparation, this deliberately retains header facts from an entry whose
+/// display body will be replaced for size, and uses the native ask call ID before clipping.
+pub fn header_items(source: &ExternalSession, session_id: &str, items: &[Value]) -> Vec<Value> {
+    items.iter().map(|item| {
+        let mut blocks = item["body"]["blocks"].as_array().into_iter().flatten().map(|block| {
+            let mut projected = json!({
+                "kind": block["kind"],
+                "metadata": {},
+                "view": null,
+                "payload": {"call_id": block["payload"]["call_id"].as_str()},
+            });
+            if matches!(block["view"]["type"].as_str(), Some("todo" | "task" | "job" | "hub" | "ask")) {
+                projected["view"] = block["view"].clone();
+            }
+            if let Some(model) = block["metadata"]["model"].as_str() {
+                projected["metadata"]["model"] = json!(model);
+            }
+            if let Some(tokens) = block["metadata"]["context_tokens"].as_u64() {
+                projected["metadata"]["context_tokens"] = json!(tokens);
+            }
+            if let Some(cost) = block["metadata"].pointer("/usage/cost_usd").and_then(Value::as_f64) {
+                projected["metadata"]["usage"] = json!({"cost_usd": cost});
+            }
+            projected
+        }).collect::<Vec<_>>();
+        prepare_task_links(source, session_id, &mut blocks);
+        for block in &mut blocks {
+            for key in ["metadata", "view", "payload"] {
+                clean_header_value(&mut block[key]);
+                bound_open_value(&mut block[key]);
+            }
+        }
+        let mut projected = json!({
+            "id": item["id"], "type": item["type"],
+            "timestamp": item["timestamp"], "sequence": item["sequence"],
+            "body": {"code": item["body"]["code"], "call_id": item["body"]["call_id"], "blocks": blocks},
+        });
+        for pointer in ["/id", "/timestamp", "/body/call_id"] {
+            let value = projected.pointer_mut(pointer).expect("header projection field");
+            clean_header_value(value);
+            bound_open_value(value);
+        }
+        projected
+    }).collect()
+}
+
+fn prepare_task_links(source: &ExternalSession, session_id: &str, blocks: &mut [Value]) {
+    for block in blocks.iter_mut()
+        .filter(|block| block["kind"] == "tool_output" && block["view"]["type"] == "task")
+    {
+        let Some(agents) = block.get_mut("view").and_then(|view| view.get_mut("agents"))
+            .and_then(Value::as_array_mut) else { continue; };
+        for agent in agents {
+            let Some(task_id) = agent.get("id").and_then(Value::as_str).map(str::to_owned)
+                else { continue; };
+            let Some(agent) = agent.as_object_mut() else { continue; };
+            match crate::subagent_sessions::child_transcript(source, &task_id) {
+                Some(_) => {
+                    agent.insert("conversation".into(), json!({
+                        "session_id": crate::subagent_sessions::child_session_id(source, &task_id, session_id),
+                    }));
+                }
+                None => { agent.remove("conversation"); }
+            }
+        }
+    }
 }
 
 pub fn prepare_one(
@@ -674,41 +839,7 @@ pub fn prepare_one(
     if session.conversation_blocks
         && let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut)
     {
-        for block in blocks
-            .iter_mut()
-            .filter(|block| block["kind"] == "tool_output" && block["view"]["type"] == "task")
-        {
-            let Some(agents) = block
-                .get_mut("view")
-                .and_then(|view| view.get_mut("agents"))
-                .and_then(Value::as_array_mut)
-            else {
-                continue;
-            };
-            for agent in agents {
-                let Some(task_id) = agent.get("id").and_then(Value::as_str).map(str::to_owned)
-                else {
-                    continue;
-                };
-                let Some(agent) = agent.as_object_mut() else {
-                    continue;
-                };
-                match crate::subagent_sessions::child_transcript(source, &task_id) {
-                    Some(_) => {
-                        agent.insert(
-                            "conversation".into(),
-                            json!({"session_id": crate::subagent_sessions::child_session_id(
-                                source,
-                                &task_id,
-                            )}),
-                        );
-                    }
-                    None => {
-                        agent.remove("conversation");
-                    }
-                }
-            }
-        }
+        prepare_task_links(source, session_id, blocks);
     }
     // Keep open display objects (including assistant text/reasoning metadata) bounded.
     // JSON continuations can cover the whole body, but an image's continuation must keep
@@ -889,6 +1020,9 @@ pub fn prepare_one(
 
 /// Keep negotiated data out of legacy relayed clients without changing their known enum.
 pub fn legacy(value: &mut Value, session: &ClientSession) {
+    if let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) {
+        for item in items { conversation_participants::legacy_item(item, session); }
+    }
     if !session.conversation_delivery_links
         && let Some(items) = value.get_mut("items").and_then(Value::as_array_mut)
     {
@@ -958,7 +1092,7 @@ pub fn assistant_text(
     let native: crate::external_sessions::NativeLocator =
         serde_json::from_value(locator.native.clone()).map_err(|_| invalidated())?;
     let slots = read_slots(&locator.source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     // Each read resolves the managed owner at the current frontier, as chunk_local does.
     let current_source = || {
         let index = state.store.index().map_err(ApiError::internal)?;

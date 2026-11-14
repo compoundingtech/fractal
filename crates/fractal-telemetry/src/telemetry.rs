@@ -39,6 +39,22 @@ fn stderr_filter() -> tracing_subscriber::EnvFilter {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
+/// `[logging] stderr_warnings`: write every WARN and ERROR event to stderr, for a daemon that
+/// exports no telemetry and so installs no subscriber. Without one, a `tracing` warning anywhere
+/// in the daemon is lost. False when a subscriber is already installed, as telemetry export
+/// installs one with its own stderr layer.
+pub fn stderr_warnings() -> bool {
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .with_filter(tracing_subscriber::filter::LevelFilter::WARN),
+        ),
+    )
+    .is_ok()
+}
+
 /// A driver or timer-driven status line has local diagnostics and no per-process exporters.
 /// Driver state/diagnostic records already reach the daemon through its observation path.
 pub fn local_only() {

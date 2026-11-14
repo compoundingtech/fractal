@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Update the native timeline conformance and delivery test callers to pass the retained read-admission guard.",
+  "replay": {"status": "none", "detail": "Test compilation repair only."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No product behavior changes."},
+  "compatibility": {"status": "none", "detail": "Two test callers now provide the admission argument required by the existing native slice API."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "No persisted state changes."}
+}

@@ -151,6 +151,7 @@ impl App {
                 has_more,
                 items,
                 header,
+                ..
             } if self.selected.as_ref() == Some(&target) => {
                 self.timeline.apply(fractal_conversation_ui::Frame {
                     replace,

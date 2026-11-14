@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fence managed OMP tools and mailbox delivery with incarnation-owned idle refresh admission",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "changed", "detail": "The managed OMP extension closes admission only with native idle, zero admitted tools and handoffs, and a subsequent zero running-job snapshot in one synchronous boundary. Closed tools and native shell/Python execution are visibly refused, as is mailbox delivery. Native user execution without proven completion makes that incarnation unsupported."},
+  "compatibility": {"status": "changed", "detail": "Native user or RPC text turns may still start after closure, but cannot execute tools; native resume preserves transcript input. Other adapters remain unsupported. No controller actuation or automatic refresh enablement is added."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "changed", "detail": "A closed gate survives channel reconnects and only its exact incarnation, owner sequence and epoch can reopen it. Tool accounting errors prevent refresh closure. Nested dispatches sharing a call ID are counted separately; explicit denials and matching terminal tool-result messages settle dispatches without clearing live nested work. Ambiguous completion stays busy."}
+}

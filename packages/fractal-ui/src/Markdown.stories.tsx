@@ -13,12 +13,40 @@ import { MarkdownCanvas, languages, streamChunks, inlineStreamStages, styles } f
 
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Markdown', component: MarkdownCanvas,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
+  parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and load @pierre/highlights after plain-text first paint; tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
   args: { scenario: 'rich-text', scheme: 'dark' },
   argTypes: { scenario: { options: ['rich-text', 'languages', 'streaming', 'inline-streaming', 'all'], control: 'radio' }, scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof MarkdownCanvas>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStatesLight:contract-fixture',
+  'CopyFailure:contract-fixture',
+  'InputForegroundDark1440:contract-fixture',
+  'InputForegroundDark440:contract-fixture',
+  'InputForegroundLight1440:contract-fixture',
+  'InputForegroundLight440:contract-fixture',
+  'Languages:contract-fixture',
+  'LanguagesLight:contract-fixture',
+  'Light:contract-fixture',
+  'RichText:contract-fixture',
+  'StreamingCodeBlock:contract-fixture',
+  'StreamingCodeBlockLight:contract-fixture',
+  'StreamingControlsPersistence:contract-fixture',
+  'StreamingControlsPersistenceLight:contract-fixture',
+  'StreamingHeading:contract-fixture',
+  'StreamingHeadingLight:contract-fixture',
+  'StreamingInlineMarkup:contract-fixture',
+  'StreamingParagraph:contract-fixture',
+  'StreamingParagraphLight:contract-fixture',
+  'StreamingTable:contract-fixture',
+  'StreamingTableLight:contract-fixture',
+  'StreamingTightList:contract-fixture',
+  'StreamingTightListLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local markdown syntax and token streaming stages exercise parser and renderer contracts.' } } } satisfies Story
 
@@ -80,17 +108,27 @@ export const RichText: Story = { ...contractFixture, tags: ['critical'],
 export const Languages: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'languages' },
   play: async ({ canvasElement }) => {
-    const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
-    if (fences.length !== languages.length) throw new Error('Language coverage lost a fence')
-    for (let index = 0; index < languages.length; index++) {
-      const [language, code] = languages[index]!
-      const fence = fences[index]!
-      if (fence.dataset.language !== (language || 'text')) throw new Error(`Fence ${index} lost its language label`)
-      if (index < languages.length - 2) {
-        for (let frame = 0; fence.querySelector('[data-syntax-token]') === null && frame < 600; frame++) await settle()
-        if (fence.querySelector('[data-syntax-token]') === null) throw new Error(`${language} did not produce real syntax tokens`)
-      } else if (fence.querySelector('[data-syntax-token], script') !== null) throw new Error('Unknown language should remain safe literal text')
-      if (fence.querySelector('code')?.textContent !== `${code}\n`) throw new Error(`${language || 'text'} highlighting changed the source text`)
+    const previousWidth = canvasElement.style.width
+    try {
+      for (const width of [440, 1440]) {
+        canvasElement.style.width = `${width}px`
+        await settle()
+        const fences = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')]
+        if (fences.length !== languages.length) throw new Error('Language coverage lost a fence')
+        for (let index = 0; index < languages.length; index++) {
+          const [language, code] = languages[index]!
+          const fence = fences[index]!
+          if (fence.dataset.language !== (language || 'text')) throw new Error(`Fence ${index} lost its language label`)
+          if (index < languages.length - 2) {
+            await waitFor(() => expect(fence.querySelector('[data-syntax-token]')).not.toBeNull())
+          } else if (fence.querySelector('[data-syntax-token], script') !== null) throw new Error('Unknown language should remain safe literal text')
+          if (fence.querySelector('code')?.textContent !== `${code}\n`) throw new Error(`${language || 'text'} highlighting changed the source text`)
+          const pre = requireElement<HTMLElement>(fence, 'pre')
+          if (pre.getAttribute('role') !== 'group' || pre.tabIndex !== 0) throw new Error('Code lost its keyboard-accessible group')
+        }
+      }
+    } finally {
+      canvasElement.style.width = previousWidth
     }
   },
 }
@@ -119,7 +157,7 @@ export const StreamingControlsPersistence: Story = { ...contractFixture, tags: [
       flushSync(() => copy.click())
       await settle()
       if (fence.dataset.copyState !== 'copied' || copied[0] !== fence.querySelector('code')?.textContent) throw new Error('Copy did not write the raw rendered code')
-      if (String(copy.textContent) !== 'Copied' || copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copied feedback did not match the accessible control name')
+      if (String(copy.textContent) !== 'Copied' || copy.getAttribute('aria-label') !== 'Copy code: Copied') throw new Error('Copied feedback did not match the accessible control name')
       for (let stage = 1; stage < streamChunks.length; stage++) {
         flushSync(() => append.click())
         await settle()
@@ -130,7 +168,7 @@ export const StreamingControlsPersistence: Story = { ...contractFixture, tags: [
       flushSync(() => copy.click())
       await settle()
       if (copied.at(-1) !== fence.querySelector('code')?.textContent || copy.textContent !== 'Copied') throw new Error('Copy after streaming did not use the latest code')
-      if (copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copy after streaming did not update the accessible control name')
+      if (copy.getAttribute('aria-label') !== 'Copy code: Copied') throw new Error('Copy after streaming did not update the accessible control name')
       const second = canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')[1]
       if (second?.dataset.wrap !== 'false') throw new Error('A new fence inherited another fence’s local wrap state')
     } finally {
@@ -143,12 +181,9 @@ export const StreamingControlsPersistenceLight: Story = { ...StreamingControlsPe
 export const StreamingInlineMarkup: Story = { ...contractFixture, tags: ['critical'],
   args: { scenario: 'inline-streaming' },
   play: async ({ canvasElement }) => {
-    const adversarial = '['.repeat(50_000)
-    const started = performance.now()
-    const completed = completeStreamingTail(adversarial)
-    const durationMs = performance.now() - started
-    canvasElement.dataset.streamingTailDuration = String(durationMs)
-    if (durationMs >= 50) throw new Error(`50k opening brackets exceeded the 50ms streaming-tail budget: ${durationMs}ms`)
+    // The 50 ms budget for this input is a CPU-time check in Markdown.unit.test.mjs; wall time here also counts time
+    // the host's scheduler gives other work.
+    const completed = completeStreamingTail('['.repeat(50_000))
     if (completed !== '['.repeat(49_999)) throw new Error('Streaming tail must remove only the last unmatched opening bracket')
     if (completeStreamingTail('Read [**label**](https://example.com') !== 'Read **label**') throw new Error('Incomplete destination did not retain its formatted label')
     if (completeStreamingTail('\\[literal') !== '\\[literal') throw new Error('Escaped opening bracket must remain literal')

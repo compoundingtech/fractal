@@ -9,7 +9,7 @@ pub fn record(
     provenance: &Provenance,
     actor: Option<&str>,
     batch: &str,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     if read(transaction, &mission.id, &mission.revision)
         .map_err(internal)?
         .is_some()

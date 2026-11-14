@@ -21,6 +21,11 @@ describe('tailnetAdmission', () => {
     expect(admit(request({ 'tailscale-user-login': 'blair@example.com', host: 'atlas.example.ts.net:8443', origin }))).toBe(false)
   })
 
+  it('never admits tagged infrastructure even if it appears in the configured allowlist', () => {
+    const tagged = tailnetAdmission({ origin, logins: ['tag:dev-host'], listener: () => undefined })
+    expect(tagged(request({ 'tailscale-user-login': 'tag:dev-host', host: 'atlas.example.ts.net:8443', origin }))).toBe(false)
+  })
+
   it('refuses a login header that carries more than one value', () => {
     // Node joins a repeated header into one comma-separated value, so a forged copy next to the real one never matches.
     for (const joined of ['robin@example.com, blair@example.com', 'blair@example.com, robin@example.com', 'robin@example.com,robin@example.com'])

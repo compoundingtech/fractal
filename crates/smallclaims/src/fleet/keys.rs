@@ -13,6 +13,10 @@ use ring::rand::SystemRandom;
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair as _, UnparsedPublicKey};
 
 const ENVELOPE_SIGNATURE_DOMAIN: &str = "st3-envelope-v1";
+/// A shard's envelopes sign over this domain and the shard ID. The same writer numbers its
+/// envelopes separately in every store, so without the shard a signature made for one store
+/// would verify for an envelope of another.
+const SHARD_ENVELOPE_SIGNATURE_DOMAIN: &str = "st3-shard-envelope-v1";
 
 fn encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -133,8 +137,27 @@ pub fn envelope_signature_message(
     sequence: u64,
     envelope_hash: &str,
 ) -> Vec<u8> {
-    format!("{ENVELOPE_SIGNATURE_DOMAIN}\n{fleet_id}\n{writer}\n{sequence}\n{envelope_hash}")
-        .into_bytes()
+    envelope_signature_message_in(None, fleet_id, writer, sequence, envelope_hash)
+}
+
+/// The bytes a writer signs for one envelope of the default store (`shard` is `None`) or of
+/// the named shard.
+pub fn envelope_signature_message_in(
+    shard: Option<&str>,
+    fleet_id: &str,
+    writer: &str,
+    sequence: u64,
+    envelope_hash: &str,
+) -> Vec<u8> {
+    match shard {
+        None => format!(
+            "{ENVELOPE_SIGNATURE_DOMAIN}\n{fleet_id}\n{writer}\n{sequence}\n{envelope_hash}"
+        ),
+        Some(shard) => format!(
+            "{SHARD_ENVELOPE_SIGNATURE_DOMAIN}\n{shard}\n{fleet_id}\n{writer}\n{sequence}\n{envelope_hash}"
+        ),
+    }
+    .into_bytes()
 }
 
 #[cfg(test)]
@@ -155,6 +178,21 @@ mod tests {
         assert!(!verify_signature(key.public(), &other_fleet, &signature));
         assert!(!verify_signature("not base64!", &message, &signature));
         assert!(!verify_signature(key.public(), &message, "AAAA"));
+    }
+
+    #[test]
+    fn a_signature_counts_only_in_the_store_it_was_made_for() {
+        let (key, _) = MemberKey::generate().unwrap();
+        let graph = envelope_signature_message("fleet", "node-a", 7, "hash");
+        assert_eq!(graph, envelope_signature_message_in(None, "fleet", "node-a", 7, "hash"));
+        let messages = envelope_signature_message_in(Some("messages"), "fleet", "node-a", 7, "hash");
+        let other = envelope_signature_message_in(Some("other"), "fleet", "node-a", 7, "hash");
+        let signature = key.sign(&graph);
+        assert!(!verify_signature(key.public(), &messages, &signature));
+        let signature = key.sign(&messages);
+        assert!(verify_signature(key.public(), &messages, &signature));
+        assert!(!verify_signature(key.public(), &graph, &signature));
+        assert!(!verify_signature(key.public(), &other, &signature));
     }
 
     #[test]

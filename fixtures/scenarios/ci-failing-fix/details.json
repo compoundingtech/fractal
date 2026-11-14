@@ -9,13 +9,248 @@
     "seed": 21
   },
   "state": {
+    "launch_variants": [],
+    "launches": [],
     "missions": [
       {
         "active_runs": 1,
         "id": "mission/example/atlas/repair-dependency-bump",
         "kind": "mission",
         "mission_revision": "sha256:atlas-mission-1",
+        "presentation": {
+          "actions": [
+            {
+              "action": "work.retry",
+              "confirm": false,
+              "id": "retry-step",
+              "target": "step-run/example/atlas/repair-dependency-bump/1/step-1"
+            },
+            {
+              "action": "message.send",
+              "confirm": false,
+              "id": "chat",
+              "target": "agent/example/atlas/builder"
+            },
+            {
+              "action": "mission.cancel",
+              "confirm": true,
+              "id": "cancel-run",
+              "target": "mission-run/example/atlas/repair-dependency-bump/1"
+            }
+          ],
+          "card": "what-you-can-do",
+          "last_progress": null,
+          "progress": {
+            "done": 0,
+            "total": 4
+          },
+          "queued_behind": null,
+          "settled_at": null,
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-1",
+              "title": "Check main after the dependency bump",
+              "word": "failed"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-2",
+              "title": "Bisect the regression",
+              "word": "working"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-3",
+              "title": "Restore the omitted limit default",
+              "word": "ready"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-4",
+              "title": "Rerun the CI matrix",
+              "word": "ready"
+            }
+          ],
+          "stuck": {
+            "agent": {
+              "id": "agent/example/atlas/builder",
+              "label": "Atlas Builder",
+              "state": "running"
+            },
+            "attempts": 1,
+            "blockers": [],
+            "step": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+            "word": "failed"
+          },
+          "system": false,
+          "who": {
+            "agent": "agent/example/atlas/builder",
+            "kind": "agent",
+            "label": "Atlas Builder"
+          },
+          "word": "failed"
+        },
         "revision": "mr-4",
+        "run_details": [
+          {
+            "current_steps": [
+              {
+                "assignee": "agent/example/atlas/builder",
+                "claimant": "agent/example/atlas/builder",
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                "since": "2030-01-01T11:59:35.000Z",
+                "state": "claimed",
+                "title": "Bisect the regression"
+              },
+              {
+                "assignee": "agent/example/atlas/builder",
+                "claimant": "agent/example/atlas/builder",
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                "since": "2030-01-01T11:59:35.000Z",
+                "state": "ready",
+                "title": "Restore the omitted limit default"
+              },
+              {
+                "assignee": "agent/example/atlas/builder",
+                "claimant": "agent/example/atlas/builder",
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                "since": "2030-01-01T11:59:35.000Z",
+                "state": "ready",
+                "title": "Rerun the CI matrix"
+              }
+            ],
+            "generation_id": "run-generation/example/atlas/repair-dependency-bump/1/g1",
+            "id": "mission-run/example/atlas/repair-dependency-bump/1",
+            "must_act": "agent",
+            "phase": "normal",
+            "progress": {
+              "done": 0,
+              "total": 4
+            },
+            "requester": "person/ada",
+            "state_since": "2030-01-01T11:59:30.000Z",
+            "status": "running",
+            "steps": [
+              {
+                "assignee": "agent/example/atlas/builder",
+                "attempt": 1,
+                "blocked_reason": "TypeError: Expected a number, received undefined",
+                "blockers": [],
+                "claimant": "agent/example/atlas/builder",
+                "constraints": [
+                  "Do not revert the dependency bump or widen the patch"
+                ],
+                "goals": [
+                  "Keep option-schema 4.1 installed",
+                  "Omitted limit retains the default of 20",
+                  "CI typecheck, test and build pass"
+                ],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+                "path": "step-1",
+                "since": "2030-01-01T11:59:30.000Z",
+                "state": "failed",
+                "title": "Check main after the dependency bump"
+              },
+              {
+                "assignee": "agent/example/atlas/builder",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/atlas/builder",
+                "constraints": [
+                  "Do not revert the dependency bump or widen the patch"
+                ],
+                "goals": [
+                  "Keep option-schema 4.1 installed",
+                  "Omitted limit retains the default of 20",
+                  "CI typecheck, test and build pass"
+                ],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                "path": "step-2",
+                "since": "2030-01-01T11:59:35.000Z",
+                "state": "claimed",
+                "title": "Bisect the regression"
+              },
+              {
+                "assignee": "agent/example/atlas/builder",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/atlas/builder",
+                "constraints": [
+                  "Do not revert the dependency bump or widen the patch"
+                ],
+                "goals": [
+                  "Keep option-schema 4.1 installed",
+                  "Omitted limit retains the default of 20",
+                  "CI typecheck, test and build pass"
+                ],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                "path": "step-3",
+                "since": "2030-01-01T11:59:35.000Z",
+                "state": "ready",
+                "title": "Restore the omitted limit default"
+              },
+              {
+                "assignee": "agent/example/atlas/builder",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/atlas/builder",
+                "constraints": [
+                  "Do not revert the dependency bump or widen the patch"
+                ],
+                "goals": [
+                  "Keep option-schema 4.1 installed",
+                  "Omitted limit retains the default of 20",
+                  "CI typecheck, test and build pass"
+                ],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                "path": "step-4",
+                "since": "2030-01-01T11:59:35.000Z",
+                "state": "ready",
+                "title": "Rerun the CI matrix"
+              }
+            ]
+          }
+        ],
         "run_generations": {
           "mission-run/example/atlas/repair-dependency-bump/1": "run-generation/example/atlas/repair-dependency-bump/1/g1"
         },
@@ -199,6 +434,248 @@
           "state": "claimed",
           "title": "Restore the omitted limit default",
           "updated_at": "2030-01-01T12:00:10.000Z"
+        },
+        {
+          "active_runs": 1,
+          "id": "mission/example/atlas/repair-dependency-bump",
+          "kind": "mission",
+          "mission_revision": "sha256:atlas-mission-1",
+          "presentation": {
+            "actions": [
+              {
+                "action": "work.retry",
+                "confirm": false,
+                "id": "retry-step",
+                "target": "step-run/example/atlas/repair-dependency-bump/1/step-1"
+              },
+              {
+                "action": "message.send",
+                "confirm": false,
+                "id": "chat",
+                "target": "agent/example/atlas/builder"
+              },
+              {
+                "action": "mission.cancel",
+                "confirm": true,
+                "id": "cancel-run",
+                "target": "mission-run/example/atlas/repair-dependency-bump/1"
+              }
+            ],
+            "card": "what-you-can-do",
+            "last_progress": null,
+            "progress": {
+              "done": 1,
+              "total": 4
+            },
+            "queued_behind": null,
+            "settled_at": null,
+            "steps": [
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-2",
+                "title": "Bisect the regression",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-1",
+                "title": "Check main after the dependency bump",
+                "word": "failed"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-3",
+                "title": "Restore the omitted limit default",
+                "word": "working"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-4",
+                "title": "Rerun the CI matrix",
+                "word": "ready"
+              }
+            ],
+            "stuck": {
+              "agent": {
+                "id": "agent/example/atlas/builder",
+                "label": "Atlas Builder",
+                "state": "running"
+              },
+              "attempts": 1,
+              "blockers": [],
+              "step": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+              "word": "failed"
+            },
+            "system": false,
+            "who": {
+              "agent": "agent/example/atlas/builder",
+              "kind": "agent",
+              "label": "Atlas Builder"
+            },
+            "word": "failed"
+          },
+          "revision": "mr-4",
+          "run_details": [
+            {
+              "current_steps": [
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "claimant": "agent/example/atlas/builder",
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                  "since": "2030-01-01T12:00:10.000Z",
+                  "state": "claimed",
+                  "title": "Restore the omitted limit default"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "claimant": "agent/example/atlas/builder",
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                  "since": "2030-01-01T11:59:35.000Z",
+                  "state": "ready",
+                  "title": "Rerun the CI matrix"
+                }
+              ],
+              "generation_id": "run-generation/example/atlas/repair-dependency-bump/1/g1",
+              "id": "mission-run/example/atlas/repair-dependency-bump/1",
+              "must_act": "agent",
+              "phase": "normal",
+              "progress": {
+                "done": 1,
+                "total": 4
+              },
+              "requester": "person/ada",
+              "state_since": "2030-01-01T11:59:30.000Z",
+              "status": "running",
+              "steps": [
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": "TypeError: Expected a number, received undefined",
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+                  "path": "step-1",
+                  "since": "2030-01-01T11:59:30.000Z",
+                  "state": "failed",
+                  "title": "Check main after the dependency bump"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                  "path": "step-2",
+                  "since": "2030-01-01T12:00:10.000Z",
+                  "state": "completed",
+                  "title": "Bisect the regression"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                  "path": "step-3",
+                  "since": "2030-01-01T12:00:10.000Z",
+                  "state": "claimed",
+                  "title": "Restore the omitted limit default"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                  "path": "step-4",
+                  "since": "2030-01-01T11:59:35.000Z",
+                  "state": "ready",
+                  "title": "Rerun the CI matrix"
+                }
+              ]
+            }
+          ],
+          "run_generations": {
+            "mission-run/example/atlas/repair-dependency-bump/1": "run-generation/example/atlas/repair-dependency-bump/1/g1"
+          },
+          "runs": [
+            "mission-run/example/atlas/repair-dependency-bump/1"
+          ],
+          "state": "running",
+          "title": "Repair CI after the option-schema bump",
+          "total_runs": 1,
+          "updated_at": "2030-01-01T11:59:30.000Z"
         }
       ]
     },
@@ -261,6 +738,240 @@
           "state": "verifying",
           "title": "Rerun the CI matrix",
           "updated_at": "2030-01-01T12:00:18.000Z"
+        },
+        {
+          "active_runs": 1,
+          "id": "mission/example/atlas/repair-dependency-bump",
+          "kind": "mission",
+          "mission_revision": "sha256:atlas-mission-1",
+          "presentation": {
+            "actions": [
+              {
+                "action": "work.retry",
+                "confirm": false,
+                "id": "retry-step",
+                "target": "step-run/example/atlas/repair-dependency-bump/1/step-1"
+              },
+              {
+                "action": "message.send",
+                "confirm": false,
+                "id": "chat",
+                "target": "agent/example/atlas/builder"
+              },
+              {
+                "action": "mission.cancel",
+                "confirm": true,
+                "id": "cancel-run",
+                "target": "mission-run/example/atlas/repair-dependency-bump/1"
+              }
+            ],
+            "card": "what-you-can-do",
+            "last_progress": null,
+            "progress": {
+              "done": 2,
+              "total": 4
+            },
+            "queued_behind": null,
+            "settled_at": null,
+            "steps": [
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-2",
+                "title": "Bisect the regression",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-3",
+                "title": "Restore the omitted limit default",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-1",
+                "title": "Check main after the dependency bump",
+                "word": "failed"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-4",
+                "title": "Rerun the CI matrix",
+                "word": "working"
+              }
+            ],
+            "stuck": {
+              "agent": {
+                "id": "agent/example/atlas/builder",
+                "label": "Atlas Builder",
+                "state": "running"
+              },
+              "attempts": 1,
+              "blockers": [],
+              "step": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+              "word": "failed"
+            },
+            "system": false,
+            "who": {
+              "agent": "agent/example/atlas/builder",
+              "kind": "agent",
+              "label": "Atlas Builder"
+            },
+            "word": "failed"
+          },
+          "revision": "mr-4",
+          "run_details": [
+            {
+              "current_steps": [
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "claimant": "agent/example/atlas/builder",
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                  "since": "2030-01-01T12:00:18.000Z",
+                  "state": "verifying",
+                  "title": "Rerun the CI matrix"
+                }
+              ],
+              "generation_id": "run-generation/example/atlas/repair-dependency-bump/1/g1",
+              "id": "mission-run/example/atlas/repair-dependency-bump/1",
+              "must_act": "agent",
+              "phase": "normal",
+              "progress": {
+                "done": 2,
+                "total": 4
+              },
+              "requester": "person/ada",
+              "state_since": "2030-01-01T11:59:30.000Z",
+              "status": "running",
+              "steps": [
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": "TypeError: Expected a number, received undefined",
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+                  "path": "step-1",
+                  "since": "2030-01-01T11:59:30.000Z",
+                  "state": "failed",
+                  "title": "Check main after the dependency bump"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                  "path": "step-2",
+                  "since": "2030-01-01T12:00:10.000Z",
+                  "state": "completed",
+                  "title": "Bisect the regression"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                  "path": "step-3",
+                  "since": "2030-01-01T12:00:18.000Z",
+                  "state": "completed",
+                  "title": "Restore the omitted limit default"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                  "path": "step-4",
+                  "since": "2030-01-01T12:00:18.000Z",
+                  "state": "verifying",
+                  "title": "Rerun the CI matrix"
+                }
+              ]
+            }
+          ],
+          "run_generations": {
+            "mission-run/example/atlas/repair-dependency-bump/1": "run-generation/example/atlas/repair-dependency-bump/1/g1"
+          },
+          "runs": [
+            "mission-run/example/atlas/repair-dependency-bump/1"
+          ],
+          "state": "running",
+          "title": "Repair CI after the option-schema bump",
+          "total_runs": 1,
+          "updated_at": "2030-01-01T11:59:30.000Z"
         }
       ]
     },
@@ -329,7 +1040,184 @@
           "id": "mission/example/atlas/repair-dependency-bump",
           "kind": "mission",
           "mission_revision": "sha256:atlas-mission-1",
+          "presentation": {
+            "actions": [],
+            "card": null,
+            "last_progress": null,
+            "progress": {
+              "done": 4,
+              "total": 4
+            },
+            "queued_behind": null,
+            "settled_at": "2030-01-01T12:00:30.000Z",
+            "steps": [
+              {
+                "attempts": 2,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-1",
+                "title": "Check main after the dependency bump",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-2",
+                "title": "Bisect the regression",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-3",
+                "title": "Restore the omitted limit default",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-4",
+                "title": "Rerun the CI matrix",
+                "word": "done"
+              }
+            ],
+            "stuck": null,
+            "system": false,
+            "who": {
+              "kind": "nobody"
+            },
+            "word": "done"
+          },
           "revision": "mr-green",
+          "run_details": [
+            {
+              "current_steps": [],
+              "generation_id": "run-generation/example/atlas/repair-dependency-bump/1/g1",
+              "id": "mission-run/example/atlas/repair-dependency-bump/1",
+              "must_act": "nobody",
+              "phase": "terminal",
+              "progress": {
+                "done": 4,
+                "total": 4
+              },
+              "requester": "person/ada",
+              "state_since": "2030-01-01T12:00:30.000Z",
+              "status": "completed",
+              "steps": [
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 2,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-1",
+                  "path": "step-1",
+                  "since": "2030-01-01T12:00:30.000Z",
+                  "state": "completed",
+                  "title": "Check main after the dependency bump"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-2",
+                  "path": "step-2",
+                  "since": "2030-01-01T12:00:10.000Z",
+                  "state": "completed",
+                  "title": "Bisect the regression"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-3",
+                  "path": "step-3",
+                  "since": "2030-01-01T12:00:18.000Z",
+                  "state": "completed",
+                  "title": "Restore the omitted limit default"
+                },
+                {
+                  "assignee": "agent/example/atlas/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/atlas/builder",
+                  "constraints": [
+                    "Do not revert the dependency bump or widen the patch"
+                  ],
+                  "goals": [
+                    "Keep option-schema 4.1 installed",
+                    "Omitted limit retains the default of 20",
+                    "CI typecheck, test and build pass"
+                  ],
+                  "id": "step-run/example/atlas/repair-dependency-bump/1/step-4",
+                  "path": "step-4",
+                  "since": "2030-01-01T12:00:30.000Z",
+                  "state": "completed",
+                  "title": "Rerun the CI matrix"
+                }
+              ]
+            }
+          ],
           "run_generations": {
             "mission-run/example/atlas/repair-dependency-bump/1": "run-generation/example/atlas/repair-dependency-bump/1/g1"
           },
@@ -348,6 +1236,38 @@
     {
       "codec": "timestamp",
       "pointer": "/state/missions/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/current_steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/current_steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/current_steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/3/since"
     },
     {
       "codec": "timestamp",
@@ -375,11 +1295,71 @@
     },
     {
       "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/current_steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/current_steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/steps/3/since"
+    },
+    {
+      "codec": "timestamp",
       "pointer": "/timeline/1/upserts/0/updated_at"
     },
     {
       "codec": "timestamp",
       "pointer": "/timeline/1/upserts/1/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/2/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/2/run_details/0/current_steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/2/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/2/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/2/run_details/0/steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/2/run_details/0/steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/2/run_details/0/steps/3/since"
     },
     {
       "codec": "timestamp",
@@ -392,6 +1372,30 @@
     {
       "codec": "timestamp",
       "pointer": "/timeline/2/upserts/2/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/2/upserts/2/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/2/upserts/2/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/2/upserts/2/run_details/0/steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/2/upserts/2/run_details/0/steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/2/upserts/2/run_details/0/steps/3/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/2/upserts/2/presentation/settled_at"
     }
   ],
   "variant": "default",

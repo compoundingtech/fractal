@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep immutable-ID edge artifact downloads flat for release publication",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or fleet coordination change."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or harness compatibility change."},
+  "downtime": {"status": "none", "detail": "No service interruption introduced."},
+  "manual": {"status": "none", "detail": "No operator action required. Edge publication downloads the assembler's immutable artifact ID with merge-multiple enabled, keeping archives, SHA256SUMS and RELEASE.json directly in dist/ rather than an artifact-named subdirectory. PR script coverage enforces the same flat layout for assembly and the edge publisher."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}

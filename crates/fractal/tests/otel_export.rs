@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 fn st3() -> &'static Path {
-    test_bin!("st3-fixture")
+    test_bin!("fractal-fixture")
 }
 
 fn otelite(test: &str) -> Option<PathBuf> {
@@ -590,6 +590,8 @@ impl ExportDaemon {
         }
         command.args(["up", "--node", "otel-test", "--state-dir"])
             .arg(root.join("daemon-state"))
+            // This fixture's process submits the synthetic worker exchanges.
+            .args(["--replication-worker-pid", &std::process::id().to_string()])
             .arg("--socket")
             .arg(&socket)
             .arg("--client-gateway-socket")
@@ -627,6 +629,27 @@ impl ExportDaemon {
 
     fn diagnostics(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Waits until the published mission list answers. Readiness does not wait for its first publication, and a
+    /// missions window opened before it resyncs first and records that frame on its first-frame span too.
+    fn await_mission_list(&self) {
+        use std::io::{Read as _, Write as _};
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let mut socket = std::os::unix::net::UnixStream::connect(&self.socket).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            write!(socket, "GET /v1/client/missions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+                x-st3-client: fractal\r\nx-st3-person: person/ada\r\n\r\n").unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            if response.starts_with("HTTP/1.1 200 ") {
+                return;
+            }
+            assert!(response.contains("mission-list-not-ready") && Instant::now() < deadline,
+                "mission list: {response}\n{}", self.diagnostics());
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn health(&self, traceparent: Option<&str>) {
@@ -1851,9 +1874,102 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             assert!(double_attribute(cold, &key).is_some_and(|ms| ms >= 0.0), "{key}: {cold}");
         }
     }
-    assert!(spans.iter().all(|span| span["parentSpanId"].as_str()
-        .is_none_or(|parent| !spans.iter().any(|server| server["traceId"] == TRACE
-            && server["spanId"].as_str() == Some(parent)))), "request stage children leaked: {spans:?}");
+    let roster_gets: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "GET /v1/client/agents").collect();
+    assert!(!roster_gets.is_empty(), "roster GET server spans missing");
+    let roster_child = |span: &Value| span["traceId"] == TRACE
+        && span["parentSpanId"].as_str().is_some_and(|parent|
+            roster_gets.iter().any(|server| server["spanId"].as_str() == Some(parent)));
+    assert!(spans.iter().all(|span| !roster_child(span)),
+        "roster GET stage children leaked: {spans:?}");
+    assert!(spans.iter().all(|span| span["name"] != "st.db.writer" || !roster_child(span)),
+        "roster GET unexpectedly created a writer span: {spans:?}");
+    // The fixture's diagnostics POSTs share TRACE with the reads. Their writes
+    // intentionally have request-parented children, unlike published roster reads.
+    let diagnostic_posts: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "POST /v1/diagnostics/harness").collect();
+    assert!(!diagnostic_posts.is_empty(), "diagnostics POST server spans missing");
+    let writers: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "st.db.writer").collect();
+    assert!(!writers.is_empty(), "diagnostics writes must export writer spans");
+    for writer in writers {
+        assert!(writer["parentSpanId"].as_str().is_some_and(|parent|
+            diagnostic_posts.iter().any(|server| server["spanId"].as_str() == Some(parent))),
+            "writer span must be a child of its diagnostics POST: {writer}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+    const TRACE: &str = "b1af7651916cd43dd8448eb211c80319";
+    const PARENT: &str = "b7ad6b7169203339";
+    const UPGRADE: &str = "00-c1af7651916cd43dd8448eb211c80319-b7ad6b7169203340-01";
+    let Some(collector) = otelite("subscribe_frame_context_is_lenient_and_continues_action_trace") else { return };
+    let root = tempfile::tempdir().unwrap();
+    seed_roster(root.path(), "agent/otel-test.observed");
+    let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Each missions window's first frame must be its snapshot (see collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans).
+    daemon.await_mission_list();
+    let mut socket = daemon.websocket("/v1/client/collections/stream",
+        "st3.client.collections.v0", UPGRADE).await;
+    let upgrade = daemon.await_span(root.path(), |span| {
+        span["traceId"] == "c1af7651916cd43dd8448eb211c80319"
+            && span["name"] == "GET /v1/client/collections/stream"
+    });
+    let cases = [
+        ("sampled", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"vendor=value"}), Some(true)),
+        ("unsampled", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-00")}), Some(false)),
+        ("st-marked", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"st=1"}), Some(false)),
+        ("conversation", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01")}), Some(true)),
+        ("invalid", serde_json::json!({"traceparent":"not-a-traceparent", "tracestate":"vendor=value"}), None),
+        ("zero-trace", serde_json::json!({"traceparent":format!("00-00000000000000000000000000000000-{PARENT}-01")}), None),
+        ("zero-span", serde_json::json!({"traceparent":format!("00-{TRACE}-0000000000000000-01")}), None),
+        ("invalid-version", serde_json::json!({"traceparent":format!("ff-{TRACE}-{PARENT}-01")}), None),
+        ("number", serde_json::json!(42), None),
+        ("string", serde_json::json!("not-an-object"), None),
+        ("array", serde_json::json!([]), None),
+        ("missing-parent", serde_json::json!({"tracestate":"vendor=value"}), None),
+        ("wrong-parent-type", serde_json::json!({"traceparent":42}), None),
+        ("null", Value::Null, None),
+    ];
+    for (id, trace, sampled) in &cases {
+        socket.send(Message::Text(serde_json::json!({
+            "kind":"subscribe", "id":id,
+            "collection": if *id == "conversation" { "conversation" } else { "missions" },
+            "conversation":"agent/otel-test.observed", "trace":trace
+        }).to_string().into())).await.unwrap();
+        let (frame, _) = next_json_frame(&mut socket).await;
+        assert_eq!(frame["kind"], if *id == "conversation" { "conversation" } else { "snapshot" }, "{frame}");
+        assert_eq!(frame["id"], *id);
+        let first = daemon.await_span(root.path(), |span| {
+            span["name"] == "st.subscription.first_frame"
+                && string_attribute(span, "st.subscription.id") == Some(*id)
+        });
+        if let Some(sampled) = sampled {
+            assert!(first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER", "{first}");
+            assert_eq!(first["traceId"], TRACE);
+            assert_eq!(first["parentSpanId"], PARENT);
+            let links = first["links"].as_array().expect("upgrade link");
+            assert_eq!(links.len(), 1, "{first}");
+            assert_eq!(links[0]["traceId"], upgrade["traceId"]);
+            assert_eq!(links[0]["spanId"], upgrade["spanId"]);
+            assert!(first["attributes"].as_array().unwrap().iter().any(|attribute| {
+                attribute["key"] == "st.parent.sampled"
+                    && attribute["value"]["boolValue"] == *sampled
+            }), "{first}");
+        } else {
+            assert_upgrade_link(&first, &upgrade);
+            assert!(first["attributes"].as_array().unwrap().iter()
+                .all(|attribute| attribute["key"] != "st.parent.sampled"), "{first}");
+        }
+        socket.send(Message::Text(serde_json::json!({
+            "kind":"unsubscribe", "id":id
+        }).to_string().into())).await.unwrap();
+    }
+    socket.close(None).await.unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -1868,6 +1984,9 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     let root = tempfile::tempdir().unwrap();
     let source = stage_replication_source(root.path());
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Each window's first frame must be its snapshot (a resync before it is covered by
+    // daemon_collection_stream_without_export_delivers_first_frame).
+    daemon.await_mission_list();
     let mut socket = daemon.websocket("/v1/client/collections/stream",
         "st3.client.collections.v0", TRACEPARENT).await;
     let upgrade = daemon.await_span(root.path(), |span| {
@@ -1879,7 +1998,10 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     for collection in ["missions", "attention", "agents", "work", "glasses", "arrangements"] {
         socket.send(Message::Text(serde_json::json!({
             "kind":"subscribe", "id":collection, "collection":collection, "limit":2,
-            "person": if collection == "arrangements" { Some("person/ada") } else { None }
+            "person": if collection == "arrangements" { Some("person/ada") } else { None },
+            "trace": if collection == "glasses" {
+                serde_json::json!({"traceparent":BARRIER})
+            } else { Value::Null }
         }).to_string().into())).await.unwrap();
         let (frame, bytes) = next_json_frame(&mut socket).await;
         assert_eq!(frame["kind"], "snapshot", "{frame}");
@@ -1888,7 +2010,15 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
             span["name"] == "st.subscription.first_frame"
                 && string_attribute(span, "st.subscription.id") == Some(collection)
         });
-        assert_upgrade_link(&first, &upgrade);
+        if collection == "glasses" {
+            assert!(first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER", "{first}");
+            assert_eq!(first["traceId"], "51af7651916cd43dd8448eb211c80319");
+            assert_eq!(first["parentSpanId"], "b7ad6b7169203333");
+            assert_eq!(first["links"][0]["traceId"], upgrade["traceId"]);
+            assert_eq!(first["links"][0]["spanId"], upgrade["spanId"]);
+        } else {
+            assert_upgrade_link(&first, &upgrade);
+        }
         assert_eq!(string_attribute(&first, "st.collection"), Some(collection));
         assert!(string_attribute(&first, "span.label").is_some_and(|label| !label.is_empty()), "{first}");
         assert_eq!(int_attribute(&first, "st.page.rows"),
@@ -1925,7 +2055,8 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     socket.close(None).await.unwrap();
     // The captured server marker closes the exporter FIFO after all observed frames.
     daemon.health(Some(BARRIER));
-    daemon.await_span(root.path(), |span| span["traceId"] == "51af7651916cd43dd8448eb211c80319");
+    daemon.await_span(root.path(), |span| span["traceId"] == "51af7651916cd43dd8448eb211c80319"
+        && span["name"] == "GET /v1/health");
     let spans = daemon.captured_spans(root.path());
     let first: Vec<_> = spans.iter().filter(|span| span["name"] == "st.subscription.first_frame").collect();
     assert_eq!(first.len(), 6, "changes must not start more first-frame spans: {first:?}");
@@ -1987,6 +2118,7 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     const NEW: &str = "00-81af7651916cd43dd8448eb211c80319-b7ad6b7169203336-01";
     const DUPLICATE: &str = "00-91af7651916cd43dd8448eb211c80319-b7ad6b7169203337-01";
     const HEARTBEAT: &str = "00-a1af7651916cd43dd8448eb211c80319-b7ad6b7169203338-01";
+    const SETTLE: &str = "00-b1af7651916cd43dd8448eb211c80319-b7ad6b7169203339-01";
     let Some(collector) = otelite("replication_projection_is_linked_root_only_for_new_data") else { return };
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("daemon-state");
@@ -2011,6 +2143,21 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     assert!(heartbeat.envelopes.is_empty());
     drop(target);
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // The daemon seals its first checkpoint in the background just after it starts. A seal that
+    // commits while the first receive projects moves the store past that projection's target, so
+    // the projection stays deferred and the duplicate receive below projects again, with a root of
+    // its own. Wait for the seal, so that the receives meet a store nothing else is writing to.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (page, _) = daemon.request("GET", "/v1/claims?after_index=0&limit=500", None, SETTLE, None).await;
+        if page["value"]["claims"].as_array().is_some_and(|claims| {
+            claims.iter().any(|claim| claim["kind"] == "checkpoint.sealed")
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the first checkpoint was never sealed: {page}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let payload = serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":exchange});
     let (received, _) = daemon.request("POST", "/v1/internal/replication/receive",
         Some(payload.clone()), NEW, None).await;
@@ -2546,4 +2693,308 @@ fn replication_worker_exports_rounds_after_graph_convergence() {
     {
         assert_eq!(metric["unit"].as_str(), Some("s"), "duration unit: {metric}");
     }
+}
+
+/// A private store and private SDK provider prove the exported contract without
+/// depending on a running daemon, global providers, collector binaries or timers.
+#[test]
+fn mailbox_gauges_export_local_managed_agents_states_ages_and_bootstrap_exception() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, RwLock};
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        data::{AggregatedMetrics, MetricData},
+    };
+    use fractal_daemon::api::mailbox_metrics;
+    use fractal_daemon::model::ClaimInput;
+    use fractal_daemon::{CoordinationStore as _, SeatsStoreCore as _};
+
+    const BUSY: &str = "agent/example.owner/busy";
+    const EMPTY: &str = "agent/example.owner/empty";
+    const REMOTE: &str = "agent/example.owner/remote";
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("claims.sqlite3");
+    let store = fractal_daemon::store::Store::open(&database, "example").unwrap();
+    let mut intent = fractal_daemon::parse_intent(
+        r#"version 2
+agent "example.owner/busy" { workspace "/tmp"; harness "claude" {} }
+agent "example.owner/empty" { workspace "/tmp"; harness "claude" {} }
+agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
+"#,
+        "example",
+    ).unwrap();
+    intent.subjects.get_mut(REMOTE).unwrap().member.as_mut().unwrap().host = "elsewhere".into();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let append = |subject: &str, kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some("agent/example.sender".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    // Deliberately old read/closed mail must affect neither count nor oldest age.
+    let mut transitions = Vec::new();
+    // Write oldest first: accepted time never moves behind this writer's newest batch.
+    for (id, recipient, lifecycle, silent, seconds) in [
+        ("stale-pending", BUSY, "sent", false, 90_000),
+        ("read", BUSY, "read", false, 600),
+        ("closed", BUSY, "closed", false, 600),
+        ("remote", REMOTE, "sent", false, 600),
+        ("person", "person/example", "sent", false, 600),
+        ("undeclared", "agent/example.undeclared", "sent", false, 600),
+        ("pending", BUSY, "sent", false, 120),
+        ("staged", BUSY, "staged", false, 100),
+        ("delivered", BUSY, "delivered", false, 90),
+        ("held", BUSY, "sent", true, 60),
+        ("silent-delivered", BUSY, "delivered", true, 30),
+    ] {
+        store.set_write_clock_at(now - seconds * 1000).unwrap();
+        let subject = format!("message/mailbox-export-{id}");
+        append(&subject, "message.sent", serde_json::json!({
+            "status": "sent", "from": "agent/example.sender", "to": recipient,
+            "content": "Mailbox export fixture",
+            "tags": if silent { vec!["st3-silent"] } else { vec![] },
+        }));
+        transitions.push((subject, lifecycle));
+    }
+    store.set_write_clock_at(now).unwrap();
+    for (subject, lifecycle) in transitions {
+        for next in ["staged", "delivered", "read", "closed"] {
+            if lifecycle == "sent" {
+                break;
+            }
+            append(&subject, &format!("message.{next}"), serde_json::json!({"status": next}));
+            if lifecycle == next {
+                break;
+            }
+        }
+    }
+    store.apply_internal(&intent, "mailbox-export-fixture").unwrap();
+    assert_eq!(
+        mailbox_metrics::managed_agents_owned_by_local_host(&store).unwrap()
+            .into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([BUSY.to_owned(), EMPTY.to_owned()]),
+    );
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.execute(
+        "UPDATE local_coordination_backfill SET complete=1 WHERE singleton=1", [],
+    ).unwrap();
+    assert!(store.coordination_backfill_status().unwrap().2);
+    let cache = Arc::new(RwLock::new(mailbox_metrics::summarize(&store).unwrap()));
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_resource(opentelemetry_sdk::Resource::builder_empty()
+            .with_attribute(opentelemetry::KeyValue::new("host.name", "example-host")).build())
+        .with_reader(PeriodicReader::builder(exporter.clone())
+            .with_interval(Duration::from_secs(3600)).build())
+        .build();
+    mailbox_metrics::register_metrics(&provider.meter("st3"), cache.clone());
+    let collect = || {
+        provider.force_flush().unwrap();
+        let batches = exporter.get_finished_metrics().unwrap();
+        let batch = batches.last().expect("SDK exported mailbox metrics");
+        assert_eq!(
+            batch.resource().get(&opentelemetry::Key::from_static_str("host.name")),
+            Some(opentelemetry::Value::from("example-host")),
+        );
+        let mut counts = BTreeMap::new();
+        let mut ages = BTreeMap::new();
+        for scope in batch.scope_metrics() {
+            assert_eq!(scope.scope().name(), "st3");
+            for metric in scope.metrics() {
+                let attributes = |attributes: Vec<_>| {
+                    let attributes = attributes.into_iter()
+                        .map(|kv: &opentelemetry::KeyValue| (kv.key.as_str(), kv.value.to_string()))
+                        .collect::<BTreeMap<_, _>>();
+                    assert_eq!(attributes.keys().copied().collect::<BTreeSet<_>>(),
+                        BTreeSet::from(["st.agent", "st.mailbox.state", "st.mailbox.age_band"]));
+                    (attributes["st.agent"].clone(), attributes["st.mailbox.state"].clone(),
+                        attributes["st.mailbox.age_band"].clone())
+                };
+                match metric.name() {
+                    "st.mailbox.unread" => {
+                        let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data() else {
+                            panic!("unread must export as u64 gauge");
+                        };
+                        for point in gauge.data_points() {
+                            assert!(counts.insert(attributes(point.attributes().collect()), point.value()).is_none());
+                        }
+                    }
+                    "st.mailbox.oldest_unread_age" => {
+                        assert_eq!(metric.unit(), "s", "same seconds unit as st.fifo.oldest_age");
+                        let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = metric.data() else {
+                            panic!("oldest unread age must export as f64 gauge");
+                        };
+                        for point in gauge.data_points() {
+                            assert!(ages.insert(attributes(point.attributes().collect()), point.value()).is_none());
+                        }
+                    }
+                    name => panic!("unexpected private-provider metric: {name}"),
+                }
+            }
+        }
+        (counts, ages)
+    };
+    let (counts, ages) = collect();
+    let expected = [BUSY, EMPTY].into_iter().flat_map(|agent| {
+        [("pending", 2), ("delivered", 2), ("held", 1)].into_iter().flat_map(move |(state, count)| {
+            ["recent", "stale"].into_iter().map(move |band| {
+                let count = if agent == EMPTY { 0 } else if band == "recent" { count }
+                    else { u64::from(state == "pending") };
+                ((agent.to_owned(), state.to_owned(), band.to_owned()), count)
+            })
+        })
+    }).collect::<BTreeMap<_, _>>();
+    assert_eq!(counts.len(), 12, "six series per agent for each gauge");
+    assert_eq!(counts, expected, "exact agent set and mandatory zero state/band pairs");
+    assert_eq!(ages.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>());
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+        .saturating_sub(now) as f64 / 1000.0;
+    for ((agent, state, band), age) in &ages {
+        if expected[&(agent.clone(), state.clone(), band.clone())] == 0 {
+            assert_eq!(*age, 0.0);
+        } else {
+            let oldest = if band == "stale" { 90_000.0 } else { match state.as_str() {
+                "pending" => 120.0,
+                "delivered" => 90.0,
+                "held" => 60.0,
+                _ => unreachable!(),
+            }};
+            assert!(*age >= oldest && *age <= oldest + elapsed + 1.0,
+                "age must use oldest accepted sent timestamp: {state}={age}");
+        }
+    }
+    connection.execute(
+        "UPDATE local_coordination_backfill SET complete=0 WHERE singleton=1", [],
+    ).unwrap();
+    assert!(!store.coordination_backfill_status().unwrap().2);
+    // Scraping does not consult the store: the completed snapshot stays visible
+    // until the background worker publishes its next summary.
+    assert_eq!(collect().0, expected);
+    *cache.write().unwrap() = mailbox_metrics::summarize(&store).unwrap();
+    let (partial_counts, partial_ages) = collect();
+    let partial_keys = expected.keys().filter(|(_, state, _)| state != "held")
+        .cloned().collect::<BTreeSet<_>>();
+    assert_eq!(partial_counts.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
+    assert_eq!(partial_ages.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
+    assert_eq!(partial_counts.len(), 8, "only the two held bands per agent are omitted");
+    assert!(partial_counts[&(BUSY.into(), "pending".into(), "recent".into())] >= 2);
+    assert!(partial_counts[&(BUSY.into(), "delivered".into(), "recent".into())] >= 2);
+    assert_eq!(partial_counts.values().sum::<u64>(), 6,
+        "incomplete held classification must not discard unread mail");
+    for band in ["recent", "stale"] {
+        for state in ["pending", "delivered"] {
+            assert_eq!(partial_counts[&(EMPTY.into(), state.into(), band.into())], 0);
+            assert_eq!(partial_ages[&(EMPTY.into(), state.into(), band.into())], 0.0);
+        }
+    }
+    provider.shutdown().unwrap();
+}
+
+/// The child exports an isolated cached snapshot through the real HTTP/JSON exporter.
+/// The parent checks the receiver's decoded OTLP, not merely local instrument counters.
+#[cfg(target_os = "linux")]
+#[test]
+fn population_gauges_export_exact_otlp_attribute_sets() {
+    const CHILD: &str = "ST_POPULATION_EXPORT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        use fractal_daemon::{SeatsStoreCore as _, SubagentsStore as _};
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_otlp::WithExportConfig as _;
+        use std::sync::{Arc, RwLock};
+        let store = fractal_daemon::store::Store::open_memory("example").unwrap();
+        let intent = fractal_daemon::parse_intent(
+            "version 2\nagent \"example.worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n",
+            "example",
+        ).unwrap();
+        store.apply_internal(&intent, "population-export").unwrap();
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&fractal_daemon::model::ClaimInput {
+                subject: "agent/example.worker".into(), kind: kind.into(),
+                actor: None, fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        append("runtime.observed", serde_json::json!({
+            "status":"running", "runtime_id":"wrapper", "incarnation_id":"one"
+        }));
+        append("harness.observed", serde_json::json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one"
+        }));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        append("subagent.appeared", serde_json::json!({
+            "subagent_id":"child", "driver":"omp", "incarnation_id":"one",
+            "session_id":"native", "lease_expires_at_unix_ms":now + 60_000
+        }));
+        assert_eq!(store.running_subagents(now).unwrap().len(), 1);
+        let snapshot = fractal_daemon::api::population_metrics::summarize(&store, &[]).unwrap();
+        let exporter = opentelemetry_otlp::MetricExporter::builder().with_http()
+            .with_protocol(opentelemetry_otlp::Protocol::HttpJson).build().unwrap();
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_resource(opentelemetry_sdk::Resource::builder_empty()
+                .with_service_name("st-daemon")
+                .with_attribute(opentelemetry::KeyValue::new("host.name", "example-host")).build())
+            .with_periodic_exporter(exporter).build();
+        fractal_daemon::api::population_metrics::register_metrics(&provider.meter("st3"), Arc::new(RwLock::new(snapshot)));
+        provider.force_flush().unwrap();
+        provider.shutdown().unwrap();
+        return;
+    }
+    let Some(collector) = otelite("population_gauges_export_exact_otlp_attribute_sets") else { return; };
+    let root = tempfile::tempdir().unwrap();
+    let output = isolated_command(&collector, root.path())
+        .args(["run", "--out"]).arg(root.path().join("capture"))
+        .args(["--protocol", "http/json", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "otel_export::population_gauges_export_exact_otlp_attribute_sets", "--nocapture"])
+        .env(CHILD, "1").output().unwrap();
+    assert!(output.status.success(), "population exporter child failed: {output:?}");
+    let requests = capture_requests(&root.path().join("capture/metrics.ndjson"));
+    let mut population = std::collections::BTreeSet::new();
+    let mut attention = std::collections::BTreeMap::new();
+    let mut freshness = false;
+    let value = |point: &Value| point["asInt"].as_u64()
+        .or_else(|| point["asInt"].as_str().and_then(|value| value.parse().ok()))
+        .expect("OTLP u64 gauge value");
+    for request in &requests {
+        for point in metric_points(request, "st.agents") {
+            let keys = point["attributes"].as_array().unwrap().iter()
+                .map(|attribute| attribute["key"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(keys, std::collections::BTreeSet::from([
+                "st.agent.driver", "st.agent.kind", "st.agent.repo",
+                "st.agent.state", "st.agent.reason", "st.agent.has_work"]));
+            assert_eq!(value(point), 1);
+            assert_eq!(string_attribute(point, "st.agent.repo"), Some("unattributed"));
+            assert_eq!(string_attribute(point, "st.agent.reason"), Some("unattributed"));
+            assert_eq!(bool_attribute(point, "st.agent.has_work"), Some(false));
+            population.insert((string_attribute(point, "st.agent.driver").unwrap().to_owned(),
+                string_attribute(point, "st.agent.kind").unwrap().to_owned(),
+                string_attribute(point, "st.agent.state").unwrap().to_owned()));
+        }
+        for point in metric_points(request, "st.attention.open") {
+            assert_eq!(point["attributes"].as_array().unwrap().len(), 1);
+            attention.insert(string_attribute(point, "st.attention.kind").unwrap().to_owned(),
+                value(point));
+        }
+        for point in metric_points(request, "st.agents.refresh.last_success") {
+            assert!(point["attributes"].as_array().is_none_or(Vec::is_empty));
+            assert!(value(point) > 0);
+            freshness = true;
+        }
+    }
+    assert_eq!(population, std::collections::BTreeSet::from([
+        ("claude".into(), "unattributed".into(), "working".into()),
+        ("omp".into(), "subagent".into(), "unknown".into())]));
+    assert_eq!(attention.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["person-step", "human-gate", "launch-approval", "unread-message",
+            "agent-request", "revision-approval", "harness-login", "harness-prompt", "fault", "model-drift", "unattributed"]));
+    assert!(attention.values().all(|count| *count == 0));
+    assert!(freshness);
 }

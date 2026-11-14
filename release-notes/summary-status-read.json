@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Drivers and st work read a seat's incarnation with a summary status read instead of the full reduction of every claim of the seat",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, table, trigger or index changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "GET /v1/status?subject=agent/X accepts summary=true: the response carries the seat's declaration and the status and incarnation_id of its actual state, each from the newest observation that has it, with harness, claims and claims_summary empty. Without it, for any other subject, or with owner_run, the response is unchanged. The driver's incarnation reads, st work's actor lookup, the local seat's terminal-binding read and the channel to-do outbox check send it. Mixed-version safe: a daemon older than this ignores the unknown parameter and answers with the full reduction, a superset these callers read the same fields from; an older client never sends it and gets the full reduction as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No added startup work. Each of these reads of a seat with 13,000 claims took about 1.1 s on a cold cache and 30-110 ms warm; the summary read takes 1-22 ms."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions or configuration changes; identity and stored state are preserved."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back is supported: an older build ignores summary=true and answers in full."
+  }
+}

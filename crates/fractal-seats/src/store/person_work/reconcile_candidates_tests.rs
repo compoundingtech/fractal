@@ -7,13 +7,38 @@ use fractal_missions::store::person_work::reconcile_candidates_tests_shared_seat
 
 #[test]
 fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
+    // The reconciliation under budget writes through the store's writer thread, so a thread
+    // scope would not see it, and the process-wide total also takes in other tests' SQL when
+    // they share the process. Measure in a process of its own.
+    const CHILD: &str = "ST3_PERSON_ASK_CANDIDATE_COST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::person_work::reconcile_candidates_tests::person_ask_candidate_cost_does_not_grow_with_settled_history",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("ST3_PROFILE_DIR")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated SQL budget failed");
+        return;
+    }
     let (store, _, input) = super::tests::fixture();
     let ask = store.ask_person(&input).unwrap();
     let record = request(&store.readers.get(), &ask.subject)
         .unwrap()
         .unwrap();
     let mut costs = Vec::new();
-    for n in 1..=10_000 {
+    // Pull requests settle a quarter of the history; the daily run (ST_TEST_SCALE=full, docs/ci.md)
+    // settles all of it. A scan of settled asks breaks the 500-step reader budget at either size.
+    let settled = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+        10_000
+    } else {
+        2_500
+    };
+    for n in 1..=settled {
         {
             let connection = store.connection.write();
             let subject = format!("step-run/history-{n}/ask");
@@ -32,7 +57,7 @@ fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
                 1,
             );
         }
-        if n == 100 || n == 10_000 {
+        if n == 100 || n == settled {
             let connection = store.readers.get();
             let query = canonical_sql(PERSON_ASKS_FOR_RECONCILE);
             let plan = connection

@@ -10,7 +10,7 @@ use axum::{
 };
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 
 struct Control {
@@ -26,6 +26,8 @@ struct Control {
     reports: Mutex<Vec<Value>>,
     report_changed: Notify,
     attachment: AtomicU8,  // 0: absent, 1: admitted, 2: failed check
+    /// How long the attachment endpoint takes to answer, as a loaded daemon does.
+    attachment_delay_ms: AtomicU64,
     publication: AtomicU8, // 0: acknowledged, 1: no commit, 2: commit without acknowledgement
     requests: Mutex<Vec<Value>>,
     /// The attachment the mailbox stream pushes once the driver offers `attachment_push`;
@@ -42,6 +44,10 @@ async fn attachment(
     Query(fence): Query<fractal_daemon::mailbox::Fence>,
 ) -> Response {
     control.attachment_checks.fetch_add(1, Ordering::SeqCst);
+    let delay = control.attachment_delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
     let mode = control.attachment.load(Ordering::SeqCst);
     if !control.binding_live.load(Ordering::SeqCst) {
         return (
@@ -203,6 +209,7 @@ impl Fixture {
             reports: Mutex::new(vec![]),
             report_changed: Notify::new(),
             attachment: AtomicU8::new(1),
+            attachment_delay_ms: AtomicU64::new(0),
             publication: AtomicU8::new(0),
             requests: Mutex::new(vec![]),
             push: tokio::sync::watch::channel(None).0,
@@ -214,7 +221,8 @@ impl Fixture {
             .route("/v1/mailbox", get(mailbox_reports))
             .route("/v1/claims", post(publication))
             .with_state(control.clone());
-        let root = tempfile::tempdir().unwrap();
+        // macOS TMPDIR can exceed the Unix socket path limit.
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("api.sock");
         let client = Client::unix(&socket);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -234,6 +242,10 @@ impl Fixture {
         Self {
             state: NativeLoopState {
                 mailbox_fence: Some(owner.clone()),
+                // Claude has started (its SessionStart) and the daemon has answered for longer than
+                // the attach window: an unattached channel is blocked.
+                claude_attachment_answered: Some(Instant::now() - Duration::from_secs(90)),
+                claude_session_started_ms: Some(current_unix_ms().unwrap() as u64 - 90_000),
                 ..Default::default()
             },
             mailbox: NativeMailbox {
@@ -261,6 +273,31 @@ impl Fixture {
             &mut self.state,
         )
         .await
+    }
+
+    /// One check whose driver settled `ago` before now.
+    async fn check_since(&mut self, ago: Duration) -> Result<()> {
+        check_claude_attachment(
+            &self.client,
+            &self.control.owner.subject,
+            &self.control.owner.incarnation,
+            &self.mailbox,
+            Instant::now() - ago,
+            &mut self.state,
+        )
+        .await
+    }
+
+    /// The newest diagnostic's reason and the cause JSON at its end, if any.
+    fn last_reason(&self) -> (String, Option<Value>) {
+        let reason = self.control.store
+            .claims_for(&self.control.owner.subject, Some("harness.diagnostic"))
+            .unwrap()
+            .last()
+            .map(|claim| claim.body["fields"]["reason"].as_str().unwrap().to_owned())
+            .unwrap_or_default();
+        let cause = reason.split_once(" cause=").map(|(_, json)| serde_json::from_str(json).unwrap());
+        (reason, cause)
     }
 
     async fn wait_ready(&self, ready: bool) {
@@ -388,6 +425,16 @@ impl Fixture {
 
     fn reports(&self) -> usize {
         self.control.reports.lock().unwrap().len()
+    }
+
+    fn phases(&self) -> Vec<String> {
+        self.control
+            .store
+            .claims_for(&self.control.owner.subject, Some("harness.diagnostic"))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.body["fields"]["status"].as_str().unwrap().into())
+            .collect()
     }
 
     fn codes(&self) -> Vec<String> {
@@ -811,6 +858,7 @@ async fn claude_attachment_publication_transient_api_errors_retain_the_identical
         (409, "idempotency-conflict"),
         (429, "rate-limited"),
         (422, "mailbox-session-starting"), // Actual store::check_mailbox_incarnation code.
+        (422, "mailbox-runtime-indeterminate"),
         (422, "unbound-mailbox"),
         (503, "internal"),
     ] {
@@ -1392,6 +1440,54 @@ async fn attachment_push_replaces_the_per_tick_poll() {
     assert_eq!(f.codes(), vec!["claude-channel-attached"]);
 }
 
+// A daemon that never pushes (or a reconnect still waiting for its first frame) no longer gets a
+// GET every one-second tick once the phase is settled: one per ten seconds, and a change is still
+// seen and published at the next recheck.
+#[tokio::test]
+async fn an_unpushed_settled_phase_is_rechecked_every_ten_seconds_not_every_tick() {
+    let mut f = Fixture::new().await;
+    let start = 1_000_000_u64;
+    // A minute of one-second control ticks, as driver_cli runs them.
+    async fn ticks(f: &mut Fixture, from: u64, seconds: u64) {
+        for second in 0..seconds {
+            if claude_attachment_check_due(&f.mailbox, &mut f.state, from + second * 1_000) {
+                f.check().await.unwrap();
+            }
+        }
+    }
+    ticks(&mut f, start, 1).await;
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    let settled = f.gets();
+    ticks(&mut f, start + 1_000, 59).await;
+    // The old loop made 59 more GETs here; now one at 10, 20, 30, 40 and 50 seconds.
+    assert_eq!(f.gets() - settled, 5, "an attached unpushed seat was checked {} times in 59 ticks", f.gets() - settled);
+    assert_eq!(f.codes(), vec!["claude-channel-attached"]);
+
+    // The channel detaches: the next recheck, at most ten seconds later, sees and publishes it.
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let gets = f.gets();
+    ticks(&mut f, start + 60_000, 10).await;
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert_eq!(
+        f.codes(),
+        vec!["claude-channel-attached", "claude-channel-unattached"]
+    );
+    // Blocked is settled too.
+    ticks(&mut f, start + 70_000, 60).await;
+    assert!(f.gets() <= gets + 8, "{} checks in 70 blocked ticks", f.gets() - gets);
+
+    // A replacement binding is never held back by its predecessor's poll.
+    let now = start + 125_000;
+    assert!(!claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    f.state.claude_attachment_polled.as_mut().unwrap().0.2 = "previous-token".into();
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    // Nor is a pushed connection: it reads the pushed value and rations its own admissions.
+    f.control.push.send_replace(Some(false));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(false)).await;
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+}
+
 // Planned T12: a pushed value never authorizes a write. The admission GET before the write can
 // contradict it or refuse it; either way nothing is posted, and the phase never comes from it.
 #[tokio::test]
@@ -1494,4 +1590,147 @@ async fn attachment_frames_never_take_mail_queue_slots() {
         matches!(frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. })),
         "{frame:?}"
     );
+}
+
+/// A restarting daemon answers "API is not ready" until it serves, then answers before the
+/// driver's channel report reaches it. Neither is a lost channel: the attached seat publishes
+/// nothing while the checks fail, and its attach window counts from the daemon's first answer.
+#[tokio::test]
+async fn a_daemon_that_cannot_answer_yet_never_blocks_an_attached_channel() {
+    let mut f = Fixture::new().await;
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    f.control.attachment.store(2, Ordering::SeqCst);
+    for _ in 0..3 {
+        f.check().await.unwrap();
+    }
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert_eq!(f.phases(), ["recovered"]);
+
+    f.control.attachment.store(0, Ordering::SeqCst);
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    // Only a whole window of answers without the channel blocks it.
+    let answered = f.state.claude_attachment_answered.unwrap();
+    f.state.claude_attachment_answered = Some(answered - claude_attachment_window());
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert_eq!(f.phases(), ["recovered", "starting", "blocked"]);
+    f.unchanged_owner();
+}
+
+/// A loaded daemon that takes longer than the check's two seconds says nothing about the channel,
+/// however long the seat has run. The diagnostic waits, as any unadmitted publication does, and
+/// goes out once the daemon answers.
+#[tokio::test]
+async fn a_check_the_daemon_is_too_slow_to_answer_does_not_block_the_channel() {
+    let mut f = Fixture::new().await;
+    f.control.attachment_delay_ms.store(2_200, Ordering::SeqCst);
+    assert!(f.check().await.is_err(), "the publication's own check timed out too");
+    let pending = f.state.claude_attachment_pending.as_ref().unwrap();
+    assert_eq!(pending.phase, "starting");
+    let reason = pending.input.fields["reason"].as_str().unwrap();
+    assert!(reason.contains("exceeded two seconds"), "{reason}");
+    assert_eq!(f.posts(), 0);
+
+    f.control.attachment_delay_ms.store(0, Ordering::SeqCst);
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert_eq!(f.phases(), ["starting", "recovered"]);
+    f.unchanged_owner();
+}
+
+/// Operations' capture of a parked seat on a loaded host (#4789), seconds after its driver settled:
+/// the plugin check until +12, Claude started (SessionStart) at +33, its channel server at +56. The
+/// old 20 s window from the driver's settle replaced such a session at +34 and +47 while it was
+/// still starting; the window now counts from Claude's own start.
+#[tokio::test]
+async fn a_claude_still_starting_is_never_blocked_and_its_window_counts_from_its_session_start() {
+    let mut f = Fixture::new().await;
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let now = current_unix_ms().unwrap() as u64;
+    // +47 s: no SessionStart yet, the daemon answering throughout.
+    f.state.claude_session_started_ms = None;
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(47));
+    f.check_since(Duration::from_secs(47)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    // Claude's first native hook is seen: its start is recorded once, from this check.
+    f.state.claude_readiness_fallback.native_state_seen = true;
+    f.check_since(Duration::from_secs(48)).await.unwrap();
+    let session = f.state.claude_session_started_ms.expect("SessionStart recorded");
+    assert!(session >= now);
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    // 59 s after SessionStart (+92): still within the window.
+    f.state.claude_session_started_ms = Some(now - 59_000);
+    f.check_since(Duration::from_secs(92)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    assert!(!f.phases().contains(&"blocked".to_owned()));
+    // 61 s after it, the daemon answering throughout, with no channel: blocked, and the cause says
+    // the channel never initialized.
+    f.state.claude_session_started_ms = Some(now - 61_000);
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(94));
+    f.check_since(Duration::from_secs(94)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    let (reason, cause) = f.last_reason();
+    assert!(reason.starts_with("claude-channel-unattached: the current Claude session has no live"), "{reason}");
+    let cause = cause.expect("a blocked diagnostic names its cause");
+    assert_eq!(cause["kind"], "channel-not-initialized");
+    assert_eq!(cause["session_started_at_ms"], now - 61_000);
+}
+
+/// The capture's third session: SessionStart at +33, the channel at +56, 23 s later. It attaches
+/// without ever being reported blocked.
+#[tokio::test]
+async fn a_channel_that_comes_up_within_the_window_after_session_start_is_never_blocked() {
+    let mut f = Fixture::new().await;
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let now = current_unix_ms().unwrap() as u64;
+    f.state.claude_session_started_ms = Some(now - 23_000);
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(56));
+    f.check_since(Duration::from_secs(56)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    f.set_attached(true).await;
+    f.check_since(Duration::from_secs(57)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert!(!f.phases().contains(&"blocked".to_owned()), "{:?}", f.phases());
+}
+
+/// A Claude that never reaches SessionStart within the start bound is stalled, not blocked on a
+/// channel: the cause says so, with what the driver chose at launch, a failed plugin check and a
+/// project server named `st` included.
+#[tokio::test]
+async fn a_claude_that_never_starts_is_stalled_with_its_launch_in_the_cause() {
+    let mut f = Fixture::new().await;
+    f.control.attachment.store(0, Ordering::SeqCst);
+    f.state.claude_session_started_ms = None;
+    f.state.claude_channel_launch = Some(fractal_drivers::claude_session::ChannelLaunch {
+        route: "inline-development".into(),
+        plugin_check_error: Some("`claude plugin list --json` failed with status 1: keychain locked".into()),
+        plugin_check_ms: 12_300,
+        launched_at_ms: Some(1_000),
+        project_st_server: true,
+    });
+    f.state.claude_attachment_answered = Some(Instant::now() - Duration::from_secs(301));
+    f.check_since(Duration::from_secs(299)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting", "within the five-minute bound");
+    f.check_since(Duration::from_secs(301)).await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "stalled");
+    let claim = f.control.store.claims_for(&f.control.owner.subject, Some("harness.diagnostic")).unwrap().pop().unwrap();
+    assert_eq!(claim.body["fields"]["status"], "stalled");
+    assert_eq!(claim.body["fields"]["severity"], "error");
+    assert_eq!(claim.body["fields"]["code"], "claude-channel-unattached");
+    let (reason, cause) = f.last_reason();
+    assert!(reason.starts_with("claude-channel-unattached: Claude did not start (no SessionStart) within 300 s"), "{reason}");
+    let cause = cause.unwrap();
+    assert_eq!(cause["kind"], "claude-not-started");
+    assert_eq!(cause["route"], "inline-development");
+    assert_eq!(cause["plugin_check_error"], "`claude plugin list --json` failed with status 1: keychain locked");
+    assert_eq!(cause["project_st_server"], true);
+    assert_eq!(cause["plugin_check_ms"], 12_300);
+    // The store folds an open status other than `starting` to blocked, as every member does, older
+    // ones included: the seat shows its channel fault.
+    let harness = f.control.store.current_harness(&f.control.owner.subject).unwrap();
+    assert_eq!(harness.map(|harness| harness.state).as_deref(), Some("blocked"));
 }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fix replay concurrency fixture ownership so its writer stays held while the second request moves its state",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema or audit format changes."},
+  "rules": {"status": "none", "detail": "No admission or graph rules change."},
+  "compatibility": {"status": "none", "detail": "Test-only ownership correction; no wire changes."},
+  "downtime": {"status": "none", "detail": "No runtime change."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No recovery change."}
+}

@@ -1,5 +1,5 @@
-//! How big this member's store is, and how much it grows a day: the database target in
-//! `slo/targets.toml`, and the physical growth that disk-filling conditions read. The daemon
+//! How big this member's store is, and how much it grows a day: the database objective in
+//! `slo/objectives.kdl`, and the physical growth that disk-filling conditions read. The daemon
 //! samples the store hourly and keeps two days of samples in `meta`, so the daily growth survives
 //! restarts. A sample reads three pragmas and the WAL file's length. It is the one sampler: the
 //! newest sample is cached for every reader (`fractal_daemon::slo::database_size`).

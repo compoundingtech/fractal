@@ -6,10 +6,12 @@ description = "Claims-graph agent reconciler"
 license = "MIT"
 # Most tests share one binary; descriptor-limit fault injection needs its own process.
 autotests = false
+# src/main.rs is the library's root, not a binary: `fractal` is crates/fractal-cli, and fractal-fixture is declared below.
+autobins = false
 
 [features]
 # Forwarded to the library; tests enable it through the dev-dependencies below, which also turn on this
-# package's own feature for build.rs and the st3-fixture binary.
+# package's own feature for build.rs and the fractal-fixture binary.
 test-support = ["fractal-daemon/test-support"]
 # Opt in only in Performance; ordinary workspace checks need not build a second test binary.
 perf-load = []
@@ -18,6 +20,8 @@ convergence-audit = []
 [dependencies]
 anyhow = "1"
 fractal-daemon = { path = "../fractal-daemon" }
+fractal-store = { path = "../fractal-store" }
+fractal-socket-discovery = { path = "../fractal-socket-discovery" }
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
 ciborium = "0.2"
@@ -45,15 +49,16 @@ opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "6336c376fe3d1657d825f4278465b6192b770b40" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "6336c376fe3d1657d825f4278465b6192b770b40" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "6336c376fe3d1657d825f4278465b6192b770b40" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
+qrcode = { version = "0.14", default-features = false }
 resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
 fractal-runtime = { path = "../fractal-runtime" }
@@ -64,8 +69,6 @@ fractal-tui = { path = "../fractal-tui" }
 fractal-conversation-ui = { path = "../fractal-conversation-ui", features = ["ratatui"] }
 fractal-schema = { path = "../fractal-schema" }
 fractal-drivers = { path = "../fractal-drivers" }
-# The build identity, baked here and not in a library (see crates/fractal-build-stamp).
-fractal-build-stamp = { path = "../fractal-build-stamp" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.27"
@@ -107,22 +110,27 @@ required-features = ["test-support"]
 name = "collection_fixture"
 required-features = ["test-support"]
 
+# The CLI and daemon. The `fractal` executable is its own package (crates/fractal-cli): only it bakes the build
+# identity, so a new commit relinks it and rebuilds nothing here. The library also lets this package switch
+# on its own `test-support` feature through the dev-dependency on itself above. Its root keeps the name
+# src/main.rs, which other branches and tools name.
 [lib]
-name = "fractal_package_marker"
-path = "src/package_marker.rs"
-test = false
+path = "src/main.rs"
 doctest = false
+
+# The production CLI without a build identity, for the tests here that run the CLI as a user does. It is a
+# target of this package, so Cargo builds it with those tests from the same sources and configuration, and
+# only test builds (test-support) link it. The installed fractal is crates/fractal-cli.
+[[bin]]
+name = "fractal-unstamped"
+path = "src/unstamped.rs"
+required-features = ["test-support"]
+test = false
+bench = false
 doc = false
 
-# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-# Keep the existing executable target; fractal dispatches through installed links to it.
 [[bin]]
-name = "st3"
-path = "src/main.rs"
-# LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-
-[[bin]]
-name = "st3-fixture"
+name = "fractal-fixture"
 path = "src/fixture.rs"
 required-features = ["test-support"]
 test = false

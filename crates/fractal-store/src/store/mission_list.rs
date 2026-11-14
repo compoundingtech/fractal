@@ -39,6 +39,8 @@ pub struct MissionRows {
     pub time_unix_ms: u128,
     /// The projection frontier at the fold, from [`Store::projection_frontier`].
     pub frontier: u64,
+    /// Independent ETA window generation, including claim-free corrections and deletions.
+    pub eta_generation: u64,
     /// Every leased step's lease end at the fold. A quiet renewal moves one, and the step's
     /// `since` on its card, with no claim.
     pub leases: HashMap<String, u128>,

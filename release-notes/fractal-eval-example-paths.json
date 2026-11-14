@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Move the eval and example source corpora to evals/fractal and examples/fractal, updating runnable declarations, indexes, scripts and Rust fixture consumers.",
+  "replay": { "status": "none", "detail": "No stored eval migration: bundle archives use eval-root-relative paths and content hashes, not repository directory names." },
+  "schema": { "status": "none", "detail": "No schema change; the hidden .st3-documents directory and its document bytes are retained." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "Repository source paths change; binary names, environment contracts, persisted paths and recorded historical evidence remain unchanged." },
+  "downtime": { "status": "none", "detail": "No live service change." },
+  "manual": { "status": "none", "detail": "Use the new repository paths for evals and examples." },
+  "recovery": { "status": "none", "detail": "Revert the source-path rename; stored bundles remain independently readable." }
+}

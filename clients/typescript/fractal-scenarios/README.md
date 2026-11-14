@@ -3,8 +3,11 @@
 Seeded, privacy-safe scenario worlds for every Fractal client, and the kit that builds and
 replays them. [spec.md](spec.md) is the contract.
 
-The registered catalog contains 25 worlds: seven narratives, empty/loading/forward-compatibility
-edges, twelve failed-sync causes, replication divergence, `huge` and Unicode.
+The registered catalog contains 26 worlds: seven recorded narratives, the authored
+`transcript-families` conversation, empty/loading/forward-compatibility edges, twelve
+failed-sync causes, replication divergence, `huge` and Unicode.
+`transcript-families` prompts use a user message header followed by user `text/plain`
+content, preserving prompt text and speaker attribution through `conversationEntries()`.
 
 ## Recorded narratives
 
@@ -19,7 +22,7 @@ Roster, details, attention and sync remain authored synthetic slices, including 
 cast members on other hosts and product timing milestones. Recorded receipt offsets are not
 scaled to those milestones. The long-debug story uses the recorded 22-turn selection: all
 three wrong hypotheses, their rejections, forty-minute history and causal fix remain; repetitive
-middle batches are not inserted. The 17 edge worlds retain their original synthetic data.
+middle batches are not inserted. The edge worlds retain their original synthetic data.
 See [D3's per-world provenance table](spec.md#catalog-cutover-provenance-and-splice-points)
 for exact splice boundaries and reasons.
 
@@ -40,7 +43,7 @@ const oneAgent = world.with({ roster: 'one-agent' }) // same cast, one slice rep
 
 // Real data layer over a fake gateway: pass both seams to the client or SDK.
 const replay = createReplay(world, { clock: realClock({ start: world.now }) })
-// St3Options: { socket: replay.socket, fetch: replay.fetch }
+// FractalOptions: { socket: replay.socket, fetch: replay.fetch }
 ```
 
 Components read wire state through `ScenarioProvider` and `useScenarioSlice(kind, project?)` from
@@ -158,7 +161,11 @@ manifest or shards. The bounded history window preserves the unchanged 8 MiB/fil
 
 - `roster.all-states` cycles states across existing cast agents; `conversation.long` has 80
   exchanges per agent; `attention.many` has 50 cards. Singleton `remote-only-mail` casts use
-  protocol-valid agent loopback mail, not invented participants.
+  protocol-valid agent loopback mail, not invented participants. `attention.sidebar-tabs` and
+  `roster.sidebar-tabs` serve the sidebar tab markers: an open harness question, one needs-you
+  card per other agent, and unreachable non-local machines holding work. The roster variant
+  retains the world's backing state and its forward-compatible state declarations; it discards
+  the timeline and only the declarations attached to that discarded timeline.
 - Loading consumers render their loading state without displaying withheld backing records.
   Story checks use one representative visible world contrast per declared slice; replication
   metadata alone is not a visible contrast for a roster-name story.
@@ -170,3 +177,7 @@ manifest or shards. The bounded history window preserves the unchanged 8 MiB/fil
 | `pnpm --filter @fractal/scenarios decode` | strict-decodes every variant of every world |
 | `pnpm --filter @fractal/scenarios scan` | privacy gate |
 | `CI=1 pnpm --filter @fractal/scenarios test` | unit and property tests |
+
+Committed wire fixtures have independent test cases, each under the ordinary test deadline,
+so catalog growth does not combine every file into one wall-clock budget. The tests and CLI
+use the same strict per-file decoder; all non-underscore world directories and JSON files remain covered.

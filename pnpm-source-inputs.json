@@ -11,6 +11,7 @@
     "repos/effect-utils/packages/@overeng/effect-rpc-explorer-react",
     "repos/effect-utils/packages/@overeng/effect-rpc-observer",
     "repos/effect-utils/packages/@overeng/effect-rust",
+    "repos/effect-utils/packages/@overeng/kdl",
     "repos/effect-utils/packages/@overeng/meters",
     "repos/effect-utils/packages/@overeng/otel-browser",
     "repos/effect-utils/packages/@overeng/otel-contract",

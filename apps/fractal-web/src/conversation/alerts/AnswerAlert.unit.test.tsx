@@ -14,8 +14,10 @@ vi.mock('@stylexjs/stylex', () => ({
 }))
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
 
-import { AgentAlerts, conversationAlerts } from './AgentAlerts.tsx'
-import { AnswerAlert, alertChoices, webLink } from './AnswerAlert.tsx'
+import { AgentAlerts } from './AgentAlerts.tsx'
+import { AnswerAlert } from './AnswerAlert.tsx'
+import { alertChoices, answeredLabel, canSend, conversationAlerts, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
+import { contextOf, isPlainHeading, repeatsHeading, sameWords } from './decisionText.ts'
 import { gatewayAlertActions } from './alert-action-port.ts'
 
 const seat = 'agent/example/atlas'
@@ -72,7 +74,7 @@ const keys = (alert: Native.Attention) => alertChoices(alert)?.map((choice) => c
 const choice = (alert: Native.Attention, key: string) => alertChoices(alert)!.find((each) => each.key === key)!
 
 describe('alertChoices', () => {
-  it('answers a free-text yes-or-no question with Yes, No, words or Nothing to do, as stui does', () => {
+  it('answers a free-text yes-or-no question with Yes, No, words or Nothing to do, as the Fractal terminal UI does', () => {
     const ask = item({})
     expect(keys(ask)).toEqual(['yes', 'no', 'words', 'nothing'])
     expect(choice(ask, 'yes').action('')).toEqual({ type: 'work.done', summary: 'Yes' })
@@ -103,7 +105,7 @@ describe('alertChoices', () => {
     expect(keys(custom)).toEqual(['merge', 'hold', 'change', 'words', 'dismiss'])
   })
 
-  it('offers only the review answers st lists on a gate, words required to send one back', () => {
+  it('offers only the review answers Fractal lists on a gate, words required to send one back', () => {
     const gate = item({ attention_kind: 'human-gate', source_id: 'gate/example/review', actions: ['review.approve', 'review.request-changes'] })
     expect(keys(gate)).toEqual(['approve', 'changes'])
     expect(choice(gate, 'approve')).toMatchObject({ words: 'optional' })
@@ -123,7 +125,7 @@ describe('alertChoices', () => {
     expect(keys(item({ attention_kind: 'launch-approval', actions: ['launch.approve', 'launch.cancel'], preview: Option.none() }))).toEqual(['revise', 'cancel'])
   })
 
-  it('answers nothing st does not offer here', () => {
+  it('answers nothing Fractal does not offer here', () => {
     expect(alertChoices(item({ actions: [] }))).toBeNull()
     expect(alertChoices(item({ attention_kind: 'launch-approval', actions: [], preview: Option.some(preview) }))).toBeNull()
     expect(alertChoices(item({ attention_kind: 'revision-approval', actions: ['mission.approve-revision'] }))).toBeNull()
@@ -131,7 +133,7 @@ describe('alertChoices', () => {
 })
 
 describe('conversationAlerts', () => {
-  it('chooses this conversation\'s open alerts of every kind, as stui and the phone do', () => {
+  it('chooses this conversation\'s open alerts of every kind, as the Fractal terminal UI and the phone do', () => {
     const rows = [
       item({ id: 'attention/ask' }),
       item({ id: 'attention/gate', attention_kind: 'human-gate', actions: ['review.approve'] }),
@@ -146,82 +148,156 @@ describe('conversationAlerts', () => {
   })
 })
 
+describe('what a card shows of the choices', () => {
+  const ask = item({ request: decision })
+  const all = alertChoices(ask)!
+
+  it('leads with the recommended answer, and keeps words and dismissal out of the options', () => {
+    const custom = item({ request: { ...decision, type: 'choice', custom: true, recommendation: { answer: 'hold', reason: 'Wait.' }, answers: decision.answers.map(({ outcome: _, ...rest }) => rest) } })
+    const parts = partitionChoices(alertChoices(custom)!)
+    expect(parts.options.map((each) => each.key)).toEqual(['hold', 'merge', 'change'])
+    expect(parts.words?.key).toBe('words')
+    expect(parts.dismiss?.key).toBe('dismiss')
+    expect(partitionChoices(alertChoices(item({}))!).dismiss?.label).toBe('Nothing to do')
+  })
+
+  it('never drops words: they move to the answer that takes them, or hold Send', () => {
+    expect(effectiveChoice(all, 'merge', '')?.key).toBe('merge')
+    // No free text here, so words on Merge become the request for changes, as `personAnswer` routes them.
+    expect(effectiveChoice(all, 'merge', 'Rename it')?.key).toBe('change')
+    expect(effectiveChoice(alertChoices(item({}))!, 'yes', 'Only after the release')?.key).toBe('words')
+    const named = item({ request: { ...decision, answers: decision.answers.filter((each) => each.outcome !== 'request_changes') } })
+    const choices = alertChoices(named)!
+    const stuck = effectiveChoice(choices, 'merge', 'Hm')
+    expect(stuck?.key).toBe('merge')
+    expect(canSend(stuck, 'Hm')).toBe(false)
+    expect(canSend(stuck, '')).toBe(true)
+    expect(canSend(effectiveChoice(all, 'change', ''), '')).toBe(false)
+    expect(canSend(undefined, '')).toBe(false)
+  })
+
+  it('records an answer by its label, or the person\'s own words', () => {
+    expect(answeredLabel(choice(ask, 'merge'), '')).toBe('Merge')
+    const words = alertChoices(item({}))!.find((each) => each.key === 'words')!
+    expect(answeredLabel(words, '  Only  after\nthe release ')).toBe('“Only after the release”')
+  })
+
+  it('hides what repeats, and gives a long or structured question room as the body', () => {
+    expect(sameWords('Merge the parser change?', 'merge the parser change')).toBe(true)
+    expect(sameWords('Why now: Q23 chose it.', 'Other.')).toBe(false)
+    expect(sameWords('Q23 chose it', 'Long. Q23 chose it. More.', true)).toBe(true)
+    expect(isPlainHeading('Merge it?')).toBe(true)
+    expect(isPlainHeading('Recommend: yes\nWhy: tests')).toBe(false)
+    expect(isPlainHeading('Build finished {"status":"failed"}')).toBe(false)
+    // Near-repeats of the heading go too, however differently worded the punctuation or order.
+    expect(repeatsHeading('Delete 118 archived legacy worklog folders (host-alpha, host-beta)', 'Delete 118 archived legacy worklog folders on host-alpha (114) and host-beta (4)?')).toBe(true)
+    expect(repeatsHeading('Q24: Interview on structural principles', 'Keep or drop P5?')).toBe(false)
+    expect(contextOf('**Short.**')).toEqual({ line: 'Short.', overflows: false })
+    expect(contextOf('One.\nTwo.').overflows).toBe(true)
+  })
+})
+
 describe('AnswerAlert', () => {
   const now = Date.parse(at) + 5 * 60_000
+  const sent = async () => ({ _tag: 'Sent' }) as const
 
   it('shows who asks, the step it holds and how long it waited, with its answers', () => {
-    const html = renderToStaticMarkup(<AnswerAlert alert={item({ blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
-    expect(html).toContain('Request · from example/atlas · step build · waited 5m')
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={sent} now={now} />)
+    expect(html).toContain('example/atlas · Request · step build · waited 5m')
     expect(html).toContain('The parser now accepts trailing commas.')
-    expect(html).toContain('>Yes<')
+    expect(html).toContain('Yes')
     expect(html).toContain('>Nothing to do<')
   })
 
-  it('leads a structured request with its recommendation, then the question, reasons and what each answer does', () => {
-    const html = renderToStaticMarkup(<AnswerAlert alert={item({ request: { ...decision, reasons: ['CI is green'] } })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
-    expect(html).toContain('Recommends <strong>Merge</strong>: Tests and review passed.')
-    expect(html).toContain('Merge the parser change?')
-    expect(html).toContain('CI is green')
-    expect(html).toContain('Merge (recommended)')
-    expect(html).toContain('It joins the merge queue.')
-    expect(html).toContain('Why you: You own the release.')
+  it('says how long is left before an ask resolves by itself and what then applies', () => {
+    const deadline = DateTime.makeUnsafe(Date.parse(at) + 3 * 3_600_000 + 5 * 60_000)
+    expect(renderToStaticMarkup(<AnswerAlert alert={item({ request: decision, deadline_at: deadline, default_answer: { id: 'hold', label: 'Hold' } })} onAct={sent} now={now} />))
+      .toContain('waited 5m · answer within 3h, or “Hold” applies')
+    expect(renderToStaticMarkup(<AnswerAlert alert={item({ deadline_at: deadline })} onAct={sent} now={now} />)).toContain('answer within 3h, or it times out')
   })
 
-  it('links a request\'s subjects only to http(s) URLs; any other scheme or a relative path is text', () => {
+  it('makes the question the one heading, the recommended answer first and chosen, each rationale in its row', () => {
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ title: 'Merge the parser change?', request: { ...decision, reasons: ['CI is green'] } })} onAct={sent} density="full" now={now} />)
+    expect(html.match(/role="heading"/g)).toHaveLength(1)
+    expect(html.match(/Merge the parser change\?/g)).toHaveLength(2) // The heading and the card's accessible name; no second title.
+    expect(html).toContain('CI is green')
+    expect(html).toContain('Recommended')
+    expect(html).toContain('Tests and review passed.')
+    expect(html).toContain('It joins the merge queue.')
+    expect(html).toContain('Why you')
+    expect(html).toContain('You own the release.')
+    expect(html.indexOf('>Merge<')).toBeLessThan(html.indexOf('>Hold<'))
+    expect(html).toMatch(/type="radio"[^>]*checked=""/)
+  })
+
+  it('hides Why you when it repeats the context, and chooses nothing without a recommendation', () => {
+    const { recommendation: _, ...plain } = decision
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ request: { ...plain, why_person: 'Why now: tests are green.', summary: 'Tests are green. Ship it soon.' } })} onAct={sent} density="full" now={now} />)
+    expect(html).not.toContain('Why you')
+    expect(html).not.toMatch(/type="radio"[^>]*checked=""/)
+  })
+
+  it('links a request\'s subjects only to http(s) URLs; any other scheme or a relative path is text, a raw ref a chip', () => {
     expect(webLink('https://example.com/pull/1')).toBe('https://example.com/pull/1')
     expect(webLink('http://example.com/a b')).toBe('http://example.com/a%20b')
     for (const unsafe of ['javascript:alert(1)', 'JAVASCRIPT:alert(1)', 'data:text/html,<script>alert(1)</script>', 'vbscript:x', 'file:///etc/passwd', '/relative/path', 'doc/notes', '']) {
       expect(webLink(unsafe)).toBeUndefined()
     }
-    const html = renderToStaticMarkup(<AnswerAlert alert={item({ request: { ...decision, subjects: [
+    const html = renderToStaticMarkup(<AnswerAlert density="full" alert={item({ request: { ...decision, subjects: [
       { kind: 'link', label: 'The pull request', url: 'https://example.com/pull/1' },
       { kind: 'link', label: 'Run this', url: 'javascript:alert(1)' },
       { kind: 'link', label: 'Inline page', url: 'data:text/html,<b>x</b>' },
       { kind: 'document', label: 'Notes', url: '/relative/notes', ref: 'doc/notes' },
-    ] } })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
-    expect(html).toContain('<a href="https://example.com/pull/1" target="_blank" rel="noopener noreferrer">The pull request</a>')
+    ] } })} onAct={sent} now={now} />)
+    expect(html).toMatch(/<a href="https:\/\/example\.com\/pull\/1" target="_blank" rel="noopener noreferrer">.*The pull request/)
     expect(html).not.toMatch(/href="(javascript|data):/i)
     expect(html).not.toContain('href="/relative/notes"')
-    expect(html).toContain('<li>Run this</li>')
-    expect(html).toContain('Notes<span> doc/notes</span>')
+    expect(html).toContain('Run this')
+    expect(html).toContain('Inline page')
+    expect(html).toContain('aria-label="Copy doc/notes"')
   })
 
   it('shows what a launch would start, or why it has nothing to approve', () => {
-    const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', title: 'Launch nightly', actions: ['launch.approve'], preview: Option.some(preview) })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
-    expect(html).toContain('Launch approval · from example/atlas')
-    expect(html).toContain('<strong>Goal:</strong> Build the nightly report')
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', title: 'Launch nightly', actions: ['launch.approve'], preview: Option.some(preview) })} onAct={sent} now={now} />)
+    expect(html).toContain('example/atlas · Launch approval')
+    expect(html).toContain('Launch nightly')
     expect(html).toContain('Review it<span> · after build</span>')
     expect(html).toContain('Agents: example/builder on example-host')
     expect(html).toContain('Gates: 1 for a person, 2 automated')
-    expect(html).toContain('>Approve launch<')
-    const none = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', detail: 'The mission file does not parse.', actions: ['launch.approve'], preview: Option.none() })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
+    expect(html).toContain('Approve launch')
+    const none = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', detail: 'The mission file does not parse.', actions: ['launch.approve'], preview: Option.none() })} onAct={sent} now={now} />)
     expect(none).toContain('There is no valid preview of this launch yet, so it cannot be approved. The mission file does not parse.')
-    expect(none).not.toContain('>Approve launch<')
-    expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'revision-approval', detail: 'Add a deploy step', actions: ['mission.approve-revision'] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
-      .toContain('st work revision approve or cancel')
+    expect(none).not.toContain('Approve launch')
+    expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'revision-approval', detail: 'Add a deploy step', actions: ['mission.approve-revision'] })} onAct={sent} now={now} />))
+      .toContain('fractal work revision approve')
   })
 
   it('shows a JSON report as its telling fields', () => {
-    const html = renderToStaticMarkup(<AnswerAlert alert={item({ detail: 'Build finished {"status":"failed","error":"linker","extra":1}' })} now={now} />)
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ detail: 'Build finished {"status":"failed","error":"linker","extra":1}' })} onAct={sent} now={now} />)
     expect(html).toContain('<dt>status</dt>')
     expect(html).toContain('linker')
   })
 
-  it('says where an alert is answered when this device cannot answer it here', () => {
-    expect(renderToStaticMarkup(<AnswerAlert alert={item({})} now={now} />)).toContain('This device cannot answer alerts.')
-    expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'harness-login', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
+  it('says why an alert cannot be answered here and where, with options disabled rather than hidden', () => {
+    const readOnly = renderToStaticMarkup(<AnswerAlert alert={item({ request: decision })} now={now} />)
+    expect(readOnly).toContain('This device is read-only')
+    expect(readOnly).toContain('fractal alerts')
+    expect(readOnly).toMatch(/type="radio"[^>]*disabled=""/)
+    expect(readOnly).not.toContain('>Send<')
+    expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'harness-login', actions: [] })} onAct={sent} now={now} />))
       .toContain('Sign in from the seat&#x27;s terminal.')
-    expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
-      .toContain('Answer this one in st for now.')
+    const fault = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: [], blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={sent} now={now} />)
+    expect(fault).toContain('fractal work retry build')
+    expect(fault).not.toContain('in Fractal')
   })
 
-  it('opens the first of several alerts and folds the rest under their titles', () => {
+  it('shows one of several alerts with a pager', () => {
     const html = renderToStaticMarkup(
-      <AgentAlerts alerts={[item({ id: 'attention/one', title: 'First?' }), item({ id: 'attention/two', title: 'Second?' })]} calls={[]} onAct={async () => ({ _tag: 'Sent' })} />,
+      <AgentAlerts alerts={[item({ id: 'attention/one', title: 'First?' }), item({ id: 'attention/two', title: 'Second?' })]} onAct={sent} />,
     )
-    expect(html).toContain('◆ 2 alerts')
-    expect(html.indexOf('First?')).toBeLessThan(html.indexOf('<details'))
-    expect(html).toMatch(/<details[^>]*><summary[^>]*>◆ Second\?<\/summary>/)
+    expect(html).toContain('1 of 2')
+    expect(html).toContain('First?')
+    expect(html).not.toContain('Second?')
   })
 })
 
@@ -258,7 +334,7 @@ describe('gatewayAlertActions', () => {
     const action = { type: 'work.done', summary: 'Yes' } as const
     expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'This was already answered or closed.' })
     expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'This changed since you read it. Read it again before answering.' })
-    expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'st no longer offers this answer here.' })
+    expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'Fractal no longer offers this answer here.' })
     expect(workDone).not.toHaveBeenCalled()
   })
 
@@ -268,7 +344,7 @@ describe('gatewayAlertActions', () => {
     const launchCancel = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const token = (digit: string) => `lpv0:${digit.repeat(64)}`
     const client = {
-      // As st raises it: the alert names its variant, and its episode is the preview's hash.
+      // As Fractal raises it: the alert names its variant, and its episode is the preview's hash.
       attentionGet: vi.fn(async () => envelope({ ...open, actions: ['launch.approve', 'launch.cancel'], source_id: 'planning-session/launch/nightly', variant_id: 'variant/two', episode: token('b') })),
       launchesGet: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { kind: 'launch', id: 'launch/nightly', revision: 'l3' } })),
       launchVariantsList: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { items: [
@@ -314,11 +390,11 @@ describe('gatewayAlertActions', () => {
     expect(await approve({ variant_id: 'variant/one', preview_token: token('a') }, [two])).toEqual(changed)
     // No variant or preview named.
     expect(await approve({ episode: token('b') }, [two])).toEqual({
-      _tag: 'Refused', detail: 'This alert does not say which preview it shows, so it cannot be approved here. Review it in st.',
+      _tag: 'Refused', detail: 'This alert does not say which preview it shows, so it cannot be approved here. Review it in Fractal.',
     })
   })
 
-  it('says why st refused, and never sends an unconfirmed answer again', async () => {
+  it('says why Fractal refused, and never sends an unconfirmed answer again', async () => {
     const refusal = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'invalid', message: 'the step already has an answer', retryable: false, details: {} }, 422)
     const workDone = vi.fn(async () => { throw refusal })
     const port = gatewayAlertActions({ attentionGet: vi.fn(async () => envelope(open)), workDone } as unknown as FractalClient)
@@ -329,5 +405,36 @@ describe('gatewayAlertActions', () => {
       _tag: 'Refused', detail: 'The answer could not be confirmed; check the alert before answering again. It was not sent again.',
     })
     expect(workDone).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('served sidebar prompts', () => {
+  it.each([true, false])('respects the daemon allow=%s verdict while showing its call', allow => {
+    const alert = item({
+      attention_kind: 'harness-prompt', actions: ['prompt.respond'],
+      action_parameters: { 'prompt.respond': { target_id: seat, episode: 'prompt/one', call_id: 'call/one', answers: ['allow', 'deny'] } },
+      presentation: {
+        tier: Option.some('stopped'), kind: Option.some('prompt'), agent: Option.none(), raised_by: Option.none(), waiting: Option.none(),
+        prompt: { allow, calls: Option.some([{ call_id: 'call/one', tool: 'Bash', input: '{"command":"deploy"}', input_complete: allow }]), answers: ['allow', 'deny'] },
+      },
+    })
+    const html = renderToStaticMarkup(
+      <AgentAlerts alerts={[alert]} onAnswer={async () => ({ _tag: 'Sent' })} />,
+    )
+    expect(html).toContain('deploy')
+    expect(html.includes('>Allow<')).toBe(allow)
+    expect(html).toContain('>Deny<')
+  })
+
+  it('offers no allow action when a daemon serves no calls', () => {
+    const alert = item({
+      attention_kind: 'harness-prompt', actions: ['prompt.respond'],
+      action_parameters: { 'prompt.respond': { episode: 'prompt/one', call_id: 'call/one', answers: ['allow', 'deny'] } },
+    })
+    const html = renderToStaticMarkup(
+      <AgentAlerts alerts={[alert]} onAnswer={async () => ({ _tag: 'Sent' })} />,
+    )
+    expect(html).not.toContain('>Allow<')
+    expect(html).toContain('>Deny<')
   })
 })

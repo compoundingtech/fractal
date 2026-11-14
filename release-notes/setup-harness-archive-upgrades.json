@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Preserve explicit Claude harness choices when channel installation fails, and make archive upgrades and running-daemon restart requirements visible without overwriting Nix-owned paths.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or projection changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or fleet rule changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Explicit --harness claude and interactive Claude choices now fail with the channel-install error instead of silently selecting another harness. Automatic selection retains its fallback. Archive installers refuse Nix/Home Manager-owned targets and report existing CLI version changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Archive installation still does not restart the daemon. Read-only service-manager status produces a restart reminder for a running managed daemon; unmanaged daemons are outside that probe."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Correct the reported Claude installation or organization-policy error and rerun setup with the same chosen harness. Follow the upgrade guide before replacing archives, then deliberately restart the daemon and inspect its build. Upgrade Nix-owned installations through their existing Home Manager configuration."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Existing macOS app backups are retained. No state or database rollback behavior changes; an app backup does not undo database migrations."
+  }
+}

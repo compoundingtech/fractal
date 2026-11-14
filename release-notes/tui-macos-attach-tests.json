@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Make terminal attachment regression tests portable and independently buildable",
+  "replay": {
+    "status": "none",
+    "detail": "Test configuration only; no replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema or migration changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, checkpoint or digest changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Attachment tests configure read timeouts before discarding stale streams, avoiding macOS socket-option errors after closure while preserving EOF assertions. The TUI dev-dependency explicitly enables daemon test support so its tests compile without another workspace package enabling that feature. Production behavior and dependencies are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No production restart change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No installation action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or recovery change."
+  }
+}

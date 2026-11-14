@@ -86,6 +86,99 @@ mod tests {
     }
 
     #[test]
+    fn agent_review_step_real_person_delegation_excludes_the_delegate() {
+        use crate::references::{Scope, validate_step_reviewer};
+
+        const DELEGATE: &str = "agent/alder.delegate";
+        const UNRELATED: &str = "agent/alder.independent";
+        for delegated in [true, false] {
+            let (store, _, input) = person_work::tests::fixture();
+            let intent = crate::graph::parse_internal_intent(
+                r#"version 2
+agent "alder.delegate" { workspace "/tmp"; command "true"; restart always; }
+agent "alder.independent" { workspace "/tmp"; command "true"; restart always; }
+"#,
+                "alder",
+            )
+            .unwrap();
+            store.apply_internal(&intent, "review-agents").unwrap();
+            let ask = store.ask_person(&input).unwrap();
+            let episode = store
+                .claims_for(&ask.subject, Some("work.person-asked"))
+                .unwrap()[0]
+                .id
+                .clone();
+            let delegation = delegated.then(|| {
+                let mut proof = proof(&store, ACTIONS, episode.clone());
+                // The shared proof addresses the asker. Use the same message helper
+                // to give a distinct delegate its own person-authored instruction.
+                sent(
+                    &store,
+                    "delegate-instruction",
+                    &input.person,
+                    DELEGATE,
+                    "Friday",
+                );
+                proof.message = "message/delegate-instruction".into();
+                proof
+            });
+            let actor = if delegated { DELEGATE } else { &input.person };
+            let before = store.step_run(&ask.subject).unwrap().unwrap();
+            assert_eq!(before.assigned_to.as_deref(), Some(input.person.as_str()));
+            assert!(before.claimant.is_none());
+            let scope = Scope {
+                run: BTreeSet::new(),
+                intent: None,
+            };
+            let check = |step: &StepRunView, reviewer: &str| {
+                validate_step_reviewer(&scope, &store.readers.get(), step, &input.person, reviewer)
+            };
+            let expected_before = BTreeSet::from([input.actor.clone()]);
+            // A is excluded through work.person-asked, not the requester argument.
+            assert_eq!(check(&before, DELEGATE).unwrap(), expected_before);
+            let completed = store
+                .finish_person_step(
+                    &PersonStepResponse {
+                        subject: ask.subject.clone(),
+                        actor: actor.into(),
+                        summary: "Friday".into(),
+                        evidence: vec![],
+                        episode: Some(episode),
+                        answer: None,
+                        idempotency_key: "review-answer".into(),
+                        delegation,
+                    },
+                    false,
+                )
+                .unwrap();
+            assert_eq!(completed.status, "completed");
+            assert!(completed.claimant.is_none());
+            let records = store
+                .claims_for(&ask.subject, Some("work.person-done"))
+                .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].actor.as_deref(), Some(actor));
+            assert!(records[0].body["fields"].get("claimant").is_none());
+            assert_eq!(
+                check(&completed, &input.actor).unwrap_err().code,
+                "reviewer-not-independent"
+            );
+            let mut expected_after = expected_before;
+            if delegated {
+                assert_eq!(records[0].body["fields"]["acted_for"], input.person);
+                assert_eq!(
+                    check(&completed, DELEGATE).unwrap_err().code,
+                    "reviewer-not-independent"
+                );
+                expected_after.insert(DELEGATE.into());
+            } else {
+                assert_eq!(check(&completed, DELEGATE).unwrap(), expected_after);
+            }
+            assert_eq!(check(&completed, UNRELATED).unwrap(), expected_after);
+        }
+    }
+
+    #[test]
     fn delegated_document_instruction_quotes_the_original_pinned_body() {
         let (store, _, input) = person_work::tests::fixture();
         let ask = store.ask_person(&input).unwrap();
@@ -300,14 +393,14 @@ mod tests {
             evidence: vec![],
             episode: Some(episode),
             delegation: Some(proof),
-            answer: Some(crate::person_request::AnswerInput {
-                id: Some("not-offered".into()),
-                text: None,
-            }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("not-offered".into()), text: None, option_notes: Vec::new() }),
             idempotency_key: "choice".into(),
         };
         assert!(store.finish_person_step(&response, false).is_err());
         response.answer.as_mut().unwrap().id = Some("friday".into());
+        response.answer.as_mut().unwrap().option_notes = vec![crate::person_request::OptionNote {
+            id: "monday".into(), text: "Monday is the fallback.".into(),
+        }];
         store.finish_person_step(&response, false).unwrap();
         let done = store.step_run(&ask.subject).unwrap().unwrap();
         assert_eq!(
@@ -318,6 +411,88 @@ mod tests {
             done.person_answers[0].acted_for.as_deref(),
             Some("person/avery")
         );
+        assert_eq!(done.person_answers[0].answer.as_ref().unwrap()["option_notes"],
+            json!([{"id": "monday", "text": "Monday is the fallback."}]));
+        store.replay_replication_graph().unwrap();
+        let done = store.step_run(&ask.subject).unwrap().unwrap();
+        assert_eq!(done.person_answers[0].answer.as_ref().unwrap()["option_notes"],
+            json!([{"id": "monday", "text": "Monday is the fallback."}]));
+    }
+
+    #[test]
+    fn generic_delegated_answer_requires_notes_in_persisted_and_resumed_summary() {
+        let (store, origin, mut input) = person_work::tests::fixture();
+        input.request = Some(json!({
+            "version": 1, "type": "choice", "question": "Choose a date",
+            "why_person": "Your date",
+            "answers": [
+                {"id": "friday", "label": "Friday", "consequence": "Release Friday"},
+                {"id": "monday", "label": "Monday", "consequence": "Release Monday"},
+                {"id": "tuesday", "label": "Tuesday", "consequence": "Release Tuesday"}
+            ]
+        }));
+        let ask = store.ask_person(&input).unwrap();
+        let episode = store.claims_for(&ask.subject, Some("work.person-asked")).unwrap()[0]
+            .id.clone();
+        let proof = proof(&store, ACTIONS, episode.clone());
+        let (request, _) = crate::person_request::StructuredRequest::parse(
+            input.request.as_ref().unwrap(),
+        ).unwrap();
+        let answer = request.answer(Some(&crate::person_request::AnswerInput {
+            id: Some("friday".into()),
+            text: None,
+            option_notes: vec![
+                crate::person_request::OptionNote {
+                    id: "monday".into(), text: "Monday is the fallback.".into(),
+                },
+                crate::person_request::OptionNote {
+                    id: "tuesday".into(), text: "Tuesday is too late.".into(),
+                },
+            ],
+        }), "Friday").unwrap();
+        let mut fields = BTreeMap::from([
+            ("status".into(), json!("completed")),
+            ("summary".into(), json!("Friday")),
+            ("attempt".into(), json!(ask.attempt)),
+            ("episode".into(), json!(episode)),
+            ("answer".into(), answer.clone()),
+        ]);
+        add_fields(&mut fields, &proof);
+        let mut evidence = vec![];
+        add_evidence(&store.readers.get(), &mut evidence, &proof).unwrap();
+        let mut completion = ClaimInput {
+            subject: ask.subject.clone(),
+            kind: "work.person-done".into(),
+            actor: Some(input.actor),
+            fields,
+            evidence,
+            expected_subject: None,
+            idempotency_key: Some("generic-choice".into()),
+        };
+        for summary in [
+            "Friday",
+            "Friday\nNote on monday (not selected): Monday is the fallback.",
+        ] {
+            completion.fields.insert("summary".into(), json!(summary));
+            assert_eq!(store.append_claim(&completion).unwrap_err().code, "delegation-refused");
+            assert!(store.claims_for(&ask.subject, Some("work.person-done")).unwrap().is_empty());
+            assert!(store.step_run(&origin.subject).unwrap().unwrap().person_answers.is_empty());
+        }
+        let summary = "Friday\nNote on monday (not selected): Monday is the fallback.\nNote on tuesday (not selected): Tuesday is too late.";
+        completion.fields.insert("summary".into(), json!(summary));
+        let record = store.append_claim(&completion).unwrap();
+        let persisted = store.claim_by_id(&record.id).unwrap().unwrap();
+        assert_eq!(persisted.body["fields"]["summary"], summary);
+        assert_eq!(persisted.body["fields"]["answer"], answer);
+        for replay in [false, true] {
+            if replay {
+                store.replay_replication_graph().unwrap();
+            }
+            let resumed = store.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(resumed.status, "ready");
+            assert_eq!(resumed.person_answers[0].summary, summary);
+            assert_eq!(resumed.person_answers[0].answer.as_ref(), Some(&answer));
+        }
     }
 
     #[test]

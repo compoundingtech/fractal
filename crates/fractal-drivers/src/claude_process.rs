@@ -481,33 +481,8 @@ pub fn process(pid: u32) -> Result<Process> {
 
 #[cfg(target_os = "macos")]
 pub fn process(pid: u32) -> Result<Process> {
-    let pid_arg = i32::try_from(pid)?;
-    let mut info = std::mem::MaybeUninit::<libc::proc_taskallinfo>::zeroed();
-    let size = std::mem::size_of::<libc::proc_taskallinfo>() as libc::c_int;
-    let count = unsafe {
-        libc::proc_pidinfo(
-            pid_arg,
-            libc::PROC_PIDTASKALLINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size,
-        )
-    };
-    anyhow::ensure!(count == size, "Darwin process generation is unavailable");
-    let info = unsafe { info.assume_init() }.pbsd;
-    anyhow::ensure!(
-        info.pbi_pid == pid && info.pbi_status != 5,
-        "Darwin process is terminal"
-    );
-    Ok(Process {
-        pid,
-        parent: info.pbi_ppid,
-        birth: info
-            .pbi_start_tvsec
-            .checked_mul(1_000_000)
-            .and_then(|v| v.checked_add(info.pbi_start_tvusec))
-            .context("Darwin process birth overflow")?,
-    })
+    let (parent, birth, _) = fractal_runtime::macos_process_identity(pid)?;
+    Ok(Process { pid, parent, birth })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

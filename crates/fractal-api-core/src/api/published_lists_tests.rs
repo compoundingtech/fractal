@@ -3,7 +3,7 @@
 //! rows a window read folds directly at the same cut.
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
-pub use crate::api::published_lists::tests_shared_client_v0_tests::{app_state, fold, mission, oracle, presented, publish, rows};
+pub use crate::api::published_lists::tests_shared_client_v0_tests::{app_state, fold, folded_at_once, mission, oracle, presented, publish, refresh_until_published, rows};
 use super::*;
 use crate::model::{MissionRunRequest, WorkRequest};
 use smallclaims::store::set_thread_clock;
@@ -130,7 +130,7 @@ fn published_missions_match_the_direct_fold_through_work_leases_failure_and_reti
 
     // A new mission, a retired one, and a rejected write that changes nothing.
     mission(&store, "garden/delta");
-    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma").unwrap();
+    store.retire_mission("mission/garden/gamma", "person/operator", "retire-gamma", None).unwrap();
     assert!(store
         .work_action(&plant, "progress", &WorkRequest {
             wait_ms: None,
@@ -227,19 +227,12 @@ fn work_oracle(store: &Store, time: u128, actor: Option<&str>, limit: usize) -> 
 fn fold_work_checked(store: &Store) -> (Arc<Publication<WorkRows>>, bool) {
     let list = store.published_work_list();
     list.start();
-    let (base, generation) = list.base();
-    let changed = match fold_work(store, base.as_deref()).unwrap() {
-        Some((publication, changed)) => {
-            list.publish(publication, generation).expect("no projection replaced meanwhile");
-            changed
-        }
-        None => false,
-    };
+    let changed = refresh_until_published(store, |store| store.published_work_list(), fold_work);
     let publication = list.newest().expect("a published list");
     assert_eq!(publication.cut, store.index().unwrap(), "published at the current cut");
     let time = publication.rows.time_unix_ms;
     assert!(time >= store.projection_time_at(publication.cut).unwrap());
-    let (fresh, _) = fold_work(store, None).unwrap().unwrap();
+    let (fresh, _) = folded_at_once(fold_work(store, None, None));
     assert_eq!(publication.rows.orders_cut, publication.cut, "seat orders read at the rows' own cut");
     // Each shown seat's queue order, kept incrementally, is the order a fold from nothing reads
     // at the same cut: a stale order shows here even for a seat no fixture actor reads.
@@ -294,7 +287,108 @@ fn fold_work_checked(store: &Store) -> (Arc<Publication<WorkRows>>, bool) {
             }
         }
     }
+    assert_eq!(
+        work_oracle(store, time, Some("garden/birch"), usize::MAX),
+        work_oracle(store, time, Some("agent/garden/birch"), usize::MAX),
+        "legacy and canonical actor filters preserve the same direct seat-queue order"
+    );
+    let (legacy, _) = publication.rows.actor_rows("garden/birch");
+    let (canonical, built) = publication.rows.actor_rows("agent/garden/birch");
+    assert!(!built, "a canonical actor reuses its legacy filter's order");
+    assert!(Arc::ptr_eq(&legacy, &canonical), "both spellings share one actor order");
     (publication, changed)
+}
+
+#[test]
+fn published_work_keeps_persisted_legacy_assignments_and_available_seats_visible() {
+    let _clock = Clock::at(start_time());
+    for available in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let store = Store::open(&path, "cedar").unwrap();
+        mission(&store, "garden/alpha");
+        let run = start(&store, "garden/alpha", "legacy-work-list");
+        let (subject, _) = step(&run, "plant");
+        store.set_step_state(&subject, "ready", None).unwrap();
+        // Retain an actual older member's projection spelling, rather than testing two empty
+        // actor filters against a row already canonicalized by the current writer.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        smallclaims::store::projection_digest::register(&connection).unwrap();
+        let assignee = (!available).then_some("garden/ash");
+        let candidates = if available { r#"["garden/ash"]"# } else { "[]" };
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h16928b5eb896 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to=?3 WHERE subject=?1",
+            rusqlite::params![subject, assignee, candidates],
+        ).unwrap();
+        drop(connection);
+        let (publication, _) = fold_work_checked(&store);
+        for actor in ["garden/ash", "agent/garden/ash"] {
+            let (indexes, _) = publication.rows.actor_rows(actor);
+            assert_eq!(indexes.len(), 1, "{actor}, available={available}");
+            assert_eq!(publication.rows.order[indexes[0] as usize], subject);
+            assert_eq!(
+                work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0.len(),
+                1,
+                "the persisted legacy row is visible in the direct read too"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_spelling_ready_rows_keep_queue_order_in_direct_and_published_work() {
+    for (legacy, canonical) in [
+        ("node/worker", "agent/node/worker"),
+        ("node.builder", "agent/node.builder"),
+    ] {
+    let _clock = Clock::at(start_time());
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Store::open(&path, "cedar").unwrap();
+    mission(&store, "garden/alpha");
+    let first = start(&store, "garden/alpha", "mixed-first");
+    let second = start(&store, "garden/alpha", "mixed-second");
+    let (first_subject, _) = step(&first, "plant");
+    let (second_subject, _) = step(&second, "plant");
+    for subject in [&first_subject, &second_subject] {
+        store.set_step_state(subject, "ready", None).unwrap();
+    }
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    smallclaims::store::projection_digest::register(&connection).unwrap();
+    for (subject, assignee, created) in [
+        (&first_subject, if legacy.contains('/') { legacy } else { canonical }, "10"),
+        (&second_subject, canonical, "20"),
+    ] {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hb7cf1dc01667 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, created_at_unix_ms=?3 WHERE subject=?1",
+            rusqlite::params![subject, assignee, created],
+        ).unwrap();
+    }
+    drop(connection);
+    store.move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
+        agent: canonical.into(),
+        run: second.id.clone(),
+        placement: "top".into(),
+        anchor: None,
+        reason: Some("reverse readiness order".into()),
+        actor: "person/operator".into(),
+        idempotency_key: "reverse-ready-order".into(),
+    }).unwrap();
+    let (publication, _) = fold_work_checked(&store);
+    for actor in [legacy, canonical] {
+        let order = store.seat_run_order(actor).unwrap();
+        let work = store.client_work_at_snapshot(Some(actor), false, publication.rows.time_unix_ms).unwrap();
+        let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
+        let selected = crate::seat_queue::select(canonical, &steps, &order);
+        assert_eq!(selected.ready, [&*second_subject, &*first_subject],
+            "both spellings honor the explicit queue order, opposite readiness order");
+        let direct = work_oracle(&store, publication.rows.time_unix_ms, Some(actor), usize::MAX).0;
+        let (indexes, _) = publication.rows.actor_rows(actor);
+        assert_eq!(indexes.iter().map(|&index| publication.rows.order[index as usize].as_str())
+            .collect::<Vec<_>>(), [&*second_subject, &*first_subject]);
+        assert_eq!(publication.rows.page_of(Some(&indexes), 0, usize::MAX).0, direct);
+    }
+    }
 }
 
 #[test]
@@ -553,6 +647,267 @@ mission "garden/proposed" state="ready" revisions="human-only" revision-reviewer
     fold_work_checked(&store);
 }
 
+/// More missions, each with a run and its steps ready, than one snapshot refolds.
+fn burst(store: &Store, burst: usize) {
+    for number in 0..FOLD_CHUNK + 1 {
+        let name = format!("garden/burst-{burst}-{number}");
+        mission(store, &name);
+        let run = start(store, &name, &format!("burst-{burst}-{number}"));
+        for path in ["plant", "water"] {
+            store.set_step_state(&step(&run, path).0, "ready", None).unwrap();
+        }
+    }
+}
+
+/// Clears the catch-up hook however the test ends.
+struct ChangingThrough(std::rc::Rc<std::cell::Cell<usize>>);
+
+impl ChangingThrough {
+    /// A burst before each of the next `rounds` catch-up rounds, whichever list folds, numbered
+    /// from `first`.
+    fn rounds(rounds: usize, first: usize) -> Self {
+        let left = std::rc::Rc::new(std::cell::Cell::new(rounds));
+        let (hook_left, mut bursts) = (left.clone(), first);
+        super::BEFORE_CATCH_UP.set(Some(Box::new(move |store: &Store| {
+            if hook_left.get() > 0 {
+                hook_left.set(hook_left.get() - 1);
+                burst(store, bursts);
+                bursts += 1;
+            }
+            Ok(())
+        })));
+        Self(left)
+    }
+
+    fn left(&self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Drop for ChangingThrough {
+    fn drop(&mut self) {
+        super::BEFORE_CATCH_UP.set(None);
+    }
+}
+
+/// What one fold did, as its refresher runs it.
+#[derive(Debug, PartialEq)]
+struct Refresh {
+    published: bool,
+    /// The catch-up rounds it ran.
+    rounds: usize,
+    /// The most rows one of its snapshots refolded.
+    most_refolded: usize,
+    failed: bool,
+}
+
+/// Fold a list once as its refresher does, publishing what it publishes, keeping the rows it
+/// leaves pending, and folding from nothing next after a fold with no base fails.
+fn refresh_once<R>(store: &Store, list: fn(&Store) -> &PublishedList<R>, fold: super::Fold<R>) -> Refresh {
+    let list = list(store);
+    super::CATCH_UP_ROUNDS.set(0);
+    super::MOST_REFOLDED.set(0);
+    let (base, pending, generation) = list.base_and_pending();
+    let from_nothing = base.is_none();
+    let (published, failed) = match fold(store, base.as_deref(), pending) {
+        Ok(Folded::Published(publication, _)) => (list.publish(publication, generation).is_some(), false),
+        Ok(Folded::Current) => (true, false),
+        Ok(Folded::Pending(rows)) => {
+            list.keep_pending(rows, generation, from_nothing);
+            (false, false)
+        }
+        Err(_) => {
+            if from_nothing {
+                list.fold_from_nothing_next();
+            }
+            (false, true)
+        }
+    };
+    Refresh { published, rounds: super::CATCH_UP_ROUNDS.get(), most_refolded: super::MOST_REFOLDED.get(), failed }
+}
+
+/// Fold a list through bursts before every catch-up round of its first two folds and the first
+/// of its third, from a burst before it starts. Each fold stays within its rounds and snapshot
+/// size, and only the first refolds from the publication: the others go on from its rows.
+fn fold_through_bursts<R>(store: &Store, list: fn(&Store) -> &PublishedList<R>, fold: super::Fold<R>, first: usize, kind: &str) {
+    let rebuilds = |why: &str| list(store).rebuilds().get(why).copied().unwrap_or(0);
+    let (chunked, pending) = (rebuilds(&format!("chunked: {kind} changed")), rebuilds(&format!("pending: {kind} kept changing")));
+    burst(store, first);
+    let changing = ChangingThrough::rounds(2 * FOLD_ROUNDS + 1, first + 1);
+    let folds = (0..3).map(|_| refresh_once(store, list, fold)).collect::<Vec<_>>();
+    assert_eq!(changing.left(), 0, "the list changed before every round");
+    drop(changing);
+    assert_eq!(
+        folds.iter().map(|fold| fold.published).collect::<Vec<_>>(),
+        [false, false, true],
+        "{kind}: two folds left their rows pending, and the third published: {folds:?}"
+    );
+    for fold in &folds {
+        assert!(fold.rounds <= FOLD_ROUNDS, "{kind}: a fold ran {} catch-up rounds", fold.rounds);
+        assert!(fold.most_refolded <= FOLD_CHUNK, "{kind}: a snapshot refolded {} rows", fold.most_refolded);
+    }
+    assert_eq!(rebuilds(&format!("chunked: {kind} changed")), chunked + 1, "{kind}: only the first fold refolded from the publication");
+    assert_eq!(rebuilds(&format!("pending: {kind} kept changing")), pending + 2, "{kind}: the next two went on from its rows");
+}
+
+/// A list that keeps changing through every catch-up round, as a burst of mission starts at the
+/// top of the hour makes it, publishes nothing and keeps its rows for the next fold to go on
+/// from, rather than give up and refold them again (#5122). No fold runs more than its rounds,
+/// no snapshot refolds more than a chunk, and once the list holds still a fold publishes at one
+/// cut, with every row the direct read's.
+#[test]
+fn a_list_changing_through_every_catch_up_round_goes_on_from_its_rows_in_bounded_snapshots() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    fold(&store);
+    fold_work_checked(&store);
+
+    fold_through_bursts(&store, |store| store.published_missions_list(), fold_missions, 0, "missions");
+    // Published at the current cut, with every row the direct read's and a fold from nothing's.
+    let (_, changed) = fold(&store);
+    assert!(!changed, "the third fold published the rows");
+
+    // The work list's base, read past the missions list's bursts.
+    fold_work_checked(&store);
+    fold_through_bursts(&store, |store| store.published_work_list(), fold_work, 2 * FOLD_ROUNDS + 2, "work");
+    fold_work_checked(&store);
+}
+
+/// A store of a few thousand missions through two top-of-the-hour bursts of run starts, as
+/// the profile of #5181's long folds shows them: the scheduled starts land through several folds,
+/// more than a chunk before every catch-up round. Every fold stays within its rounds and its
+/// snapshot size, the list publishes within a few folds of each burst ending, at one cut, with
+/// every row the direct read's. About two minutes in a debug build, so it runs on its own:
+/// `cargo test -p fractal-api-core --lib -- --ignored a_store_of_thousands`.
+#[test]
+#[ignore = "a few thousand missions: run it on its own"]
+fn a_store_of_thousands_of_missions_publishes_through_hourly_bursts_in_bounded_folds() {
+    const MISSIONS: usize = 3_000;
+    const SHOWN_RUNS: usize = 1_000;
+    /// Starts before each catch-up round, more than a chunk.
+    const STARTS: usize = FOLD_CHUNK + 50;
+    /// Catch-up rounds a burst lands through: several folds' worth.
+    const BURST_ROUNDS: usize = 4 * FOLD_ROUNDS;
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    for number in 0..MISSIONS {
+        let name = format!("garden/m-{number}");
+        mission(&store, &name);
+        if number < SHOWN_RUNS {
+            start(&store, &name, &format!("m-{number}-0"));
+        }
+    }
+    let started = Instant::now();
+    fold(&store);
+    eprintln!("from nothing: {MISSIONS} missions in {:?}", started.elapsed());
+    for hour in 1..=2 {
+        let next = std::rc::Rc::new(std::cell::Cell::new(0));
+        // One landing before the first fold begins, then one before each of its catch-up rounds.
+        let left = std::rc::Rc::new(std::cell::Cell::new(BURST_ROUNDS + 1));
+        // How long the starts took, which a fold's own time leaves out.
+        let landing = std::rc::Rc::new(std::cell::Cell::new(Duration::ZERO));
+        let (hook_next, hook_left, hook_landing) = (next.clone(), left.clone(), landing.clone());
+        super::BEFORE_CATCH_UP.set(Some(Box::new(move |store: &Store| {
+            if hook_left.get() == 0 {
+                return Ok(());
+            }
+            hook_left.set(hook_left.get() - 1);
+            let started = Instant::now();
+            for _ in 0..STARTS {
+                let number = hook_next.get() % MISSIONS;
+                hook_next.set(hook_next.get() + 1);
+                let run = start(store, &format!("garden/m-{number}"), &format!("m-{number}-{hour}"));
+                store.set_step_state(&step(&run, "plant").0, "ready", None).unwrap();
+            }
+            hook_landing.set(hook_landing.get() + started.elapsed());
+            Ok(())
+        })));
+        super::BEFORE_CATCH_UP.with_borrow_mut(|hook| hook.as_mut().expect("the burst")(&store)).unwrap();
+        let mut folds = Vec::new();
+        while folds.last().is_none_or(|(fold, _): &(Refresh, Duration)| !fold.published) {
+            let (started, landed) = (Instant::now(), landing.get());
+            let fold = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+            folds.push((fold, started.elapsed().saturating_sub(landing.get() - landed)));
+            assert!(folds.len() <= BURST_ROUNDS / FOLD_ROUNDS + 2, "hour {hour}: no publication after {} folds", folds.len());
+        }
+        super::BEFORE_CATCH_UP.set(None);
+        assert_eq!(left.get(), 0, "hour {hour}: the burst landed through every round");
+        for (number, (fold, took)) in folds.iter().enumerate() {
+            eprintln!("hour {hour} fold {number}: {fold:?} in {took:?}");
+            assert!(fold.rounds <= FOLD_ROUNDS, "hour {hour}: a fold ran {} catch-up rounds", fold.rounds);
+            assert!(fold.most_refolded <= FOLD_CHUNK, "hour {hour}: a snapshot refolded {} rows", fold.most_refolded);
+        }
+        // Published at the current cut, with every row the direct read's and a fold from nothing's.
+        fold(&store);
+    }
+}
+
+/// Rows a fold left pending are folded from projections a forget or a refold replaced, so the
+/// next fold folds from nothing rather than go on from them. Rows a fold from nothing left pending
+/// keep it from nothing: should the fold that goes on from them fail, the next one folds from
+/// nothing again, never on from the publication of the projections replaced.
+#[test]
+fn a_forget_or_a_refold_drops_the_rows_a_fold_left_pending() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("cedar").unwrap();
+    fold(&store);
+    let list = store.published_missions_list();
+    let starts = || list.rebuilds().get("start").copied().unwrap_or(0);
+    for (number, replace) in [
+        (0, PublishedList::forget as fn(&PublishedList<MissionRows>)),
+        (1, PublishedList::refold),
+    ] {
+        burst(&store, 100 + 10 * number);
+        let changing = ChangingThrough::rounds(FOLD_ROUNDS, 101 + 10 * number);
+        let first = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        drop(changing);
+        assert!(!first.published, "the fold left its rows pending");
+        let before = starts();
+        replace(list);
+        assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+        assert_eq!(starts(), before + 1, "the fold after it folded from nothing");
+        fold(&store);
+    }
+
+    // Rows kept by a fold that began before a forget are dropped too.
+    burst(&store, 120);
+    let changing = ChangingThrough::rounds(FOLD_ROUNDS, 121);
+    let (base, pending, generation) = list.base_and_pending();
+    let Folded::Pending(rows) = fold_missions(&store, base.as_deref(), pending).unwrap() else {
+        panic!("the fold left its rows pending");
+    };
+    drop(changing);
+    list.forget();
+    list.keep_pending(rows, generation, false);
+    let (base, pending, _) = list.base_and_pending();
+    assert!(base.is_none() && pending.is_none(), "the next fold folds from nothing");
+    assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+
+    // After a forget or a refold, a fold from nothing leaves its rows pending, and the fold that
+    // goes on from them fails: the next one folds from nothing again, never on from the
+    // publication of the projections replaced.
+    for (number, replace) in [
+        (0, PublishedList::forget as fn(&PublishedList<MissionRows>)),
+        (1, PublishedList::refold),
+    ] {
+        fold(&store);
+        let before = starts();
+        replace(list);
+        let changing = ChangingThrough::rounds(FOLD_ROUNDS, 130 + 10 * number);
+        let first = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        drop(changing);
+        assert!(!first.published && starts() == before + 1, "the fold from nothing left its rows pending: {first:?}");
+        super::BEFORE_CATCH_UP.set(Some(Box::new(|_: &Store| anyhow::bail!("a catch-up round failed"))));
+        let failed = refresh_once(&store, |store| store.published_missions_list(), fold_missions);
+        super::BEFORE_CATCH_UP.set(None);
+        assert!(failed.failed, "the fold that went on from them failed: {failed:?}");
+        assert!(refresh_once(&store, |store| store.published_missions_list(), fold_missions).published);
+        assert_eq!(starts(), before + 2, "the fold after the failure folded from nothing again");
+        // Every row the direct read's and a fold from nothing's.
+        fold(&store);
+    }
+}
+
 #[test]
 fn a_forgotten_list_keeps_its_rows_until_refolded_and_withdraws_its_view_too() {
     let _clock = Clock::at(start_time());
@@ -566,9 +921,10 @@ fn a_forgotten_list_keeps_its_rows_until_refolded_and_withdraws_its_view_too() {
     list.forget();
     assert!(list.newest().is_some(), "readers keep the rows until the refold");
     // A fold under way when the projections were replaced publishes nothing.
-    let (stale, _) = fold_missions(&store, list.newest().as_deref()).unwrap().unwrap_or_else(|| {
-        fold_missions(&store, None).unwrap().unwrap()
-    });
+    let (stale, _) = match fold_missions(&store, list.newest().as_deref(), None).unwrap() {
+        Folded::Published(publication, changed) => (publication, changed),
+        _ => folded_at_once(fold_missions(&store, None, None)),
+    };
     assert_eq!(list.publish(stale, generation), None);
     // A refresher that then keeps failing withdraws the view, served list or not.
     assert!(list.withdraw());
@@ -818,6 +1174,80 @@ async fn http_work_pages_come_from_publications_and_never_read_the_list_directly
     assert_eq!(store.direct_work_reads(), direct, "an ended list is never read directly");
 }
 
+#[tokio::test]
+async fn work_fresh_retry_pins_the_first_cut_while_the_index_keeps_advancing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    let list = store.published_work_list();
+    list.start();
+    fold_work_checked(store);
+    mission(store, "garden/first");
+    let fresh = ClientListQuery { fresh: true, ..work_query(None, 200) };
+    let refused = work_page(&state, fresh.clone()).await.unwrap_err();
+    assert_eq!(refused.code, WORK_LIST_NOT_FRESH);
+    let wanted = refused.details["wanted_cut"].as_u64().unwrap();
+    let (publication, _) = folded_at_once(fold_work(store, None, None));
+    assert_eq!(publication.cut, wanted);
+    // Each subsequent request sees a newer head, but the first requested cut suffices.
+    mission(store, "garden/second");
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        let query = ClientListQuery { min_cut: Some(wanted), ..fresh.clone() };
+        async move { work_page(&state, query).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    mission(store, "garden/third");
+    assert!(list.publish(publication, list.generation()).is_some());
+    waiting.await.unwrap().unwrap();
+    for name in ["garden/fourth", "garden/fifth"] {
+        mission(store, name);
+        let (Extension(snapshot), _) = client_work(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Query(ClientListQuery { min_cut: Some(wanted), ..fresh.clone() }),
+        ).await.unwrap();
+        assert_eq!(snapshot.store_index, wanted);
+        assert!(store.index().unwrap() > wanted);
+    }
+}
+
+#[tokio::test]
+async fn work_fresh_without_min_cut_still_samples_each_request() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    store.published_work_list().start();
+    fold_work_checked(store);
+    let fresh = ClientListQuery { fresh: true, ..work_query(None, 200) };
+    for name in ["garden/first", "garden/second"] {
+        mission(store, name);
+        let refused = work_page(&state, fresh.clone()).await.unwrap_err();
+        assert_eq!(refused.code, WORK_LIST_NOT_FRESH);
+        assert_eq!(refused.details["wanted_cut"], json!(store.index().unwrap()));
+    }
+}
+
+#[tokio::test]
+async fn work_min_cut_rejects_future_indexes_and_accepts_zero_and_current() {
+    let root = tempfile::tempdir().unwrap();
+    let state = app_state(root.path());
+    let store = &state.store;
+    store.published_work_list().start();
+    fold_work_checked(store);
+    let head = store.index().unwrap();
+    for fresh in [false, true] {
+        let refused = work_page(&state, ClientListQuery {
+            fresh, min_cut: Some(head + 1), ..work_query(None, 200)
+        }).await.unwrap_err();
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        for cut in [0, head] {
+            work_page(&state, ClientListQuery {
+                fresh, min_cut: Some(cut), ..work_query(None, 200)
+            }).await.unwrap();
+        }
+    }
+}
+
 #[test]
 fn an_actors_order_is_built_once_per_publication_by_its_first_read() {
     let _clock = Clock::at(start_time());
@@ -827,7 +1257,7 @@ fn an_actors_order_is_built_once_per_publication_by_its_first_read() {
     for path in ["plant", "water"] {
         store.set_step_state(&step(&alpha, path).0, "ready", None).unwrap();
     }
-    let (publication, _) = fold_work(&store, None).unwrap().unwrap();
+    let (publication, _) = folded_at_once(fold_work(&store, None, None));
     let rows = &publication.rows;
     let count = |counter: &std::sync::atomic::AtomicUsize| counter.load(std::sync::atomic::Ordering::Relaxed);
     std::thread::scope(|scope| {
@@ -896,7 +1326,7 @@ fn a_work_page_clones_only_its_rows_along_each_growing_inventory() {
         ash: (usize, usize, usize),
     }
     let measure = |store: &Store| {
-        let (publication, _) = fold_work(store, None).unwrap().unwrap();
+        let (publication, _) = folded_at_once(fold_work(store, None, None));
         let rows = &publication.rows;
         let (fleet, _) = rows.page_of(None, 0, 2);
         let fleet = (fleet.len(), serde_json::to_vec(&fleet).unwrap().len(), count(&rows.actors.scanned));
@@ -956,6 +1386,9 @@ fn an_incremental_fold_reads_only_the_seats_it_can_reorder() {
         seat_mission(&store, &name, &seat);
         runs.insert(n, ready_run(&store, &name, &format!("seat-{n}-1")));
     }
+    // Equal join times use run identity, not creation order. Make the second run
+    // join later so moving it to the top must change the queue.
+    _clock.set(now_ms() + 1);
     let second = ready_run(&store, "garden/seat-5", "seat-5-2");
     store.published_work_list().start();
     // From nothing: every shown seat once, charged as the cold fold.
@@ -1096,7 +1529,7 @@ fn claims_rebuilds(store: &Store) -> u64 {
     store.published_work_list().rebuilds().get("claims").copied().unwrap_or(0)
 }
 
-fn handoff(store: &Store, step: &str, from: &str, to: &str, key: &str) -> Result<crate::model::StepRunView, St3Error> {
+fn handoff(store: &Store, step: &str, from: &str, to: &str, key: &str) -> Result<crate::model::StepRunView, FractalError> {
     store.handoff_work(
         step,
         &crate::model::WorkHandoffRequest {
@@ -1317,7 +1750,7 @@ async fn wait_published(store: &Store) {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_fresh_read_cuts_the_refresher_pause_short_and_commits_keep_it() {
+async fn a_fresh_read_or_a_claim_this_node_commits_cuts_the_refresher_pause_short() {
     let root = tempfile::tempdir().unwrap();
     let state = app_state(root.path());
     let store = &state.store;
@@ -1325,11 +1758,12 @@ async fn a_fresh_read_cuts_the_refresher_pause_short_and_commits_keep_it() {
     ready_run(store, "garden/tend", "tend-1");
     start_published_work(&state);
     wait_published(store).await;
-    // A commit just after a fold waits out the pause before the next fold.
+    // A claim this node commits just after a fold waits only the floor, not the whole pause.
     let committed = tokio::time::Instant::now();
     ready_run(store, "garden/tend", "tend-2");
     wait_published(store).await;
-    assert!(committed.elapsed() >= REFRESH_PAUSE - Duration::from_millis(100), "{:?}", committed.elapsed());
+    assert!(committed.elapsed() >= LOCAL_PAUSE - Duration::from_millis(50), "{:?}", committed.elapsed());
+    assert!(committed.elapsed() < LOCAL_PAUSE + REFRESH_PAUSE / 4, "{:?}", committed.elapsed());
     // A fresh read just after a fold asks for the next one at once.
     ready_run(store, "garden/tend", "tend-3");
     let asked = tokio::time::Instant::now();
@@ -1622,4 +2056,359 @@ fn a_word_that_hinges_on_agent_queues_waits_for_the_first_roster() {
     let mut working = card("running", step("claimed", Some("agent/example/keeper")));
     present(&mut working, &[], None);
     assert_eq!(working["presentation"]["word"], "working", "this word reads no queue");
+}
+
+#[test]
+fn eta_shared_step_completion_republishes_other_missions_open_run() {
+    let _clock = Clock::at(start_time());
+    let store = Store::open_memory("node").unwrap();
+    for name in ["eta/a", "eta/b"] {
+        publish(
+            &store,
+            &format!("version 2\nmission \"{name}\" state=\"ready\" {{ goal \"Finish.\"; concurrent-runs max=4; step \"work\" {{ agentless; }} }}"),
+            name,
+        );
+    }
+    let waiting = start(&store, "eta/b", "waiting");
+    let (before, _) = fold(&store);
+    assert!(before.rows.cards["mission/eta/b"]["run_details"][0]["eta"].is_null());
+    // The run chip pins the declaration sheet to the run's revision.
+    let card = &before.rows.cards["mission/eta/b"];
+    assert_eq!(card["run_details"][0]["revision"], card["mission_revision"]);
+    assert!(card["run_details"][0]["revision"].is_string());
+    for (index, duration) in [100_u64, 300].into_iter().enumerate() {
+        let run = start(&store, "eta/a", &format!("sample-{index}"));
+        store
+            .set_step_state(&run.steps[0].subject, "working", None)
+            .unwrap();
+        store
+            .set_step_state(&run.steps[0].subject, "completed", None)
+            .unwrap();
+        // Mission transitions stamp wall time independently of the publication clock.
+        store.connection.lock().unwrap().execute(
+            /* sqlite-large-value: allow-for-now lv-h5326fa890870 owner=fractal_api_core::api::published_lists_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CASE json_extract(body,'$.fields.status')
+            WHEN 'working' THEN '1000' WHEN 'completed' THEN CAST(1000+?2 AS TEXT) ELSE accepted_at_unix_ms END WHERE subject=?1 AND kind='step-run.state'",
+            rusqlite::params![run.steps[0].subject,duration],
+        ).unwrap();
+        // Consume fixture corrections before the independent terminal transition.
+        fold(&store);
+        store
+            .set_mission_run_state(&run.id, "completed", "terminal", Some("done"))
+            .unwrap();
+        let (publication, changed) = fold(&store);
+        assert!(changed);
+        let eta = &publication.rows.cards["mission/eta/b"]["run_details"][0]["eta"];
+        assert_eq!(eta["basis"]["samples"], index + 1);
+        assert_eq!(eta["remaining_low_ms"], 100);
+        assert_eq!(eta["remaining_high_ms"], duration);
+        assert_eq!(
+            *eta,
+            store
+                .mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into())
+                .unwrap()
+                .unwrap()
+        );
+    }
+    let (before, _) = fold(&store);
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h336cf3012340 owner=fractal_api_core::api::published_lists_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CAST(CAST(accepted_at_unix_ms AS INTEGER)+400 AS TEXT) WHERE kind='step-run.state' AND json_extract(body,'$.fields.status')='completed'", []).unwrap();
+        tx.commit().unwrap();
+    }
+    let (corrected, changed) = fold(&store);
+    assert!(changed);
+    assert_eq!(corrected.cut, before.cut, "correction appended no claim");
+    let eta = &corrected.rows.cards["mission/eta/b"]["run_details"][0]["eta"];
+    assert_eq!(eta["basis"]["samples"], 2);
+    assert_eq!(eta["remaining_low_ms"], 500);
+    assert_eq!(eta["remaining_high_ms"], 700);
+}
+
+#[test]
+fn eta_v3_trigger_layout_preserves_samples_and_published_card_values() {
+    let _clock = Clock::at(start_time());
+    let mut results = Vec::new();
+    for rollback in [false, true] {
+        let store = Store::open_memory("node").unwrap();
+        publish(&store, "version 2\nmission \"eta\" state=\"ready\" { goal \"Finish.\"; concurrent-runs max=4; step \"work\" { agentless; } }", "eta");
+        if rollback {
+            // The parent replaces this trigger when a fresh v4 store lacks its v3 marker.
+            store.connection.write().execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h832547b61b1f owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER run_eta_run_update;
+                CREATE TRIGGER run_eta_run_update AFTER UPDATE ON mission_runs
+                WHEN NEW.phase='terminal' OR OLD.phase='terminal' BEGIN
+                INSERT OR IGNORE INTO local_run_eta_dirty
+                SELECT definition_hash,step_path FROM step_runs WHERE run_id=OLD.id;
+                INSERT OR IGNORE INTO local_run_eta_pending VALUES(NEW.id); END;"
+            ).unwrap();
+        }
+        let waiting = start(&store, "eta", "waiting");
+        fold(&store);
+        for (index, duration) in [100_u64, 300].into_iter().enumerate() {
+            let run = start(&store, "eta", &format!("sample-{index}"));
+            store.set_step_state(&run.steps[0].subject, "working", None).unwrap();
+            store.set_step_state(&run.steps[0].subject, "completed", None).unwrap();
+            store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h5a9504380e4b owner=fractal_api_core::api::published_lists_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=CASE json_extract(body,'$.fields.status')
+                WHEN 'working' THEN '1000' WHEN 'completed' THEN CAST(1000+?2 AS TEXT) ELSE accepted_at_unix_ms END WHERE subject=?1 AND kind='step-run.state'",
+                rusqlite::params![run.steps[0].subject,duration],
+            ).unwrap();
+            fold(&store);
+            store.set_mission_run_state(&run.id, "completed", "terminal", None).unwrap();
+        }
+        let (publication, _) = fold(&store);
+        let eta = publication.rows.cards["mission/eta"]["run_details"][0]["eta"].clone();
+        assert_eq!(eta["basis"]["samples"], 2);
+        assert_eq!(eta["remaining_low_ms"], 100);
+        assert_eq!(eta["remaining_high_ms"], 300);
+        assert_eq!(Some(eta.clone()), store.mission_run_eta(&waiting.subject, eta["as_of"].as_u64().unwrap().into()).unwrap());
+        let samples = store.connection.write().prepare(
+            "SELECT duration FROM local_run_eta_samples ORDER BY duration"
+        ).unwrap().query_map([], |row| row.get::<_, i64>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(samples, vec![100, 300]);
+        results.push((samples, eta));
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+/// One list's refresher, as [`start_published_lists`] spawns it, with a claim of this node's that
+/// its check reads (`reads`) and one it does not (`unread`), each about the subject given.
+struct Refresher<R: 'static> {
+    list: fn(&Store) -> &PublishedList<R>,
+    name: &'static str,
+    label: &'static str,
+    fold: Fold<R>,
+    local: Option<fn(&Arc<Store>) -> local_commits::LocalCommits>,
+    reads: fn(&Store, &str),
+    unread: fn(&Store, &str),
+}
+
+impl<R: Send + Sync + 'static> Refresher<R> {
+    fn start(&self, store: &Arc<Store>) {
+        spawn(Arc::clone(store), self.list, self.name, self.label, self.fold, true, Wakes { roster: false, local: self.local });
+    }
+
+    fn folds(&self, store: &Store) -> usize {
+        (self.list)(store).folds()
+    }
+
+    /// Start it, and wait until its first fold's pause has long run out.
+    async fn start_quiet(&self, store: &Arc<Store>) {
+        self.start(store);
+        until_within(Duration::from_secs(10), "the first fold", || self.folds(store) >= 1).await;
+        tokio::time::sleep(REFRESH_PAUSE + REFRESH_PAUSE / 2).await;
+    }
+}
+
+/// A resource observation is not a neutral kind, so the missions check rereads which runs wait on
+/// a person; progress on a step that does not exist changes no mission.
+fn missions_refresher() -> Refresher<MissionRows> {
+    Refresher {
+        list: |store| store.published_missions_list(), name: "missions", label: "published_list.missions", fold: fold_missions,
+        local: Some(missions_local_commits),
+        reads: |store, tag| crate::test_support::note_local_resource(store, &format!("resource/pause/{tag}")),
+        unread: |store, tag| crate::test_support::note_local_progress(store, &format!("step-run/pause/{tag}")),
+    }
+}
+
+/// Any claim about a step reaches its row; a message reaches none.
+fn work_refresher() -> Refresher<WorkRows> {
+    Refresher {
+        list: |store| store.published_work_list(), name: "work", label: "published_list.work", fold: fold_work,
+        local: Some(work_local_commits),
+        reads: |store, tag| crate::test_support::note_local_progress(store, &format!("step-run/pause/{tag}")),
+        unread: |store, tag| crate::test_support::note_local_claim(store, &format!("message/{tag}")),
+    }
+}
+
+/// The runtimes fold has no change check: no local claim cuts its pause.
+fn runtimes_refresher() -> Refresher<crate::store::runtime_list::RuntimeRows> {
+    Refresher {
+        list: |store| store.published_runtime_list(), name: "runtimes", label: "runtimes/refresh", fold: fold_runtimes,
+        local: None,
+        reads: |store, tag| crate::test_support::note_local_claim(store, &format!("message/{tag}")),
+        unread: |store, tag| crate::test_support::note_local_claim(store, &format!("message/{tag}")),
+    }
+}
+
+async fn until_within(limit: Duration, what: &str, done: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + limit;
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// A claim this node commits during a fold's pause ends the pause at its floor, not the full
+/// second, so its writer sees it after one fold; and however fast this node writes, folds come no
+/// faster than the floor allows.
+async fn a_claim_this_node_commits_cuts_the_pause<R: Send + Sync + 'static>(refresher: Refresher<R>) {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    refresher.start_quiet(&store).await;
+    // The first claim wakes a fold; the second lands in that fold's pause.
+    let before = refresher.folds(&store);
+    (refresher.reads)(&store, "pause-first");
+    until_within(Duration::from_secs(2), "the fold the first claim wakes", || refresher.folds(&store) > before).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let wrote = tokio::time::Instant::now();
+    (refresher.reads)(&store, "pause-second");
+    until_within(Duration::from_secs(2), "the fold the second claim cuts to", || refresher.folds(&store) > before + 1).await;
+    let waited = wrote.elapsed();
+    let most = LOCAL_PAUSE + Duration::from_millis(400);
+    assert!(waited < most, "{}: the claim waited {waited:?}, not the floor", refresher.name);
+    // The floor itself is held by the burst below, by count: a gap timed from when this task saw a fold begin can read under it by
+    // as much as the task was late to look.
+    // A burst of local writes: the pause is cut every time, never below the floor.
+    tokio::time::sleep(REFRESH_PAUSE + REFRESH_PAUSE / 2).await;
+    let (folds, span, written) = burst_of(&refresher, &store, refresher.reads).await;
+    assert!(written > 20, "the burst kept writing");
+    let most = (span.as_millis() / LOCAL_PAUSE.as_millis()) as usize + 2;
+    assert!(folds <= most, "{}: {folds} folds in {span:?}, at most {most}", refresher.name);
+    let full = (span.as_millis() / REFRESH_PAUSE.as_millis()) as usize + 2;
+    assert!(folds > full, "{}: local writes did cut the pause: {folds} folds in {span:?}, more than {full}", refresher.name);
+}
+
+/// Folds of `refresher` during a burst of this node's writes, the burst's span, and how many claims it wrote.
+async fn burst_of<R: Send + Sync + 'static>(refresher: &Refresher<R>, store: &Arc<Store>, write: fn(&Store, &str)) -> (usize, Duration, usize) {
+    let writing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let burst = std::thread::spawn({
+        let (store, writing) = (Arc::clone(store), Arc::clone(&writing));
+        move || {
+            let mut written = 0;
+            while writing.load(std::sync::atomic::Ordering::Acquire) {
+                write(&store, &format!("pause-burst-{written}"));
+                written += 1;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            written
+        }
+    });
+    let (before, began) = (refresher.folds(store), tokio::time::Instant::now());
+    tokio::time::sleep(REFRESH_PAUSE * 3).await;
+    let (folds, span) = (refresher.folds(store) - before, began.elapsed());
+    writing.store(false, std::sync::atomic::Ordering::Release);
+    (folds, span, burst.join().unwrap())
+}
+
+/// A stream of claims this node writes that the fold's check does not read keeps the full pause:
+/// a node's other writes fold the list no more often than before.
+async fn local_claims_the_check_does_not_read_keep_the_full_pause<R: Send + Sync + 'static>(refresher: Refresher<R>) {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    refresher.start_quiet(&store).await;
+    let (folds, span, written) = burst_of(&refresher, &store, refresher.unread).await;
+    assert!(written > 20, "the burst kept writing");
+    let most = (span.as_millis() / REFRESH_PAUSE.as_millis()) as usize + 2;
+    assert!(folds <= most, "{}: {folds} folds in {span:?} of claims its check does not read, at most {most}", refresher.name);
+}
+
+/// Claims another node wrote move the cut all the time on a busy fleet: they keep the full pause,
+/// so replication folds the list no more often than before.
+async fn replicated_claims_keep_the_full_pause<R: Send + Sync + 'static>(refresher: Refresher<R>) {
+    let root = tempfile::tempdir().unwrap();
+    let writer = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    let reader = crate::test_support::fleet_member(&root.path().join("reader"), "reader");
+    refresher.start_quiet(&reader).await;
+    let through = reader.index().unwrap();
+    let (before, began) = (refresher.folds(&reader), tokio::time::Instant::now());
+    for round in 0..6 {
+        (refresher.reads)(&writer, &format!("pause-replicated-{round}"));
+        crate::test_support::replicate(&writer, &reader);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    let (folds, span) = (refresher.folds(&reader) - before, began.elapsed());
+    assert!(reader.index().unwrap() > through, "the writer's claims reached the reader");
+    assert_eq!(reader.first_local_commit_after(through, reader.index().unwrap()).unwrap(), None);
+    let most = (span.as_millis() / REFRESH_PAUSE.as_millis()) as usize + 2;
+    assert!(folds <= most, "{}: {folds} folds in {span:?} of replicated claims, at most {most}", refresher.name);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_this_node_commits_cuts_the_missions_pause_to_its_floor() {
+    a_claim_this_node_commits_cuts_the_pause(missions_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_claims_keep_the_full_missions_pause() {
+    replicated_claims_keep_the_full_pause(missions_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_this_node_commits_cuts_the_work_pause_to_its_floor() {
+    a_claim_this_node_commits_cuts_the_pause(work_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_claims_keep_the_full_work_pause() {
+    replicated_claims_keep_the_full_pause(work_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_claims_keep_the_full_runtimes_pause() {
+    local_claims_the_check_does_not_read_keep_the_full_pause(runtimes_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_claims_the_missions_check_does_not_read_keep_its_full_pause() {
+    local_claims_the_check_does_not_read_keep_the_full_pause(missions_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_claims_the_work_check_does_not_read_keep_its_full_pause() {
+    local_claims_the_check_does_not_read_keep_the_full_pause(work_refresher()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_claims_keep_the_full_runtimes_pause() {
+    replicated_claims_keep_the_full_pause(runtimes_refresher()).await;
+}
+
+/// A check registered while a look runs is asked about the claims that look reads without it: a
+/// write made then still wakes its holder, with no later commit to start another look.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_check_registered_during_a_look_is_asked_about_the_claims_that_look_read() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    let from = store.index().unwrap();
+    let (first, snapshotted, gate) =
+        local_commits::LocalCommits::from_index_gated(&store, from, 10_000, "first", local_commits::every_local_claim(&store));
+    // A commit starts a look, which takes its checks and then waits at the gate before it reads
+    // the index.
+    crate::test_support::note_local_claim(&store, "message/during-a-look-first");
+    tokio::task::spawn_blocking(move || snapshotted.recv_timeout(Duration::from_secs(5)))
+        .await
+        .unwrap()
+        .expect("the look took its checks");
+    // A second holder registers after that, while the look runs, and writes: the look reads that
+    // write without asking its check.
+    let mut second = first.also("second", local_commits::every_local_claim(&store));
+    let before = store.index().unwrap();
+    crate::test_support::note_local_claim(&store, "message/during-a-look-second");
+    gate.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), second.after(before))
+        .await
+        .expect("the second check was asked about the claim the look read without it");
+    assert!(first.cut().newest_local_of("first") > before, "the first check saw both claims");
+}
+
+/// Every refresher on a store pauses on one scanner: a commit is read once, however many hold it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_refresher_on_a_store_shares_one_look_at_each_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::test_support::fleet_member(&root.path().join("writer"), "writer");
+    let holders: Vec<_> = (0..5).map(|_| store.local_commits("test", local_commits::every_local_claim(&store))).collect();
+    let mut waiting = holders[4].clone();
+    assert_eq!(holders[0].looks(), 0, "a scanner starts with nothing to read");
+    let through = store.index().unwrap();
+    crate::test_support::note_local_claim(&store, "message/pause-shared");
+    tokio::time::timeout(Duration::from_secs(5), waiting.after(through)).await.expect("the claim was found");
+    for holder in &holders {
+        assert_eq!(holder.looks(), 1, "one look for every holder");
+    }
+    // Once every holder is gone, the next one starts a scanner of its own.
+    drop((holders, waiting));
+    assert_eq!(store.local_commits("test", local_commits::every_local_claim(&store)).looks(), 0);
 }

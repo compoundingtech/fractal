@@ -18,6 +18,7 @@ serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
 fractal-kernel = { path = "../fractal-kernel" }
+fractal-schema = { path = "../fractal-schema" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "v7"] }

@@ -135,10 +135,10 @@ fn legacy_validate_and_admit_envelope_tx(
     envelope: &ReplicaEnvelope,
     runtime: &dyn Runtime,
     outcome: &mut ReplicationAdmission,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let started = std::time::Instant::now();
     let payload_bytes = envelope.payload.bytes().map_err(|error| {
-        St3Error::new(
+        FractalError::new(
             "invalid-envelope-payload",
             format!("the envelope payload is not valid base64: {error}"),
         )
@@ -151,14 +151,14 @@ fn legacy_validate_and_admit_envelope_tx(
         payload_bytes,
     );
     if expected_hash != envelope.hash {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "envelope-hash-mismatch",
             "the envelope hash does not match its payload",
         ));
     }
     let payload: ReplicaEnvelopePayload =
         ciborium::from_reader(payload_bytes).map_err(|error| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-envelope-payload",
                 format!("the envelope payload is not valid CBOR: {error}"),
             )
@@ -169,7 +169,7 @@ fn legacy_validate_and_admit_envelope_tx(
         || batch.previous_hash != envelope.previous_hash
         || batch.accepted_at_unix_ms != envelope.accepted_at_unix_ms
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "envelope-batch-mismatch",
             "the envelope and its batch identify different writes",
         ));

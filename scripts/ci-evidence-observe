@@ -53,6 +53,12 @@ def git(repo, *args, stdin=None, check=True):
     return done
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for standalone observers.
+def config_path(repo, base, name):
+    path = f'.fractal/{name}'
+    return path if git(repo, 'ls-tree', '--full-tree', '-z', base, '--', path).stdout else f'.st/{name}'
+
+
 def source_artifact(repository, run_id, attempt):
     """The one retained-source artifact of this attempt, from authenticated GitHub metadata."""
     listing = json.loads(run(['gh', 'api', f'repos/{repository}/actions/runs/{run_id}/artifacts?per_page=100']))
@@ -304,9 +310,8 @@ def one_run(args, run, attempt):
             if args.keys:
                 return ['--keys', args.keys]
             if not keys_file:
-                found = subprocess.run(['git', '-C', args.checkout, 'show', f'{args.keys_from}:.st/evidence-keys'], capture_output=True)
-                if found.returncode != 0:
-                    raise Failure(f'no key list: {args.keys_from}:.st/evidence-keys is missing, so full records cannot be verified')
+                path = config_path(args.checkout, args.keys_from, 'evidence-keys')
+                found = git(args.checkout, 'show', f'{args.keys_from}:{path}')
                 handle = tempfile.NamedTemporaryFile('wb', prefix='evidence-keys-', delete=False)
                 handle.write(found.stdout)
                 handle.close()

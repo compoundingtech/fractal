@@ -15,6 +15,347 @@ fn fixture(name: &str) -> Vec<u8> {
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
 }
+#[test]
+fn availability_fixtures_decode_coarse_and_full_views_and_encode_a_status_clear_as_null() {
+    let read: Envelope<PersonAvailabilities> = decode("person-availability.json");
+    let [ada, avery, blair] = &read.value.people[..] else { panic!("three people") };
+    assert_eq!((ada.status.as_str(), ada.status_source.as_str(), ada.interruptions.as_str()), ("away", "override", "urgent"));
+    assert!(ada.presence.is_none() && ada.presence_observed_at.is_none());
+    assert_eq!((avery.deadline_clock, avery.deadline_clock_until.as_deref()), (AvailabilityDeadlineClock::HoldRoutine, Some("2026-11-12T17:00:00Z")));
+    assert_eq!((blair.status, blair.status_source), (AvailabilityStatus::Available, AvailabilityStatusSource::Unreported));
+    let own: Envelope<PersonAvailability> = decode("availability-set-result.json");
+    assert_eq!(own.value.presence, Some(AvailabilityPresence::Present));
+    let set: AvailabilitySet = decode("availability-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("availability-set.json")).unwrap());
+    let clear = AvailabilitySet { status: Some(AvailabilityStatusChange { value: None, until: None }), ..AvailabilitySet::default() };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"status": {"value": null}}));
+    let report: PresenceReport = decode("presence-report.json");
+    assert_eq!((report.state.as_str(), report.last_input_at.as_deref(), report.observed_at.as_str()), ("active", Some("2026-11-12T09:57:30Z"), "2026-11-12T09:58:00Z"));
+    let reported: Envelope<PresenceReportResult> = decode("presence-report-result.json");
+    assert_eq!((reported.value.availability.presence, reported.value.report_again_at.as_deref()), (Some(AvailabilityPresence::Present), Some("2026-11-12T10:07:30Z")));
+    let bare = PresenceReport { state: "locked".into(), last_input_at: None, observed_at: "2026-11-12T09:58:00Z".into() };
+    assert_eq!(serde_json::to_value(&bare).unwrap(), serde_json::json!({"state": "locked", "observed_at": "2026-11-12T09:58:00Z"}));
+}
+
+#[test]
+fn availability_words_a_newer_daemon_adds_read_as_unknown() {
+    let mut row = serde_json::from_slice::<serde_json::Value>(&fixture("person-availability.json")).unwrap()["value"]["people"][0].clone();
+    for (field, word) in [("status", "busy"), ("status_source", "calendar"), ("presence", "in-call"), ("interruptions", "priority"), ("deadline_clock", "hold-weekend")] {
+        row[field] = serde_json::json!(word);
+    }
+    let future: PersonAvailability = serde_json::from_value(row).unwrap();
+    assert_eq!((future.status, future.status_source), (AvailabilityStatus::Unknown, AvailabilityStatusSource::Unknown));
+    assert_eq!(future.presence, Some(AvailabilityPresence::Unknown));
+    assert_eq!((future.interruptions, future.deadline_clock), (AvailabilityInterruptions::Unknown, AvailabilityDeadlineClock::Unknown));
+    assert_eq!((AvailabilityDeadlineClock::HoldAll.as_str(), AvailabilityStatus::Unknown.to_string()), ("hold-all", "unknown".to_owned()));
+}
+
+#[test]
+fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
+    let set: DirectiveNoteSet = decode("directive-note-set.json");
+    assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("directive-note-set.json")).unwrap());
+    let written: Envelope<DirectiveNoteSetResult> = decode("directive-note-set-result.json");
+    assert_eq!(written.value.note.as_ref().map(|note| note.text.as_str()), set.text.as_deref());
+    let clear = DirectiveNoteSet { text: None, expires_at: None };
+    assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"text": null}));
+}
+
+
+#[test]
+fn response_evidence_schema_and_typed_models_preserve_observations() {
+    let bodies: Vec<serde_json::Value> = decode("response-evidence.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/TimelineUsageBody"
+    })).unwrap();
+    for raw in bodies {
+        assert!(validator.is_valid(&raw));
+        let body: TimelineUsageBody = serde_json::from_value(raw.clone()).unwrap();
+        let encoded = serde_json::to_value(&body).unwrap();
+        for (key, value) in raw.as_object().unwrap() {
+            assert_eq!(&encoded[key], value, "{key}");
+        }
+        assert_eq!(body.response_id.as_deref(), raw["response_id"].as_str());
+    }
+    let unknown = serde_json::json!({
+        "semantics":"response", "driver":"omp", "attribution":{"agent_id":"agent/example"}
+    });
+    assert!(validator.is_valid(&unknown));
+    let body: TimelineUsageBody = serde_json::from_value(unknown.clone()).unwrap();
+    assert!(body.total_tokens.is_none());
+    assert!(body.cost.is_none());
+    assert!(body.provider_quota.is_none());
+    assert!(body.reasoning_tokens.is_none());
+    assert!(body.cache_write_1h_tokens.is_none());
+    let mut invalid = unknown;
+    invalid["provider_quota"] = serde_json::json!({"unit":"tokens","quantity":1});
+    assert!(!validator.is_valid(&invalid));
+    invalid["provider_quota"] = serde_json::json!({"unit":"premium_requests","quantity":-1});
+    assert!(!validator.is_valid(&invalid));
+}
+
+#[test]
+fn sender_outcomes_keep_expired_delivered_and_read_as_open_string_states() {
+    let cases: serde_json::Value = decode("message-sender-outcomes.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs":schema["$defs"], "$ref":"#/$defs/Page"
+    })).unwrap();
+    assert!(validator.is_valid(&cases));
+    for raw in cases["items"].as_array().unwrap() {
+        let message: Message = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(message.state, raw["state"].as_str().unwrap());
+        let encoded = serde_json::to_value(message).unwrap();
+        assert_eq!(encoded["state"], raw["state"]);
+    }
+}
+
+#[test]
+fn person_option_notes_round_trip_and_empty_omission() {
+    let legacy = serde_json::json!({"id": "land", "text": "Ship it."});
+    let input: PersonAnswerInput = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(input.option_notes.is_empty());
+    assert_eq!(serde_json::to_value(&input).unwrap(), legacy);
+    let notes = serde_json::json!([{"id": "hold", "text": "Keep as a fallback."}]);
+    let wire = serde_json::json!({"id": "land", "text": "Ship it.", "option_notes": notes});
+    let input: PersonAnswerInput = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(input.option_notes[0].id, "hold");
+    assert_eq!(serde_json::to_value(input).unwrap(), wire);
+    let stored = serde_json::json!({"type": "decision", "outcome": "accept",
+        "id": "land", "text": "Ship it.", "option_notes": notes});
+    let answer: PersonAnswer = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(serde_json::to_value(answer).unwrap(), stored);
+    let mut empty = stored;
+    empty["option_notes"] = serde_json::json!([]);
+    let answer: PersonAnswer = serde_json::from_value(empty.clone()).unwrap();
+    empty.as_object_mut().unwrap().remove("option_notes");
+    assert_eq!(serde_json::to_value(answer).unwrap(), empty);
+}
+
+#[test]
+fn person_option_notes_schema_is_nested_and_strict() {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/PersonAnswerInput"
+    })).unwrap();
+    assert!(validator.is_valid(&serde_json::json!({"id": "land",
+        "option_notes": [{"id": "hold", "text": "Fallback."}]})));
+    for note in [
+        serde_json::json!({"id": "hold"}),
+        serde_json::json!({"id": "hold", "text": ""}),
+        serde_json::json!({"id": "hold", "text": "x".repeat(8001)}),
+        serde_json::json!({"id": "hold", "text": "Fallback.", "label": "extra"}),
+    ] {
+        assert!(!validator.is_valid(&serde_json::json!({"id": "land", "option_notes": [note]})));
+    }
+}
+
+#[test]
+fn related_run_rows_decode_and_validate_server_semantics() {
+    let value: serde_json::Value = serde_json::from_slice(&fixture("agent-related-runs.json")).unwrap();
+    let decoded: AgentRelatedRuns = serde_json::from_value(value.clone()).unwrap();
+    assert!(decoded.rows[0].waiting_on_you);
+    assert!(decoded.rows[0].eta.is_none());
+    assert_eq!(decoded.rows[0].current_step.as_ref().unwrap().who.as_deref(), Some("person/reviewer"));
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let schema = serde_json::json!({"$defs":schema["$defs"],"$ref":"#/$defs/AgentRelatedRuns"});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&value));
+    let mut invalid = value;
+    invalid["rows"][0]["urgency_rank"] = serde_json::json!(5);
+    assert!(!validator.is_valid(&invalid));
+}
+
+#[test]
+fn revisioned_agents_frames_keep_typed_publication_and_snapshot_provenance() {
+    let CollectionEvent::AgentsSnapshotChunk {
+        id, collection, snapshot, publication, chunk_index, chunk_count, items, order, has_more,
+    } = decode("agents-publication-chunk.json") else { panic!("expected typed chunk"); };
+    assert_eq!(id, "roster");
+    assert_eq!(collection, "agents");
+    assert_eq!(snapshot.published_at.as_deref(), Some("2026-10-10T12:00:00.000Z"));
+    assert_eq!(publication.revision, 42);
+    assert_eq!(publication.status_watermark.store_index, snapshot.store_index);
+    assert_eq!(publication.status_watermark.local_frontier, 17);
+    assert_eq!(publication.materialized_at_ms, 1791633600000);
+    assert_eq!((chunk_index, chunk_count), (0, 2));
+    assert_eq!(items[0].header.id, "agent/a");
+    assert_eq!(order, ["agent/a"]);
+    assert!(!has_more);
+    let CollectionEvent::AgentsChanges {
+        id, collection, snapshot, publication, base_revision, upserts, removes, order, has_more,
+    } = decode("agents-publication-changes.json") else { panic!("expected typed delta"); };
+    assert_eq!(id, "roster");
+    assert_eq!(collection, "agents");
+    assert_eq!(snapshot.published_at.as_deref(), Some("2026-10-10T12:00:01.000Z"));
+    assert_eq!(publication.revision, 43);
+    assert_eq!(base_revision, 42);
+    assert!(upserts.is_empty());
+    assert_eq!(removes, ["agent/b"]);
+    assert_eq!(order, ["agent/a"]);
+    assert!(!has_more);
+}
+
+#[test]
+fn collection_errors_keep_distinct_permanent_code_and_optional_legacy_metadata() {
+    let CollectionEvent::Error { id, collection, code, retryable, .. } =
+        decode("agents-publication-row-too-large.json") else { panic!("expected error"); };
+    assert_eq!(id, "roster");
+    assert_eq!(collection.as_deref(), Some("agents"));
+    assert_eq!(code, Some(ErrorCode::AgentsPublicationRowTooLarge));
+    assert_eq!(retryable, Some(false));
+    let legacy: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"resync", "id":"roster"
+    })).unwrap();
+    assert!(matches!(legacy, CollectionEvent::Resync { collection: None, retryable: None, .. }));
+    let notice: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"resync", "id":"talk", "collection":"conversation", "retryable":true, "code":"remote-unavailable"
+    })).unwrap();
+    assert!(matches!(notice, CollectionEvent::Resync { collection: Some(collection), retryable: Some(true), .. } if collection == "conversation"));
+    let error: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"error", "message":"legacy refusal"
+    })).unwrap();
+    assert!(matches!(error, CollectionEvent::Error { collection: None, retryable: None, .. }));
+}
+
+#[test]
+fn collection_publication_grammar_cannot_leak_into_legacy_events() {
+    let chunk: serde_json::Value = serde_json::from_slice(&fixture("agents-publication-chunk.json")).unwrap();
+    let mut legacy = chunk.clone();
+    for key in ["publication", "chunk_index", "chunk_count"] { legacy.as_object_mut().unwrap().remove(key); }
+    let event: CollectionEvent = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(event, CollectionEvent::Snapshot { collection, snapshot, .. } if collection == "agents" && snapshot.published_at.is_some()));
+    for key in ["chunk_index", "chunk_count", "base_revision"] {
+        let mut invalid = legacy.clone();
+        invalid[key] = serde_json::json!(1);
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err(), "{key}");
+    }
+    for key in ["publication", "chunk_index", "chunk_count"] {
+        let mut invalid = chunk.clone();
+        invalid.as_object_mut().unwrap().remove(key);
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err(), "{key}");
+    }
+    for (key, value) in [
+        ("chunk_count", serde_json::json!(0)),
+        ("chunk_index", serde_json::json!(2)),
+        ("collection", serde_json::json!("work")),
+        ("has_more", serde_json::json!(true)),
+    ] {
+        let mut invalid = chunk.clone();
+        invalid[key] = value;
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err(), "{key}");
+    }
+    let mut unpublished = chunk.clone();
+    unpublished["snapshot"].as_object_mut().unwrap().remove("published_at");
+    assert!(serde_json::from_value::<CollectionEvent>(unpublished).is_err());
+    for base_revision in [0, 9_007_199_254_740_992_u64] {
+        let mut invalid: serde_json::Value = serde_json::from_slice(&fixture("agents-publication-changes.json")).unwrap();
+        invalid["base_revision"] = serde_json::json!(base_revision);
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err());
+    }
+    let mut delta: serde_json::Value = serde_json::from_slice(&fixture("agents-publication-changes.json")).unwrap();
+    delta["chunk_index"] = serde_json::json!(0);
+    assert!(serde_json::from_value::<CollectionEvent>(delta).is_err());
+    let legacy_snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "id":"snapshot/host-a/1/fence", "host_id":"host/host-a", "store_index":1,
+        "projection_version":"client-projection.v0", "created_at":"2026-10-10T12:00:00.000Z"
+    })).unwrap();
+    assert!(legacy_snapshot.published_at.is_none());
+    assert!(serde_json::to_value(legacy_snapshot).unwrap().get("published_at").is_none());
+}
+
+#[test]
+fn collection_frames_ignore_unknown_extension_keys() {
+    for (name, publication) in [
+        ("agents-publication-chunk.json", true),
+        ("agents-publication-changes.json", true),
+        ("agents-publication-chunk.json", false),
+    ] {
+        let mut frame: serde_json::Value = serde_json::from_slice(&fixture(name)).unwrap();
+        if !publication {
+            for key in ["publication", "chunk_index", "chunk_count"] {
+                frame.as_object_mut().unwrap().remove(key);
+            }
+        }
+        frame["future_extension"] = serde_json::json!({"value": true});
+        let event: CollectionEvent = serde_json::from_value(frame).unwrap();
+        assert!(matches!((publication, event),
+            (true, CollectionEvent::AgentsSnapshotChunk { .. } | CollectionEvent::AgentsChanges { .. })
+            | (false, CollectionEvent::Snapshot { .. })));
+    }
+}
+
+#[test]
+fn terminal_conversation_and_legacy_changes_keep_collection_names() {
+    let envelope: serde_json::Value = serde_json::from_slice(&fixture("terminal-screen.json")).unwrap();
+    let screen: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"screen", "id":"term", "collection":"terminal",
+        "snapshot":envelope["snapshot"], "value":envelope["value"],
+    })).unwrap();
+    assert!(matches!(screen, CollectionEvent::Screen { collection, .. } if collection == "terminal"));
+    let conversation: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"conversation", "id":"talk", "collection":"conversation",
+        "session_id":"session/a", "replace":false, "items":[],
+    })).unwrap();
+    assert!(matches!(conversation, CollectionEvent::Conversation { collection, has_more: None, .. } if collection == "conversation"));
+    let changes: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"changes", "id":"window", "collection":"agents", "snapshot":envelope["snapshot"],
+        "upserts":[], "removes":[], "order":[], "has_more":false,
+    })).unwrap();
+    assert!(matches!(changes, CollectionEvent::Changes { collection, .. } if collection == "agents"));
+}
+
+#[test]
+fn shared_error_sentences_preserve_machine_values_and_match_human_clients() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        kind: String,
+        code: Option<String>,
+        message: String,
+        plain: String,
+        human: String,
+    }
+    let cases: Vec<Case> = serde_json::from_str(include_str!(
+        "../../../fixtures/clients/plain-errors-v1.json"
+    )).unwrap();
+    for case in cases {
+        let code: Option<ErrorCode> = case.code.as_ref()
+            .map(|code| serde_json::from_value(serde_json::json!(code)).unwrap());
+        if case.kind == "api" {
+            assert_eq!(plain_message(code.as_ref(), &case.message), case.plain);
+            assert_eq!(human_message(code.as_ref(), &case.message), case.human);
+        }
+        let error = if case.kind == "transport" {
+            ClientError::Transport(case.message.clone())
+        } else if let Some(code) = code {
+            let envelope: ErrorEnvelope = serde_json::from_value(serde_json::json!({
+                "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                "request_id": "request/parity", "code": case.code,
+                "message": case.message, "retryable": false,
+                "details": if case.kind == "applied-unknown" {
+                    serde_json::json!({"applied": "unknown"})
+                } else { serde_json::json!({}) },
+            })).unwrap();
+            ClientError::Api(code, case.message.clone(), Box::new(envelope))
+        } else {
+            continue;
+        };
+        let before = match &error {
+            ClientError::Api(_, _, envelope) => Some(serde_json::to_value(envelope).unwrap()),
+            _ => None,
+        };
+        assert_eq!(error.plain(), case.plain, "{} {:?}", case.kind, case.code);
+        assert_eq!(error.human(), case.human, "{} {:?}", case.kind, case.code);
+        if let ClientError::Api(_, message, envelope) = &error {
+            assert_eq!(message, &case.message);
+            assert_eq!(serde_json::to_value(envelope).unwrap(), before.unwrap());
+        }
+    }
+}
 
 #[test]
 fn assistant_timeline_round_trip_preserves_read_side_wire_contract() {
@@ -256,6 +597,33 @@ fn generated_models_decode_every_stream_fixture() {
 }
 
 #[test]
+fn mcp_pairing_and_read_proofs_preserve_their_principal() {
+    let paired: Envelope<PairedSession> = decode("assistant-mcp-pairing.json");
+    let PairedSession::Assistant(session) = paired.value else {
+        panic!("MCP session decoded as person");
+    };
+    assert_eq!(session.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.principal, AssistantPrincipal::Mcp);
+    assert_eq!(session.grant.issuer, "person/robin");
+    assert_eq!(
+        session.session_actor,
+        format!("assistant/mcp/session/{}", session.grant.id)
+    );
+    assert_eq!(session.session_actor, session.grant.session_actor);
+    assert!(serde_json::from_slice::<Envelope<PersonPairedSession>>(
+        &fixture("assistant-mcp-pairing.json")
+    ).is_err());
+
+    let mut proof: serde_json::Value = decode("assistant-read-authorization.json");
+    proof["payload"]["issuer"] = serde_json::json!("person/robin");
+    proof["payload"]["identity"] = serde_json::json!("mcp");
+    proof["payload"]["assistant_id"] = serde_json::json!("assistant/mcp");
+    let proof: ScgReadAuthorization = serde_json::from_value(proof).unwrap();
+    assert_eq!(proof.payload.identity, ScgReadIdentity::Mcp);
+    assert_eq!(proof.payload.assistant_id, AssistantPrincipal::Mcp);
+}
+
+#[test]
 fn assistant_pairing_is_disjoint_from_person_delegation() {
     let begin: PairingBegin = decode("assistant-pairing-begin.json");
     let PairingBegin::Assistant(request) = begin else { panic!("assistant request decoded as person"); };
@@ -311,7 +679,34 @@ fn assistant_pairing_is_disjoint_from_person_delegation() {
 #[test]
 fn generated_resource_union_decodes_all_kinds() {
     let resources: Vec<Resource> = serde_json::from_slice(&fixture("resources.json")).unwrap();
-    assert_eq!(resources.len(), 18);
+    assert_eq!(resources.len(), 19);
+    let question = resources
+        .iter()
+        .find_map(|resource| match resource {
+            Resource::HarnessQuestion(question) => Some(question),
+            _ => None,
+        })
+        .expect("the fixture must decode a typed harness question, not an unknown resource");
+    assert_eq!(question.header.id, "harness-question/00ca25ee5d0da6af852c81a5ee4949df");
+    assert_eq!(question.header.revision, "claim/ada-observed");
+    assert_eq!(question.agent, "agent/ada");
+    assert_eq!(question.session, "ada-session");
+    assert_eq!(question.runtime_incarnation, "ada-incarnation-1");
+    assert_eq!(question.observed_at, 1793008800000);
+    assert_eq!(question.questions, vec![HarnessQuestionItem {
+        id: "q0".into(),
+        options: 2,
+        multi: false,
+        required: true,
+    }]);
+    assert!(question.resolution.is_none());
+    assert_eq!(question.answer.state, HarnessQuestionAnswerabilityState::Unavailable);
+    assert_eq!(question.answer.reason, Some(HarnessQuestionAnswerabilityReason::AdapterMissing));
+    let typed = Resource::HarnessQuestion(question.clone());
+    let encoded = serde_json::to_value(&typed).unwrap();
+    assert_eq!(encoded["kind"], "harness-question");
+    let round_trip: Resource = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round_trip, typed);
     let lane = resources
         .iter()
         .find_map(|resource| match resource {
@@ -375,6 +770,7 @@ fn generated_resource_union_decodes_all_kinds() {
     assert_eq!(subagent.work_id.as_deref(), Some("step-run/release/build"));
     assert_eq!(subagent.lease_expires_at, "2026-09-20T11:17:10Z");
     assert!(!agent.extra.contains_key("subagents"));
+    assert_eq!(agent.background_jobs, None, "an older card without the field is unknown");
     let machine = resources
         .iter()
         .find_map(|resource| match resource {
@@ -395,6 +791,29 @@ fn generated_resource_union_decodes_all_kinds() {
         .unwrap();
     assert_eq!(device.person_id.as_deref(), Some("person/alex"));
     assert_eq!(device.state, "active");
+}
+
+#[test]
+fn agent_background_jobs_decode_as_known_count_or_unknown() {
+    let resources: Vec<serde_json::Value> =
+        serde_json::from_slice(&fixture("resources.json")).unwrap();
+    let card = resources
+        .into_iter()
+        .find(|resource| resource["kind"] == "agent")
+        .unwrap();
+    for (wire, expected) in [
+        (serde_json::json!(2), Some(2)),
+        (serde_json::json!(0), Some(0)),
+        (serde_json::Value::Null, None),
+    ] {
+        let mut card = card.clone();
+        card["background_jobs"] = wire;
+        let Resource::Agent(agent) = serde_json::from_value(card).unwrap() else {
+            panic!("agent discriminator was not preserved");
+        };
+        assert_eq!(agent.background_jobs, expected);
+        assert!(!agent.extra.contains_key("background_jobs"));
+    }
 }
 
 #[test]
@@ -545,6 +964,26 @@ fn timeline_tool_result_preserves_timing_metadata_and_decodes_legacy_results() {
         legacy.body,
         TimelineBody::ToolResult(body) if body.blocks.is_empty()
     ));
+}
+
+#[test]
+fn a_mailbox_content_entry_names_its_message_and_older_content_decodes_without() {
+    let mut wire = serde_json::json!({
+        "id": "timeline-entry/mailbox-content", "sequence": 3, "revision": 1,
+        "timestamp": "2026-09-20T12:00:00Z", "role": "user", "type": "content", "final": true,
+        "body": {"media_type": "text/plain", "text": "hello", "message_id": "message/first"}
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let TimelineBody::Content(body) = &entry.body else {
+        panic!("content discriminator was not preserved");
+    };
+    assert_eq!(body.message_id.as_deref(), Some("message/first"));
+    assert_eq!(serde_json::to_value(&entry).unwrap(), wire);
+
+    wire["body"].as_object_mut().unwrap().remove("message_id");
+    let older: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(&older.body, TimelineBody::Content(body) if body.message_id.is_none()));
+    assert_eq!(serde_json::to_value(&older).unwrap(), wire);
 }
 
 #[test]
@@ -700,7 +1139,7 @@ fn runtime_publication_error_messages_preserve_retryability() {
         (ErrorCode::RuntimeListNotReady, true,
             "st is still preparing the runtime list; try again shortly"),
         (ErrorCode::RuntimeListEnded, false,
-            "the runtime list stopped updating; restart st"),
+            "the runtime list stopped updating; restart fractal"),
     ] {
         let envelope = serde_json::from_value(serde_json::json!({
             "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
@@ -769,6 +1208,99 @@ fn a_kind_this_client_does_not_know_reads_as_unknown_and_the_page_still_reads() 
         }))
         .is_err()
     );
+}
+
+#[test]
+fn ordered_membership_contract_preserves_root_remove_and_versioned_bodies() {
+    let value: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/ordered-memberships-v2.json")).unwrap();
+    let parameters: ArrangementMembershipEditParameters = serde_json::from_value(value["edit"]["parameters"].clone()).unwrap();
+    assert!(matches!(&parameters.operations[0], OrderedMembershipOperation::Place { bucket: None, .. }));
+    assert!(matches!(&parameters.operations[1], OrderedMembershipOperation::Remove { .. }));
+    let fence: Fence = serde_json::from_value(value["edit"]["fence"].clone()).unwrap();
+    let serialized_fence = serde_json::to_value(&fence).unwrap();
+    let request = ActionRequest::arrangement_membership_edit(
+        "action/membership-edit", "membership-edit-ada-0001",
+        fence, parameters,
+    ).unwrap();
+    let mut expected = value["edit"].clone();
+    expected["fence"] = serialized_fence;
+    assert_eq!(serde_json::to_value(request).unwrap(), expected);
+    let page: OrderedMembershipPage = serde_json::from_value(value["page"].clone()).unwrap();
+    assert_eq!(page.items[0].id, page.items[0].member);
+    assert!(page.items[0].position.bucket.is_none());
+    let mut expected_page = value["page"].clone();
+    expected_page["page"]["next_cursor"] = serde_json::Value::Null;
+    expected_page["page"]["cursor_expires_at"] = serde_json::Value::Null;
+    assert_eq!(serde_json::to_value(page).unwrap(), expected_page);
+    let body: ArrangementBody = serde_json::from_value(value["body"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(body).unwrap(), value["body"]);
+    let legacy: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/arrangements-v1.json")).unwrap();
+    let body: ArrangementBody = serde_json::from_value(legacy["resource"]["body"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(body).unwrap(), legacy["resource"]["body"]);
+    let mut invalid = value["body"].clone();
+    invalid["version"] = serde_json::json!(3);
+    assert!(serde_json::from_value::<ArrangementBody>(invalid).is_err());
+    let mut invalid = value["body"].clone();
+    invalid["placements"] = serde_json::json!({});
+    assert!(serde_json::from_value::<ArrangementBody>(invalid).is_err());
+    let parameters: ArrangementEditParameters = serde_json::from_value(legacy["edit"]["parameters"].clone()).unwrap();
+    assert_eq!(parameters.version, None);
+    assert_eq!(serde_json::to_value(parameters).unwrap(), legacy["edit"]["parameters"]);
+    for (raw, code) in [
+        ("unsupported-membership-container", ErrorCode::UnsupportedMembershipContainer),
+        ("membership-owner-forbidden", ErrorCode::MembershipOwnerForbidden),
+        ("invalid-membership-member", ErrorCode::InvalidMembershipMember),
+        ("invalid-membership-bucket", ErrorCode::InvalidMembershipBucket),
+        ("invalid-membership-key", ErrorCode::InvalidMembershipKey),
+        ("invalid-membership-operations", ErrorCode::InvalidMembershipOperations),
+        ("invalid-arrangement-version", ErrorCode::InvalidArrangementVersion),
+        ("invalid-arrangement-body", ErrorCode::InvalidArrangementBody),
+        ("membership-edit-too-large", ErrorCode::MembershipEditTooLarge),
+    ] {
+        assert_eq!(serde_json::from_value::<ErrorCode>(serde_json::json!(raw)).unwrap(), code);
+        assert_eq!(serde_json::to_value(code).unwrap(), raw);
+    }
+}
+
+#[test]
+fn ordered_membership_envelopes_decode_and_missing_buckets_fail_before_a_request_exists() {
+    let value: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/ordered-memberships-v2.json")).unwrap();
+    let envelope: Envelope<OrderedMembershipPage> = serde_json::from_value(value["envelope"].clone()).unwrap();
+    assert_eq!(envelope.value.collection, "ordered-memberships");
+    assert!(envelope.value.items.is_empty());
+    let mut expected_page = value["envelope"]["value"].clone();
+    expected_page["page"]["next_cursor"] = serde_json::Value::Null;
+    expected_page["page"]["cursor_expires_at"] = serde_json::Value::Null;
+    assert_eq!(serde_json::to_value(&envelope.value).unwrap(), expected_page);
+    // A missing bucket is not the root: neither the edit nor a read row decodes without it.
+    let mut missing = value["edit"]["parameters"].clone();
+    missing["operations"][0].as_object_mut().unwrap().remove("bucket");
+    let error = serde_json::from_value::<ArrangementMembershipEditParameters>(missing).unwrap_err();
+    assert!(error.to_string().contains("missing field `bucket`"), "{error}");
+    let mut row = value["page"]["items"][0].clone();
+    row["position"].as_object_mut().unwrap().remove("bucket");
+    assert!(serde_json::from_value::<OrderedMembership>(row).is_err());
+    let mut explicit_root = value["page"]["items"][0].clone();
+    explicit_root["position"]["bucket"] = serde_json::Value::Null;
+    let decoded: OrderedMembership = serde_json::from_value(explicit_root).unwrap();
+    assert_eq!(decoded.position.bucket, None);
+}
+
+#[test]
+fn invocation_attribution_preserves_each_optional_evidence_field() {
+    for mask in 0..8 {
+        let mut raw = serde_json::json!({"agent_id":"agent/example",
+            "mission_run_id":null,"generation_id":null,"step_id":null});
+        for (bit, key, value) in [
+            (1, "execution_id", serde_json::json!("claim/exact")),
+            (2, "invocation_id", serde_json::json!("invocation/exact")),
+            (4, "attempt", serde_json::json!(2)),
+        ] {
+            if mask & bit != 0 { raw[key] = value; }
+        }
+        let typed: TimelineAttribution = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(typed).unwrap(), raw);
+    }
 }
 
 #[test]
@@ -896,7 +1428,7 @@ fn assistant_read_contract_decodes_fixtures_and_rejects_malformed_shapes() {
 }
 
 #[test]
-fn queued_mission_deadlines_decode_for_stui() {
+fn queued_mission_deadlines_decode_for_tui() {
     let mut wire: serde_json::Value =
         serde_json::from_slice(&fixture("person-ask-mission.json")).unwrap();
     wire["run_details"][0]["after"] = serde_json::json!("mission-run/predecessor");
@@ -909,4 +1441,44 @@ fn queued_mission_deadlines_decode_for_stui() {
         admitted.run_details[0].deadline.as_deref(),
         Some("2026-09-20T11:05:00Z")
     );
+}
+
+#[path = "support/legacy_message_body.rs"]
+mod legacy_message_body;
+
+#[test]
+fn optional_message_participants_preserve_legacy_scalar_types_and_typed_relay() {
+    let bytes = fixture("timeline-message-participants.json");
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let page: Envelope<TimelinePage> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_value(&page).unwrap(),raw);
+    for entry in raw["value"]["items"].as_array().unwrap() {
+        let old: legacy_message_body::TimelineMessageBody = serde_json::from_value(entry["body"].clone()).unwrap();
+        let mut expected = entry["body"].clone(); expected.as_object_mut().unwrap().remove("author");
+        expected.as_object_mut().unwrap().remove("recipients");
+        assert_eq!(serde_json::to_value(old).unwrap(),expected);
+    }
+    let changes = serde_json::json!({"kind":"conversation-changes", "session_id":raw["value"]["session_id"],
+        "items":raw["value"]["items"], "next_cursor":"conversation-cursor/participants/next"});
+    let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(),changes);
+}
+
+#[tokio::test]
+async fn a_relayed_plugin_read_refuses_paths_outside_the_plugin_routes() {
+    let client = Client::unix(Path::new("/nonexistent/fractal-plugin-read.sock"));
+    let refused = |result: &Result<serde_json::Value, ClientError>| {
+        matches!(result, Err(ClientError::Protocol(message)) if message.contains("not a GitHub plugin read"))
+    };
+    for path in [
+        "/v1/plugins/github/repos/acme/../garden/pulls",
+        "/v1/plugins/github/repos/./acme/garden/pulls",
+        "/v1/client/agents",
+        "/v1/plugins/github/repos/acme/garden/pulls#12",
+    ] {
+        assert!(refused(&client.github_plugin_read(path).await), "{path}");
+    }
+    // A dotted value in the query names no segment: the read is sent, and finds no daemon here.
+    let sent = client.github_plugin_read("/v1/plugins/github/repos/acme/garden/events?after=a..b").await;
+    assert!(sent.is_err() && !refused(&sent), "{sent:?}");
 }

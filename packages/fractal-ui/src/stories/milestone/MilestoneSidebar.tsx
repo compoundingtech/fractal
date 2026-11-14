@@ -3,12 +3,12 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel, Input, Label, SearchField, Tree, TreeItem, TreeItemContent, type Key } from 'react-aria-components'
-import { sidebarRowAccessibleName } from '../../assistant-ui/sidebar/SidebarAgentRow'
+import { sidebarRowAccessibleName } from '../../assistant-ui/sidebar/rowPresentation.tsx'
 import { MilestoneAgentRow } from '../../assistant-ui/sidebar/MilestoneAgentRow'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
-import type { RosterFolder } from './milestone-fixtures'
+export interface RosterFolder { readonly id: string; readonly label: string; readonly rows: readonly Row[] }
 
 export type RosterState = 'ready' | 'loading' | 'empty' | 'error' | 'stale'
 export interface MilestoneSidebarProps {
@@ -36,7 +36,7 @@ const matches = (row: Row, needle: string) => `${row.title} ${row.host} ${row.re
 export function MilestoneSidebar(props: MilestoneSidebarProps) {
   const { state, folders, query } = props
   const frozen = state === 'stale' && props.observedAt !== undefined
-  const clock = frozen ? props.observedAt! : props.now
+  const clock = frozen ? props.observedAt ?? props.now : props.now
   const needle = query.trim().toLowerCase()
   // Filtering keeps a parent when a subagent matches, so a hit never loses its context.
   const visible = needle === '' ? folders : folders.map(folder => ({ ...folder, rows: folder.rows.flatMap(row => {

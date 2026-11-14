@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The ordinary public-repo-history check scans every introduced commit, including merge commits and recursively merged side histories. Cleaning the final tree no longer hides dirty intermediate commits. The accepted-main content-only pre-push guard runs before unchanged evidence signing. Forgery-proof hosted enforcement is not activated: the workflow is prepared for a future trusted organization required-workflow rule, while the organization-plan versus dedicated producer App decision remains separate. An ordinary candidate workflow can change its own scanner and is not a trust anchor. The separate landing-signing transition is unchanged.",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay or stored data change. The guard reads Git commit history without lazy fetching. Missing promised objects, including the accepted scanner, block publication; hydrate them outside the guard before retrying."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, wire or checkpoint schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No runtime admission or checkpoint rule change. Repository protection requires an organization-level workflows rule selecting repository 1310762902, .github/workflows/public-repo-history.yml and the full approved landing commit SHA containing both workflow and scanner, with an empty bypass list and reviewed SHA repins. Hosted scanner and policy load from github.workflow_sha, not the event base or candidate. The observed GitHub Free organization must upgrade to Team/Enterprise to activate this rule; a dedicated non-Actions app is an alternative prerequisite, not provisioned here. An Actions status context is not a trusted substitute. This change does not mutate live settings or claim enforcement is active."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Every commit in merge-base(BASE, HEAD)..HEAD must pass message and per-parent complete introduced-blob checks at real repository paths, recursively including merges and side histories. Added, modified and type-changed blobs are checked; removed lines and synthetic diff headers are not. Gitlinks receive path checks only. A dirty intermediate commit fails even after a cleanup commit makes the head clean. Evidence records and newly reachable source ancestors pass the same publication guard without namespace bypass or signed-byte/hash rewriting. ST_SKIP_EVIDENCE and ST_EVIDENCE_LOCAL affect only evidence signing, never the content guard. Existing signing behavior is unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption or runtime deployment is required."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Install the repository hooks with scripts/install-git-hooks. Before hosted enforcement, land the trusted workflow and scanner on protected main, satisfy the organization plan prerequisite, apply the organization required-workflow ruleset pinned to that approved landing SHA as documented in docs/ci.md, and retrigger PR and merge-queue runs. Future workflow/scanner changes need reviewed SHA repins. Do not add a forgeable Actions status-context requirement instead. If introduced history is dirty, create a replacement branch from a clean base with only public-clean changes and messages, then open a replacement PR. Do not force-push or rebase the existing PR to conceal dirty history."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "A clean head does not repair dirty history. Replace the branch and PR from a clean base rather than adding another cleanup commit or rewriting the existing PR. Bypassing the local hook is not an approved publication path; trusted hosted enforcement requires the separately activated organization required-workflow rule."
+  }
+}

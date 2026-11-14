@@ -13,6 +13,11 @@ pub(super) fn client_config_check(unknown: &[String]) -> Option<DoctorCheck> {
     })
 }
 
+/// The checks the daemon gave up on at their deadline, which doctor names as it exits non-zero.
+pub(super) fn timed_out(checks: &[DoctorCheck]) -> Vec<&str> {
+    checks.iter().filter(|check| check.status == "timeout").map(|check| check.name.as_str()).collect()
+}
+
 /// A local warning can raise a pass, but must never hide an existing failure.
 pub(super) fn client_config_status(status: &str, has_unknown_keys: bool) -> &str {
     if status == "pass" && has_unknown_keys {
@@ -46,6 +51,14 @@ pub(super) fn developer_tools(environment: &BTreeMap<String, String>) -> DoctorC
 }
 
 pub(super) fn human_outage_message(error: &anyhow::Error) -> Option<String> {
+    outage_message_for_program(error, "fractal")
+}
+
+pub(super) fn outage_message(error: &anyhow::Error) -> Option<String> {
+    outage_message_for_program(error, "st")
+}
+
+fn outage_message_for_program(error: &anyhow::Error, program: &str) -> Option<String> {
     // Keep native drivers and seats on their existing retry/recovery messages.
     if ["ST_AGENT", "ST_MISSION_RUN", "ST3_INCARNATION"]
         .iter()
@@ -65,7 +78,7 @@ pub(super) fn human_outage_message(error: &anyhow::Error) -> Option<String> {
         return None;
     }
     Some(format!(
-        "the st daemon at {} is unavailable. Run `st` to open Fractal, or `st setup` to set up or start its background service, then retry this command",
+        "the st daemon at {} is unavailable. Run `{program}` to open Fractal, or `{program} setup` to set up or start its background service, then retry this command",
         outage.endpoint()
     ))
 }
@@ -79,5 +92,15 @@ mod client_config_tests {
         assert_eq!(super::client_config_status("warn", true), "warn");
         assert_eq!(super::client_config_status("pass", true), "warn");
         assert_eq!(super::client_config_status("pass", false), "pass");
+    }
+
+    #[test]
+    fn checks_the_daemon_timed_out_are_named() {
+        let check = |name: &str, status: &str| fractal_daemon::model::DoctorCheck {
+            name: name.into(), status: status.into(), message: String::new(),
+        };
+        let checks = [check("claim-store", "pass"), check("claim-signatures", "timeout"), check("replication", "warn"), check("attention", "timeout")];
+        assert_eq!(super::timed_out(&checks), ["claim-signatures", "attention"]);
+        assert!(super::timed_out(&checks[..1]).is_empty());
     }
 }

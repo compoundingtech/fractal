@@ -17,7 +17,7 @@ const glass = (id, name, layout, extra = {}) => ({ id: `glass/person/avery/${id}
 const split = (split, a, b) => ({ split, children: [a, b] });
 const group = (...tabs) => ({ tabs: tabs.map(tab => typeof tab === 'string' ? { pane: tab } : tab) });
 
-// Splits read left to right, top to bottom, as stui numbers them.
+// Splits read left to right, top to bottom, as the Fractal terminal UI numbers them.
 assert.deepEqual(groups(split('right', group('a'), split('below', group('b', 'c'), group()))).map(tabs => tabs.map(tab => tab.pane)), [['a'], ['b', 'c'], []]);
 
 // Choices are the live glasses by name.
@@ -61,7 +61,7 @@ assert.deepEqual(glassGroups(glass('1', 'main', group()), lists), [{ index: 0, t
   assert.equal(spaceSummary({ ...glass, body: { name: 'one', layout: { tabs: [{ pane: 'agent:agent/a' }] } } }), '1 tab');
 }
 
-// A split's ratio sizes its groups, as stui drew them; without one they share evenly.
+// A split's ratio sizes its groups, as the Fractal terminal UI drew them; without one they share evenly.
 {
   const sized = { split: 'right', ratio: 0.3, children: [group('a'), { split: 'below', children: [group('b'), group('c')] }] };
   const boxes = groupBoxes(sized).map(box => Object.values(box).map(value => Math.round(value * 100) / 100));

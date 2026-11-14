@@ -1,5 +1,5 @@
 /**
- * `@fractal/sdk/effect`: the st client-v0 transport for wf, as one Effect service.
+ * `@fractal/sdk/read`: the roster/conversation read transport, without PTY or mutation services.
  *
  * One collections socket carries every follow (`socket.ts`). Each follow is a scoped
  * `Stream<FollowEvent<A>>` decoded tolerantly at this edge with Fractal's generated codecs, so
@@ -15,13 +15,6 @@
  * until replacement or identifiable repair. Diagnostics count each tag per normalized
  * schema path, with bounded first-path trace events and no row contents or decoder errors.
  *
- * `messageSend` uses the generated HTTP action client and decodes its acknowledgement; it does
- * not retry ambiguous delivery. Daemon refusals retain the complete error envelope and HTTP
- * status, separately from transport failures. `snapshot` reads fresh capabilities over HTTP,
- * bypassing cached discovery so the composer's fence refresh is authoritative.
- * `arrangementActions` exposes the same fresh snapshot/refusal contract as an HTTP-only
- * `submitAction` port, so Sidebar edits do not open a second collections socket.
- *
  * Tracing (`trace.ts`, `firstFrame.ts`): SDK HTTP calls run under their own `st3.*` span (a child
  * of `parentSpan`) whose `traceparent` they carry; socket opens carry the caller's `traceContext`.
  * Each subscribe attempt opens a bounded `wf.ux.first_frame` root (and an `st3.follow.subscribe`
@@ -30,9 +23,7 @@
  */
 import {
   ClientError,
-  type ActionOf,
   type CollectionSocket,
-  type ErrorEnvelope,
   type CollectionFilters,
   type CollectionFrame,
   type CollectionSocketFactory,
@@ -43,16 +34,13 @@ import {
   FractalClient,
 } from '@fractal/client'
 import {
-  ActionResult,
   type Capabilities,
   Capabilities as CapabilitiesCodec,
   decodeUnknownSync,
   Resource,
   Runtime,
-  TerminalScreen,
-  TimelineEntry,
-  Snapshot,
-} from '@fractal/client/schema'
+} from '@fractal/client/schema/read'
+import type { TerminalScreen } from '@fractal/client/schema'
 import * as Context from 'effect/Context'
 import * as Data from 'effect/Data'
 import * as Effect from 'effect/Effect'
@@ -66,6 +54,8 @@ import type * as Tracer from 'effect/Tracer'
 
 import * as Exit from 'effect/Exit'
 import { makeAdmission, type Admission } from './admission.ts'
+import { decodeConversationEntry, type ConversationEntry } from './conversationBlocks.ts'
+export { decodeConversationEntry, type BlockDegrade, type ConversationEntry } from './conversationBlocks.ts'
 import { makeFirstFrames, type FirstFrameAttempt, type FirstFrameOutcome } from './firstFrame.ts'
 import {
   type FollowFreshness,
@@ -74,7 +64,7 @@ import {
   initialFreshness,
   transitionFreshness,
 } from './freshness.ts'
-import { type ConnectionState, type St3Diagnostic, makeChannel } from './socket.ts'
+import { type ConnectionState, type FractalDiagnostic, makeChannel } from './socket.ts'
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'
 import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, type DecodedAgent, type DecodedResource, type Undecodable } from './resourceDecode.ts'
 export { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent, type Open, type DecodedAgent, type DecodedUsageSummary, type DecodedResource, type ResourceDecodeDiagnostic, type DecodeDiagnosticCounts, type Undecodable, type Unrecognized, type UnrecognizedLeaf } from './resourceDecode.ts'
@@ -128,7 +118,7 @@ type AdvertisedEnvelope = {
 }
 type CollectionName = Parameters<CollectionStream['subscribe']>[1]
 
-export type { ConnectionState, St3Diagnostic } from './socket.ts'
+export type { ConnectionState, FractalDiagnostic } from './socket.ts'
 export {
   type FollowFreshness,
   type FreshnessEvent,
@@ -159,29 +149,6 @@ export class AttachFailure extends Data.TaggedError('Attach')<{
   readonly message: string
 }> {}
 
-/** The daemon refused an action; retain its wire response for caller-specific handling. */
-export class ActionRefused extends Data.TaggedError('ActionRefused')<{
-  readonly response: ErrorEnvelope
-  readonly status: number
-  readonly message: string
-}> {}
-/** No usable action response arrived. Delivery may still have happened. */
-export class ActionTransportFailure extends Data.TaggedError('ActionTransportFailure')<{
-  readonly cause: unknown
-  readonly message: string
-}> {}
-/** Refusal or uncertain transport failure from an action invocation. */
-export type ActionFailure = ActionRefused | ActionTransportFailure
-
-/** Generated message.send input, allowing immutable draft tags. */
-export type MessageSendInput = Omit<
-  ActionOf<'message.send'>,
-  'api_version' | 'type' | 'parameters'
-> & {
-  readonly parameters: Omit<ActionOf<'message.send'>['parameters'], 'tags'> & {
-    readonly tags?: readonly string[]
-  }
-}
 
 /** Failures reported by a follow instead of terminating its event stream. */
 export type FollowFailure = SubscriptionLimit | DecodeFailure | Rejected | AttachFailure
@@ -257,6 +224,7 @@ export interface UnrecognizedEntry {
   readonly timestamp?: string
   readonly rawType: string
   readonly raw: unknown
+  readonly issue: string
 }
 
 /** One conversation frame: `replace` resets the timeline, otherwise `entries` revise it. */
@@ -265,14 +233,18 @@ export interface ConversationChunk {
   readonly id?: string
   readonly replace: boolean
   readonly hasMore: boolean
-  readonly entries: readonly (TimelineEntry | UnrecognizedEntry)[]
+  readonly olderCursor?: string
+  readonly sessionId?: string
+  readonly entries: readonly (ConversationEntry | UnrecognizedEntry)[]
   /** Raw page evidence before decoding/filtering; only explicit has_more=false proves emptiness. */
   readonly observation?: { readonly empty: boolean }
+  /** Negotiated header facts retain source/as_of annotations verbatim. */
+  readonly header?: Readonly<Record<string, unknown>>
 }
 
 /** Scoped collection follows and gateway state carried by one shared socket. */
-export class St3 extends Context.Service<
-  St3,
+export class Fractal extends Context.Service<
+  Fractal,
   {
     readonly connection: Stream.Stream<ConnectionState>
     /** Synchronously send a going-away close, then pause automatic reconnect. */
@@ -287,9 +259,6 @@ export class St3 extends Context.Service<
     readonly probeSockets: Effect.Effect<void>
     /** The gateway's capabilities (limits, actions and the scopes this credential holds). */
     readonly capabilities: Effect.Effect<Capabilities, Rejected>
-    /** A fresh HTTP snapshot, never the generated client's cached discovery snapshot. */
-    readonly snapshot: Effect.Effect<string, ActionFailure>
-    readonly messageSend: (request: MessageSendInput) => Effect.Effect<ActionResult, ActionFailure>
     /** One bounded published roster page, without the daemon's fresh-read wait. */
     readonly readAgents: Effect.Effect<{
       readonly value: readonly DecodedAgent[]
@@ -322,7 +291,7 @@ export class St3 extends Context.Service<
     /** Socket reachability is not Live: only a successfully decoded data frame establishes it. */
     readonly gatewaySyncStatus: Stream.Stream<SyncStatus>
   }
->()('@fractal/sdk/St3') {}
+>()('@fractal/sdk/Read') {}
 
 /** A caller-owned socket that can answer an identical initial subscribe without another send. */
 export interface AdoptedCollections {
@@ -333,11 +302,11 @@ export interface AdoptedCollections {
 }
 
 /** Optional host policy. The neutral SDK neither reads browser globals nor evicts hidden views. */
-export class St3Platform extends Context.Service<St3Platform, {
+export class FractalPlatform extends Context.Service<FractalPlatform, {
   readonly socket?: CollectionSocketFactory
   readonly takeEarlyCollections?: () => AdoptedCollections | undefined
   readonly admission?: (options: { readonly cap: number; readonly conversationSlots?: number }) => Admission<string>
-}>()('@fractal/sdk/St3Platform') {}
+}>()('@fractal/sdk/FractalPlatform') {}
 
 /** A typed decoder and an existing collection selector; no new wire collection or transport. */
 export interface FollowDescriptor<TResource> {
@@ -355,7 +324,7 @@ export const collectionWindow = (
 ): FollowDescriptor<DecodedResource> => ({ spec, decodeRow: decodeResourceRow })
 
 /** Gateway configuration and transport seams for the scoped SDK layer. */
-export interface St3Options {
+export interface FractalOptions {
   /** Gateway origin; the browser passes its own origin (the dev proxy or the serving gateway). */
   readonly baseUrl: string
   /** Bearer credential resolved for every HTTP request and socket open; never an actor selector. */
@@ -377,7 +346,7 @@ export interface St3Options {
   /** Test seam: HTTP reads and actions. */
   readonly fetch?: typeof fetch
   /** Authoritative transitions and frame work, without coupling the SDK to a metrics library. */
-  readonly onDiagnostics?: (event: St3Diagnostic) => void
+  readonly onDiagnostics?: (event: FractalDiagnostic) => void
   /** Called with the wire id after a follow's subscribe command is sent on an open WebSocket; includes resubscribe sends. */
   readonly onSubscribeSent?: (id: string) => void
   /** Actual-send callback with the canonical followKey; includes queued-open and resubscribe sends. */
@@ -392,53 +361,12 @@ export interface St3Options {
 }
 
 
-const decodeEntry = decodeUnknownSync(TimelineEntry)
-const decodeScreen = decodeUnknownSync(TerminalScreen)
 const decodeRuntime = decodeUnknownSync(Runtime)
 const decodeCapabilities = decodeUnknownSync(CapabilitiesCodec)
-const decodeActionResult = decodeUnknownSync(ActionResult)
-const decodeSnapshot = decodeUnknownSync(Snapshot)
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
-const actionFailure = (cause: unknown): ActionFailure =>
-  cause instanceof ClientError
-    ? new ActionRefused({
-        response: cause.response,
-        status: cause.status,
-        message: cause.response.message,
-      })
-    : new ActionTransportFailure({ cause, message: errorMessage(cause) })
 
-/** HTTP-only arrangement actions; sharing this port never opens another collections socket. */
-export interface ArrangementActionPort {
-  readonly snapshot: Effect.Effect<string, ActionFailure>
-  readonly submitAction: (request: ActionOf<'arrangement.edit'>) => Effect.Effect<typeof ActionResult.Type, ActionFailure>
-}
-
-export const arrangementActions = (client: Pick<FractalClient, 'capabilities' | 'arrangementEdit'>): ArrangementActionPort => ({
-  snapshot: Effect.tryPromise({
-    try: () => client.capabilities(),
-    catch: actionFailure,
-  }).pipe(
-    Effect.flatMap((envelope) => Effect.try({
-      try: () => decodeSnapshot(envelope.snapshot).id,
-      catch: actionFailure,
-    })),
-    Effect.withSpan('st3.snapshot'),
-  ),
-  submitAction: Effect.fn('st3.arrangement.edit')((request: ActionOf<'arrangement.edit'>) =>
-    Effect.tryPromise({
-      try: () => client.arrangementEdit(request),
-      catch: actionFailure,
-    }).pipe(
-      Effect.flatMap((envelope) => Effect.try({
-        try: () => decodeActionResult(envelope.value),
-        catch: actionFailure,
-      })),
-    )),
-})
-
-const unrecognized = (raw: unknown): UnrecognizedEntry | undefined => {
+const unrecognized = (raw: unknown, issue: string): UnrecognizedEntry | undefined => {
   if (typeof raw !== 'object' || raw === null) return undefined
   const fields = raw as Record<string, unknown>
   if (typeof fields['id'] !== 'string' || typeof fields['sequence'] !== 'number') return undefined
@@ -450,25 +378,27 @@ const unrecognized = (raw: unknown): UnrecognizedEntry | undefined => {
     ...(typeof fields['timestamp'] === 'string' ? { timestamp: fields['timestamp'] } : {}),
     rawType: typeof fields['type'] === 'string' ? fields['type'] : 'unknown',
     raw,
+    issue,
   }
 }
 
 /** Decode entries without confusing discarded payloads or omitted pagination with an empty page. */
 export const decodeConversationChunk = (
-  frame: Extract<CollectionFrame, { kind: 'conversation' }>,
+  frame: Omit<Extract<CollectionFrame, { kind: 'conversation' }>, 'items' | 'header'> & { readonly items: readonly unknown[]; readonly header?: unknown },
 ): ConversationChunk => ({
   id: frame.id,
   replace: frame.replace,
   hasMore: frame.has_more ?? false,
+  ...(frame.older_cursor === undefined ? {} : { olderCursor: frame.older_cursor }),
+  sessionId: frame.session_id,
+  ...(frame.header !== null && typeof frame.header === 'object' && !Array.isArray(frame.header)
+    ? { header: Object.fromEntries(Object.entries(frame.header)) } : {}),
   ...(frame.replace || frame.items.length > 0
     ? { observation: { empty: frame.replace && frame.items.length === 0 && frame.has_more === false } }
     : {}),
-  entries: frame.items.flatMap<TimelineEntry | UnrecognizedEntry>((raw) => {
-    try {
-      return [decodeEntry(raw)]
-    } catch {
-      return unrecognized(raw) ?? []
-    }
+  entries: frame.items.flatMap<ConversationEntry | UnrecognizedEntry>((raw) => {
+    const decoded = decodeConversationEntry(raw)
+    return decoded._tag === 'Entry' ? [decoded.entry] : unrecognized(raw, decoded.issue) ?? []
   }),
 })
 
@@ -480,12 +410,14 @@ const RETRY_DELAY = '1 second'
 
 /** How one kind of follow talks on the socket. */
 interface FollowProtocol<A> {
+  /** Scoped decoder setup runs alongside transport; only data frames wait for it. */
+  readonly prepare?: Effect.Effect<void, FollowFailure>
   readonly subscribe: (args: {
     readonly stream: CollectionStream
     readonly id: string
   }) => Effect.Effect<void, FollowFailure>
   /** The decoded value a data frame carries, or `undefined` for a frame that changes nothing. */
-  readonly onData: (frame: CollectionFrame) => A | undefined
+  readonly onData: (frame: CollectionFrame) => A | DecodeFailure | undefined
   /** The socket dropped: forget anything the next snapshot replaces. */
   readonly reset: () => void
 }
@@ -511,14 +443,15 @@ const tracedStream = (
     subscribe: issue(stream.subscribe),
     subscribeGlasses: issue(stream.subscribeGlasses),
     subscribeArrangements: issue(stream.subscribeArrangements),
+    subscribeOrderedMemberships: issue(stream.subscribeOrderedMemberships),
     subscribeTerminal: issue(stream.subscribeTerminal),
     subscribeConversation: issue(stream.subscribeConversation),
   }
 }
 
-const make = (options: St3Options) =>
+const make = (options: FractalOptions) =>
   Effect.gen(function* () {
-    const platform = Option.getOrUndefined(yield* Effect.serviceOption(St3Platform))
+    const platform = Option.getOrUndefined(yield* Effect.serviceOption(FractalPlatform))
     /** A subscribe's own attempt context while the client issues it; otherwise the caller's. */
     let outbound: TraceContext | undefined
     const client = new FractalClient({
@@ -563,7 +496,7 @@ const make = (options: St3Options) =>
       const adopted = early?.consume()
       if (adopted !== undefined) currentSocket = adopted
       else if (freshSocket !== undefined) currentSocket = freshSocket(url, protocols, headers)
-      else throw new TypeError('St3 requires a collections socket factory or a St3Platform layer')
+      else throw new TypeError('Fractal requires a collections socket factory or a FractalPlatform layer')
       return currentSocket
     }
     const followKeys = new Map<string, string>()
@@ -724,14 +657,25 @@ const make = (options: St3Options) =>
             emit({ _tag: 'Observed', value })
           }
           const protocol = makeProtocol(observe)
+          let decoderReady = protocol.prepare === undefined
+          let stopped = false
+          // Projected terminal frames are complete replacements (client-v0 terminal protocol).
+          // Retain at most one cold screen; raw PTY deltas never use this follow path.
+          let pendingScreen: Extract<CollectionFrame, { kind: 'screen' }> | undefined
+          const resetProtocol = () => {
+            pendingScreen = undefined
+            protocol.reset()
+          }
           // Status writes precede the terminal FollowEvent so no consumer teardown races a verdict.
           const fail = (error: FollowFailure, status = syncStatusFromFailure(error)) => {
+            if (stopped) return
             setSync(status)
             endAttempt('failed')
             emit({ _tag: 'Failed', error })
             stop()
           }
           const stop = () => {
+            stopped = true
             endAttempt('disposed')
             followKeys.delete(id)
             fresheners.delete(id)
@@ -739,7 +683,7 @@ const make = (options: St3Options) =>
               freshnessTable.delete(key)
               publishFreshness()
             }
-            protocol.reset()
+            resetProtocol()
             channel.unregister(id)
             if (open.get(key)?.id === id) {
               open.delete(key)
@@ -747,6 +691,22 @@ const make = (options: St3Options) =>
               reportFollows()
             }
             Queue.endUnsafe(queue)
+          }
+          const decodeFrame = (frame: CollectionFrame) => {
+            if (stopped) return
+            const started =
+              options.onDiagnostics === undefined || spec._tag === 'Window'
+                ? undefined
+                : performance.now()
+            let value: A | DecodeFailure | undefined
+            try {
+              value = protocol.onData(frame)
+            } finally {
+              if (started !== undefined)
+                options.onDiagnostics?.({ _tag: 'Decode', elapsedMs: performance.now() - started })
+            }
+            if (value instanceof DecodeFailure) fail(value)
+            else if (value !== undefined) observe(value)
           }
           // Register cleanup before the interruptible budget latch: cancellation while the
           // first probe is pending must remove routing/freshness entries too.
@@ -772,10 +732,11 @@ const make = (options: St3Options) =>
           open.set(key, {
             id,
             evict: () => {
+              stopped = true
               endAttempt('disposed')
               applyFreshness({ _tag: 'Evicted' })
               emit({ _tag: 'Stale' })
-              protocol.reset()
+              resetProtocol()
               channel.unregister(id)
               open.delete(key)
               reportFollows()
@@ -788,6 +749,7 @@ const make = (options: St3Options) =>
           const context = yield* Effect.context()
           const subscribe = ({ stream, id: wireId }: { readonly stream: CollectionStream; readonly id: string }) =>
             Effect.suspend(() => {
+              if (stopped) return Effect.void
               endAttempt('superseded')
               // The early-connect roster subscribe answers an identical first window subscribe.
               const adopted = spec._tag === 'Window'
@@ -821,8 +783,9 @@ const make = (options: St3Options) =>
               probeEligible: spec._tag !== 'Terminal',
               onRejected: (message, code) => fail(new Rejected({ code, message })),
               onDrop: () => {
+                if (stopped) return
                 endAttempt('dropped')
-                protocol.reset()
+                resetProtocol()
                 applyFreshness({
                   _tag: 'SocketDropped',
                   attempt: 1,
@@ -831,9 +794,10 @@ const make = (options: St3Options) =>
                 emit({ _tag: 'Stale' })
               },
               onFrame: (frame) => {
+                if (stopped) return
                 if (frame.kind === 'resync') {
                   options.onDiagnostics?.({ _tag: 'Resync' })
-                  protocol.reset()
+                  resetProtocol()
                   applyFreshness({
                     _tag: 'Resync',
                     ...(frame.code === undefined ? {} : { code: frame.code }),
@@ -853,6 +817,7 @@ const make = (options: St3Options) =>
                     return
                   }
                   if (isSubscriptionLimit(frame)) {
+                    resetProtocol()
                     applyFreshness({ _tag: 'Retry' })
                     const retried = admission.serverLimit(key, lane)
                     reportFollows()
@@ -868,7 +833,7 @@ const make = (options: St3Options) =>
                     return
                   }
                   if (isTransientCode(frame.code)) {
-                    protocol.reset()
+                    resetProtocol()
                     applyFreshness({
                       _tag: 'Retry',
                       ...(frame.code === undefined ? {} : { code: frame.code }),
@@ -893,24 +858,25 @@ const make = (options: St3Options) =>
                   )
                   return
                 }
-                const started =
-                  options.onDiagnostics === undefined || spec._tag === 'Window'
-                    ? undefined
-                    : performance.now()
-                let value: A | undefined
-                try {
-                  value = protocol.onData(frame)
-                } finally {
-                  if (started !== undefined)
-                    options.onDiagnostics?.({
-                      _tag: 'Decode',
-                      elapsedMs: performance.now() - started,
-                    })
-                }
-                if (value !== undefined) observe(value)
+                if (!decoderReady && frame.kind === 'screen') pendingScreen = frame
+                else decodeFrame(frame)
               },
             },
           })
+          // Transport admission and attach must never wait for an optional codec chunk.
+          // Only the latest complete screen waits; control frames invalidate it synchronously.
+          if (protocol.prepare !== undefined && !stopped) {
+            yield* Effect.forkIn(protocol.prepare.pipe(Effect.match({
+              onSuccess: () => {
+                if (stopped) return
+                decoderReady = true
+                const screen = pendingScreen
+                pendingScreen = undefined
+                if (screen !== undefined) decodeFrame(screen)
+              },
+              onFailure: (error) => fail(error),
+            })), scope)
+          }
         }),
       )
 
@@ -1063,7 +1029,16 @@ const make = (options: St3Options) =>
         spec,
         makeProtocol: () => {
           let initialRuntime = spec.initialRuntime
+          let decodeScreen: (value: unknown) => TerminalScreen
           return {
+            prepare: Effect.tryPromise({
+              try: async () => {
+                // Optional PTY and mutation validators must not load on read startup.
+                const { TerminalScreen } = await import('@fractal/client/schema')
+                decodeScreen = decodeUnknownSync(TerminalScreen)
+              },
+              catch: () => new DecodeFailure({ message: 'Fractal terminal screen codec could not load' }),
+            }),
             subscribe: ({ stream, id }) =>
               Effect.suspend(() => {
                 const observation = initialRuntime
@@ -1077,9 +1052,8 @@ const make = (options: St3Options) =>
               try {
                 return decodeScreen(frame.value)
               } catch {
-                // The schema failure quotes the frame, which carries screen text: log fixed text only.
-                console.warn('st3 terminal screen did not decode')
-                return undefined
+                // Decoder errors quote screen text; expose only a fixed diagnostic.
+                return new DecodeFailure({ message: 'Fractal terminal screen did not decode' })
               }
             },
             reset: () => {},
@@ -1087,7 +1061,7 @@ const make = (options: St3Options) =>
         },
       })
 
-    return St3.of({
+    return Fractal.of({
       connection: SubscriptionRef.changes(channel.connection),
       suspendSockets: () => {
         // Send synchronously before Effect interruption/finalization or document teardown.
@@ -1172,44 +1146,6 @@ const make = (options: St3Options) =>
           ),
         ),
       ),
-      snapshot: sdkRequest('st3.snapshot', (traced) =>
-        Effect.tryPromise({
-          try: () => traced.capabilities(),
-          catch: actionFailure,
-        }).pipe(
-          Effect.flatMap((envelope) =>
-            Effect.try({
-              try: () => decodeSnapshot(envelope.snapshot).id,
-              catch: actionFailure,
-            }),
-          ),
-        ),
-      ),
-      messageSend: (request: MessageSendInput) =>
-        sdkRequest('st3.messageSend', (traced) =>
-          Effect.tryPromise({
-            try: () => {
-              const { tags, ...parameters } = request.parameters
-              return traced.messageSend({
-                id: request.id,
-                idempotency_key: request.idempotency_key,
-                fence: request.fence,
-                parameters: {
-                  ...parameters,
-                  ...(tags === undefined ? {} : { tags: [...tags] }),
-                },
-              })
-            },
-            catch: actionFailure,
-          }).pipe(
-            Effect.flatMap((envelope) =>
-              Effect.try({
-                try: () => decodeActionResult(envelope.value),
-                catch: actionFailure,
-              }),
-            ),
-          ),
-        ),
       followWindow,
       watch,
       followConversation,
@@ -1225,4 +1161,4 @@ const make = (options: St3Options) =>
   })
 
 /** The SDK for the life of the layer: one socket, opened on build, closed on release. */
-export const St3Live = (options: St3Options) => Layer.effect(St3, make(options))
+export const FractalLive = (options: FractalOptions) => Layer.effect(Fractal, make(options))

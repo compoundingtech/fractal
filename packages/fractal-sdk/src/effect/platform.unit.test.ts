@@ -5,7 +5,7 @@ import * as Fiber from 'effect/Fiber'
 import * as Stream from 'effect/Stream'
 import { describe, expect } from 'vitest'
 import { makeAdmission } from './admission.ts'
-import { collectionWindow, followKey, St3, St3Live, type FollowDescriptor } from './mod.ts'
+import { collectionWindow, followKey, Fractal, FractalLive, type FollowDescriptor } from './mod.ts'
 
 const snapshot = {
   id: 'snapshot/1', created_at: '2026-10-21T00:00:00Z', host_id: 'host/test',
@@ -21,9 +21,11 @@ describe('host-independent SDK', () => {
   it.live('builds and follows without browser globals, sharing and releasing one authenticated socket', () => {
     const commands: { kind: string; id: string; collection?: string }[] = []
     const httpAuthorization: (string | null)[] = []
+    const httpClients: (string | null)[] = []
     let socketCount = 0
     let closes = 0
     let socketAuthorization: string | undefined
+    let socketClient: string | undefined
     const socket: CollectionSocket = {
       onopen: null, onmessage: null, onclose: null, onerror: null,
       send: (text) => { commands.push(JSON.parse(text)) },
@@ -32,14 +34,16 @@ describe('host-independent SDK', () => {
     const factory: CollectionSocketFactory = (_url, _protocols, headers) => {
       socketCount += 1
       socketAuthorization = headers.Authorization
+      socketClient = headers['x-st3-client']
       queueMicrotask(() => socket.onopen?.())
       return socket
     }
-    const layer = St3Live({
+    const layer = FractalLive({
       baseUrl: 'http://gateway.test', maxFollows: 2,
       credential: () => 'paired-test-credential', client: 'sdk-node-test', socket: factory,
       fetch: async (_input, init) => {
         httpAuthorization.push(new Headers(init?.headers).get('authorization'))
+        httpClients.push(new Headers(init?.headers).get('x-st3-client'))
         return new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: { capabilities: [] } }))
       },
     })
@@ -47,7 +51,7 @@ describe('host-independent SDK', () => {
       expect('window' in globalThis).toBe(false)
       expect('document' in globalThis).toBe(false)
       yield* Effect.gen(function* () {
-        const sdk = yield* St3
+        const sdk = yield* Fractal
         const first = yield* Effect.forkChild(sdk.watch(collectionWindow({ _tag: 'Window', collection: 'agents', limit: 50 })).pipe(Stream.runDrain))
         // A descriptor can choose its decoded value without another projection or socket.
         const descriptor: FollowDescriptor<{ readonly identity: string }> = {
@@ -64,6 +68,8 @@ describe('host-independent SDK', () => {
         expect(socketCount).toBe(1)
         expect(socketAuthorization).toBe('Bearer paired-test-credential')
         expect(httpAuthorization).toContain('Bearer paired-test-credential')
+        expect(socketClient).toBe('sdk-node-test')
+        expect(httpClients).toContain('sdk-node-test')
         expect(commands.filter((command) => command.kind === 'subscribe').map((command) => command.collection)).toEqual(['agents', 'missions'])
         expect(followKey(descriptor.spec)).not.toBe(followKey({ ...descriptor.spec, descriptor: 'another-decoder' }))
         const subscription = commands.find((command) => command.collection === 'missions')!
@@ -71,8 +77,10 @@ describe('host-independent SDK', () => {
           kind: 'snapshot', id: subscription.id, collection: 'missions', has_more: false,
           items: [{ id: 'mission/test', revision: '1' }], order: ['mission/test'], snapshot,
         }) })
-        yield* Effect.sleep('10 millis')
-        expect(identities).toEqual(['mission/test'])
+        // Ingest and Effect publication complete on separate scheduler turns.
+        yield* Effect.promise(async () => {
+          await expect.poll(() => identities, { timeout: 2_000 }).toEqual(['mission/test'])
+        })
         yield* Fiber.interrupt(first)
         yield* settle
         expect(commands.filter((command) => command.kind === 'unsubscribe')).toHaveLength(1)

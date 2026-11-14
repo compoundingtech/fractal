@@ -289,14 +289,7 @@ fn spawn(
     recorder: Option<&Path>,
 ) -> Result<Child> {
     let (log, report) = (&item.log, &item.report);
-    let mut declared = item.environment.clone();
-    for (key, value) in base {
-        if key.starts_with("ST3_") {
-            declared.insert(key.clone(), value.clone());
-        } else {
-            declared.entry(key.clone()).or_insert_with(|| value.clone());
-        }
-    }
+    let mut declared = with_check_environment(&item.environment, base);
     // A gate acts as no agent, as the reconciler starts it.
     crate::environment::remove_aliases(&mut declared, "ST_AGENT");
     crate::environment::remove_aliases(&mut declared, crate::suspension::RESUME_ENV);
@@ -338,25 +331,44 @@ fn check_environment(host: &CheckHost<'_>) -> Result<BTreeMap<String, String>> {
                 .to_string_lossy()
                 .into_owned(),
         ),
-        (
-            "ST3_DRIVER_STATE_DIR".to_owned(),
-            host.state_dir
-                .join("drivers")
-                .to_string_lossy()
-                .into_owned(),
-        ),
     ]);
+    crate::environment::set(
+        &mut environment,
+        "ST3_DRIVER_STATE_DIR",
+        host.state_dir
+            .join("drivers")
+            .to_string_lossy()
+            .into_owned(),
+    );
     let link = crate::reconcile::st_binary_link(host.state_dir);
     let st_binary = if link.exists() {
         link
     } else {
         crate::reconcile::launch_executable()?
     };
-    environment.insert("ST3_BIN".into(), st_binary.to_string_lossy().into_owned());
+    crate::environment::set(&mut environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());
     if let Some(endpoint) = ENDPOINT.get() {
-        environment.insert("ST3_ENDPOINT".into(), endpoint.clone());
+        crate::environment::set(&mut environment, "ST3_ENDPOINT", endpoint.clone());
     }
     Ok(environment)
+}
+
+/// A gate's declared environment with the check's own values. A launcher-owned `ST3_` value
+/// replaces an authored value in either spelling, as `perform_start` does for members; the
+/// other values only fill names the gate leaves unset.
+fn with_check_environment(
+    authored: &BTreeMap<String, String>,
+    base: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut declared = authored.clone();
+    for (key, value) in base {
+        if key.starts_with("ST3_") {
+            crate::environment::set(&mut declared, key, value.clone());
+        } else {
+            declared.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    declared
 }
 
 /// Run variables for a check: each names this check where a run would name itself.
@@ -521,4 +533,36 @@ pub fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn a_check_gets_the_daemon_endpoint_in_both_spellings_and_no_gate_replaces_it() {
+        super::set_endpoint("/run/daemon.sock".into());
+        let state = tempfile::tempdir().unwrap();
+        let base = super::check_environment(&super::CheckHost {
+            node: "node",
+            state_dir: state.path(),
+            pty_root: state.path(),
+        })
+        .unwrap();
+        for name in ["ST3_ENDPOINT", "FRACTAL_ENDPOINT"] {
+            assert_eq!(base[name], "/run/daemon.sock", "{name}");
+        }
+        for name in ["BIN", "DRIVER_STATE_DIR"] {
+            assert_eq!(base[&format!("ST3_{name}")], base[&format!("FRACTAL_{name}")], "{name}");
+        }
+        let authored = BTreeMap::from([
+            ("FRACTAL_ENDPOINT".to_owned(), "/authored.sock".to_owned()),
+            ("ST_HOOKS".to_owned(), "/authored-hooks".to_owned()),
+        ]);
+        let declared = super::with_check_environment(&authored, &base);
+        for name in ["ST3_ENDPOINT", "FRACTAL_ENDPOINT"] {
+            assert_eq!(declared[name], "/run/daemon.sock", "{name}");
+        }
+        assert_eq!(declared["ST_HOOKS"], "/authored-hooks");
+    }
 }

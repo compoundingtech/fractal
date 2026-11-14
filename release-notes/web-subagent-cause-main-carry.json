@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry current main into the subagent reporting-cause follow-up",
+  "replay": {"status": "none", "detail": "Main carry only; no additional replay change."},
+  "schema": {"status": "none", "detail": "No additional persisted or wire schema change."},
+  "rules": {"status": "none", "detail": "No additional checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Clean merge retains main updates and cause-specific sidebar behavior."},
+  "downtime": {"status": "none", "detail": "No additional service restart required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Revert the merge using its first parent to remove the main carry."}
+}

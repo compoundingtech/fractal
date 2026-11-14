@@ -13,6 +13,7 @@ import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
+import { tooltipFor } from './story-play'
 import { surfaceVars as surface, textVars as text, spaceVars as space, typeVars as type, radiusVars as radius } from './assistant-ui/composition-tokens.stylex'
 
 const panes: readonly WorkbenchPane[] = [
@@ -38,6 +39,7 @@ const styles = stylex.create({
 
 /** Only production components are mounted; the CSF render callback owns host observations. */
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Details Tab Strip',
   component: Workbench,
   parameters: {
@@ -86,6 +88,22 @@ const meta = {
   },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'LoneDetailsNarrow:contract-fixture',
+  'ManyTabs:contract-fixture',
+  'Mounted159SelectedFirst:contract-fixture',
+  'Mounted159SelectedLast:contract-fixture',
+  'Mounted160SelectedFirst:contract-fixture',
+  'Mounted160SelectedLast:contract-fixture',
+  'RawStability159:contract-fixture',
+  'RawStability160:contract-fixture',
+  'RawStability:contract-fixture',
+  'Threshold:contract-fixture',
+  'Wide:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 async function frames(count = 3) {
@@ -228,20 +246,6 @@ function assertSelected(tab: HTMLElement) {
   requireContract(panel.querySelector<HTMLElement>('[data-pane-key]')?.dataset.paneKey === tab.dataset.tabKey, 'Wrong resource body')
   requireContract(painted(tab), 'Selected resource is not revealed whole')
 }
-/**
- * The tab's disclosure, resolved through its own aria-describedby. A document-wide ByRole
- * query re-runs on every mutation at 46ms (unthrottled) to 319ms (6x CPU) per check on this
- * page, so under load a few checks consumed the whole 1s budget meant for RAC's 0 or 350ms
- * (warm or cold) open delay and missed a tooltip that was already mounted.
- */
-async function tooltipFor(tab: HTMLElement, name: string) {
-  return waitFor(() => {
-    const tooltip = tab.getAttribute('aria-describedby')?.split(/\s+/).map(id => tab.ownerDocument.getElementById(id)).find(node => node?.getAttribute('role') === 'tooltip')
-    requireContract(tooltip !== undefined && tooltip !== null, `Missing tooltip for ${name}`)
-    expect(tooltip).toHaveAccessibleName(name)
-    return tooltip
-  })
-}
 async function interactionPlay({ canvasElement }: { canvasElement: HTMLElement }) {
   const strip = await stripFor(canvasElement)
   const tabs = within(strip).getAllByRole('tab')
@@ -276,6 +280,10 @@ async function interactionPlay({ canvasElement }: { canvasElement: HTMLElement }
   try { await rejectsControl('Missing keyboard focus ring', assertFocus) } finally { tabs[1].style.outlineStyle = outline }
   for (const tab of [tabs[2], tabs.at(-1)!, tabs[0]]) {
     await userEvent.keyboard(tab === tabs[2] ? '{Home}{ArrowRight}{ArrowRight}' : tab === tabs[0] ? '{Home}' : '{End}')
+    // The keyboard reveal scrolls the strip, and the browser dispatches that scroll event with the next frame. RAC
+    // closes an open tooltip on scroll, so on a loaded host whose next frame comes late the event closed the hover
+    // tooltip below (#4488). Scroll events are dispatched before frame callbacks, so one frame lets it land first.
+    await frames(1)
     await userEvent.click(tab)
     assertSelected(tab)
     assertPaint(strip)

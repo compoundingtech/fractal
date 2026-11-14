@@ -1,6 +1,6 @@
-//! One socket to st for live collection windows, conversations and a terminal.
+//! A primary socket for live windows, conversations and a terminal, plus read invalidations.
 //!
-//! The feed holds one collection socket with the attention, missions and agents windows, the
+//! The feed holds a primary collection socket with the attention, missions and agents windows, the
 //! open conversations, and, while a terminal is open, that terminal. st joins each row and each
 //! conversation, so callers never join lists themselves or read item by item. When the socket drops,
 //! the feed opens a new one, subscribes again, and attaches the open terminal again. Nothing
@@ -13,7 +13,12 @@ pub mod cache;
 pub mod model;
 mod inventory;
 mod terminal;
+mod read_positions;
 pub mod tree;
+#[cfg(test)]
+mod read_positions_tests;
+#[cfg(test)]
+mod revisioned_agents_tests;
 
 pub use terminal::{action_pair, terminal_fence, terminal_screen_fence};
 pub use inventory::{Inventories, Inventory};
@@ -28,7 +33,7 @@ use std::time::Duration;
 use tokio::sync::mpsc as channel;
 use tokio::time::Instant;
 
-/// How many current items each window holds. st sends at most 200.
+/// How many current items legacy windows hold. Revisioned agents rosters are complete.
 pub const WINDOW: usize = 200;
 
 /// How often the stream's own quiet time is looked at; nothing is sent to look.
@@ -55,19 +60,23 @@ const RETRY_DELAYS: [Duration; 5] = [
 /// How long a fresh request may take to prove st is answering after its stream dropped.
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 
-/// `default`, or `STUI_FEED_TIMER_CAP_MS` when that is shorter: a cap on the quiet check, the
+/// `default`, or `FRACTAL_FEED_TIMER_CAP_MS` when that is shorter: a cap on the quiet check, the
 /// ping, the pong wait and the retry delays above. Only the end-to-end tests set it, so they need
 /// not wait 20 s to see a silent link dropped.
 fn timer(default: Duration) -> Duration {
     static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
-    let cap = *CAP.get_or_init(|| {
-        std::env::var("STUI_FEED_TIMER_CAP_MS")
-            .ok()
-            .and_then(|ms| ms.parse().ok())
-            .map(Duration::from_millis)
-    });
+    let cap = *CAP.get_or_init(|| timer_cap_with(&|name| std::env::var(name).ok()));
     cap.map_or(default, |cap| cap.min(default))
 }
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+fn timer_cap_with(get: &dyn Fn(&str) -> Option<String>) -> Option<Duration> {
+    get("FRACTAL_FEED_TIMER_CAP_MS")
+        .or_else(|| get("STUI_FEED_TIMER_CAP_MS"))
+        .and_then(|ms| ms.parse().ok())
+        .map(Duration::from_millis)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
 /// The wait before the attempt after `failures` failed ones.
 fn retry_delay(failures: usize) -> Duration {
@@ -78,6 +87,16 @@ fn retry_delay(failures: usize) -> Duration {
 const TERMINAL: &str = "terminal";
 /// The subscription ID of the open conversation.
 const CONVERSATION: &str = "conversation";
+
+/// A snapshot sequence stays private until every whole-row chunk has arrived.
+struct AgentsSequence {
+    publication: fractal_client::AgentsPublicationMetadata,
+    snapshot: String,
+    count: u64,
+    next: u64,
+    rows: BTreeMap<String, Resource>,
+    order: Vec<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Window {
@@ -91,6 +110,9 @@ pub enum Window {
     Summary,
     /// The selected person’s sidebar organization, when supported.
     Arrangements,
+    /// The person's read positions, when supported, on a dedicated invalidation socket.
+    /// Its frames say that positions changed, and the UI reads their list again.
+    ReadPositions,
     Inventory(Inventory),
 }
 
@@ -105,6 +127,7 @@ impl Window {
             Self::Glasses => "glasses",
             Self::Summary => "summary",
             Self::Arrangements => "arrangements",
+            Self::ReadPositions => "read-positions",
             Self::Inventory(inventory) => inventory.collection(),
         }
     }
@@ -112,7 +135,7 @@ impl Window {
     fn from_id(id: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain([Self::Glasses, Self::Summary, Self::Arrangements])
+            .chain([Self::Glasses, Self::Summary, Self::Arrangements, Self::ReadPositions])
             .find(|window| window.id() == id)
             .or_else(|| Inventory::from_id(id).map(Self::Inventory))
     }
@@ -120,14 +143,14 @@ impl Window {
     /// How many items to follow: every glass a person may keep, a page of anything else.
     fn limit(self) -> usize {
         match self {
-            Self::Glasses | Self::Arrangements => GLASSES,
+            Self::Glasses | Self::Arrangements | Self::ReadPositions => GLASSES,
             _ => WINDOW,
         }
     }
 }
 
 /// The glasses capability version whose glasses are splits of tab groups.
-const GLASSES_VERSION: u32 = 1;
+const GLASSES_VERSION: u64 = 1;
 
 /// The most glasses st keeps live for one person.
 const GLASSES: usize = 100;
@@ -145,7 +168,7 @@ pub enum Update {
     Degraded(String),
     /// The granted glasses shape, delivered before its window. The embedding UI chooses how
     /// to store glasses for this version; the feed owns no application state.
-    GlassesVersion(u32),
+    GlassesVersion(u64),
     /// Optional inventory admission and the member build, discovered once per connection.
     InventorySupport { granted: bool, member_build: Option<String> },
     /// A window's current items, in st's display order.
@@ -166,6 +189,8 @@ pub enum Update {
     /// The open conversation's entries. `replace` means these are its newest page and every
     /// earlier entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
+        /// The wire subscription that delivered this frame, for content-free diagnostics.
+        subscription_id: String,
         target: String,
         /// The session the entries belong to: earlier pages are read from its timeline.
         session_id: String,
@@ -238,7 +263,7 @@ pub enum Command {
 }
 
 /// Three conversations remain live alongside collection windows, glasses and a terminal.
-/// Optional arrangements require the advertised sixteen-subscription socket capacity.
+/// Read-position invalidations use a separate socket, preserving all six inventory slots.
 pub const MAX_CONVERSATIONS: usize = 3;
 
 /// A conversation being shown, on its own subscription.
@@ -249,6 +274,9 @@ struct Conversing {
     /// When to subscribe again after a failure; `None` while subscribed.
     retry_at: Option<Instant>,
     failures: usize,
+    /// When it began failing without a page in between: a failure st or the feed retries is
+    /// said only once it has lasted `REPORT_AFTER`.
+    failing_since: Option<Instant>,
 }
 
 /// The terminal being followed.
@@ -529,7 +557,7 @@ async fn connected(
     // earlier shape would send glasses this Fractal TUI cannot decode, and that drops the connection.
     let capabilities = match client.capabilities().await {
         Ok(capabilities) => capabilities,
-        Err(error) => return Ended::Dropped(error.plain()),
+        Err(error) => return Ended::Dropped(error.human()),
     };
     let version = if glasses {
         capabilities
@@ -555,6 +583,7 @@ async fn connected(
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
     let inventory_granted = supports("inventory-collections") && supports("collections");
+    let revisioned_agents = supports("collections.agents.revisioned.v1");
     if updates.send(Update::InventorySupport {
         granted: inventory_granted,
         member_build: capabilities.value.machine_version.clone(),
@@ -563,6 +592,16 @@ async fn connected(
     let sidebar_person = person.filter(|person| {
         person.starts_with("person/") && supports("arrangements") && supports("collections")
     });
+    let positions_person = person.filter(|person| {
+        person.starts_with("person/") && supports("read-positions") && supports("collections")
+    });
+    let positions = async {
+        if let Some(person) = positions_person {
+            read_positions::run(client, person, updates).await;
+        }
+    };
+    tokio::pin!(positions);
+    let mut positions_running = positions_person.is_some();
     // From version 2 a glass's splits keep their sizes in st.
     if let Some(version) = version
         && updates.send(Update::GlassesVersion(version)).is_err()
@@ -576,10 +615,12 @@ async fn connected(
         .chain(granted.then_some(Window::Glasses))
         .chain(summary.then_some(Window::Summary))
     {
-        if let Err(error) = stream
-            .subscribe(window.id(), window.id(), window.limit(), None, None)
-            .await
-        {
+        let result = if window == Window::Agents && revisioned_agents {
+            stream.subscribe_agents_publication(window.id()).await
+        } else {
+            stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+        };
+        if let Err(error) = result {
             return Ended::Dropped(error.to_string());
         }
     }
@@ -587,9 +628,10 @@ async fn connected(
         && let Err(error) = stream.subscribe_arrangements("arrangements", person, GLASSES, None).await {
         return Ended::Dropped(error.to_string());
     }
+    // The main socket never subscribes to read positions.
     if inventory_granted {
         for inventory in inventories.windows() {
-            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
+            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
         }
     }
     for current in conversing.iter_mut() {
@@ -598,6 +640,8 @@ async fn connected(
         }
     }
     let mut windows = BTreeMap::<Window, BTreeMap<String, Resource>>::new();
+    let mut agents_sequence: Option<AgentsSequence> = None;
+    let mut agents_publication: Option<fractal_client::AgentsPublicationMetadata> = None;
     // A window st stopped (its first read failed) is asked for again after a backoff, so a list
     // never stays stale under a live connection.
     let mut window_retries = WindowRetries::default();
@@ -619,6 +663,9 @@ async fn connected(
         let window_at = window_retries.next();
         let report_at = pending_reports.next();
         tokio::select! {
+            () = &mut positions, if positions_running => {
+                positions_running = false;
+            }
             _ = probe.tick() => {
                 let quiet = heard.quiet_for();
                 if quiet < timer(QUIET_BEFORE_PING) {
@@ -628,7 +675,7 @@ async fn connected(
                     match pinged {
                         None => {
                             if let Err(error) = stream.ping().await {
-                                return Ended::Dropped(error.plain());
+                                return Ended::Dropped(error.human());
                             }
                             pinged = Some(Instant::now());
                         }
@@ -652,7 +699,62 @@ async fn connected(
                 let received = std::time::Instant::now();
                 *failures = 0;
                 match event {
-                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more } => {
+                    CollectionEvent::AgentsSnapshotChunk { id, snapshot, publication, chunk_index, chunk_count, items, order, has_more, .. } => {
+                        if !revisioned_agents || id != Window::Agents.id() { continue; }
+                        if chunk_index == 0 {
+                            agents_sequence = Some(AgentsSequence { publication: publication.clone(),
+                                snapshot: snapshot.id.clone(), count: chunk_count, next: 0,
+                                rows: BTreeMap::new(), order: Vec::new() });
+                        }
+                        let Some(sequence) = agents_sequence.as_mut() else {
+                            return Ended::Dropped("agents snapshot started without its first chunk".into());
+                        };
+                        if sequence.publication != publication || sequence.snapshot != snapshot.id
+                            || sequence.count != chunk_count || sequence.next != chunk_index
+                            || chunk_count == 0 || chunk_index >= chunk_count || has_more
+                        {
+                            return Ended::Dropped("inconsistent agents snapshot sequence".into());
+                        }
+                        sequence.rows.extend(items.into_iter().map(|agent| {
+                            let item = Resource::Agent(agent);
+                            (item.header().id.clone(), item)
+                        }));
+                        sequence.order.extend(order);
+                        sequence.next += 1;
+                        if sequence.next == sequence.count {
+                            let sequence = agents_sequence.take().expect("complete sequence exists");
+                            agents_publication = Some(sequence.publication);
+                            let rows = windows.entry(Window::Agents).or_default();
+                            *rows = sequence.rows;
+                            window_retries.loaded(Window::Agents);
+                            pending_reports.cancel(Window::Agents);
+                            if !send_window(updates, received, Window::Agents, snapshot, rows, &sequence.order, false) {
+                                return Ended::Closed;
+                            }
+                        }
+                    }
+                    CollectionEvent::AgentsChanges { id, snapshot, publication, base_revision, upserts, removes, order, has_more, .. } => {
+                        if !revisioned_agents || id != Window::Agents.id() { continue; }
+                        if agents_sequence.is_some() || has_more || !agents_publication.as_ref().is_some_and(|base|
+                            base.node_epoch == publication.node_epoch && base.revision == base_revision
+                                && publication.revision > base_revision)
+                        {
+                            return Ended::Dropped("agents delta does not follow the held publication".into());
+                        }
+                        let rows = windows.entry(Window::Agents).or_default();
+                        for id in removes { rows.remove(&id); }
+                        rows.extend(upserts.into_iter().map(|agent| {
+                            let item = Resource::Agent(agent);
+                            (item.header().id.clone(), item)
+                        }));
+                        agents_publication = Some(publication);
+                        window_retries.loaded(Window::Agents);
+                        pending_reports.cancel(Window::Agents);
+                        if !send_window(updates, received, Window::Agents, snapshot, rows, &order, false) {
+                            return Ended::Closed;
+                        }
+                    }
+                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         // A frame already on its way when the window was left: the socket was
                         // heard from, but nothing of the window comes back.
@@ -660,8 +762,7 @@ async fn connected(
                             continue;
                         }
                         *failures = 0;
-                        window_retries.loaded(window);
-                        pending_reports.cancel(window);
+                        window_loaded(&mut window_retries, &mut pending_reports, window);
                         let rows = windows.entry(window).or_default();
                         rows.clear();
                         rows.extend(items.into_iter().map(|item| (item.header().id.clone(), item)));
@@ -669,13 +770,12 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more } => {
+                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
                         }
-                        window_retries.loaded(window);
-                        pending_reports.cancel(window);
+                        window_loaded(&mut window_retries, &mut pending_reports, window);
                         let rows = windows.entry(window).or_default();
                         for id in removes {
                             rows.remove(&id);
@@ -687,9 +787,10 @@ async fn connected(
                     }
                     // st keeps a conversation's subscription and retries it itself; it says why
                     // so the last copy shown can say it is stale (the owner's host is away).
-                    CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
-                        let Some(current) = conversing.iter().find(|current| current.id == id) else { continue };
-                        let message = fractal_client::plain_message(code.as_ref(), &message);
+                    CollectionEvent::Resync { id, code, message: Some(message), .. } if id.starts_with(CONVERSATION) => {
+                        let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
+                        if !current.failed_long(Instant::now()) { continue; }
+                        let message = fractal_client::human_message(code.as_ref(), &message);
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent: false }).is_err() {
                             return Ended::Closed;
                         }
@@ -698,35 +799,38 @@ async fn connected(
                     // under it). Asked at once and again on every resync, that is a loop and, at an
                     // upgrade, a herd; so each is asked after a wait that grows and is jittered, and
                     // one good snapshot resets the wait.
-                    CollectionEvent::Resync { id, code, message } => {
+                    CollectionEvent::Resync { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id)
                             && !(left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
                         {
-                            if matches!(window, Window::Inventory(_)) {
-                                if let Some(message) = message {
-                                    let plain = fractal_client::plain_message(code.as_ref(), &message);
-                                    pending_reports.report(window, Instant::now(), plain);
+                            if window == Window::Agents && revisioned_agents && retryable == Some(false) {
+                                agents_sequence = None;
+                                agents_publication = None;
+                                window_retries.loaded(window);
+                                pending_reports.cancel(window);
+                                let message = fractal_client::human_message(code.as_ref(),
+                                    message.as_deref().unwrap_or("st refused the agents publication"));
+                                if updates.send(Update::WindowFailed(window, message)).is_err() {
+                                    return Ended::Closed;
                                 }
                                 continue;
                             }
-                            // Said once, with st's own reason when it gave one (its source is
-                            // not ready); the retries are quiet until the window loads.
-                            let first = window_retries.failed(window, Instant::now());
-                            if first && let Some(message) = message {
-                                let message = fractal_client::plain_message(code.as_ref(), &message);
-                                pending_reports.report(window, Instant::now(), message);
-                            }
+                            // An inventory too: st keeps reading it, but a read that then finds
+                            // nothing new sends nothing, so unless it is asked for again its
+                            // reason would stand until the list next changed.
+                            let reason = message.map(|message| fractal_client::human_message(code.as_ref(), &message));
+                            window_failed(&mut window_retries, &mut pending_reports, window, Instant::now(), reason);
                         }
                     }
                     CollectionEvent::Conversation { id, session_id, replace, items, has_more, header, .. } => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
-                        current.failures = 0;
-                        if updates.send(Update::Conversation { target: current.target.clone(), session_id, replace, has_more, items, header }).is_err() {
+                        current.served();
+                        if updates.send(Update::Conversation { subscription_id: id, target: current.target.clone(), session_id, replace, has_more, items, header }).is_err() {
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Error { id, code, message } if id.starts_with(CONVERSATION) => {
-                        let message = fractal_client::plain_message(code.as_ref(), &message);
+                    CollectionEvent::Error { id, code, message, .. } if id.starts_with(CONVERSATION) => {
+                        let message = fractal_client::human_message(code.as_ref(), &message);
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         let permanent = !conversation_may_clear(code.as_ref());
                         // Anything else may clear: the agent starts, its host comes back, its
@@ -734,37 +838,50 @@ async fn connected(
                         if !permanent {
                             current.retry_at = Some(Instant::now() + retry_delay(current.failures));
                             current.failures += 1;
+                            if !current.failed_long(Instant::now()) { continue; }
                         }
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent }).is_err() {
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Error { id, code, message } => {
+                    CollectionEvent::Error { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id) {
                             if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                                 continue;
                             }
+                            if window == Window::Agents && revisioned_agents && retryable == Some(false) {
+                                // A permanent publication refusal (for example an oversized row)
+                                // cannot clear by preparing the same full roster again.
+                                agents_sequence = None;
+                                agents_publication = None;
+                                window_retries.loaded(window);
+                                pending_reports.cancel(window);
+                                let message = fractal_client::human_message(code.as_ref(), &message);
+                                if updates.send(Update::WindowFailed(window, message)).is_err() {
+                                    return Ended::Closed;
+                                }
+                                continue;
+                            }
                             if matches!(window, Window::Inventory(_)) {
-                                let plain = fractal_client::plain_message(code.as_ref(), &message);
+                                let plain = fractal_client::human_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), plain);
                                 continue;
                             }
-                            // Said once, and only if it lasts; the retries are quiet until it loads.
-                            if window_retries.failed(window, Instant::now()) {
-                                let message = fractal_client::plain_message(code.as_ref(), &message);
-                                pending_reports.report(window, Instant::now(), message);
-                            }
+                            let reason = fractal_client::human_message(code.as_ref(), &message);
+                            window_failed(&mut window_retries, &mut pending_reports, window, Instant::now(), Some(reason));
                         } else if following.as_ref().is_some_and(|current| current.subscription == id)
                             && let Err(error) = fail_following(client, stream, updates, following, code, message).await
                         {
                             return Ended::Dropped(error.to_string());
                         }
                     }
-                    CollectionEvent::Screen { id, screen } => {
+                    CollectionEvent::Screen { id, screen, .. } => {
                         if !terminal_screen(updates, following, &id, screen.value) {
                             return Ended::Closed;
                         }
                     }
+                    // The feed holds no ordered-membership window.
+                    CollectionEvent::MembershipSnapshot { .. } | CollectionEvent::MembershipChanges { .. } => {}
                 }
             }
             command = commands.recv() => match command {
@@ -800,16 +917,18 @@ async fn connected(
                 Some(Command::Inventories(wanted)) => {
                     let previous = *inventories;
                     *inventories = wanted;
-                    if !inventory_granted { continue; }
-                    for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
-                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.plain()); }
-                        let window = Window::Inventory(inventory);
-                        windows.remove(&window); window_retries.loaded(window);
-                        pending_reports.cancel(window);
-                        if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
-                    }
-                    for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
-                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
+                    // Inventories never compete with the dedicated read-position socket.
+                    if inventory_granted {
+                        for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
+                            if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.human()); }
+                            let window = Window::Inventory(inventory);
+                            windows.remove(&window); window_retries.loaded(window);
+                            pending_reports.cancel(window);
+                            if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
+                        }
+                        for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
+                            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
+                        }
                     }
                 }
                 Some(Command::Converse { targets }) => {
@@ -883,13 +1002,20 @@ async fn connected(
                     if window == Window::Missions && !*missions {
                         continue;
                     }
-                    let result = if window == Window::Arrangements {
-                        match sidebar_person {
+                    let result = match window {
+                        Window::Arrangements => match sidebar_person {
                             Some(person) => stream.subscribe_arrangements(window.id(), person, window.limit(), None).await,
                             None => continue,
-                        }
-                    } else {
-                        stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+                        },
+                        Window::ReadPositions => continue,
+                        Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory) => continue,
+                        Window::Inventory(inventory) => inventory.subscribe(stream).await,
+                        Window::Agents if revisioned_agents => {
+                            agents_sequence = None;
+                            agents_publication = None;
+                            stream.subscribe_agents_publication(window.id()).await
+                        },
+                        _ => stream.subscribe(window.id(), window.id(), window.limit(), None, None).await,
                     };
                     if let Err(error) = result {
                         return Ended::Dropped(error.to_string());
@@ -908,12 +1034,16 @@ async fn connected(
     }
 }
 
-/// Whether a frame for `window` is one already on its way when the window was left: the missions
-/// window is followed only on request, and a snapshot, change, resync or error that arrives after
-/// the unsubscribe must not bring back the rows, the followed state or an error the UI dropped.
+/// Ignore late frames for missions after leaving them. Read positions belong exclusively to
+/// their dedicated socket and cannot be delivered through the main socket.
 fn left(window: Window, missions_followed: bool) -> bool {
-    window == Window::Missions && !missions_followed
+    match window {
+        Window::Missions => !missions_followed,
+        Window::ReadPositions => true,
+        _ => false,
+    }
 }
+
 
 /// Up to half of `wait` more, so many clients told to ask again at once do not all ask together.
 fn jitter(wait: Duration) -> Duration {
@@ -921,6 +1051,21 @@ fn jitter(wait: Duration) -> Duration {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| u64::from(since.subsec_nanos()) % 1000);
     wait.mul_f64(spread as f64 / 2000.0)
+}
+
+/// `window` failed at `now` in a way that may mend: it is asked for again after a wait that grows,
+/// and st's reason for its first failure since it last loaded is said only once it has lasted.
+/// The retries are quiet until it loads.
+fn window_failed(retries: &mut WindowRetries, reports: &mut PendingReports, window: Window, now: Instant, reason: Option<String>) {
+    if retries.failed(window, now) && let Some(reason) = reason {
+        reports.report(window, now, reason);
+    }
+}
+
+/// `window` was served: its wait and any reason held for it are moot.
+fn window_loaded(retries: &mut WindowRetries, reports: &mut PendingReports, window: Window) {
+    retries.loaded(window);
+    reports.cancel(window);
 }
 
 /// Why a window is not being served, held until it has lasted `REPORT_AFTER`: a window that
@@ -1181,7 +1326,22 @@ impl Conversing {
             target,
             retry_at: None,
             failures: 0,
+            failing_since: None,
         }
+    }
+
+    /// It failed at `now` in a way that is retried: whether it has kept failing, with no page in
+    /// between, for `REPORT_AFTER`. A read st restarts because its list moved under it (a cursor
+    /// gap, an expired page cursor) mends within that and is never put in front of the person.
+    fn failed_long(&mut self, now: Instant) -> bool {
+        let since = *self.failing_since.get_or_insert(now);
+        now.duration_since(since) >= REPORT_AFTER
+    }
+
+    /// A page arrived: whatever was failing has mended.
+    fn served(&mut self) {
+        self.failures = 0;
+        self.failing_since = None;
     }
 }
 
@@ -1240,7 +1400,7 @@ enum Refusal {
 fn terminal_reason(code: Option<&ErrorCode>, message: &str) -> String {
     match code {
         Some(ErrorCode::StaleFence) if !message.is_empty() => message.to_owned(),
-        _ => fractal_client::plain_message(code, message),
+        _ => fractal_client::human_message(code, message),
     }
 }
 
@@ -1248,7 +1408,7 @@ fn terminal_reason(code: Option<&ErrorCode>, message: &str) -> String {
 fn refusal(error: ClientError) -> Refusal {
     let reason = match &error {
         ClientError::Api(code, message, _) => terminal_reason(Some(code), message),
-        other => other.plain(),
+        other => other.human(),
     };
     if error.is_transient() {
         Refusal::Unavailable(reason)
@@ -1270,10 +1430,9 @@ async fn resolve(client: &Client, runtime_ids: &[String]) -> Result<(String, Str
     Err("that agent has no terminal right now".into())
 }
 
-/// Whether a refused conversation may load if asked again. Only st's word that it keeps no
-/// start for the transcript (`timeline-history-incomplete`) is final: asking again cannot help.
+/// Missing retained history and a peer upgrade requirement cannot clear by retrying.
 fn conversation_may_clear(code: Option<&ErrorCode>) -> bool {
-    !matches!(code, Some(ErrorCode::TimelineHistoryIncomplete))
+    !matches!(code, Some(ErrorCode::TimelineHistoryIncomplete | ErrorCode::PeerTooOld))
 }
 
 /// How many times a fenced terminal request is tried while it races a busy store.
@@ -1373,6 +1532,26 @@ pub async fn detach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_cap_prefers_fractal_and_masks_legacy_even_when_empty_or_invalid() {
+        for (legacy, fractal, expected) in [
+            (None, None, None),
+            (Some("10"), None, Some(10)),
+            (None, Some("20"), Some(20)),
+            (Some("10"), Some("20"), Some(20)),
+            (Some("10"), Some(""), None),
+            (Some("10"), Some("invalid"), None),
+            (Some("10"), Some("0"), Some(0)),
+        ] {
+            let cap = timer_cap_with(&|name| match name {
+                "STUI_FEED_TIMER_CAP_MS" => legacy.map(str::to_owned),
+                "FRACTAL_FEED_TIMER_CAP_MS" => fractal.map(str::to_owned),
+                _ => None,
+            });
+            assert_eq!(cap, expected.map(Duration::from_millis));
+        }
+    }
 
     #[test]
     fn a_window_failure_is_said_only_once_it_has_lasted_and_a_load_cancels_it() {
@@ -1499,6 +1678,101 @@ mod tests {
         );
     }
 
+    /// What a fake link does at a moment: st restarts the window's read, or serves it.
+    #[derive(Clone, Copy)]
+    enum Link {
+        Resync,
+        Served,
+    }
+
+    /// Replays `events` (seconds after the start) of one window through the feed's bookkeeping,
+    /// waking every 100 ms as its loop would, until `until` seconds. Returns each reason said and
+    /// the moments the window was asked for again.
+    fn replay(window: Window, events: &[(f64, Link)], until: f64) -> (Vec<(f64, String)>, Vec<f64>) {
+        let start = Instant::now();
+        let mut retries = WindowRetries::default();
+        let mut reports = PendingReports::default();
+        let (mut said, mut asked) = (Vec::new(), Vec::new());
+        let mut events = events.iter().peekable();
+        let mut tick = 0.0;
+        while tick <= until {
+            let now = start + Duration::from_secs_f64(tick);
+            while let Some((_, link)) = events.next_if(|(at, _)| *at <= tick) {
+                match link {
+                    Link::Resync => window_failed(&mut retries, &mut reports, window, now, Some("st hit a problem: the read exceeded its server deadline".into())),
+                    Link::Served => window_loaded(&mut retries, &mut reports, window),
+                }
+            }
+            asked.extend(retries.due(now).into_iter().map(|_| tick));
+            said.extend(reports.due(now).into_iter().map(|(_, reason)| (tick, reason)));
+            tick += 0.1;
+        }
+        (said, asked)
+    }
+
+    #[test]
+    fn an_inventory_whose_read_st_restarts_is_asked_for_again_and_a_flap_says_nothing() {
+        // Nathan, 2026-10: the bar kept flipping from stale to live. An inventory (the machines
+        // list) whose read st restarted was never asked for again; st's next good read found
+        // nothing new and sent nothing, so its reason went up after 20 s and stood until the list
+        // next changed. Each restart of its read must ask for it again and say nothing while it
+        // mends.
+        let machines = Window::Inventory(Inventory::Machines);
+        let mut flap = Vec::new();
+        for cycle in 0..12 {
+            let at = f64::from(cycle) * 25.0;
+            flap.push((at, Link::Resync));
+            // Asked again after a second or so, st serves it with a snapshot.
+            flap.push((at + 2.0, Link::Served));
+        }
+        let (said, asked) = replay(machines, &flap, 300.0);
+        assert!(said.is_empty(), "a read that mends is never put in front of the person: {said:?}");
+        assert_eq!(asked.len(), 12, "each restarted read is asked for again, once: {asked:?}");
+    }
+
+    #[test]
+    fn a_window_that_stays_unserved_is_said_once_and_asked_for_again_without_a_busy_loop() {
+        // st restarts the read every 1.5 s while it cannot serve it, for five minutes.
+        let flap = (0..200).map(|tick| (f64::from(tick) * 1.5, Link::Resync)).collect::<Vec<_>>();
+        for window in [Window::Agents, Window::Inventory(Inventory::Machines)] {
+            let (said, asked) = replay(window, &flap, 300.0);
+            assert_eq!(said.len(), 1, "{window:?}: said once: {said:?}");
+            assert!((REPORT_AFTER.as_secs_f64()..REPORT_AFTER.as_secs_f64() + 0.2).contains(&said[0].0), "{window:?}: once it has lasted: {said:?}");
+            assert!(said[0].1.contains("server deadline"), "in st's words: {said:?}");
+            // The waits grow to 30 s: about a dozen asks in five minutes, never one per resync.
+            assert!(asked.len() <= 16, "{window:?}: asked {} times: {asked:?}", asked.len());
+            assert!(asked.windows(2).all(|pair| pair[1] - pair[0] >= 0.9), "{window:?}: {asked:?}");
+        }
+    }
+
+    #[test]
+    fn a_conversation_whose_read_st_restarts_says_nothing_until_it_has_lasted() {
+        // Nathan, 2026-10: "roster changed" kept showing: a conversation whose read st restarted
+        // (its list moved under it) said "the list changed while it was being read" at once,
+        // and the next page took it away again.
+        let start = Instant::now();
+        let mut current = Conversing::new("agent/tester".into());
+        let mut said = Vec::new();
+        // A restart every 1.5 s, and a page every 9 s between them, for five minutes.
+        for tick in 0..200 {
+            let at = start + Duration::from_millis(tick * 1500);
+            if tick % 6 == 5 {
+                current.served();
+            } else if current.failed_long(at) {
+                said.push(tick);
+            }
+        }
+        assert!(said.is_empty(), "a read that keeps mending says nothing: {said:?}");
+
+        // One that stays wrong is said once it has lasted, and the next page clears it.
+        let mut current = Conversing::new("agent/tester".into());
+        assert!(!current.failed_long(start));
+        assert!(!current.failed_long(start + REPORT_AFTER - Duration::from_millis(1)));
+        assert!(current.failed_long(start + REPORT_AFTER));
+        current.served();
+        assert!(!current.failed_long(start + REPORT_AFTER * 2), "a page starts the clock over");
+    }
+
     fn api_error(code: ErrorCode, message: &str) -> ClientError {
         ClientError::Api(
             code.clone(),
@@ -1540,10 +1814,15 @@ mod tests {
     }
 
     #[test]
-    fn only_incomplete_history_stops_a_conversation_retrying() {
+    fn incomplete_history_and_old_peers_stop_a_conversation_retrying() {
         assert!(!conversation_may_clear(Some(
             &ErrorCode::TimelineHistoryIncomplete
         )));
+        assert!(!conversation_may_clear(Some(&ErrorCode::PeerTooOld)));
+        assert_eq!(
+            fractal_client::human_message(Some(&ErrorCode::PeerTooOld), "raw diagnostic"),
+            "This host runs an older Fractal version; update it to open subagent conversations.",
+        );
         for code in [
             ErrorCode::CursorGap,
             ErrorCode::StaleFence,
@@ -1570,7 +1849,7 @@ mod tests {
             "subject `agent/x` has indeterminate runtime authority",
         ));
         assert!(
-            matches!(&refused, Refusal::Unavailable(reason) if reason == "st cannot tell yet which host runs this")
+            matches!(&refused, Refusal::Unavailable(reason) if reason == "Fractal cannot tell yet which host runs this")
         );
         let refused = refusal(api_error(
             ErrorCode::Forbidden,
@@ -1638,15 +1917,16 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_for_the_missions_window_after_it_was_left_is_ignored() {
-        // The other windows are never left; missions are ignored only while not followed.
-        for window in [Window::Attention, Window::Agents, Window::Glasses, Window::Summary] {
+    fn a_frame_for_a_window_after_it_was_left_is_ignored() {
+        for window in [Window::Attention, Window::Agents, Window::Glasses, Window::Summary, Window::Arrangements] {
             assert!(!left(window, false), "{window:?} is always followed");
             assert!(!left(window, true));
         }
         assert!(left(Window::Missions, false), "a late missions frame is dropped");
         assert!(!left(Window::Missions, true), "followed missions are kept");
+        assert!(left(Window::ReadPositions, true), "read positions use their own socket");
     }
+
 
 }
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Close mission person-step history waits on completion or cancellation and end retry intervals at their declared deadline",
+  "replay": {"status": "none", "detail": "Read-time history folding only; no replay or recovery work."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, triggers, migrations or persistent data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules, retention or fleet coordination changes."},
+  "compatibility": {"status": "none", "detail": "Existing optional mission-history fields and event vocabulary are unchanged. Terminal person responses use the existing state event; retry wait end timestamps now respect the stored deadline."},
+  "downtime": {"status": "none", "detail": "No additional startup work or interruption."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "No stored state changes; binary swap-back retains the same data and wire shapes."}
+}

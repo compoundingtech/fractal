@@ -12,6 +12,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
 hex = "0.4"
+kdl = "6"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
@@ -21,6 +22,7 @@ sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
 fractal-runtime = { path = "../fractal-runtime" }
 fractal-client = { path = "../fractal-client" }
+fractal-socket-discovery = { path = "../fractal-socket-discovery" }
 fractal-terminal-direct = { path = "../fractal-terminal-direct" }
 fractal-schema = { path = "../fractal-schema" }
 fractal-drivers = { path = "../fractal-drivers" }

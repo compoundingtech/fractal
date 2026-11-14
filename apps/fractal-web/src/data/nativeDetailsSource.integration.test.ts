@@ -1,6 +1,6 @@
 import { it } from '@effect/vitest'
 import { FractalClient } from '@fractal/client'
-import { openAgent } from '@fractal/sdk/effect'
+import { openAgent } from '@fractal/sdk/read'
 import { Effect } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -29,8 +29,10 @@ describe('real native Details getter adapters', () => {
   it.effect('shares one Details agent period demand, decodes native wire, and retains failed observations as stale until retry', () => Effect.gen(function* () {
     const registry = yield* Effect.acquireRelease(Effect.sync(() => AtomRegistry.make()), registry => Effect.sync(() => registry.dispose()))
     const requests: URL[] = []
+    const clients: (string | null)[] = []
     let fail = false
-    const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) => {
+    const options = { baseUrl: 'http://gateway.invalid', client: 'fractal-web test', fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
+      clients.push(new Headers(init?.headers).get('x-st3-client'))
       requests.push(new URL(String(input)))
       if (String(input).endsWith('/capabilities')) return Response.json(recording.capabilities)
       if (fail) throw new TypeError('Connection lost')
@@ -45,6 +47,7 @@ describe('real native Details getter adapters', () => {
     const first = yield* nextFeed({ registry, atom: spend, predicate: feed => feed._tag === 'Observed' && feed.freshness === 'live' })
     expect(first).toMatchObject({ _tag: 'Observed', value: { since_ms: 1000, until_ms: 5000 } })
     expect(requests.filter(url => url.pathname === '/v1/client/usage')).toHaveLength(1)
+    expect(clients).toEqual(['fractal-web test', 'fractal-web test'])
     expect(requests.find(url => url.pathname === '/v1/client/usage')?.searchParams.get('since_ms')).toBe('5000')
     expect(requests.some(url => url.pathname.includes('conversation'))).toBe(false)
     fail = true

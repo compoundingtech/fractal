@@ -22,6 +22,7 @@ export const loading: WorldDefinition = {
       attention: { ...base.attention, loading: true, timeline: [] },
       conversation: { ...base.conversation, loading: true, timeline: [] },
       terminal: { ...base.terminal, loading: true, timeline: [] },
+      objectives: { ...base.objectives!, loading: true },
       sync: {
         ...base.sync,
         variant: 'requested',

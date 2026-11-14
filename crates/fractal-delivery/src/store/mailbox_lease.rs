@@ -10,7 +10,13 @@ use super::*;
 use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
 pub use fractal_store::store::mailbox_lease::*;
-pub use fractal_store::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, record};
+pub use fractal_store::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, mailbox_member, record};
+
+/// The wall bound on a card-fault capture that no request encloses, read on an already pinned
+/// snapshot (the roster refresher's). Scheduling pauses under load must not cancel it: its 25 ms
+/// CPU work clock bounds the query. Only a stalled page read, which spends no CPU, comes near
+/// this; it stops one from holding the snapshot without limit.
+pub const CARD_FAULT_PINNED_WALL_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn capture_mailbox_faults(
     connection: &Connection, subjects: &[String], index: u64,
@@ -81,7 +87,7 @@ fn promotion_is_noop(row: Option<&(Fence, Authority, bool)>, authority: &Authori
     authority.sequence == 0 || (prior.sequence != 0 && !advancing_session)
 }
 
-pub fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence) -> Result<(), St3Error> {
+pub fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence) -> Result<(), FractalError> {
     let retained: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_mailbox_argv_bindings WHERE token=?1)",
         [&fence.token], |row| row.get(0),
@@ -90,7 +96,7 @@ pub fn refuse_argv_native_adoption(connection: &Connection, fence: &Fence) -> Re
     Ok(())
 }
 
-pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &MemberSpec) -> Result<(), St3Error> {
+pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &MemberSpec) -> Result<(), FractalError> {
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h13207c3614f8 owner=fractal_delivery::store::mailbox_lease TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_mailbox_argv_bindings VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(token) DO NOTHING",
         params![fence.token,fence.subject,fence.component,fence.incarnation,fence.epoch,serde_json::to_string(member).map_err(internal)?],
@@ -98,24 +104,29 @@ pub fn record_argv_binding(connection: &Connection, fence: &Fence, member: &Memb
     Ok(())
 }
 
+/// Whether this capability token's argv binding is stored, so `record_argv_binding` would leave
+/// it as it is.
+pub fn holds_argv_binding(connection: &Connection, fence: &Fence) -> Result<bool, FractalError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_mailbox_argv_bindings WHERE token=?1)",
+        [&fence.token], |row| row.get(0),
+    ).map_err(internal)
+}
+
 pub fn check_declaration(
     connection: &Connection,
     fence: &Fence,
     authority: &Authority,
     host: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let declared = current_desired_row(connection, &fence.subject)
         .map_err(internal)?
         .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member: MemberSpec = declared
-        .member
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(internal)?
+    // A seat its run's end stopped keeps the mailbox of the declaration it ended while the
+    // reconciler holds it, so it can read the mail that holds it.
+    let member = mailbox_member(connection, &fence.subject, &declared.kind, declared.member.as_deref())?
         .ok_or_else(|| refused("the seat is intentionally stopped"))?;
-    if declared.kind == "stop"
-        || member.driver.as_deref() != Some(&authority.provider)
+    if member.driver.as_deref() != Some(&authority.provider)
         || member.host != host
         || member
             .terminal_binding
@@ -134,7 +145,7 @@ pub trait MailboxLeaseStore {
             &self,
             fence: &Fence,
             episode: &str,
-        ) -> Result<Option<(String, bool)>, St3Error>;
+        ) -> Result<Option<(String, bool)>, FractalError>;
     /// The caller holds the provider ownership lock. Recheck physical/declaration and
     /// canonical custody inside the same Store writer transaction as fault publication.
     fn append_mailbox_lease_claim(
@@ -143,7 +154,7 @@ pub trait MailboxLeaseStore {
             owner: &Authority,
             input: &ClaimInput,
             repaired: bool,
-        ) -> Result<ClaimRecord, St3Error>;
+        ) -> Result<ClaimRecord, FractalError>;
     /// Promote physical Codex bootstrap custody, or advance a surviving process's
     /// same-session ownership after re-exec, under the caller's provider ownership lock.
     /// Both retain only the still-current capability and exact process generation.
@@ -156,27 +167,27 @@ pub trait MailboxLeaseStore {
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<(), St3Error>;
+        ) -> Result<(), FractalError>;
     fn mailbox_lease_authority(
             &self,
             fence: &Fence,
-        ) -> Result<Option<Authority>, St3Error>;
+        ) -> Result<Option<Authority>, FractalError>;
     /// Compare replay inputs without allocating another decoded lease. This is
     /// not report admission: runtime, custody and binding checks still run there.
     fn mailbox_replay_owner_matches(
             &self,
             fence: &Fence,
             owner: &Authority,
-        ) -> Result<bool, St3Error>;
+        ) -> Result<bool, FractalError>;
     /// A transient physical query may retry only a still-current canonical capability.
     /// An absent owner row can be repaired; a foreign owner or retired binding is terminal.
-    fn check_mailbox_custody_fence(&self, fence: &Fence) -> Result<(), St3Error>;
+    fn check_mailbox_custody_fence(&self, fence: &Fence) -> Result<(), FractalError>;
     fn mailbox_session_active(
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<(), St3Error>;
-    fn has_mailbox_lease(&self, fence: &Fence) -> Result<bool, St3Error>;
+        ) -> Result<(), FractalError>;
+    fn has_mailbox_lease(&self, fence: &Fence) -> Result<bool, FractalError>;
     /// Captured public-card fault source, bounded to the selected subjects and cut.
     /// Keep the capture on one blocking worker: its CPU budget belongs to that thread.
     fn mailbox_faults_for(
@@ -188,7 +199,7 @@ pub trait MailboxLeaseStore {
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<bool, St3Error>;
+        ) -> Result<bool, FractalError>;
     /// Repair only the exact canonical lease. Never mint a token or advance an epoch.
     /// Deleting/revoking a binding is terminal; only displacement of its owner is repairable.
     #[cfg(any(test, feature = "test-support"))]
@@ -196,13 +207,13 @@ pub trait MailboxLeaseStore {
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<bool, St3Error>;
+        ) -> Result<bool, FractalError>;
     fn repair_mailbox_checked(
             &self,
             fence: &Fence,
             authority: &Authority,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<bool, St3Error>;
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<bool, FractalError>;
 }
 
 impl MailboxLeaseStore for Store {
@@ -211,7 +222,7 @@ impl MailboxLeaseStore for Store {
             &self,
             fence: &Fence,
             episode: &str,
-        ) -> Result<Option<(String, bool)>, St3Error> {
+        ) -> Result<Option<(String, bool)>, FractalError> {
         let connection = self.readers.get();
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h28113e2f57f3 owner=fractal_delivery::store::mailbox_lease TODO=trace-statement-and-value-representation */ &canonical_sql(
@@ -239,7 +250,7 @@ impl MailboxLeaseStore for Store {
             owner: &Authority,
             input: &ClaimInput,
             repaired: bool,
-        ) -> Result<ClaimRecord, St3Error> {
+        ) -> Result<ClaimRecord, FractalError> {
         let admission = |connection: &Connection| {
             check_mailbox_incarnation(connection, fence)?;
             check_declaration(connection, fence, owner, &self.origin)?;
@@ -275,7 +286,7 @@ impl MailboxLeaseStore for Store {
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<(), St3Error> {
+        ) -> Result<(), FractalError> {
         let observed = lease(&self.readers.get(), fence)?;
         if promotion_is_noop(observed.as_ref(), authority) {
             return Ok(());
@@ -322,7 +333,7 @@ impl MailboxLeaseStore for Store {
     fn mailbox_lease_authority(
             &self,
             fence: &Fence,
-        ) -> Result<Option<Authority>, St3Error> {
+        ) -> Result<Option<Authority>, FractalError> {
         Ok(
             lease(&self.readers.get(), fence)?.and_then(|(held, owner, _)| {
                 (held.incarnation == fence.incarnation
@@ -337,7 +348,7 @@ impl MailboxLeaseStore for Store {
             &self,
             fence: &Fence,
             owner: &Authority,
-        ) -> Result<bool, St3Error> {
+        ) -> Result<bool, FractalError> {
         self.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM local_mailbox_leases
              WHERE subject=?1 AND component=?2 AND incarnation=?3
@@ -351,7 +362,7 @@ impl MailboxLeaseStore for Store {
         ).map_err(internal)
     }
 
-    fn check_mailbox_custody_fence(&self, fence: &Fence) -> Result<(), St3Error> {
+    fn check_mailbox_custody_fence(&self, fence: &Fence) -> Result<(), FractalError> {
         let connection = self.readers.get();
         check_mailbox_incarnation(&connection, fence)?;
         if lease(&connection, fence)?.is_none() {
@@ -377,13 +388,13 @@ impl MailboxLeaseStore for Store {
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<(), St3Error> {
+        ) -> Result<(), FractalError> {
         let connection = self.readers.get();
         check_mailbox_incarnation(&connection, fence)?;
         check_declaration(&connection, fence, authority, &self.origin)
     }
 
-    fn has_mailbox_lease(&self, fence: &Fence) -> Result<bool, St3Error> {
+    fn has_mailbox_lease(&self, fence: &Fence) -> Result<bool, FractalError> {
         Ok(lease(&self.readers.get(), fence)?.is_some())
     }
 
@@ -395,17 +406,22 @@ impl MailboxLeaseStore for Store {
         if subjects.is_empty() { return Ok(BTreeMap::new()); }
         let _capture = smallclaims::profile::span("mailbox_faults/capture");
         // Admission and result cleanup remain within the enclosing wall deadline.
-        // Captures without a request retain their existing finite wall bound.
+        // Captures without a request retain their existing finite wall bound, except on a
+        // pinned snapshot: nothing waits for admission there, so the work clock bounds it.
         let duration = std::time::Duration::from_millis(25);
+        // A forced expiry zeroes `duration`, the work clock's allowance below, so it also ends a
+        // pinned capture whose wall bound is the backstop.
         #[cfg(any(test, feature = "test-support"))]
         let duration = CARD_FAULT_DEADLINES.with(|remaining| {
             let count = remaining.get();
             remaining.set(count.saturating_sub(1));
             if count == 0 { duration } else { std::time::Duration::ZERO }
         });
-        let budget = smallclaims::read_budget::current().unwrap_or_else(
-            || smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", duration),
-        );
+        let pinned = self.readers.has_pinned_reader();
+        let budget = smallclaims::read_budget::current().unwrap_or_else(|| {
+            let wall = if pinned { CARD_FAULT_PINNED_WALL_BACKSTOP } else { duration };
+            smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", wall)
+        });
         let checked = budget.clone();
         smallclaims::read_budget::with(Some(budget), || {
             checked.check()?;
@@ -433,7 +449,6 @@ impl MailboxLeaseStore for Store {
             };
             // Keep the authoritative existing snapshot; otherwise acquire cancellable
             // admission before the fallible reader checkout.
-            let pinned = self.readers.has_pinned_reader();
             let result = if pinned { read() } else {
                 self.readers.request_read(read).and_then(|result| result)
             };
@@ -452,7 +467,7 @@ impl MailboxLeaseStore for Store {
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<bool, St3Error> {
+        ) -> Result<bool, FractalError> {
         Ok(
             lease(&self.readers.get(), fence)?.is_some_and(|(held, owner, _)| {
                 held.incarnation == fence.incarnation
@@ -468,7 +483,7 @@ impl MailboxLeaseStore for Store {
             &self,
             fence: &Fence,
             authority: &Authority,
-        ) -> Result<bool, St3Error> {
+        ) -> Result<bool, FractalError> {
         self.repair_mailbox_checked(fence, authority, &|| Ok(()))
     }
 
@@ -476,8 +491,8 @@ impl MailboxLeaseStore for Store {
             &self,
             fence: &Fence,
             authority: &Authority,
-            validate: &dyn Fn() -> Result<(), St3Error>,
-        ) -> Result<bool, St3Error> {
+            validate: &dyn Fn() -> Result<(), FractalError>,
+        ) -> Result<bool, FractalError> {
         let mut connection = self.connection.write();
         let tx = connection.transaction().map_err(internal)?;
         check_mailbox_incarnation(&tx, fence)?;
@@ -589,7 +604,7 @@ pub use crate::store::mailbox_lease_tests_shared_seats::{authority, change_after
             });
             let expired = worker_store.mailbox_faults_for(&subjects, 0).unwrap_err();
             sent.send(reached.load(std::sync::atomic::Ordering::SeqCst)
-                && expired.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline")).unwrap();
+                && expired.downcast_ref::<FractalError>().is_some_and(|error| error.code == "read-deadline")).unwrap();
         });
         let result = received.recv_timeout(std::time::Duration::from_secs(1));
         std::fs::rename(&saved, &path).unwrap();

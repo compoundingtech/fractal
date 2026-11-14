@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read back the installed daily iOS build before installation, and support explicit version-floor reconciliation for builds installed outside the updater.",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "changed", "detail": "Approved delivery refuses artifacts at or below the installed-build floor. Missing bundles, unreadable device queries and malformed versions defer installation instead of assuming it is safe."},
+  "downtime": {"status": "none", "detail": "No live device or scheduler change."},
+  "manual": {"status": "changed", "detail": "After repinning the updater, the operator runs the configured command once with --reconcile-installed before resuming scheduled delivery. This read-only device query raises the stored version floor without deployment approval, building, installing or launching."},
+  "recovery": {"status": "changed", "detail": "Interrupted-install recovery and explicit reconciliation share one readback path. Contradictory successful observations clear stale installed-content identity without lowering the authoritative version floor."}
+}

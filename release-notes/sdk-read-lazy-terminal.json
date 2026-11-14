@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Load terminal screen validators only when terminal following starts",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "Public SDK signatures remain unchanged. Terminal codec loading and decoding failures publish Failed sync status before the existing Failed Decode event instead of silently dropping malformed screens. Cancelled codec preparation never admits or registers a socket follow."},
+  "downtime": {"status": "none", "detail": "No service interruption or startup migration required."},
+  "manual": {"status": "none", "detail": "No operator action or configuration change required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new swap-back restrictions."}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A member that trims locally deletes its daily cut by walking only that cut's own tombstones, from where it stopped, instead of every earlier checkpoint's; a cut that dropped nothing finishes at once",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table, index or claim schema change. The walk's place is a meta row, local_trim_walk/CHECKPOINT, removed when the cut is trimmed."},
+  "rules": {"status": "none", "detail": "No retention rule change; the cut drops what it dropped before."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. Shared checkpoints walk as before."},
+  "downtime": {"status": "none", "detail": "None. On the largest member, the walk of about 2.8M earlier tombstones for a cut an older build recorded becomes one read for the cut's first tombstone."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build: local cuts walk every tombstone again."}
+}

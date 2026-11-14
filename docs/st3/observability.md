@@ -1,4 +1,4 @@
-# st observability
+# Fractal observability
 
 This reference describes the current daemon, CLI, replication worker and hook
 telemetry in the `crates/fractal` implementation. The shared client-class vocabulary
@@ -10,25 +10,26 @@ O11Y-R10–R18 remain the accepted constraints. They include coverage targets th
 are not all implemented; the mechanism and integration boundaries below state the
 current coverage. Budget limits are requirements, not claims of measured compliance.
 
-- **O11Y-R10 Process signals:** The st3 daemon, replication worker, and CLI use the OpenTelemetry
+- **O11Y-R10 Process signals:** The Fractal daemon, replication worker, and CLI use the OpenTelemetry
   SDK to produce traces, metrics, and logs. Their `service.name` values are `st-daemon`,
   `st-replication-worker`, and `st-cli`. Hooks send signals through the daemon and never export
   directly; hook spans and invocation metrics emitted by the observations exporter use
   `st-hook`. Harness-timer statusline commands remain exempt from telemetry initialization.
-- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, st3 builds no
+- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, Fractal builds no
   exporter or SDK provider, makes no telemetry network calls, and incurs no measurable telemetry
   overhead. Exporter configuration uses standard `OTEL_*` variables.
 - **O11Y-R12 Reactor isolation:** Export work must not run on the daemon's request reactor.
-- **O11Y-R13 Signal version:** Every st3 signal carries `service.version` from the machine build
+- **O11Y-R13 Signal version:** Every Fractal signal carries `service.version` from the machine build
   identity, including signals from the observations exporter.
-- **O11Y-R14 Bounded metrics and attributes:** st3 exposes a bounded rate, error, duration, and
+- **O11Y-R14 Bounded metrics and attributes:** Fractal exposes a bounded rate, error, duration, and
   saturation metric set with at most 2,000 active series per daemon. Agent, session, message,
-  terminal, attachment, and lease ids are forbidden in metric labels and `span.label`.
+  terminal, attachment, and lease ids are forbidden in metric labels and `span.label`,
+  except for the fleet-bounded `st.agent` delivery-health and mailbox-gauge axes documented below.
   Capabilities and their hashes are forbidden in every signal.
 - **O11Y-R15 Trace propagation:** W3C `traceparent` and `tracestate` propagate end to end across
-  st3 HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
+  Fractal HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
   protocol. Peer trace context is covered by the peer signature.
-- **O11Y-R16 Sampling:** st3 exports every span when traces are enabled and performs no
+- **O11Y-R16 Sampling:** Fractal exports every span when traces are enabled and performs no
   in-process sampling. The local collector applies the fleet sampling policy: keep traces
   with an error, a local root longer than 1 second, a sampled caller, and a deterministic
   1% of the rest. Sampling never affects metrics.
@@ -73,13 +74,17 @@ so a healthy daemon exports no log stream, while WARN/ERROR diagnostics still ex
 
 With no `OTEL_EXPORTER_OTLP_ENDPOINT`, initialization builds no telemetry subscriber,
 SDK providers, exporters, or threads. An atomic enabled gate returns before span construction.
-Local stderr diagnostics remain available. Standard `OTEL_*` environment variables configure
-export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every st3
+The lines the daemon writes itself (prefixed `st3:` or `fractal:`) still reach stderr, but with no
+subscriber a `tracing` event anywhere in its code is written nowhere. `[logging] stderr_warnings
+= true` in the daemon's config installs a stderr subscriber at WARN for that case, so warnings such
+as a writer hold over a second reach the journal; it is off by default, and does nothing when
+export already installed a subscriber with its own stderr layer. Standard `OTEL_*` environment variables configure
+export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every Fractal
 unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 
 | Process unit | `service.name` | Shutdown budget |
 | --- | --- | --- |
-| `st up` daemon | `st-daemon` | 5 s |
+| `fractal up` daemon | `st-daemon` | 5 s |
 | `peer::run_worker` replication worker | `st-replication-worker` | 5 s |
 | One-shot CLI | `st-cli` | 50 ms when export is enabled |
 | Driver hook | `st-hook` via daemon observations exporter; no direct SDK export | No collector flush in the hook |
@@ -120,10 +125,10 @@ The local collector applies tail sampling keyed by trace id (O11Y-R16), keeping 
 any span has status `ERROR`, a local root lasts more than 1 second, or the root came from a
 sampled caller. It keeps a deterministic trace-id ratio of 1% of the remaining traces.
 
-The sampled-caller signal is `st.parent.sampled`: because st3 exports every span with
+The sampled-caller signal is `st.parent.sampled`: because Fractal exports every span with
 AlwaysOn, every exported span carries the sampled flag, and the collector cannot recover the
 caller's decision from trace flags. Server spans set `st.parent.sampled=true` only when
-the remote parent is sampled and its tracestate has no `st` key. st's own clients mark
+the remote parent is sampled and its tracestate has no `st` key. Fractal's own clients mark
 collector-owned sampling with `st=c`; their AlwaysOn flag must not force the collector to
 keep every trace. Unsampled or st-marked parents record false; a missing parent records no
 attribute. The decision wait must be long enough for the daemon's SDK batch delay and
@@ -171,6 +176,8 @@ follows the collector sampling policy above; the process exports every span.
 ```text
 HTTP upgrade SERVER span (ends at 101)
     <link> st.subscription.first_frame INTERNAL root (subscribe -> first frame sent)
+frame remote parent -> st.subscription.first_frame SERVER span (valid subscribe trace)
+    <link> HTTP upgrade SERVER span
 HTTP receive SERVER span
     <link> st.replication.projection INTERNAL root (new or deferred data only)
 st.roster.rebuild INTERNAL root (cold build only; optional admission-holder link)
@@ -182,16 +189,31 @@ span. The context is captured before handler dispatch because the handler constr
 and terminal pumps. W3C context on the upgrade therefore survives task boundaries without
 extending the request span's lifetime.
 
-Each accepted subscribe constructs one `st.subscription.first_frame` root with an empty
-parent context and a link to the valid upgrade span context. It ends after the first
-frame is sent. Later rereads, resyncs, and changes construct no spans; there are no
-per-frame child spans. Construction is gated by the trace-export `AtomicBool`, before
-labels, collections, or counts are inspected (O11Y-R02, O11Y-R18).
+Accepted subscriptions to `missions`, `attention`, `agents`, `work`, `glasses`,
+`arrangements`, `conversation`, and `terminal` construct one bounded
+`st.subscription.first_frame` span linked to the valid upgrade context.
+The proposed optional subscribe `trace` field
+(pending [#1910](https://github.com/compoundingtech/fractal/pull/1910)) carries W3C
+`traceparent` and optional `tracestate`; the field's repository-local naming and
+compatibility contract is in [collections.md](client-v0/collections.md).
+Every collection-socket subscribe variant accepts the field, but only the collections
+listed above use the W3C propagator to extract it for their first-frame span.
+A valid frame context parents a SERVER span and
+records `st.parent.sampled` through the same helper as HTTP SERVER spans.
+Absent, null, malformed, or invalid context never rejects a frame: the span remains
+an INTERNAL root with an empty parent. Dedicated streams have no subscribe frame
+and retain the INTERNAL root behavior.
+
+The span ends after the first frame is sent. Later rereads, resyncs, and changes
+construct no spans; there are no per-frame child spans. Construction and extraction
+are gated by the trace-export `AtomicBool`, before labels, collections, or counts
+are inspected (O11Y-R02, O11Y-R18). No command or strict HTTP body gains frame context.
 
 | First-frame attribute | Type / vocabulary |
 | --- | --- |
 | `st.collection` | String: `missions`, `attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, `terminal` |
 | `st.subscription.id` | String: protocol subscription identity, span-only |
+| `st.parent.sampled` | Boolean: valid external frame remote parent's sampled flag; st-marked parents record false, same policy as HTTP |
 | `st.projection.hit`, `st.projection.cold`, `st.projection.incremental`, `st.projection.shared` | Boolean: projection path used by the initial read |
 | `st.page.rows` | Integer: initial frame rows after truncation |
 | `st.page.bytes` | Integer: serialized initial frame bytes |
@@ -317,7 +339,7 @@ is span-only and never a metric label or `span.label`.
 
 ## Metric naming and cardinality
 
-The repository-local st3 instrument namespace uses lowercase dot-separated names:
+The repository-local Fractal instrument namespace uses lowercase dot-separated names:
 daemon work and storage instruments use `st.`, while HTTP and database client
 instruments use the OpenTelemetry `http.server` and `db.client` namespaces.
 Duration instruments use seconds. Depth, size, and age gauges describe saturation.
@@ -337,6 +359,12 @@ values map to `other`; routes are matched templates, not raw paths.
 | Replication `peer` | Fleet node membership |
 | Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
 | Projection `collection` | `missions`, `agents`, `attention`, else `other` |
+| Delivery and mailbox `st.agent` | Full declared subject of each managed agent owned by the local host |
+| Delivery `st.delivery.state` | `live`, `stale`, `refused` |
+| Delivery `st.delivery.reason` | Empty unless refused; the fixed refusal-code vocabulary below |
+| Delivery `st.agent.desired` | `running`, `suspended`; selected from authoritative lifecycle, not observed liveness |
+| Mailbox `st.mailbox.state` | `pending`, `delivered`, `held` |
+| Mailbox `st.mailbox.age_band` | `recent`, `stale`; oldest accepted send younger than one day, or at least one day old, respectively |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -621,6 +649,443 @@ Excluded from FIFO telemetry are coalesced Notify/watch states, caches,
 durable inbox and seat queues, driver-side mailbox `Subscription` queues, and
 ping sidecar queues.
 
+## Agent population (st.agents, st.attention.open)
+
+**Contract revision: AP-2026-11-07-r2 (proposed; independent reviewer GO required).**
+This is the contract for separate implementation PRs, not a claim that these
+instruments or all attribution signals already exist. Review GO names this
+revision and the exact reviewed commit. See [#1580](https://github.com/compoundingtech/fractal/issues/1580).
+
+### Instruments, ownership and closed dimensions
+
+The daemon alone exports these observable u64 gauges through its existing OTLP
+pipeline and `st3` meter, using one consistent store snapshot per host. Drivers
+publish observations to the store, never population metrics. `omp-usage` publishes
+no population series. Refresh runs off the request reactor and SDK callback;
+callbacks read only a complete aggregate, as the mailbox and delivery gauges do.
+
+| OTel instrument | Mimir name | Unit | Point attributes |
+| --- | --- | --- | --- |
+| `st.agents` | `st_agents` | `{agent}` | `st.agent.driver`, `st.agent.kind`, `st.agent.repo`, `st.agent.state`, `st.agent.reason`, `st.agent.has_work` |
+| `st.attention.open` | `st_attention_open` | `{item}` | `st.attention.kind` |
+| `st.agents.refresh.last_success` | `st_agents_refresh_last_success` | `s` (Unix epoch seconds) | None; host identity from the daemon resource only |
+
+Dots in point-attribute names likewise become underscores, for example
+`st_agent_state`. Host identity is the daemon's existing `host.name` resource
+(Mimir `host_name` when promoted), not another independently supplied `host`
+point attribute. Deployment host inventory is a closed allowlist of daemon
+origins; replication must not create another publisher for the same member.
+
+| Label | Closed value set |
+| --- | --- |
+| `st.agent.driver` | `omp`, `claude`, `codex`, `opencode`, `pi`, `unattributed` |
+| `st.agent.kind` | `root`, `mission`, `gate`, `verifier`, `subagent`, `unattributed` |
+| `st.agent.repo` | Versioned deployment allowlist R of at most eight canonical repository names, plus `unattributed`; R must be enumerated before enabling export |
+| `st.agent.state` | `faulted`, `unreachable`, `asking`, `waiting`, `working`, `idle`, `starting`, `unknown` |
+| `st.agent.reason` | Only the state-specific values in the table below |
+| `st.agent.has_work` | Boolean `true`, `false` |
+| `st.attention.kind` | `person-step`, `human-gate`, `launch-approval`, `unread-message`, `agent-request`, `revision-approval`, `harness-login`, `harness-prompt`, `fault`, `model-drift`, `unattributed` |
+
+R is a closed registry, not a regex, workspace path, arbitrary remote URL, branch
+or dynamically discovered set. Missing, ambiguous, unapproved and unknown
+repositories map to `unattributed`; registration changes require cardinality
+review. The same rule applies to unknown driver and kind values. Agent, parent,
+session, mission, message, PR, PID and commit identifiers are never labels on
+either gauge, including resource attributes promoted to labels.
+
+Configure R with the daemon's root `agent_population_repositories` TOML key,
+an array of at most eight unique canonical lowercase `owner/repo` names (for
+example, `["example/repo"]`), validated at configuration load. URLs, filesystem
+paths and `.git` suffixes are rejected. The source default is an empty registry:
+every repository is `unattributed` until explicitly configured.
+Restart the daemon after changing this registry.
+
+Kind describes provenance, not activity. Use an explicit semantic discriminator
+for roots, mission seats, gates and verifiers; harness children always take
+`subagent`. `owner_run_id` alone cannot distinguish mission, gate and verifier,
+nor a standing root currently serving mission work. Missing provenance is
+`unattributed`, never a name-based guess. Preserve parent linkage in the store,
+not in labels.
+Current `seat_kind=standing|mission` is derived from `owner_run_id`, not explicit
+stored provenance; standing maps to root only when positively established.
+Gate/verifier kinds are reserved, not inferred from a seat's current verifying
+work or from human-gate attention. Existing gate work is not proof of a distinct
+gate/verifier agent.
+
+Repository is normalized against R at the population-only agent resource boundary.
+Ordinary roster/card presentation does not read workspace observations for metrics.
+The population fold overlays the current `workspace.observed` repository when its
+workspace and host match the card. A canonical `owner/repo`, or an absolute
+megarepo path containing `github.com/owner/repo[/refs/...]`, normalizes to lowercase
+`owner/repo`; unknown paths map to `unattributed`. This normalization performs no
+git or filesystem I/O. Prefer positively observed repository evidence; a declared
+`checkout.repository` is usable only when not contradicted by a current observation.
+An empty registry skips the population workspace read entirely. A child inherits
+its observed parent's repository unless it has its own positively observed checkout;
+do not infer one from a native session path.
+
+### Membership and exclusive classification
+
+Start with `mailbox_metrics::managed_agents_owned_by_local_host`: current declared
+agents with `member.host == store.origin()`. For population, intersect these
+members with observed live presence, including a last-live incarnation whose
+presence has gone stale but has no authoritative end. Exclude retired, removed,
+authoritatively ended and stopped incarnations; a new incarnation replaces the
+old one, never adds another seat. Declaration alone, including a never-started
+seat, is not proof of live presence. Such seats remain visible in declaration-
+based delivery gauges and fault attention, not as invented live agents.
+
+Union the live, unexpired harness subagent ledger of those members, deduplicated
+by owning seat, native session and child identity. A subagent counts as its own
+agent even though today's store represents it as a claim on its parent rather
+than a declared member. Ended and lease-expired children are excluded; current
+leases, session changes and parent teardown define their liveness. Include
+children until their own end/lease expiry, even if the parent has just ended;
+the parent's membership still determines the reporting host. A subagent's mere
+existence does not put the parent in `waiting/subagent`: the parent must actually
+be blocked on that child. Concurrent parent work remains working.
+
+Suspension is desired lifecycle, not activity. A quiescing seat still observed
+live counts; a fully stopped suspended incarnation does not. Resume counts only
+when live presence is observed again. Do not label suspension `faulted` or
+`unreachable`. `st.agent.desired=running|suspended` remains the separate
+declaration-based delivery axis, selected from authoritative suspension as
+documented below; population totals intentionally differ from that membership.
+Unmanaged direct PTY/native sessions are outside this metric. Binding such a
+session to a declared member brings it into scope; discovery alone does not.
+
+Evaluate the following rows top-down. Exactly one state/reason pair contributes
+one count per included agent. A positive blocking wait outranks a broad active
+turn envelope; asking outranks both. Health overrides activity only on positive
+fault evidence or the owning presence/freshness fold, never on silence alone.
+
+| Precedence / state | Valid reasons | Evidence required |
+| --- | --- | --- |
+| 1 `faulted` | `crash_loop`, `not_started`, `unattributed` | Current fault affecting the live incarnation; `not_started` requires a live wrapper whose harness failed to start, not a declaration with no runtime |
+| 2 `unreachable` | `stale` | Last-live member's authoritative presence/reachability is stale, without an end |
+| 3 `asking` | `question`, `permission`, `review`, `unattributed` | Current blocking human ask; unknown ask subtype uses `unattributed` |
+| 4 `waiting` | `subagent`, `background_job`, `agent_reply`, `external`, `retry`, `compaction`, `unattributed` | Positively observed blocking interval, with subtype only if observed |
+| 5 `working` | `model`, `tool`, `unattributed` | Current active work; an active turn alone does not distinguish model from tool |
+| 6 `idle` | `none` | Positive current idle/input-ready evidence, no higher-priority condition |
+| 7 `starting` | `none` | Live launch/start evidence before ready, no higher-priority condition |
+| 8 `unknown` | `unattributed` | Included live agent whose activity cannot be determined |
+
+The table reserves 21 legal pairs, including reasons unavailable from a driver
+today. `unattributed` means the state is known but its cause is not; if even the
+state is unknown use `unknown/unattributed`. Never replace missing evidence with
+idle or invent an ask, retry, model call or wait. A completed compaction counter
+or active background-job count does not establish a blocking interval. If
+multiple waits are observed concurrently without a unique blocking cause, use
+`waiting/unattributed`.
+
+Use the authoritative current-incarnation presence and harness freshness folds,
+not filesystem mtime or a new metric-only timeout. A stale idle report cannot
+remain positive idle evidence; a long active turn is not stale merely because
+it produced no new claim. Reachable presence plus missing/indeterminate activity
+is `unknown/unattributed`, not `unreachable/stale`. Daemon disappearance is an
+exporter availability failure, not zero agents. Failed refresh keeps the last
+complete snapshot and reports failure through existing diagnostics, never a
+partial count or false zero. On each complete successful snapshot, the refresher
+atomically publishes that snapshot and sets `st.agents.refresh.last_success`
+to its completion time in seconds since the Unix epoch. Failed refreshes and
+SDK collection callbacks never advance that value; before the first success
+the instrument is absent. The dotted name follows the instrument convention
+above, without a Prometheus `_seconds` suffix.
+The card's nonauthoritative `host-lost` end-reason is not terminal evidence:
+retain its last-live incarnation as `unreachable/stale`, even when the
+presentation also carries a launch/fault annotation. An authoritative runtime
+or harness end, retirement, or removal still excludes the incarnation.
+
+
+Refresh subscribes to the store commit notification before the initial fold,
+then coalesces commits with a minimum 30-second rest (or the preceding fold's
+duration, whichever is longer). It also wakes for the earliest relevant shared
+classification boundary: idle freshness at heard-at + `HARNESS_OBSERVATION_FRESHNESS` + 1 ms,
+launch + 120,001 ms or heard-at + 661,001 ms, an owned live child's lease expiry,
+and the canonical attention snapshot's next visibility boundary. These strict-age
+offsets match the existing card overlay; working turns have no age-only expiry.
+With no commits or deadlines, the refresher performs zero folds per minute.
+Retention expiry removes cached zero buckets at their ten-minute deadline,
+independently of refresh admission or success, without a store read or a new
+last-success timestamp. Failed folds wait for a store commit or an unconsumed
+future classification deadline from the last complete fold, subject to the same
+minimum rest; failure itself never schedules a retry timer. Expired classification
+deadlines are consumed even on failure, so a defective fold cannot busy-loop.
+
+
+Consumers alert on `st_agents_refresh_last_success`: compute snapshot age with
+`time() - st_agents_refresh_last_success` and compare it with the deployment's
+freshness deadline. An absent series for an expected host is also a failure,
+not a successful empty snapshot. This distinguishes a stuck refresher still
+exporting cached counts from a fresh zero population; host/exporter absence
+must not be hidden by the age expression's lack of a sample.
+
+### Orthogonal work and attention
+
+`has_work` is true exactly when the store's current assigned/claimed work count
+or queued work count is nonzero for that agent. It is not model activity,
+unread-mail count, or a claim that queued work is executable. A child uses work
+explicitly linked to it, not every item in its parent's queue. No linked work
+means false; a failed work read invalidates the refresh rather than guessing.
+`idle` plus `has_work=true` is idle-with-work, not another state.
+
+Attention is the count of open actionable attention items, not agents. Count
+each source, person and episode item once, using the existing attention snapshot;
+closed/expired items do not count. Its kind set includes current attention
+sources beyond the five in the original draft. Custom/unrecognized kinds use
+`unattributed`. `unread-message` is reserved: the current attention snapshot
+deliberately leaves messages in conversations, so do not manufacture attention
+items from mailbox counts. It stays zero until an approved source projection
+exists. Most operational faults remain in the separate fault snapshot; count
+only faults actually present in person attention. An open item does not
+automatically make any agent asking.
+Shard by the owning host of the source member/run/launch; message attention
+belongs to its source conversation owner. For fleet-global sources select the
+fleet's authoritative source origin, not every replica that reads the item.
+An implementation must establish that unique origin before exporting those
+items; no person, message or source identifiers become labels.
+On every successful snapshot, `st.attention.open` emits all ten closed kinds,
+including explicit zeros. A missing attention-kind series means exporter
+failure, not zero open items; use the last-success gauge to detect a stale
+snapshot whose ten cached series still export.
+
+### Cardinality budget
+
+Emit occupied population buckets only; never preallocate the Cartesian product.
+A bucket that becomes empty emits zero for a fixed ten-minute retention window
+starting at its first complete empty snapshot. That window is at least two
+export intervals (configure export intervals no longer than five minutes) and
+at least Mimir's five-minute lookback. Repeated empty snapshots do not restart
+the window. After the window, stop reporting the bucket; becoming occupied
+again cancels its empty deadline. Only live buckets and empty buckets inside
+this window count against the 256-bucket population budget.
+
+The theoretical per-host product is `6 drivers × 6 kinds × 9 repos × 21 legal
+pairs × 2 work flags = 13,608`, plus ten attention buckets and one last-success
+series. This is not an acceptable active-series allocation. Population's
+operational allocation is at most 256 live/retained buckets, plus ten attention
+buckets and one last-success series per daemon. A worked deployment bound of
+64 live seats plus 128 live children and at most 64 distinct buckets inside the
+empty retention window is `192 + 64 + 10 + 1 = 267` series per host. Each live
+agent contributes to one bucket, so simultaneous nonzero population series
+never exceed the number of included agents. Backend active-series accounting
+can outlive reporting; its additional churn cost still needs capacity review.
+
+Set the OTel SDK stream cardinality limit explicitly to 512 for each of these
+three instruments, above 266 and the combined 267-series allocation; do not
+rely on the default. This is a safety margin, not permission to exceed the
+contract's allocation. OTel Rust SDK 0.30 emits an overflow data-point series
+with the attribute `otel.metric.overflow=true`, rendered in Mimir as
+`otel_metric_overflow="true"` on the affected metric (for example,
+`st_agents{otel_metric_overflow="true"}`). Alert on the presence of that label
+for any of the three metrics: overflow is a contract violation, never a valid
+fallback bucket or silently accepted population total.
+The 256-bucket operational allocation must not reject a complete snapshot or
+freeze last-success, counts, or retained-zero aging. Publish the complete cut;
+the SDK's explicit 512-series safety limit surfaces excess combinations through
+its overflow series. Such overflow remains an alertable contract violation,
+not an approved loss of labels or a valid substitute for capacity review.
+
+
+This allocation must fit O11Y-R14's shared 2,000-series daemon budget, not add
+another 2,000. The HTTP request-duration instrument already reserves up to 1,500
+series; mailbox/delivery and other instruments consume the remainder. Capacity
+and label-churn review is an implementation gate, not a claim of current
+compliance. If inventory exceeds the allocation, the decision owner must approve
+a revised budget or a lossless
+dimension policy before rollout: never truncate agents, use SDK overflow to
+silently lose the contract's labels, or discard counts to meet a budget.
+
+### Signal gaps and implementation boundary
+
+This source assessment is pinned to `bb31fd6fc90dddcf8fbabb39c315510ba1a0d993`.
+The population exporter does not exist at this revision. “Unattributed” below
+describes the required initial emission once that exporter exists, not a
+measurement already exported.
+
+| Signal / reserved reason | Initial attribution and change that closes the gap |
+| --- | --- |
+| Human asks | Existing `blocked_on` and `ask` support `asking/question`, `permission`, `review`; an absent subtype is `asking/unattributed`. Preserve that observation for every driver. |
+| `working/model`, `working/tool` | Active-turn evidence gives `working/unattributed`; forward balanced model/tool intervals into current-incarnation store observations, not only timeline/ask events. |
+| `waiting/subagent` | A child ledger proves a child exists, not parent blocking. Forward the parent's actual await/resume interval and child linkage; otherwise known waits remain `waiting/unattributed`. |
+| `waiting/background_job` | Aggregate background counts cannot prove blocking or distinguish job types. Driver must forward typed blocking job intervals. |
+| `waiting/retry` | Retry continuation is not a terminal turn but does not publish a blocking retry interval. Forward retry start/end through driver state. |
+| `waiting/compaction` | OMP context edges/counts do not prove duration or blocking; keep its known state with `reason=unattributed` until balanced blocking compaction start/end exist. Claude/Codex already publish a compaction state reason; use it only for a positively observed blocking interval, not a completed count. |
+| `waiting/agent_reply`, `waiting/external` | Mission/work waits and shell commands alone do not prove the harness is blocked. Link an observed blocking operation to the wait in the store; no heuristic classification of command text. |
+| Unknown child activity | A live child ledger supports population membership, not per-child model/tool/ask state. Emit `unknown/unattributed` until drivers forward child-scoped activity. |
+| Missing child lifecycle | The ledger currently supports Claude, Codex and current OMP, not pi/opencode; historical OMP assets still suppress children. Complete lifecycle coverage or prove that no children exist for each enabled driver before population rollout. `unattributed` cannot repair an agent that was never observed; a partial store count must not be presented as a complete population. |
+| Child parent/repository provenance | OMP forwards lifecycle today, but only child id/name, not immediate `parentId`, depth or repository. Preserve explicit child-to-parent linkage and repository attribution in driver/store observations; seat ownership alone does not express nested parentage. |
+| Repository projection | Declared checkout is on the agent resource; observed workspace repository is not. Add the normalized current repository projection instead of a metric-specific claim join. |
+| Faults / stale presence | Reuse observed fault and freshness folds; unknown fault code maps to `faulted/unattributed`. Never-started declarations remain outside live population. |
+| `st.attention.kind=unread-message` | Reserved, with no current attention-item source; emit zero, not a guessed unread-message count. Adding that source requires explicit review of attention semantics. |
+| Attention publisher ownership | Current attention views have no metric-ready unique host field. Resolve authoritative source ownership in the store before enabling export; replicated snapshots must not double-count. |
+
+All drivers must preserve totals despite attribution gaps. OMP child observation
+must stay separate from the parent channel's session ownership: forwarding child
+events must not let a child replace the seat's channel. Implementation follows
+only after independent GO on this revision, in separate exporter/store and driver
+PRs; this documentation changes no runtime behavior.
+Consumer dashboards and alerts require telemetry-registry entries before rollout.
+
+### Rollout prerequisites and deployment switch
+
+Population export is explicitly opt-in per daemon: the root TOML key
+`agent_population_enabled = false` is the default, including when omitted.
+While off, the daemon starts no population refresher, subscribes no population
+commit observer, registers none of the three population/attention instruments,
+and performs no population queries on the ordinary roster/card path.
+Enabling the ordinary OTLP metrics pipeline alone does not enable population.
+
+Set `agent_population_enabled = true` only after the independent review GO,
+enabled-driver child lifecycle coverage, authoritative attention ownership,
+host inventory, repository registry R, cardinality allocation, and applicable
+telemetry-registry requirements above have been satisfied. Configure
+`agent_population_repositories` alongside the switch; an empty registry remains
+valid and maps all repositories to `unattributed`, not permission to discover
+new label values. Restart the daemon after changing either key. Population
+instruments register only after the first successful complete snapshot and
+also require the existing metrics pipeline to be enabled. To disable population
+without disabling other telemetry, set the switch to false and restart.
+
+## Per-agent delivery health
+
+The daemon's existing `st3` meter exports observable f64 gauge
+`st.delivery.state_age`, unit `s`, with exactly four point attributes:
+`st.agent`, `st.delivery.state`, `st.delivery.reason`, and `st.agent.desired`. Host identity stays in
+the daemon resource, not an additional point attribute.
+
+Membership comes exclusively from
+`mailbox_metrics::managed_agents_owned_by_local_host(&Store)`: declared subjects
+whose kind is `agent` and whose member host equals `store.origin()`. The full
+subject is used unchanged as `st.agent`, so this series joins the mailbox
+backlog gauges without display-name aliases or duplicate remote-host reporting.
+Every member contributes one series, including agents that have never bound
+and members not yet in the cached agents publication. Stopped declarations
+(kind `stop`), retired/undeclared agents and agents owned by another host are not exported.
+Stopping an agent therefore removes its series; it cannot page for stale delivery.
+
+`st.agent.desired` is `suspended` exactly when
+`suspension::current(&Store, agent)?.holds_seat()` holds, using the same authoritative
+suspend/resume fold as the reconciler. This includes quiescing, snapshotting,
+suspended, fencing-source, transferring, restoring and verifying phases; it stays
+suspended until resume completes, including failed resumes that retain the hold.
+Otherwise an exported declared agent is `running`, even if its harness never
+started or crashed. No `stopped` or `unknown` attribute value is exported because
+membership already proves an active agent declaration. The off-scrape worker
+updates this attribute; desired-state changes do not reset the delivery-state age.
+
+The cached delivery projection maps `current`, `outdated`, and `legacy` to
+`live`; an explicit bind refusal maps to `refused`. Every other case maps to
+`stale`, including startup `unknown`, a never-bound seat, a suspended seat, or
+missing publication data. This is deliberately stricter than the UI's startup
+grace: absence of confirmed delivery evidence is explicit rather than an absent
+time series.
+
+`st.delivery.reason` is always the empty string for `live` and `stale`. For
+`refused` its fixed vocabulary is `mailbox-runtime-indeterminate`,
+`stale-mailbox-session`, `mailbox-binding-conflict`, `mailbox-peer-mismatch`,
+`mailbox-not-authorized`, `recipient-retired`, and `other`. Unrecognized codes
+map to `other`; their original text remains in the warning log and API reason.
+Refusal observation follows caller identity proof: the provider, exact live
+physical runtime membership and daemon-selected observation paths must match.
+A nested Claude caller also passes the primary process gate; argv callers must
+pass physical process validation. Wrong-provider and outside-runtime rejections
+cannot mark healthy primary delivery refused. A subsequent session/fence refusal
+encountered by the authenticated caller remains visible.
+On non-Linux platforms there is no native authority on the Store bind route:
+after the Claude primary gate, permission to attempt that bind also permits
+its refusal diagnostics.
+
+Free-form diagnostic text is never exported as a label.
+
+The value is seconds since the current normalized state began in this daemon
+lifetime. `delivery.since_unix_ms` seeds the initial age once when available;
+otherwise age starts at the first successful metrics refresh. Thereafter a
+monotonic clock advances age: wall-clock corrections cannot move it backward
+or forward. Repeated refusals, unknown-to-stale transitions, and binary-version
+changes within `live` do not reset it. State or runtime-incarnation changes do
+reset it. The worker holds a roster-publication subscription for its lifetime,
+so heartbeat expiry, refusal and recovery keep refreshing without any UI reader.
+A single off-scrape worker refreshes membership and cached projection data, with at least
+30 seconds of rest after each refresh (or its elapsed duration if longer).
+Failures retain the last complete summary. Collection only reads this summary
+and advances ages; it does no store, graph, process, or filesystem reads.
+
+Alert on `st.delivery.state=stale` AND `st.agent.desired=running` AND
+`st.delivery.state_age > 600`. Add a corresponding `refused` rule if refused
+delivery should page too, retaining the desired-running filter. This detects
+channel health independently of unread messages and excludes intentional
+suspension. Daemon disappearance requires a separate exporter/host-availability
+alert; stopped declarations emit no series.
+
+## Durable mailbox gauges (contract v2)
+
+The `st3` meter exports these observable gauges from the daemon:
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.mailbox.unread` | Observable u64 gauge | `{message}` | `st.agent`, `st.mailbox.state`, `st.mailbox.age_band` |
+| `st.mailbox.oldest_unread_age` | Observable f64 gauge | `s` | `st.agent`, `st.mailbox.state`, `st.mailbox.age_band` |
+
+`st.agent` is the full declared subject, such as `agent/<owner>/<name>`,
+not a display name or runtime identity. This is a deliberate fleet-membership
+exception to O11Y-R14's identity-label prohibition. The reusable
+`managed_agents_owned_by_local_host` helper reads the same declared projection
+as `desired_subjects_named` and includes only agents whose `member.host` equals
+the store's local origin. Remote-owned agents, undeclared recipients and people
+are excluded. Each included agent contributes three states × two age bands to
+each instrument (~6 × agents series per gauge), including agents with no messages.
+Host identity remains the `host.name` resource attribute (available as `host_name` downstream); neither
+instrument adds a per-point host attribute.
+
+Unread means no `message.read` or `message.closed` claim. Partition unread mail
+into `pending` for sent or staged messages, `delivered` for delivered messages,
+and `held` for silent messages for which `waits_for_turn` is true. Held takes
+precedence over the ordinary delivery state: a silent sent message is held,
+but a silent message already offered or delivered is not waiting for a turn.
+Partition each state by `st.mailbox.age_band`: `recent` when the message's oldest
+accepted `message.sent` timestamp is less than 86,400,000 ms before the refresh's
+`now`, and `stale` at that exact boundary or later. Repeated sends count once,
+using the oldest accepted send, not the latest retry. Every state × band reports
+a count and age of zero when empty. Age is seconds since that pair's oldest
+accepted send, not its delivery time or a sender-provided field. Its unit is
+exactly `s`, matching `st.fifo.oldest_age`; it measures durable unread mail,
+not an in-process FIFO.
+
+While `coordination_backfill_status()?.2` is false, held metadata is incomplete.
+Omit only the two `held` bands, including held zeros; continue exporting `pending`
+and `delivered` and their mandatory zeros (four pairs per agent per gauge).
+During this bootstrap, ordinary delivery-state counts may include mail whose
+held classification is unavailable. Resume the complete six-pair partition
+after the next successful refresh observes completed bootstrap.
+
+Registration is part of `start_published_lists`, after the first successful
+summary. A single blocking worker reads the desired declarations and builds
+a cached summary using an indexed query per locally owned recipient. Refresh
+cost is bounded by the declared-subject set plus those recipients' retained sent
+and unread-subject claim histories, not fleet-wide message bodies; there is no
+delivery-page cap or silent truncation. Cache size is at most six rows per
+local agent, plus temporary query candidates and the existing message-view cache.
+Refreshes never overlap; after each refresh the worker pauses for at least 30 seconds, or
+the refresh's elapsed duration if longer. SDK collection reads only the cached
+summary and advances ages from cached accepted timestamps; it does no store,
+graph or filesystem reads. Counts and membership therefore reflect the last
+successful refresh rather than the instant of collection.
+Bands are classified only at refresh time with one shared `now`. A message crosses
+bands at the next successful refresh, normally at most about 30 seconds late
+(long refreshes or failures can delay this). Scraping advances ages but does not
+reclassify cached messages, so a recent-band age can briefly exceed one day.
+Failed refreshes retain the last complete summary and log a warning.
+
+For an unread-latency alert across all ages, including stale pending mail, use:
+
+```promql
+max by (st_agent) (st_mailbox_oldest_unread_age{st_mailbox_state=~"pending|delivered"}) > 1800
+```
+
+For a weekly stale-backlog list, use
+`st_mailbox_unread{st_mailbox_age_band="stale"}`.
+
 ## Projection freshness telemetry
 
 The `projection-fresh` target (docs/clients/ui-contract.md, SLOs) does not sample a publication
@@ -633,6 +1098,20 @@ adds one to a counter, so a catch-up is seen rather than hidden from the target.
 | `st.slo.projection_fresh.skipped` | Counter | `{publication}` | `collection=missions`, `agents`, `attention`, or `other` |
 
 It contributes at most 4 attribute series and counts only while daemon metrics are enabled.
+
+## Assistant read receipt telemetry
+
+Caller-bound assistant read receipts commit on one background writer after the read returns
+(docs/st3/external-assistants.md). Each writer transaction records how many receipts it
+committed; a receipt that fails to commit is counted and logged at `error` with its subject.
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.assistant.read_receipts.batch.size` | Histogram | `{receipt}` | none; buckets `1,2,4,…,256` |
+| `st.assistant.read_receipts.failures` | Counter | `{receipt}` | none |
+
+Both record only while daemon metrics are enabled. The same distribution is available in
+process from `ReceiptWriter::stats`, and each commit logs `receipt_count` at `debug`.
 
 ## Daemon startup telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
@@ -708,7 +1187,7 @@ exchange(peer) → st.replication.round (detached root, one per exchange call)
 ```
 
 The root uses the OpenTelemetry API's `start_with_context` with an empty
-parent context. smallclaims depends on the OTel API only; st3 owns providers.
+parent context. smallclaims depends on the OTel API only; Fractal owns providers.
 The round does not inherit an ambient daemon or worker span. `span.label` is
 the bounded operation `round`.
 Span fields use the `st.replication.*` prefix. The round records `peer`,
@@ -874,8 +1353,11 @@ no root, abnormal/failure results are ERROR, and roots remain parentless even wi
 both an entered tracing span and an attached OTel context.
 
 The stage-span receiver proof compares `st.request.id` with the HTTP envelope, checks
-roster/page stage values, and links first-frame roots to the exported upgrade trace/span
-ids. It asserts that repeated rereads or changes produce no additional first-frame
+roster/page stage values, and links first-frame spans to the exported upgrade trace/span
+ids. It checks valid frame parent trace/span IDs, SERVER kind, sampled and unsampled
+flags, and malformed-field fallback to an INTERNAL root without losing first-frame
+delivery. The client contract proof preserves old-shape subscribes and accepts malformed
+telemetry. Repeated rereads or changes produce no additional first-frame
 roots, cold roster builds are detached and unlinked, and receive projection roots are
 detached but linked to the receive request. Empty receives produce no projection root.
 
@@ -905,3 +1387,55 @@ share coverage or vocabulary remains a design question.
 The daemon has no SIGTERM flush handler. A service stop can therefore lose its last
 buffered telemetry batch; the five-second budget bounds an invoked shutdown, rather
 than promising that SIGTERM invokes one. The lifecycle policy remains open.
+
+## Program attempt correlation
+
+Program launches use the existing daemon OTel provider and exporter; they do not
+install another SDK or sampler. `st.mission.run` is a short root identifying a
+mission run. Each `st.program.attempt` is a new root with links to that run and,
+when present, the previous launch of the same step (including host replacement),
+or the matching step of the run named by `retry_of` / `supersedes`. Retries never
+form an indefinitely nested parent chain. The attempt span closes when the engine
+forgets that exact attempt: completion, failure, cancellation, or host loss.
+The roots retain `st.run`, `st.step`, and integer `st.attempt` as span-only
+attributes, never metric labels; `span.label` is a concise attempt label.
+
+The daemon persists the W3C `{traceparent,tracestate?}` object in durable,
+system-only `mission.run.trace` and append-only `program.attempt.trace` claims.
+Every new program journal/result claim references its exact launch's
+`program.attempt.trace` claim ID in the existing `evidence[]` envelope field;
+the `program.step` fields keep their old shape, with no inline trace object.
+These records are independent of collector sampling and backend retention.
+With export disabled, fresh valid IDs still exist, with the sampled flag clear;
+this is correlation evidence, not a claim that an exported span exists.
+Historical journal entries without trace evidence remain valid. Older readers
+admit the unchanged journal shape and retain the unknown standalone trace claim
+kinds, so this correlation change does not require a reader-first deployment.
+New root carriers use `tracestate=st=c`, retaining the collector-owned sampling
+marker used by Fractal's other propagation surfaces.
+
+The start frame carries `TRACEPARENT` and `TRACESTATE` in its per-attempt
+environment. The host passes these into the isolated worker and each exec,
+without mutating its shared environment. Exec options cannot replace this
+correlation with an unrelated parent. An absent tracestate explicitly clears
+any inherited value. Concurrent workers therefore cannot leak context.
+
+Harness support, inventoried against upstream interfaces:
+
+- [Claude Code monitoring](https://code.claude.com/docs/en/monitoring-usage#traces-beta)
+  documents inbound `TRACEPARENT` / `TRACESTATE` for Agent SDK and `claude -p`
+  interactions (not interactive sessions). Native traces require its documented
+  telemetry/beta tracing settings; event logs can carry inbound IDs without a
+  traces exporter. Fractal does not override the user's exporter settings.
+- [Codex's trace context module](https://github.com/openai/codex/blob/main/codex-rs/otel/src/trace_context.rs)
+  reads and validates these exact environment variables using W3C extraction.
+- [OMP's agent telemetry](https://github.com/can1357/oh-my-pi/blob/main/packages/agent/src/telemetry.ts)
+  supports an active OTel context and its worker telemetry bridge preserves it;
+  its CLI does not currently expose a `TRACEPARENT` environment extractor.
+  Fractal delivers context but does not assert native OMP span continuity or
+  invent an unsupported flag.
+
+The durable invocation receipt is the authoritative join to harness response
+evidence; a reused harness process needs a new per-turn invocation receipt rather
+than reusing its launch environment as turn identity.
+

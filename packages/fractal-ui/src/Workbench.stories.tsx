@@ -57,11 +57,41 @@ function WorkbenchStory({ scheme = 'dark', state = 'two', threadState = 'live', 
   </section>
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Workbench', component: WorkbenchStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic host-owned layouts, resource maps, local command mutations, diff/terminal composition and persistence exercise the Workbench embedding contract.' }, layout: 'fullscreen' }, args: { scheme: 'dark', state: 'two', threadState: 'live', seed: 'running' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, state: { options: ['one', 'two', 'three', 'dragging', 'nested', 'tabs'], control: 'select' }, threadState: { options: ['live', 'empty', 'loading', 'stale', 'failed', 'unavailable'], control: 'select' }, seed: { options: ['running', 'idle'], control: 'radio' }, persist: { table: { disable: true } }, workspaceId: { table: { disable: true } } },
   render: (args, { id }) => <main aria-label="Workbench"><WorkbenchStory key={`${id}-${args.scheme}-${args.state}-${args.seed}-${args.threadState}`} {...args} workspaceId={`kit-b-${id}-${args.scheme}-${args.state}${args.seed === 'idle' ? '-idle' : ''}-${args.threadState}`} /></main>,
 } satisfies Meta<typeof WorkbenchStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'Dark:contract-fixture',
+  'DragToSplit:contract-fixture',
+  'DragToSplitSingleGroup:contract-fixture',
+  'Dragging:contract-fixture',
+  'Empty:contract-fixture',
+  'Failed:contract-fixture',
+  'HostToolReveal:contract-fixture',
+  'IdleSample:contract-fixture',
+  'KeyboardCloseAndSnapshot:contract-fixture',
+  'KeyboardSplitPreservesHost:contract-fixture',
+  'KeyboardTabsAndTerminal:contract-fixture',
+  'Light:contract-fixture',
+  'Loading:contract-fixture',
+  'NestedRatios:contract-fixture',
+  'OnePane:contract-fixture',
+  'OptionalSnapshotFields:contract-fixture',
+  'RendererOverride:contract-fixture',
+  'RunningQueueAndSteer:contract-fixture',
+  'SplitBelow:contract-fixture',
+  'Stale:contract-fixture',
+  'TerminalOpen:contract-fixture',
+  'ThreadTabs:contract-fixture',
+  'Unavailable:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const settle = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 export const Dark: Story = {}
@@ -218,7 +248,7 @@ export const HostToolReveal: Story = { tags: ['critical'], args: { state: 'two' 
   await expect(file).toHaveAttribute('aria-expanded', 'true')
   await expect(fileDiff.getByTestId('diff-code')).toBeVisible()
 } }
-export const AllStates: Story = { tags: ['critical'], render: args => <main aria-label="Workbench states" {...stylex.props(styles.matrix)}>{(['one', 'two', 'three', 'dragging'] as const).map(state => <section key={state} {...stylex.props(styles.specimen)}><h2>{state} · W3/H1/P3/D2</h2><WorkbenchStory {...args} state={state} persist={false} /></section>)}</main>, play: async ({ canvasElement }) => {
+export const AllStates: Story = { tags: ['critical', 'both-widths'], render: args => <main aria-label="Workbench states" {...stylex.props(styles.matrix)}>{(['one', 'two', 'three', 'dragging'] as const).map(state => <section key={state} {...stylex.props(styles.specimen)}><h2>{state} · W3/H1/P3/D2</h2><WorkbenchStory {...args} state={state} persist={false} /></section>)}</main>, play: async ({ canvasElement }) => {
   await settle()
   // Syntax tokens belong to kit A; these assertions target newly reachable UI counts, markers and washes.
   const chrome = canvasElement.querySelectorAll('[data-testid="pane-header"] span, [data-testid="diff-panel"] span, [data-testid="diff-code"] > div')
@@ -231,7 +261,7 @@ export const AllStates: Story = { tags: ['critical'], render: args => <main aria
     }
   }
 } }
-export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
+export const AllStatesLight: Story = { ...AllStates, tags: ['critical', '!both-widths'], args: { scheme: 'light' } }
 const styles = stylex.create({
   canvas: { display: 'flex', flexDirection: 'column', height: '100vh', minWidth: 0, overflow: 'hidden', backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   toolbar: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.lg, padding: s.sm, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border }, workspace: { display: 'flex', flex: '1 1 0', minHeight: 0, minWidth: 0 },

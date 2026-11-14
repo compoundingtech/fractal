@@ -147,7 +147,7 @@ fn batched_mission_reads_preserve_alias_lifecycle_fences() {
                 store.mission_definitions_for_ids(&[id.into()]).unwrap_err(),
                 store.mission_run_headers_for_missions(&[id.into()]).unwrap_err(),
             ] {
-                let error = error.downcast_ref::<St3Error>().unwrap();
+                let error = error.downcast_ref::<FractalError>().unwrap();
                 assert_eq!(error.code, "lifecycle-unavailable", "{id}: {fence}");
                 assert_eq!(error.details["subject"], "mission/example-before");
                 assert_eq!(error.details["reason"], expected);

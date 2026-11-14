@@ -75,7 +75,7 @@ class Tab:
         self.master, self.slave = pty.openpty()
         self.resize(40, 120)
         self.env = {**os.environ, "TERM": "xterm-256color", "PTY_ROOT": str(self.registry),
-                    "STUI_PROBE_ROOT": str(self.root), "STUI_PROBE_SOCKET": str(self.root / "tab.sock"),
+                    "FRACTAL_TUI_PROBE_ROOT": str(self.root), "FRACTAL_TUI_PROBE_SOCKET": str(self.root / "tab.sock"),
                     "XDG_CONFIG_HOME": str(self.root / "config"),
                     "XDG_CACHE_HOME": str(self.root / "cache"),
                     "XDG_STATE_HOME": str(self.root / "state"), "HOME": str(self.root)}
@@ -440,9 +440,9 @@ def matrix(tab):
 
 
 def agent_guards(worker):
-    with tempfile.TemporaryDirectory(prefix="stui-guard-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-guard-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
-        tab.env["STUI_PROBE_AGENT"] = "1"
+        tab.env["FRACTAL_TUI_PROBE_AGENT"] = "1"
         try:
             tab.start()
             tab.emit(RESET)
@@ -460,9 +460,9 @@ def agent_guards(worker):
 
 def controls_and_images(worker):
     import base64
-    with tempfile.TemporaryDirectory(prefix="stui-controls-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-controls-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
-        tab.env["STUI_PROBE_GRAPHICS"] = "1"
+        tab.env["FRACTAL_TUI_PROBE_GRAPHICS"] = "1"
         rows = []
         try:
             tab.start()
@@ -591,7 +591,7 @@ def controls_and_images(worker):
 
 
 def check_program(worker, name, binary):
-    with tempfile.TemporaryDirectory(prefix="stui-app-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-app-") as directory:
         root = Path(directory)
         document = root / ("document.html" if name == "cha" else "document.txt")
         lines = [f"copper line {number:03}" for number in range(200)]
@@ -630,7 +630,7 @@ def action_publication(worker):
     # Force the consumer to run while the producer has written only the first byte.
     # Two title acknowledgements span a new worker loop during that interval.
     from unittest.mock import patch
-    with tempfile.TemporaryDirectory(prefix="stui-action-probe-") as directory:
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-action-probe-") as directory:
         tab = Tab(worker, [sys.executable, str(HERE / "copper_probe.py"), directory], directory)
         original_write = Path.write_text
 
@@ -662,11 +662,76 @@ def action_publication(worker):
     print("terminal tab: split-write hide/show publication controls passed")
 
 
+def program_signals():
+    # Every resize reaches copper_probe.py as a SIGWINCH at any point in its loop, while it logs
+    # what it reads and writes. Signal it without pause while it reads and writes; it must run on.
+    with tempfile.TemporaryDirectory(prefix="fractal-tui-signals-probe-") as directory:
+        root = Path(directory)
+        master, slave = pty.openpty()
+        program = subprocess.Popen([sys.executable, str(HERE / "copper_probe.py"), directory],
+                                   stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        # Only the program holds the terminal, and input never blocks: a program that exited
+        # leaves its input unread, and this check must then fail rather than wait on it.
+        os.close(slave)
+        os.set_blocking(master, False)
+        output = bytearray()
+        stopping = threading.Event()
+
+        def drain():
+            while not stopping.is_set():
+                if select.select([master], [], [], 0.05)[0]:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except BlockingIOError:
+                        continue
+                    except OSError:
+                        return
+
+        def resize():
+            while not stopping.is_set() and program.poll() is None:
+                program.send_signal(signal.SIGWINCH)
+
+        threads = [threading.Thread(target=drain, daemon=True), threading.Thread(target=resize, daemon=True)]
+        for thread in threads:
+            thread.start()
+        requests = 0
+        deadline = time.monotonic() + 3
+        try:
+            while time.monotonic() < deadline and program.poll() is None:
+                requests += 1
+                (root / "request.new").write_text(json.dumps({"id": requests, "hex": b"x".hex()}))
+                (root / "request.new").replace(root / "request.json")
+                try:
+                    os.write(master, b"copper")
+                except BlockingIOError:
+                    pass
+            exited = program.poll()
+            assert exited is None, (
+                f"copper_probe.py exited ({exited}) after {requests} requests under SIGWINCH:\n"
+                + bytes(output[-2000:]).decode(errors="replace"))
+            rows = json_lines(root / "program.jsonl")
+            assert sum(row["kind"] == "resize" for row in rows) > 1, "no SIGWINCH was recorded"
+            assert any(row["kind"] == "input" for row in rows), "no input was recorded"
+        finally:
+            stopping.set()
+            (root / "stop").touch()
+            for thread in threads:
+                thread.join()
+            try:
+                program.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                program.kill()
+                program.wait()
+            os.close(master)
+    print(f"terminal tab: the program ran on through SIGWINCH for {requests} requests")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--check-action-publication", action="store_true")
+    parser.add_argument("--check-program-signals", action="store_true")
     # One part of the recorded cases, so the parts can run as separate tests at the same time.
     parser.add_argument("--part", choices=["matrix", "agent-guards", "controls"])
     parser.add_argument("--record", type=Path)
@@ -677,9 +742,12 @@ def main():
     if args.check_action_publication:
         action_publication(args.worker.resolve())
         return
+    if args.check_program_signals:
+        program_signals()
+        return
     rows = []
     if args.part in (None, "matrix"):
-        with tempfile.TemporaryDirectory(prefix="stui-probe-") as directory:
+        with tempfile.TemporaryDirectory(prefix="fractal-tui-probe-") as directory:
             command = [sys.executable, str(HERE / "copper_probe.py"), directory]
             tab = Tab(args.worker.resolve(), command, directory)
             try:
@@ -687,6 +755,7 @@ def main():
                 rows.extend(matrix(tab))
             except Exception:
                 print("worker tail:", bytes(tab.output[-2000:]), file=sys.stderr)
+                print("program tail:", bytes(tab.program_output[-2000:]), file=sys.stderr)
                 print("relay error:", tab.relay_error, file=sys.stderr)
                 raise
             finally:

@@ -60,7 +60,7 @@ pub fn run_plan(
     let mut args: Vec<OsString> = vec![
         format!("--unit={}", registry::tools_unit(name)).into(),
         format!("--slice={}", registry::slice_unit(name)).into(),
-        format!("--description=st tile {name}").into(),
+        format!("--description=Fractal tile {name}").into(),
         "--service-type=exec".into(),
         "--collect".into(),
         "--wait".into(),
@@ -215,7 +215,7 @@ pub fn enter(registry_path: &Path, name: &str, command: &[OsString]) -> Result<i
     // did not record.
     let uid = registry
         .uid(name)
-        .with_context(|| format!("tile {name} has no user ID yet; start it with `st tiles run`"))?;
+        .with_context(|| format!("tile {name} has no user ID yet; start it with `fractal tiles run`"))?;
     uids::check_unclaimed(name, uid)?;
     if command.is_empty() {
         bail!("name a command to run in the tile");
@@ -227,7 +227,7 @@ pub fn enter(registry_path: &Path, name: &str, command: &[OsString]) -> Result<i
     if cgroup != expected {
         bail!(
             "st tiles enter runs only as the main process of {}, in {expected}; this process runs \
-             in {cgroup}. Start the tile with `st tiles run`",
+             in {cgroup}. Start the tile with `fractal tiles run`",
             registry::tools_unit(name)
         );
     }

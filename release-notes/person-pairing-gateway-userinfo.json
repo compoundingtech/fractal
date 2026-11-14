@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Pairing gateways reject URLs containing usernames or passwords; upgrade all completion members for the origin guarantee.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No claim schema or storage changes." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "changed", "detail": "The pair command rejects gateway URLs containing userinfo before making a probe. The completion origin guarantee holds only when every member accepting pairing completion runs this version or later. An older member has no origin check and can still complete a replicated challenge begun on an upgraded member." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "changed", "detail": "Upgrade all members accepting pairing completion. Supply a gateway URL without a username or password." },
+  "recovery": { "status": "changed", "detail": "Remove URL userinfo and rerun the pair command on the beginning member." }
+}

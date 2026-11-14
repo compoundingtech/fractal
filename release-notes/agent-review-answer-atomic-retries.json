@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Isolate internal agent answer writes and settle idempotent retries",
+  "replay": {"status": "none", "detail": "No production agent-answer ingress or accepted-answer fold is enabled."},
+  "schema": {"status": "none", "detail": "No accepted wire changes; public parsers and generic append remain closed to agent-review request/result shapes."},
+  "rules": {"status": "none", "detail": "The dormant answer writer now shares generic append's operation-outcome admission: identical retries return the original claim, mismatched or conflicting keys fail before writing, and checkpointed outcomes remain fenced. A savepoint rolls back every mutation on failure, including failures after claim insertion, even when the caller commits its outer transaction."},
+  "compatibility": {"status": "none", "detail": "Existing generic append outcomes and human policy remain unchanged. Agent repair refusal, responsibility, retirement, evidence and currency checks remain in force for new answers."},
+  "downtime": {"status": "none", "detail": "No runtime cutover."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "No data migration or recovery is required."}
+}

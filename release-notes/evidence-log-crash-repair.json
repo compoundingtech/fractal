@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Repair crash-damaged evidence publisher and watcher copies without changing trusted keys",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay changes. Evidence repository repair operates only on local Git storage."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database or signed evidence format changes. Existing log commits and copy refs remain readable."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Existing trusted-key and leased fast-forward requirements remain in force. Publisher repair additionally requires a signed published descendant of the exact damaged local head."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Existing readers need no changes. Empty copies still require explicit seeding; this change does not accept new keys or unrelated chains."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon downtime. A damaged publisher fetches the trusted continuation once in isolation; a damaged disposable watcher copy is rebuilt once per pass."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Update installed evidence-log-timer and evidence-log-watch scripts to enable durable object writes and watcher repair. The timer reads the publisher from main. Keep evidence GC paused until its separate fixes are installed."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Publisher repair retains broken loose objects and refuses untrusted, unrelated or absent published heads. An unpublished damaged local head requires operator recovery. Failed checkpoint publication still packs refs, performs requested record restoration and retains the missing-record alarm. Watcher repair retains its newest broken repository and preserves synced notification state. Revert scripts without converting stored data."
+  }
+}

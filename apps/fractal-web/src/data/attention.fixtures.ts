@@ -1,4 +1,4 @@
-import { Attention, decodeUnknownSync, type AttentionEncoded } from '@fractal/client/schema'
+import { Attention, decodeUnknownSync, type AttentionEncoded } from '@fractal/client/schema/read'
 
 // Synthetic wire-contract table: keep all cases here so misc's planned shared request
 // fixtures can replace this module without changing predicate, filter or badge tests.

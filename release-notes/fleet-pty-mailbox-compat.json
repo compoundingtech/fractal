@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cover deployed PTY metadata in the fleet compatibility lane",
+  "replay": {"status": "none", "detail": "No replay behavior changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No retention or checkpoint changes."},
+  "compatibility": {"status": "none", "detail": "fleet-compat now invokes the production mailbox bind handler against a pinned pty 0.13.0 (063ff7f) publication shape without daemonBootId, using a live process start token. This complements the existing previous-Fractal-release replication check; it does not replace the development PTY dependency."},
+  "downtime": {"status": "none", "detail": "Test-only change."},
+  "manual": {"status": "none", "detail": "No deployment steps."},
+  "recovery": {"status": "none", "detail": "No runtime changes."}
+}

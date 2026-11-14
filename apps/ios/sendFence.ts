@@ -1,6 +1,6 @@
-// A message carries no subject revisions: st asks only that the snapshot be this host's and not
+// A message carries no subject revisions: Fractal asks only that the snapshot be this host's and not
 // ahead of its store, so the newest snapshot a window frame already brought is as good as a fresh
-// read and saves a round trip on every send. Only when st says a try applied nothing (a stale
+// read and saves a round trip on every send. Only when Fractal says a try applied nothing (a stale
 // fence, a restarted host) is a fresh snapshot read.
 export type SendFence = { snapshot_id: string; subject_revisions: Record<string, string> };
 

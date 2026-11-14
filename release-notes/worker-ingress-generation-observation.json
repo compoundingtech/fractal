@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Observe Linux worker-only internal requests against the supervised worker process generation and support explicit foreground worker enrollment before the daemon listens.",
+  "replay": {"status": "none", "detail": "No claim or retirement format changes."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Observation only: requests that lack worker provenance are logged but not refused. macOS emits unverified-platform and retains existing admission; its unbound local caller authority gap remains open. Foreground launchers can start the worker first and pass its PID to up --replication-worker-pid. Service-managed daemons refuse explicit enrollment."},
+  "downtime": {"status": "none", "detail": "No coordinated restart is required for observation-only admission."},
+  "manual": {"status": "changed", "detail": "For foreground operation start the worker first and enroll its PID when starting the daemon. A subsequent manual worker restart requires restarting the foreground daemon with its new PID."},
+  "recovery": {"status": "none", "detail": "Existing admission behavior is unchanged; reverting does not require data migration."}
+}

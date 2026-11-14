@@ -18,34 +18,35 @@ use fractal_store::store::fleet_admission_tests_shared_delivery::{fleet};
 fn directive_note_lifecycle_author_time_bounds_expiry_and_tombstones() {
     let store = store();
     assert!(store.directive_notes("person/avery").unwrap().is_empty());
-    let first = store.set_directive_note("person/avery", "person/avery", Some("Prioritize the release"), None).unwrap().unwrap();
+    let first = store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Prioritize the release"), None).unwrap().unwrap();
     assert_eq!(first.person, "person/avery");
     assert_eq!(first.author, "person/avery");
     let record = store.claim_by_id(&first.revision).unwrap().unwrap();
+    assert_eq!(record.body["fields"]["source"], "host/alder", "the note records its daemon-assigned writer");
     assert_eq!(chrono::DateTime::parse_from_rfc3339(&first.time).unwrap().timestamp_millis() as u128, record.accepted_at_unix_ms);
     assert_eq!(store.directive_notes("person/avery").unwrap(), vec![first.clone()]);
-    let replacement = store.set_directive_note("person/avery", "person/avery", Some(&"é".repeat(2048)), Some("2099-01-01T00:00:00+00:00")).unwrap().unwrap();
+    let replacement = store.set_directive_note("person/avery", "person/avery", "host/alder", Some(&"é".repeat(2048)), Some("2099-01-01T00:00:00+00:00")).unwrap().unwrap();
     assert_ne!(replacement.revision, first.revision);
     assert_eq!(replacement.text.len(), 4096);
     for text in [" \n\t".to_owned(), "é".repeat(2049)] {
-        assert!(store.set_directive_note("person/avery", "person/avery", Some(&text), None).is_err());
+        assert!(store.set_directive_note("person/avery", "person/avery", "host/alder", Some(&text), None).is_err());
     }
     for at in ["2099-02-30T00:00:00Z", "2099-01-01T00:00:00+01:00"] {
-        assert!(store.set_directive_note("person/avery", "person/avery", Some("Context"), Some(at)).is_err());
+        assert!(store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Context"), Some(at)).is_err());
     }
     assert_eq!(store.directive_notes("person/avery").unwrap(), vec![replacement]);
-    assert!(store.set_directive_note("person/avery", "person/avery", None, None).unwrap().is_none());
+    assert!(store.set_directive_note("person/avery", "person/avery", "host/alder", None, None).unwrap().is_none());
     assert!(store.directive_notes("person/avery").unwrap().is_empty());
-    let expiring = store.set_directive_note("person/avery", "person/avery", Some("Temporary focus"), Some("2099-01-01T00:00:00.500Z")).unwrap().unwrap();
+    let expiring = store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Temporary focus"), Some("2099-01-01T00:00:00.500Z")).unwrap().unwrap();
     let expiry = fractal_schema::directive_notes::expiry(expiring.expires_at.as_deref().unwrap()).unwrap().timestamp_millis() as u128;
     assert!(current(&store.readers.get(), "person/avery", expiry - 1).unwrap().is_some());
     assert!(current(&store.readers.get(), "person/avery", expiry).unwrap().is_none());
     assert!(current(&store.readers.get(), "person/avery", u128::MAX).unwrap().is_none());
-    let precise = store.set_directive_note("person/avery", "person/avery", Some("Short focus"), Some("2099-01-01T00:00:00.000500Z")).unwrap().unwrap();
+    let precise = store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Short focus"), Some("2099-01-01T00:00:00.000500Z")).unwrap().unwrap();
     let floor = fractal_schema::directive_notes::expiry(precise.expires_at.as_deref().unwrap()).unwrap().timestamp_millis() as u128;
     assert!(current(&store.readers.get(), "person/avery", floor).unwrap().is_some());
     assert!(current(&store.readers.get(), "person/avery", floor + 1).unwrap().is_none());
-    assert!(store.set_directive_note("person/avery", "person/avery", Some("Already expired"), Some("2000-01-01T00:00:00Z")).unwrap().is_none());
+    assert!(store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Already expired"), Some("2000-01-01T00:00:00Z")).unwrap().is_none());
     assert!(store.directive_notes("person/avery").unwrap().is_empty());
     let rows: usize = store.readers.get().query_row("SELECT COUNT(*) FROM person_directive_notes WHERE person='person/avery'", [], |row| row.get(0)).unwrap();
     assert_eq!(rows, 1, "clear and expired revisions must remain current tombstones");
@@ -58,10 +59,10 @@ fn directive_note_local_and_replicated_admission_require_subject_person() {
     let store = store();
     for actor in ["person/robin", "agent/worker"] {
         for text in [Some("Approved"), None] {
-            assert_eq!(store.set_directive_note("person/avery", actor, text, None).unwrap_err().code, "directive-note-forbidden");
+            assert_eq!(store.set_directive_note("person/avery", actor, "host/alder", text, None).unwrap_err().code, "directive-note-forbidden");
         }
     }
-    let note = store.set_directive_note("person/avery", "person/avery", Some("Approved"), None).unwrap().unwrap();
+    let note = store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Approved"), None).unwrap().unwrap();
     let original = store.claim_by_id(&note.revision).unwrap().unwrap();
     for actor in [None, Some("person/robin"), Some("agent/worker")] {
         let mut record = original.clone();
@@ -85,7 +86,7 @@ fn directive_note_local_and_replicated_admission_require_subject_person() {
 #[test]
 fn directive_note_visibility_fails_closed_on_unknown_cycles_and_depth_limit() {
     let store = store();
-    store.set_directive_note("person/avery", "person/avery", Some("Context"), None).unwrap();
+    store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Context"), None).unwrap();
     declare(&store, "version 2\nagent \"note/cycle-a\" { workspace \"/tmp\"; command \"true\"; }", "agent/note/cycle-b", "cycle-a");
     declare(&store, "version 2\nagent \"note/cycle-b\" { workspace \"/tmp\"; command \"true\"; }", "agent/note/cycle-a", "cycle-b");
     declare(&store, "version 2\nagent \"note/missing\" { workspace \"/tmp\"; command \"true\"; }", "agent/note/absent", "missing");
@@ -128,7 +129,7 @@ fn directive_note_feature_barrier_covers_generic_append_active_peers_and_legacy_
     store.append_client_claim(&input).unwrap();
     advertise(&peer, false);
     sync(&peer, &store);
-    assert_eq!(store.set_directive_note("person/avery", "person/avery", None, None).unwrap_err().code, "directive-note-feature-barrier");
+    assert_eq!(store.set_directive_note("person/avery", "person/avery", "host/alder", None, None).unwrap_err().code, "directive-note-feature-barrier");
     let high_water = writer_high_water(&peer.readers.get(), "birch").unwrap().unwrap();
     claim(&store, "host/birch", "fleet.member-removed", None, json!({"member_key":peer_key.public(),"high_water":high_water,"reason":"Unsupported peer fenced"}));
     store.replication_snapshot().unwrap();
@@ -163,8 +164,8 @@ fn directive_note_replication_out_of_order_clear_replay_and_reopen_agree() {
     sync(&source, &peer);
     advertise(&peer, true);
     sync(&peer, &source);
-    let set = source.set_directive_note("person/avery", "person/avery", Some("Old context"), None).unwrap().unwrap();
-    peer.set_directive_note("person/avery", "person/avery", None, None).unwrap();
+    let set = source.set_directive_note("person/avery", "person/avery", "host/alder", Some("Old context"), None).unwrap().unwrap();
+    peer.set_directive_note("person/avery", "person/avery", "host/alder", None, None).unwrap();
     let target = Store::open(&path, "cedar").unwrap();
     target.bind_fleet(FLEET).unwrap();
     target.pin_fleet_anchor(anchor.public()).unwrap();
@@ -177,7 +178,7 @@ fn directive_note_replication_out_of_order_clear_replay_and_reopen_agree() {
     target.replay_replication_graph().unwrap();
     assert_eq!(target.readers.get().query_row("SELECT claim_id,head_key FROM person_directive_notes WHERE person='person/avery'", [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))).unwrap(), expected);
     sync(&peer, &source);
-    let replacement = source.set_directive_note("person/avery", "person/avery", Some("New context"), None).unwrap().unwrap();
+    let replacement = source.set_directive_note("person/avery", "person/avery", "host/alder", Some("New context"), None).unwrap().unwrap();
     sync(&source, &target);
     assert_eq!(target.directive_notes("person/avery").unwrap(), vec![replacement.clone()]);
     drop(target);
@@ -200,8 +201,8 @@ fn directive_note_repaired_original_is_excluded_after_round_trip_and_replay() {
     sync(&source, &peer);
     advertise(&peer, true);
     sync(&peer, &source);
-    let fallback = source.set_directive_note("person/avery", "person/avery", Some("Retained context"), None).unwrap().unwrap();
-    let original = source.set_directive_note("person/avery", "person/avery", Some("Rejected context"), None).unwrap().unwrap();
+    let fallback = source.set_directive_note("person/avery", "person/avery", "host/alder", Some("Retained context"), None).unwrap().unwrap();
+    let original = source.set_directive_note("person/avery", "person/avery", "host/alder", Some("Rejected context"), None).unwrap().unwrap();
     sync(&source, &peer);
     assert_eq!(peer.directive_notes("person/avery").unwrap(), vec![original.clone()]);
     // An upgraded receiver rejects an already-admitted record, then repairs it to an
@@ -249,7 +250,7 @@ fn directive_note_repaired_original_is_excluded_after_round_trip_and_replay() {
 #[test]
 fn directive_note_projection_rollback_and_canonical_metadata_corrections() {
     let store = store();
-    let first = store.set_directive_note("person/avery", "person/avery", Some("First"), None).unwrap().unwrap();
+    let first = store.set_directive_note("person/avery", "person/avery", "host/alder", Some("First"), None).unwrap().unwrap();
     {
         let mut writer = store.connection.write();
         let tx = writer.transaction().unwrap();
@@ -257,7 +258,7 @@ fn directive_note_projection_rollback_and_canonical_metadata_corrections() {
         assert_eq!(current(&tx, "person/avery", now_ms()).unwrap().unwrap().text, "Rolled back");
     }
     assert_eq!(store.directive_notes("person/avery").unwrap(), vec![first.clone()]);
-    let second = store.set_directive_note("person/avery", "person/avery", Some("Second"), None).unwrap().unwrap();
+    let second = store.set_directive_note("person/avery", "person/avery", "host/alder", Some("Second"), None).unwrap().unwrap();
     store.connection.batched(|tx| -> Result<()> {
         tx.execute(/* sqlite-large-value: allow-for-now lv-h4edaa415bb3c owner=fractal_delivery::store::directive_notes::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms=accepted_at_unix_ms+100000 WHERE id=?1", [&first.revision])?;
         flush(tx)?;
@@ -278,8 +279,8 @@ fn directive_note_keyed_read_work_and_statements_ignore_history_size() {
     let mut costs = Vec::new();
     for count in [16, 256] {
         for index in 0..count {
-            store.set_directive_note("person/avery", "person/avery", Some(&format!("Context {count}/{index}")), None).unwrap();
-            store.set_directive_note("person/other", "person/other", Some("Unrelated context"), None).unwrap();
+            store.set_directive_note("person/avery", "person/avery", "host/alder", Some(&format!("Context {count}/{index}")), None).unwrap();
+            store.set_directive_note("person/other", "person/other", "host/alder", Some("Unrelated context"), None).unwrap();
         }
         store.directive_notes("person/avery").unwrap(); // Warm the pooled connection.
         let before = STATEMENTS_RUN.with(std::cell::Cell::get);
@@ -305,7 +306,7 @@ fn directive_note_signed_wire_admission_rejects_wrong_writer_bounds_and_expiry()
         target.bind_fleet(FLEET).unwrap();
         target.pin_fleet_anchor(key.public()).unwrap();
         sync(&source, &target);
-        source.set_directive_note("person/avery", "person/avery", Some("Context"), None).unwrap();
+        source.set_directive_note("person/avery", "person/avery", "host/alder", Some("Context"), None).unwrap();
         let mut exchange = source.export_replication_exchange(FLEET, &target.replication_inventory().unwrap()).unwrap();
         exchange.envelopes.retain(|envelope| {
             let payload: ReplicaEnvelopePayload = ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();

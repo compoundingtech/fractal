@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Report the observed state of a newly created agent when a status read crosses the readiness deadline",
+  "replay": {
+    "status": "none",
+    "detail": "No stored observations or action receipts are rewritten."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No graph, database, agent resource or JSON success schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Admission, ordering, incarnation and readiness classification rules are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Previously, agents new could cancel its first status read at --timeout and report an already-ready agent as starting or not ready. The same absolute readiness deadline now bounds event waiting. A status read can complete for at most two seconds beyond that deadline and reports the ready, waiting or starting state it observed. A read that still has not answered ends with an error saying the current state is unknown, rather than inventing a starting state. Human output names Unknown; JSON failures emit no invented agent resource. Existing transport deadlines and the configured readiness wait are not increased."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None beyond the normal CLI binary replacement."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration changes are required. On an unknown-state error, use the printed agents show command to inspect the agent without creating another one."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "A slow status read no longer misclassifies an agent that is already ready or waiting for input. The two-second status-read grace bounds the overrun; it is shared across observation work and does not restart a readiness wait or retry a cancelled state read. A genuine starting state still ends at the original readiness deadline after its current observation completes."
+  }
+}

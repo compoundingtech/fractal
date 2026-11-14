@@ -9,29 +9,12 @@ import { createHash } from 'node:crypto'
 //  1. Each story runs in one case, not four. The case is one of two diagonals of the
 //     scheme × width matrix, chosen by a stable hash of the story id, so about half the stories run
 //     dark at 440 and half light at 1440: every story's play runs, and both schemes and both widths
-//     stay covered across the set. Stories in BOTH_WIDTHS are about layout at a width, so they run
+//     stay covered across the set. Stories tagged `both-widths` are about layout at a width, so they run
 //     dark at 440 and at 1440.
-//  2. Stories in MERGE_ONLY do not run per commit. They are the slowest stories whose coverage is
+//  2. Stories tagged `merge-only` do not run per commit. They are the slowest stories whose coverage is
 //     behavioural depth or render cost rather than a kit contract, and the merge gate still runs them.
 //
-// Every id named here must be a critical story, so a rename cannot silently drop coverage.
-export const MERGE_ONLY = [
-  // 15 s of case time: every state of the transcript's no-green rule in one story.
-  'fractal-ui-transcript--no-green-all-states',
-  // 10 s of case time: renders a hundred agents; a render-cost check rather than a contract.
-  'fractal-ui-sidebar-roster--hundred-agent-render',
-]
-export const BOTH_WIDTHS = [
-  'fractal-app-composer-images--several-images',
-  'fractal-ui-composer--footer-width-budget',
-  'fractal-ui-composer--kit-label-resize',
-  'fractal-ui-composer--layout-shapes',
-  'fractal-ui-sidebar-agent-row--densities-and-children',
-  'fractal-ui-transcript-composer--host-width',
-  'fractal-ui-transcript-composer--reading-column',
-  'fractal-ui-workbench--all-states',
-  'fractal-narrow-layout--decode-stale-sidebar-hosts',
-]
+// Policy tags come from the built Storybook index and must accompany `critical`.
 
 const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
 
@@ -40,11 +23,15 @@ const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
 // in only one outer browser case. FilterBehavior retains functional coverage in all four cases.
 export const KIT_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
-  ['fractal-ui-composer--footer-width-budget-light', []],
+  ['fractal-ui-composer--footer-width-budget-narrow-light', []],
+  ['fractal-ui-composer--footer-width-budget-medium-light', []],
+  ['fractal-ui-composer--footer-width-budget-wide-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
   // Portal theme inheritance must run in light as well as dark on every commit.
   ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],
 ])
+const APP_MODULE_STATES = ['loading', 'empty', 'populated', 'failed-tool', 'offline', 'unavailable', 'scripted-repair']
+export const APP_MODULE_SUITE_IDS = ['fractal-app-liveagentworkspace', 'fractal-app-conversationpane'].flatMap(suite => APP_MODULE_STATES.map(state => `${suite}--${state}`))
 export const APP_CASE_OVERRIDES = new Map([
   // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
   ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
@@ -53,6 +40,16 @@ export const APP_CASE_OVERRIDES = new Map([
   ['fractal-narrow-layout--breakpoint-density-coarse', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
   // Pointer and Escape dismissal restore the opening trigger in tablet and phone drawers.
   ['fractal-narrow-layout--drawer-focus-return', [['dark', 899], ['light', 440]]],
+  // The production module suites prove each availability state mounts the real module; none depends on width
+  // or scheme, so each state runs once, dark at desktop width (14 merge cases rather than 56).
+  ...APP_MODULE_SUITE_IDS.map(id => [id, [['dark', 1440]]]),
+  // The Usage pane's served tone inks and row/chart layout run in both schemes at both widths on every commit.
+  ['fractal-app-usagepane--all-states', FULL],
+  ['fractal-app-usagepane--populated', FULL],
+  // The dev-bar build popover must show its first change without scrolling at phone width, and mark changes seen
+  // only once that entry is in view when a short viewport bounds the popover.
+  ['fractal-app-developer-bar-build-and-changes--narrow-unseen', [['dark', 390], ['light', 390]]],
+  ['fractal-app-developer-bar-build-and-changes--short-viewport-unseen', [['dark', 390], ['light', 390]]],
 ])
 // The production build includes both inventories; every named story remains required.
 export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])
@@ -75,7 +72,7 @@ export function validateCaseOverrides(entries, overrides = FULL_CASE_OVERRIDES) 
 export const diagonalCase = id => FULL[createHash('sha256').update(id).digest()[0] % 2 === 0 ? 0 : 3]
 
 // The cases of the per-commit set for the critical story ids, plus what the set leaves out.
-export function commitSetCases(criticalIds, { mergeOnlyIds = MERGE_ONLY, bothWidthsIds = BOTH_WIDTHS, overrides = FULL_CASE_OVERRIDES } = {}) {
+export function commitSetCases(criticalIds, { mergeOnlyIds = [], bothWidthsIds = [], overrides = FULL_CASE_OVERRIDES } = {}) {
   const critical = new Set(criticalIds)
   for (const id of [...mergeOnlyIds, ...bothWidthsIds]) {
     if (!critical.has(id)) throw new Error(`The per-commit set names ${id}, which is not a critical story`)

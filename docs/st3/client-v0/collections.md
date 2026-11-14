@@ -22,6 +22,31 @@ Send one JSON command per subscription:
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
 
+**Proposed trace context, pending [#1910](https://github.com/compoundingtech/fractal/pull/1910)
+and Nathan's decision:** subscribe frames may add
+`"trace": {"traceparent": "W3C value", "tracestate": "optional W3C value"}`.
+The lowercase `trace` wire key belongs to the repository-local client_v0 namespace;
+its members use W3C Trace Context, not a separate identifier format. Every
+collection-socket subscribe variant accepts the field, but it affects only `missions`,
+`attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, and `terminal`,
+the collections that emit `st.subscription.first_frame`.
+It grants no authority and changes no subscription fields.
+
+The daemon accepts absent, null, and malformed `trace` values without rejecting the
+frame. It uses the W3C propagator to validate the parent; an invalid or non-string
+`traceparent`, or a non-object field, is ignored entirely. A valid context parents the
+bounded `st.subscription.first_frame` SERVER span, which also links to the upgrade.
+It records `st.parent.sampled` using the same policy as HTTP SERVER spans. Without a
+valid context the first-frame span remains an INTERNAL root linked to the upgrade.
+Later changes, rereads, and resyncs emit no spans. Existing older collection decoders
+ignore the unknown field; frames without it remain unchanged.
+
+Dedicated conversation and terminal streams have no subscribe frame, so their
+upgrade-linked behavior is unchanged. Unsubscribe, command frames, and strict HTTP
+bodies do not acquire this field. The generated TypeScript client exposes `trace`
+as an opaque `SubscribeTraceContext`. Typed SDK helpers and Swift client support
+are follow-up work after the #1910 decision.
+
 Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
 `person` to attention, and `status` plus exact `agent` to agents. For `arrangements`, `person: "person/NAME"`
@@ -134,9 +159,10 @@ new `order`, `has_more`, and a new snapshot fence. Apply removals and upserts
 before displaying the new order. Rows leaving a bounded window appear in
 `removes`, even if they still exist beyond that window.
 
-Rows are joined in st so a client never joins collections itself. A mission's
+Rows are joined in Fractal so a client never joins collections itself. A mission's
 `run_details` carry `steps` for each open run and for its latest run, and every
-run's steps in a mission detail read. An agent names its queue in
+run's steps in a mission detail read. A window never carries the detail-only step history
+(`attempts`, `waits`, `transitions`, `history_complete`) or per-step `eta`. An agent names its queue in
 `current_work`, `next_work`, and `upcoming_work`: each step's mission, run,
 path, title, first goal, and state, and the `subagents` its harness runs now.
 A work row names its `mission_id`.
@@ -175,6 +201,63 @@ fresh snapshot. If the socket closes, including during a daemon
 restart, open a new socket and subscribe again; the new snapshot is authoritative.
 Each socket subscribes to store changes before taking its first snapshot, so a
 write racing that snapshot is visible in the snapshot or a subsequent frame.
+
+## Revisioned agents publications
+
+To request the complete unfiltered roster instead of a legacy window, send:
+
+```json
+{"kind":"subscribe","id":"roster","collection":"agents","agents_publication_version":1}
+```
+
+Do not include `limit`, window fields or filters. Without this opt-in, HTTP reads
+and collection frames keep their legacy grammar. This section defines the
+contract; it does not advertise server capability availability.
+
+Each snapshot is one or more `snapshot` chunks, including one empty chunk for an
+empty roster. Each chunk carries `id`, `collection: "agents"`, `snapshot`
+(including `published_at`), `publication`, `chunk_index`, `chunk_count`, `items`,
+`order` and `has_more: false`. The publication contains `node_epoch`, `revision`,
+`status_watermark: {store_index, local_frontier}` and `materialized_at_ms`.
+Indices start at zero; the count is positive. Chunk order contains only that
+chunk's item IDs. Chunks repeat identical snapshot, publication and count.
+
+Stage chunks privately. Require consecutive indices, matching envelopes and
+unique IDs across the sequence. Install rows, concatenated order and publication
+metadata together only after the final chunk. `has_more: false` means no window
+truncation, not that one chunk is the whole roster.
+
+A `changes` frame carries the same snapshot/publication, `base_revision`,
+`upserts`, `removes`, the complete target `order` and `has_more: false`, with no
+chunk fields. Apply it atomically only when its epoch and base revision match the
+last complete roster. Revision jumps are valid. Metadata-only changes still
+advance the publication.
+
+Frame consumers ignore unknown extension keys, including on revisioned frames.
+Required fields and values, the reserved snapshot/delta grammar, and the epoch,
+base-revision and contiguous-chunk integrity fences still apply. Producer schema
+validation remains stricter than transport decoding.
+
+Reconnect or resubscribe always starts a full snapshot; there is no replay log.
+Discard incomplete staging on disconnect, replacement, epoch change or newer
+revision. A newer chunk zero can start a new sequence. A gap, duplicate,
+nonzero opening chunk or delta during staging requires a full resubscribe.
+Ignore frames from an old connection generation or lower revision.
+
+The entire encoded JSON text frame must fit 1,048,576 UTF-8 bytes. Whole rows
+are packed into contiguous socket-wide chunks; no other subscription data frame
+interleaves. The complete sequence has an eight-second send deadline. An
+oversized delta becomes a full snapshot. An unrepresentable row ends the
+subscription with `code: "agents-publication-row-too-large"`, the actual
+subscription ID, `collection: "agents"` and `retryable: false`, before any chunk
+is sent. Keep the last complete roster visible.
+
+Rust callers use `CollectionStream::subscribe_agents_publication(id)` and receive
+`CollectionEvent::AgentsSnapshotChunk` or `AgentsChanges`. Snapshot provenance
+includes optional `Snapshot::published_at`; error and resync events retain
+optional collection/retryable fields for older servers. The raw send stays private.
+TypeScript callers use `subscribeAgentsPublication`; `applyWindow` is only for
+legacy windows. Swift callers use `agentsPublicationStream`.
 
 ## Terminals
 
@@ -243,8 +326,8 @@ session starts with its own availability and must not inherit the previous windo
 Older-page responses independently report whether there are entries before that page; once
 the session's start is reached, later live deltas do not reopen older-history paging.
 
-`st missions ls --watch`, `st attention ls --watch`, `st agents ls --watch`,
-and `st work ls --watch` consume this same transport.
+`fractal missions ls --watch`, `fractal attention ls --watch`, `fractal agents ls --watch`,
+and `fractal work ls --watch` consume this same transport.
 
 ## Summary
 
@@ -261,8 +344,8 @@ These are complete current source counts, independent of any list's page size.
 gates, launch/revision approvals, person asks, agent and custom requests, harness
 prompts and logins, and broken gates the person published). Updates, messages and
 agents' faults are not alerts. `needs_you` carries the same count for older clients; a daemon that
-predates alerts omits `alerts` and also counted unread updates in `needs_you`. Local snoozes and closed rows remain
-client-owned. `working_agents` uses running/working presentation, excluding
+predates alerts omits `alerts` and also counted unread updates in `needs_you`. Snoozed rows still count here: each
+client hides a row while its `snoozed_until` is ahead, and closed rows remain client-owned. `working_agents` uses running/working presentation, excluding
 faults and stale delivery. `active_missions` uses the shared mission words
 working, queued, decision, stalled, unstaffed and unclaimed, excluding system
 missions. Human gates use the selected person's unresolved attention membership.
@@ -297,16 +380,50 @@ retain their prior row timestamp so an unchanged count emits no delta.
 
 ## Presentations
 
-Optional capability `presentation` version 1 says agent rows carry `presentation`: st's state
+Optional capability `presentation` version 1 says agent rows carry `presentation`: Fractal's state
 word, list group, why the agent needs someone, and what it holds and has queued (see
 [the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
-lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
+lacks it shows the state Fractal reports, marked as coming from an older Fractal; clients derive nothing.
 
 The same capability says attention rows carry `presentation`: the Now group and card, who
 **Chat about this** reaches, who raised it, and the step it holds (see
 [the UI contract](../../clients/ui-contract.md#attention-row)). The attention refresher computes
 it; every attention route copies it from the published list, and a row the list has not
 published yet has none until it does.
+
+## Sync on the stream
+
+A window frame of the `attention` collection may carry `sync` (`StreamSync`): this host's
+replication, taken when the frame was built. It is `{state: "level"}` while this host is current,
+or `{state: "catching-up" | "diverged", peers}` naming the peers it lacks envelopes from or
+projects a different graph than, with the same `SyncPeer` a page's `sync` carries. Unlike a page's
+`SyncNotice`, which is absent while level, it says `level` explicitly: on the stream an absent
+`sync` means unknown, as from a daemon that does not send it, never level.
+
+A window an incremental view source reads (the daemon admits one for no collection yet) carries
+none, since such a source's reads say nothing when no row changed.
+
+A daemon that sends it puts it on every `snapshot` frame of the collection, and on a `changes`
+frame only when it changed since the subscription's previous frame: its state, or which peers
+(by `host_id`) are named, including the change back to `level`. A peer's counts moving is not a
+change. A client that missed a changes frame learns the current value from the next snapshot,
+which every resubscribe gets. A client on a daemon that sends none keeps reading a page's `sync`
+(`GET /v1/client/attention?limit=1`).
+
+The daemon sends a change on the window's next frame. A host that starts or stops catching up or
+diverging rereads its attention windows on that commit, paced like any reread (within 1.5 s).
+Another peer named, or a measurement grown too old to say the host is behind, waits for the
+window's next read, which comes at least every 30 s while it is subscribed.
+
+A state this client does not know, or a shape the schema forbids (`level` with peers, or another
+state without them), reads as unknown, never level, and the frame is kept: the Rust client reads
+such a `sync` as none, and the TypeScript transport parses frames without validating them, so a
+reader there must apply the same rule (only `level` without peers is level; only `catching-up` or
+`diverged` with peers is behind; anything else is unknown). Decoding a frame with the generated
+TypeScript schema is stricter: it rejects a forbidden shape as it rejects any malformed field,
+and a state it does not know decodes as unknown. A daemon sends neither. Older clients ignore the
+field: the generated Rust and Swift decoders read frames by named field (fixtures:
+`fixtures/clients/stream-sync/frames.json`).
 
 ## Screen inventories
 

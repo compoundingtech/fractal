@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One tick of the pre-sign worker, as main has it (scripts/evidence-presign-{light,heavy}.service from their timers).
-# The worker is read from origin/main of the clone it owns, never a checkout's copy; st-test, which it runs, is read the same way.
+# The worker is read from origin/main of the clone it owns, never a checkout's copy; fractal-test, which it runs, is read the same way.
 #   evidence-presign-timer light|heavy [--dry-run]
 set -euo pipefail
 state=${EVIDENCE_PRESIGN_STATE:-$HOME/.local/state/evidence-presign}

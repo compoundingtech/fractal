@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use smallclaims::Error as St3Error;
+pub use smallclaims::Error as FractalError;
 pub use smallclaims::claim::{
     ClaimInput, ClaimRecord, ClaimsPage, DocumentVersion, ReplicaBatch, ReplicaEnvelope,
     ReplicaEnvelopeId, ReplicaEnvelopeSignature,
@@ -16,11 +16,19 @@ pub use smallclaims::replication::{
     ReplicationStatus, ReplicationTimings, UnhealthyProjection,
 };
 
+// Dormant until the complete agent-review policy is activated; never a serde gate variant.
+#[allow(dead_code)]
+#[doc(hidden)]
+pub mod evidence_contract;
+
 pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
 /// The diagnostic code of a call Claude's auto mode classifier denied.
 pub const PERMISSION_DENIED_CODE: &str = "permission-denied";
 pub const PLACEMENT_SOURCE_OFFLINE_KIND: &str = "agent.placement.source-offline";
+/// Lets one member, for its current daemon start only, act on its seats' placement without
+/// waiting for the named peers it cannot reach (docs/st3/replication.md, "After a start").
+pub const MEMBER_ADMISSION_OVERRIDE_KIND: &str = "member.admission-override";
 /// The former owners and declarations which can acknowledge their latest departure.
 /// Walk causal predecessors, never receiver-local indexes or receipt timestamps.
 pub struct PlacementFence {
@@ -98,15 +106,15 @@ pub struct FleetEndpointsRequest {
 /// The error code of a send or reply addressed to a person.
 pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
 
-/// What a refused send or reply says. The order matters: print in the chat first; an attention
-/// item (`work ask`, `work update`) only when the person asked for one.
-pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. To reach a person, print in the chat; only if the person asked for it, use `work ask` for a decision or `work update` for information";
+/// What a refused send or reply says: factual replies stay in the conversation,
+/// while every new question or decision uses a native work ask.
+pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. Any new question or decision for the person goes through a native `work ask`, even when the person is present. Use `work update` only for information the person asked for";
 
 /// Refuse a message addressed to a person. `recipient` is the canonical recipient subject.
 /// Messages to agents are unchanged.
-pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
+pub fn refuse_person_recipient(recipient: &str) -> Result<(), FractalError> {
     if recipient.starts_with("person/") {
-        return Err(St3Error::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
+        return Err(FractalError::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
     }
     Ok(())
 }
@@ -228,6 +236,158 @@ impl Default for RestartIntensity {
     }
 }
 
+/// Declaration metadata only: these values do not change process priority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeclaredPriority {
+    Background,
+    Normal,
+    Unknown(String),
+}
+
+impl DeclaredPriority {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Background => "background",
+            Self::Normal => "normal",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for DeclaredPriority {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeclaredPriority {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "background" => Self::Background,
+            "normal" => Self::Normal,
+            _ => Self::Unknown(raw),
+        })
+    }
+}
+
+/// A declared label, independent of the enforced capacity lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeclaredLane {
+    Check,
+    Build,
+    Unknown(String),
+}
+
+impl DeclaredLane {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Check => "check",
+            Self::Build => "build",
+            Self::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for DeclaredLane {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeclaredLane {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "check" => Self::Check,
+            "build" => Self::Build,
+            _ => Self::Unknown(raw),
+        })
+    }
+}
+
+/// The concrete person identity shape used by native person asks.
+pub fn person_subject(value: &str) -> bool {
+    value.starts_with("person/") && value.matches('/').count() == 1 && value != "person/"
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredAttentionBudget {
+    pub person: String,
+    pub asks: u64,
+}
+
+/// Declared, not enforced; absence does not mean zero or unlimited.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredBudgets {
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub cpu_seconds: Option<u64>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<String>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub disk_max: Option<String>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<DeclaredAttentionBudget>,
+}
+
+impl DeclaredBudgets {
+    pub fn is_empty(&self) -> bool {
+        self.cpu_seconds.is_none()
+            && self.memory_max.is_none()
+            && self.disk_max.is_none()
+            && self.token_budget.is_none()
+            && self.attention.is_empty()
+    }
+}
+
+/// Read projection of declaration-local metadata, with no inherited values.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeclaredAdmission {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<DeclaredPriority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<DeclaredLane>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<DeclaredBudgets>,
+}
+
+impl DeclaredAdmission {
+    pub fn from_declaration(
+        priority: Option<&DeclaredPriority>,
+        lane: Option<&DeclaredLane>,
+        budgets: Option<&DeclaredBudgets>,
+    ) -> Option<Self> {
+        let budgets = budgets.filter(|budgets| !budgets.is_empty());
+        if priority.is_none() && lane.is_none() && budgets.is_none() {
+            return None;
+        }
+        Some(Self {
+            priority: priority.cloned(),
+            lane: lane.cloned(),
+            budgets: budgets.cloned(),
+        })
+    }
+}
+
+fn declared_budgets_absent(budgets: &Option<DeclaredBudgets>) -> bool {
+    budgets.as_ref().is_none_or(DeclaredBudgets::is_empty)
+}
+
+fn declared_nonnull<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// Native finite-execution context carried with the effective member launch.
+pub const RESOURCE_LANE_REQUEST_TAG: &str = "st3.resource-lane";
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemberSpec {
     pub kind: MemberKind,
@@ -256,6 +416,16 @@ pub struct MemberSpec {
     /// read at each launch. Never declared, so never a launch change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_size: Option<fractal_runtime::TerminalSize>,
+    /// The seat's lane: the CPU and memory cap its scope holds when its host enforces lanes
+    /// (docs/st3/seat-lanes.md). Absent, the seat runs without one. Read at each launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Capacity>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_priority: Option<DeclaredPriority>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_lane: Option<DeclaredLane>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "declared_budgets_absent")]
+    pub declared_budgets: Option<DeclaredBudgets>,
 }
 
 impl MemberSpec {
@@ -280,6 +450,9 @@ impl MemberSpec {
         }
         if authored_launch(&self.launch) != authored_launch(&launched.launch) {
             changes.push("launch");
+        }
+        if self.tags.get(RESOURCE_LANE_REQUEST_TAG) != launched.tags.get(RESOURCE_LANE_REQUEST_TAG) {
+            changes.push("resource-lane");
         }
         changes
     }
@@ -402,14 +575,14 @@ impl Serialize for DesiredSubject {
 
 impl DesiredSubject {
     /// Keep the authored KDL name and its normalized member projection identical.
-    pub fn set_display_name(&mut self, name: Option<&str>) -> Result<(), St3Error> {
+    pub fn set_display_name(&mut self, name: Option<&str>) -> Result<(), FractalError> {
         let body = self.desired.as_object_mut()
-            .ok_or_else(|| St3Error::new("invalid-agent-declaration", "agent has no canonical body"))?;
+            .ok_or_else(|| FractalError::new("invalid-agent-declaration", "agent has no canonical body"))?;
         if !body.contains_key("children") {
             body.insert("children".into(), serde_json::json!([]));
         }
         let children = body.get_mut("children").and_then(Value::as_array_mut)
-            .ok_or_else(|| St3Error::new("invalid-agent-declaration", "agent body must be an array"))?;
+            .ok_or_else(|| FractalError::new("invalid-agent-declaration", "agent body must be an array"))?;
         if let Some(name) = name {
             if let Some(child) = children.iter_mut()
                 .find(|child| child.get("name").and_then(Value::as_str) == Some("name"))
@@ -675,6 +848,14 @@ pub struct StepSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_constraints: BTreeMap<String, Vec<String>>,
     pub timeout_ms: Option<u64>,
+    /// The lane the seat working this step holds while it holds it, raised from its own for what
+    /// it names (docs/st3/seat-lanes.md). Omitted when absent, so an undeclared step hashes as it
+    /// did before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Raise>,
+    /// Finite exec admission policy; independent of an assigned seat's scoped capacity raise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_lane: Option<ResourceLaneSpec>,
     pub retry: RetrySpec,
     pub finally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -700,11 +881,122 @@ pub struct StepSpec {
     /// completes and fails when it fails or is cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_run: Option<String>,
+    /// The program bundle this agentless step runs (docs/st3/program-engine.md). The daemon's
+    /// program engine owns the step's outcome. Omitted when absent, so other steps hash as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramSpec>,
     pub gates: Vec<GateSpec>,
     pub nested_mission: Option<Box<MissionSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// The declarative counterpart of `resources.lane`: one host-local admission policy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLaneSpec {
+    pub name: String,
+    pub host: String,
+    pub max_members: u32,
+    pub capacity: Option<fractal_runtime::Capacity>,
+    pub coverage: ResourceLaneCoverage,
+    pub admission_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceLaneCoverage {
+    Logical,
+    Enforced,
+}
+
+/// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The
+/// hash is part of the step's definition, so a mission revision binds exactly one program. The
+/// field is named `bundle_hash` so publishing the declaration promotes the stored blob and every
+/// replica receives it with the declaration; `bundle` is the author's path, kept as provenance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProgramSpec {
+    pub bundle: String,
+    pub bundle_hash: String,
+    /// How long the program may go without a new journal entry before its run reports it stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+}
+
+impl MissionSpec {
+    /// Every program this mission declares, with its step's path, including nested missions and
+    /// loop rounds.
+    pub fn programs(&self) -> Vec<(&str, &ProgramSpec)> {
+        let mut programs = Vec::new();
+        for step in self.steps.values() {
+            if let Some(program) = &step.program {
+                programs.push((step.path.as_str(), program));
+            }
+            if let Some(nested) = &step.nested_mission {
+                programs.extend(nested.programs());
+            }
+            if let Some(loop_spec) = &step.loop_spec {
+                for mission in [Some(&loop_spec.round), loop_spec.on_keep.as_ref(), loop_spec.on_discard.as_ref()].into_iter().flatten() {
+                    programs.extend(mission.programs());
+                }
+            }
+        }
+        programs
+    }
+}
+
+/// How the resource edge was authored. Older stored URI edges predate this discriminator.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceReferenceKind {
+    #[default]
+    Uri,
+    Subject,
+}
+
+/// A named edge to an ordinary resource subject, not a copy of its locator.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeclaredResourceReference {
+    pub name: String,
+    pub subject: String,
+    #[serde(default)]
+    pub kind: ResourceReferenceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One rule of a mission's `authority` block: what its runs may do as `mission-run/RUN`
+/// (docs/st3/program-engine.md §3). Mission verbs take a mission ID pattern, `write` a subject
+/// pattern; either is exact or a terminal `/*` namespace.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct AuthorityGrant {
+    pub verb: AuthorityVerb,
+    pub pattern: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorityVerb {
+    Publish,
+    Start,
+    Revise,
+    Cancel,
+    Write,
+}
+
+impl AuthorityVerb {
+    pub const ALL: [Self; 5] = [Self::Publish, Self::Start, Self::Revise, Self::Cancel, Self::Write];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Start => "start",
+            Self::Revise => "revise",
+            Self::Cancel => "cancel",
+            Self::Write => "write",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -717,6 +1009,12 @@ pub struct MissionSpec {
     /// with `mission::is_system` (fractal-daemon), which covers revisions published before the flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub system: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<DeclaredResourceReference>,
+    /// What runs of this mission may do as `mission-run/RUN`, in canonical order; empty grants
+    /// nothing. Omitted when empty, so an undeclared mission hashes as it did before the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authority: Vec<AuthorityGrant>,
     #[serde(default)]
     pub inputs: BTreeMap<String, MissionInputSpec>,
     #[serde(default = "default_mission_run_limit")]
@@ -745,8 +1043,19 @@ pub struct MissionSpec {
     pub revision_cutover: RevisionCutover,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declarations_kdl: Option<String>,
+    /// The lane of each agent this mission and its steps declare that declares none of its own,
+    /// applied when a run materializes them (docs/st3/seat-lanes.md). Omitted when absent, so an
+    /// undeclared mission's revision is what an older member computes for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Capacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_selector: Option<WorkSelector>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_priority: Option<DeclaredPriority>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "Option::is_none")]
+    pub declared_lane: Option<DeclaredLane>,
+    #[serde(default, deserialize_with = "declared_nonnull", skip_serializing_if = "declared_budgets_absent")]
+    pub declared_budgets: Option<DeclaredBudgets>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<CompletionSpec>,
     pub goals: Vec<String>,
@@ -1217,6 +1526,29 @@ pub struct ResourceObservationOutcome {
     #[serde(default)]
     pub observation_claim: Option<String>,
     pub message_subjects: Vec<String>,
+    /// The item resources this observation recorded, for the poller's plugin mirror. Never
+    /// serialized: an idempotent replay returns none, and the first call already mirrored them.
+    #[serde(skip)]
+    pub recorded_items: Vec<RecordedItem>,
+}
+
+/// What a GitHub repository's poller lays beside one look it records, from its plugin mirror:
+/// each item's facts as the mirror holds them, which replace the graph's as what the look is
+/// compared and merged with, and whether the repository is in compact mode, where an item's
+/// change is recorded as `vcs.item.state` alone instead of a `resource.observed` snapshot.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MirroredPrior {
+    pub compact: bool,
+    pub items: std::collections::HashMap<String, Value>,
+}
+
+/// One item resource an observation recorded: its subject, item kind, facts and claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedItem {
+    pub subject: String,
+    pub kind: String,
+    pub facts: Value,
+    pub claim: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1242,6 +1574,11 @@ pub struct GateCheckRequest {
     /// Values for the mission's inputs. A gate that reads an input without one is unchecked.
     #[serde(default)]
     pub inputs: BTreeMap<String, String>,
+    /// Check only these mission subjects' gates; omitted checks every mission in the intent. An
+    /// owned-set publication names the missions whose declaration differs from the selected
+    /// revision, so an unchanged member's gates do not run again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missions: Option<BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -1304,6 +1641,41 @@ pub struct DeclarationDiff {
     pub after: Value,
     /// JSON pointers; arrays are compared as a whole, objects by field.
     pub fields: BTreeSet<String>,
+}
+
+/// An ad hoc change to a member of an owned set, accepted only with `--force --reason`
+/// (`store::owned_sets`). It stays open while the set revision it diverged from is selected;
+/// the next publication of that set closes it and reports it here as reverted.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceDebt {
+    /// The `source.debt.recorded` claim.
+    pub id: String,
+    pub subject: String,
+    /// `apply` for a forced declaration, otherwise the lifecycle verb (`hold`).
+    pub verb: String,
+    pub set: String,
+    /// `owned-set/NAME@REVISION` the change diverged from.
+    pub set_revision: String,
+    pub repository: String,
+    pub r#ref: String,
+    pub sha: String,
+    /// The forced declaration claim, for `apply`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<String>,
+    pub actor: Option<String>,
+    pub reason: String,
+    /// Changed JSON pointers of the forced declaration against the set's.
+    #[serde(default)]
+    pub fields: BTreeSet<String>,
+    pub recorded_at: String,
+    /// In a publication report: `reverted` when the new source differs from the forced
+    /// declaration, `adopted` when the source now declares it, `closed` for runtime verbs
+    /// (`hold`, `suspend`, `resume`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The `source.debt.closed` claim and the set revision that wrote it, once closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_by: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1517,6 +1889,13 @@ pub struct ApplyRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub actor: Option<String>,
+    /// The bytes of each program bundle the intent declares, base64 by sha256 (the
+    /// `ProgramSpec::bundle_hash`). The daemon verifies and stores them before it publishes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub program_bundles: BTreeMap<String, String>,
+    /// Accept an ad hoc change to an owned-set member and record it as source debt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1531,6 +1910,15 @@ pub struct ApplyResponse {
     pub resolved_kdl: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<PlannedAction>,
+    /// Source debt this forced publication recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_recorded: Vec<SourceDebt>,
+    /// Open source debt this set publication closed, with each change it reverted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_debts_reverted: Vec<SourceDebt>,
+    /// Set publications with `--source-map`: claims recorded or kept, file texts stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_maps: Option<fractal_schema::source_map::SourceMapCounts>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1578,6 +1966,9 @@ pub struct StatusResponse {
     pub store_index: u64,
     pub subjects: Vec<SubjectStatus>,
     pub pending_actions: Vec<PlannedAction>,
+    /// Current controller-host admission observation; absent on historical/store-only reads.
+    #[serde(default, rename = "seatAdmission", skip_serializing_if = "Option::is_none")]
+    pub seat_admission: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1797,6 +2188,10 @@ pub struct CurrentHarnessView {
     pub input_buffer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<String>,
+    /// Background jobs the current incarnation last reported with its state; `None` when the
+    /// harness does not report them or the incarnation ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_jobs: Option<u64>,
     pub claim: String,
     pub observed_at_unix_ms: u128,
     #[serde(default)]
@@ -1804,6 +2199,14 @@ pub struct CurrentHarnessView {
 }
 
 impl CurrentHarnessView {
+    /// The background-job count a `harness.observed` state report carries for a live incarnation.
+    pub fn reported_background_jobs(state: &str, fields: &serde_json::Value) -> Option<u64> {
+        if matches!(state, "ended" | "indeterminate") {
+            return None;
+        }
+        fields.get("background_jobs").and_then(serde_json::Value::as_u64)
+    }
+
     pub fn is_ready(&self) -> bool {
         matches!(self.state.as_str(), "ready" | "working" | "idle")
             && self.reason.as_deref() != Some("providerAuth")
@@ -1825,6 +2228,7 @@ mod current_harness_view_tests {
             ask: None,
             input_buffer: None,
             exit: None,
+            background_jobs: None,
             claim: "claim/one".into(),
             since_unix_ms: 1,
             observed_at_unix_ms: 1,
@@ -1929,6 +2333,28 @@ pub struct FaultView {
     pub item: AttentionItemView,
 }
 
+/// A request to dismiss a current fault whose run has ended, so nothing at its source can close
+/// it. `source` is the fault's subject or its run; `episode` picks one fault when the source has
+/// several.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FaultDismissRequest {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<String>,
+    pub reason: String,
+    pub actor: String,
+}
+
+/// The fault a dismissal closed: it stays closed until its source raises a new episode.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FaultDismissal {
+    pub subject: String,
+    pub episode: String,
+    pub title: String,
+    pub actor: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AttentionItemView {
     #[serde(default)]
@@ -1974,6 +2400,12 @@ pub struct AttentionItemView {
     #[serde(default)]
     pub targets: Vec<String>,
     pub requested_at_unix_ms: u128,
+    /// When a person ask resolves by itself if nobody answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_unix_ms: Option<u128>,
+    /// The answer that then applies, `{id, label}`. Absent, the ask times out without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<Value>,
     #[serde(default)]
     pub actions: Vec<AttentionActionView>,
 }
@@ -1989,6 +2421,13 @@ impl AttentionItemView {
     /// Whether this item is an alert: it blocks or waits on an answer from its person.
     pub fn is_alert(&self) -> bool {
         attention_is_alert(&self.kind, self.is_update())
+    }
+
+    /// Whether this item is urgent: the one server rule, priority `critical`
+    /// ([`fractal_schema::availability::urgent_priority`]). Interruptions `urgent`, the deadline
+    /// clock's `hold-routine` and spoken delivery read only this.
+    pub fn is_urgent(&self) -> bool {
+        fractal_schema::availability::urgent_priority(Some(&self.priority))
     }
 
     /// Every agent conversation this item shows in: its own, and for a login, every seat that
@@ -2008,10 +2447,10 @@ impl AttentionItemView {
 
 /// Whether an item of `kind` is an alert: it blocks or waits on its person. Asks, human gates,
 /// launch and revision approvals, agents' requests, harness prompts and logins, and a gate the
-/// person published that is broken all are. An update asks nothing, and a message stays in its
-/// conversation.
+/// person published that is broken all are. An update asks nothing, a model-drift summary
+/// waits on nothing (its seats keep working), and a message stays in its conversation.
 pub fn attention_is_alert(kind: &str, update: bool) -> bool {
-    !update && kind != "unread-message"
+    !update && kind != "unread-message" && kind != "model-drift"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2229,6 +2668,23 @@ pub struct MessageView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_grant_id: Option<String>,
     pub created_index: u64,
+    /// Who said how far the message got, when its recipient's seat runs on another host that keeps
+    /// the seat's receipts (db break-up step 4b): that host answered, and `status` is the further
+    /// of its answer and this member's own records, or it did not, and `status` is only this
+    /// member's own. Absent when this member's own records are the whole answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_from: Option<StatusFrom>,
+}
+
+/// The host a message's status was asked of, and whether it answered.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StatusFrom {
+    pub host: String,
+    /// `answered`, or `unknown` when the host did not answer.
+    pub state: String,
+    /// Why the host's answer is unknown, with `unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A definitive first-send refusal. Transport loss remains MessageSendUnconfirmed.
@@ -2256,14 +2712,14 @@ pub enum LifecycleUnavailableReason {
 }
 
 impl MessageSendRefusal {
-    pub fn into_error(self) -> St3Error {
+    pub fn into_error(self) -> FractalError {
         let (code, variant, recipient) = match &self {
             Self::Retired { recipient, .. } => ("recipient-retired", "Retired", recipient),
             Self::LifecycleUnavailable { recipient, .. } => {
                 ("lifecycle-unavailable", "LifecycleUnavailable", recipient)
             }
         };
-        St3Error::new(
+        FractalError::new(
             code,
             format!("{variant}: recipient `{recipient}` refuses this first send"),
         )
@@ -2497,6 +2953,9 @@ pub struct OperationalRepairPlan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OperationalRepairApplyRequest {
     pub token: String,
+    /// Caller actor, honoured only for an authenticated local harness binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2565,10 +3024,71 @@ pub struct MissionRunRequest {
     pub idempotency_key: String,
 }
 
+/// Start an independent run from a failed run without changing the failed run's history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionRunRetryRequest {
+    pub actor: String,
+    #[serde(default)]
+    pub same_revision: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub idempotency_key: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionDefinitionView {
+    #[serde(
+        serialize_with = "serialize_mission_definition",
+        deserialize_with = "deserialize_mission_definition"
+    )]
     pub mission: MissionSpec,
     pub updated_at_unix_ms: u128,
+}
+
+fn serialize_mission_definition<S: serde::Serializer>(
+    mission: &MissionSpec,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut value = serde_json::to_value(mission).map_err(serde::ser::Error::custom)?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| serde::ser::Error::custom("mission definition must be an object"))?;
+    fields.remove("declared_priority");
+    fields.remove("declared_lane");
+    fields.remove("declared_budgets");
+    if let Some(admission) = DeclaredAdmission::from_declaration(
+        mission.declared_priority.as_ref(),
+        mission.declared_lane.as_ref(),
+        mission.declared_budgets.as_ref(),
+    ) {
+        fields.insert(
+            "declared_admission".into(),
+            serde_json::to_value(admission).map_err(serde::ser::Error::custom)?,
+        );
+    }
+    value.serialize(serializer)
+}
+
+fn deserialize_mission_definition<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<MissionSpec, D::Error> {
+    let mut value = Value::deserialize(deserializer)?;
+    let fields = value
+        .as_object_mut()
+        .ok_or_else(|| serde::de::Error::custom("mission definition must be an object"))?;
+    let admission = fields
+        .remove("declared_admission")
+        .map(serde_json::from_value::<DeclaredAdmission>)
+        .transpose()
+        .map_err(serde::de::Error::custom)?;
+    let mut mission: MissionSpec =
+        serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+    if let Some(admission) = admission {
+        mission.declared_priority = admission.priority;
+        mission.declared_lane = admission.lane;
+        mission.declared_budgets = admission.budgets.filter(|budgets| !budgets.is_empty());
+    }
+    Ok(mission)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2602,18 +3122,50 @@ pub struct MissionRunView {
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<MissionRunOutcomeView>,
+    /// The failed run this fresh run retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// Independent retry runs linked to this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
+    /// The cancelled predecessor whose cleanup this replacement must await.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// The fresh replacement selected by a later mission publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Why a publication could not safely replace this still-active run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_fault: Option<String>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
     #[serde(default)]
     pub steps: Vec<StepRunView>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loops: Vec<LoopRunView>,
+    /// Each program step's current journal, computed for presentation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub programs: Vec<crate::program_journal::ProgramRunView>,
     /// Unresolved exit-code field gates on terminal execs, computed for mission details.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stuck_gates: Vec<String>,
     /// An unresolved scheduler fault on this run, with its observed first-readiness wait.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler_fault: Option<String>,
+}
+
+impl MissionRunView {
+    /// How this run ended, when it has: its terminal status, or the terminal or cleanup phase it
+    /// stops its seats in. A run stops its owned agents in cleanup, before it becomes terminal.
+    pub fn ended(&self) -> Option<&str> {
+        if matches!(self.status.as_str(), "completed" | "failed" | "cancelled") {
+            Some(&self.status)
+        } else if self.phase == "terminal" || self.phase.starts_with("cleanup-") {
+            Some(&self.phase)
+        } else {
+            None
+        }
+    }
 }
 
 /// A bounded slice of the root graph for human mission presentation.
@@ -2695,6 +3247,9 @@ pub struct StepRunView {
     pub run: String,
     pub generation: String,
     pub step: String,
+    /// Detail-read execution evidence; absent on lean work reads and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions: Option<Vec<crate::step_execution::StepExecution>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2835,6 +3390,21 @@ pub struct WorkWakeView {
     pub acknowledged_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+    /// What to ask the assignee's host, when it keeps its seats' receipts (db break-up step 4b).
+    /// Never serialized.
+    #[serde(skip)]
+    pub asks: WakeAsks,
+}
+
+/// The wake's own messages to its incarnation that this member has not seen consumed, and
+/// whether one delivered would acknowledge the wake (its assignee is working in that
+/// incarnation), or one staged would (its driver's staging is its delivery), as this member's own
+/// records count them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WakeAsks {
+    pub messages: Vec<String>,
+    pub delivery_acknowledges: bool,
+    pub staging_acknowledges: bool,
 }
 
 /// One agent seat's current claim and its ordered queue of mission runs.
@@ -3007,6 +3577,44 @@ pub struct WorkExtendRequest {
     pub idempotency_key: String,
 }
 
+/// One-shot repair of current person-bound work; this never aliases identities or rewrites history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PersonRenameRequest {
+    pub old_person: String,
+    pub new_person: String,
+    pub actor: String,
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonRenameReport {
+    pub old_person: String,
+    pub new_person: String,
+    pub reassigned_steps: Vec<String>,
+    pub reassigned_reviews: Vec<String>,
+    pub run_requesters: Vec<String>,
+    pub missions_to_republish: Vec<String>,
+    /// Open, immutable inbox records that this repair does not move.
+    #[serde(default)]
+    pub unchanged_attention_requests: Vec<String>,
+    #[serde(default)]
+    pub unchanged_fault_cards: Vec<String>,
+    #[serde(default)]
+    pub unchanged_revision_approvals: Vec<String>,
+    #[serde(default)]
+    pub unchanged_planning_launch_approvals: Vec<String>,
+    /// Remaining routing references, keyed by subject with sorted JSON-pointer paths.
+    #[serde(default)]
+    pub live_run_references: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub published_mission_references: BTreeMap<String, Vec<String>>,
+    pub namespace_notice: String,
+}
+
+/// The requester of a program step's person asks (docs/st3/program-engine.md §6). The daemon asks
+/// on the program's behalf: a program step has no claimant, so its attempt fences the ask instead.
+pub const PROGRAM_ASKER: &str = "daemon/program";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PersonAskRequest {
     #[serde(skip)]
@@ -3026,6 +3634,19 @@ pub struct PersonAskRequest {
     /// is free text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<Value>,
+    /// How long the person has to answer, in milliseconds. Absent, the fleet's default deadline
+    /// applies. At the deadline the ask resolves by itself with `default_answer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    /// The answer id of the structured request that applies when the deadline passes. Absent,
+    /// the ask resolves as timed out with no answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<String>,
+    /// `critical`, `high`, `normal` or `low` ([`fractal_schema::availability::PRIORITIES`]);
+    /// absent is `normal`. Only `critical` is urgent: it keeps running under `hold-routine` and
+    /// may interrupt a person whose interruptions are `urgent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     pub idempotency_key: String,
 }
 
@@ -3046,6 +3667,14 @@ pub struct PersonStepResponse {
     pub idempotency_key: String,
 }
 
+/// A person's note about a named option other than their chosen answer.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OptionNote {
+    pub id: String,
+    pub text: String,
+}
+
 /// A person's answer as submitted: a named answer `id`, text, or both (`person_request`).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -3054,6 +3683,9 @@ pub struct AnswerInput {
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Notes on other named options; the chosen answer's note remains `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub option_notes: Vec<OptionNote>,
 }
 
 /// A response to a person ask, including answers submitted by an authorized assistant.
@@ -3080,9 +3712,14 @@ pub struct PersonAnswerView {
     /// The answering principal, including `assistant/chatgpt` for assistant responses.
     pub respondent: String,
     pub answered_at_unix_ms: u128,
-    /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present.
+    /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present. An ask
+    /// that timed out carries its default answer as the person's choice of it would read, or no
+    /// answer when it named none; `resolved_by` says the deadline gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Value>,
+    /// `deadline` when the ask resolved by itself at its deadline, not by the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }
@@ -3162,6 +3799,9 @@ pub struct MissionRunReportView {
 pub struct MissionRetireRequest {
     pub actor: String,
     pub idempotency_key: String,
+    /// Retire a member of an `enforce` owned set ad hoc, recording source debt with this reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3277,10 +3917,11 @@ mod person_inbox_tests {
             assert_eq!(error.code, PERSON_HAS_NO_INBOX_CODE);
             assert_eq!(error.message, PERSON_HAS_NO_INBOX);
         }
-        let chat = PERSON_HAS_NO_INBOX.find("print in the chat").unwrap();
+        let chat = PERSON_HAS_NO_INBOX.find("print your answer in the chat").unwrap();
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work ask`").unwrap());
         assert!(chat < PERSON_HAS_NO_INBOX.find("`work update`").unwrap());
-        assert!(PERSON_HAS_NO_INBOX.contains("only if the person asked for it"));
+        assert!(PERSON_HAS_NO_INBOX.contains("Any new question or decision for the person"));
+        assert!(PERSON_HAS_NO_INBOX.contains("even when the person is present"));
         assert!(!PERSON_HAS_NO_INBOX.contains("NO REPLY"));
     }
 }
@@ -3299,3 +3940,7 @@ pub fn local_observation_position(record: &ClaimRecord) -> Option<u64> {
         .parse()
         .ok()
 }
+
+#[cfg(test)]
+#[path = "declared_admission_tests.rs"]
+mod declared_admission_tests;
