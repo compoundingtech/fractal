@@ -2675,6 +2675,15 @@ fn thread_preview_evidence() {
     let read = ui.threads.writes().pop().expect("V dispatches visible-message read");
     assert!(matches!(read.mutation, Mutation::MarkRead(_)));
     capture(&mut ui, &pane, &dir, "harness-v-pending");
+    // Dispatch-only fixture: settle its retained action before the independent lifecycle
+    // scenarios below. This is a simulated rejection, not an accepted server-side read.
+    assert_eq!(
+        ui.threads.complete(
+            Receipt { write: read, confirmation: Confirmation::Rejected },
+            &mut ui.conversation_state.drafts,
+        ).as_deref(),
+        Some("The original thread action was rejected"),
+    );
     ui.click(Hit::Thread(pane.key(), thread::Tap::Compose("thread/worker".into())));
     ui.paste("Keep this unsent draft.".into());
     let focused = capture(&mut ui, &pane, &dir, "harness-focused-composer");
