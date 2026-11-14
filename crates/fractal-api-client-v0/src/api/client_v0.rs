@@ -697,7 +697,11 @@ async fn collection_items_with_windows(
         let worker_store = state.store.clone();
         let (result, read_permit, returned_admission, attributes) = super::blocking_store(move || {
             crate::profile::task(collection_window_label(&collection), || super::roster_worker(roster_telemetry, submitted, roster_attributes, || {
-            let (result, read_permit, admission) = worker_store.readers.request_read_with_permit(reader_permit, move || {
+            // Bound physical snapshots to one refresh cadence, not the HTTP
+            // envelope's fifteen seconds. A shorter inherited budget still wins.
+            let (result, read_permit, admission) = super::read_deadline::query_with_permit(
+                &worker_store, "/v1/client/collections", COLLECTION_REREAD_INTERVAL,
+                reader_permit, move || {
             // The worker owns both guards until its physical snapshot finishes, including
             // after caller cancellation. A miss returns them without allocating shared guards.
             let mut admission = admission;
@@ -1086,7 +1090,7 @@ async fn collection_items_with_windows(
                 Ok(Ok(Some((snapshot, items, has_more, pinned))))
             });
             Ok::<_, anyhow::Error>((result?, read_permit, admission))
-            })??;
+            })?;
             // Keep the failed probe's measurements for the admitted retry, before the
             // worker scope restores its thread-local accumulator.
             Ok((result, read_permit, admission, crate::otel::take_roster_attributes()))
@@ -10494,6 +10498,49 @@ mod tests {
         if let Some((publication, _)) = published_runtimes::fold(&state.store, base.as_deref()).unwrap() {
             assert!(list.publish(publication, generation).is_some());
         }
+    }
+
+    #[test]
+    fn inventory_runtimes_reuse_only_the_exact_published_cut_and_restrict_access() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        observe_published_runtime(&state, "exec/inventory-terminal", "running", true);
+        let snapshot = new_client_snapshot(&state);
+        let privileged = ClientSession::local(Some("person/operator")).unwrap();
+        let restricted = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+        let expected = runtime_resources(&state, false, &snapshot, &restricted).unwrap();
+        let machines = machine_resources(&state, false, &snapshot, &restricted).unwrap();
+        publish_runtimes_once(&state);
+        let work = smallclaims::sqlite::work::SqliteWorkScope::start();
+        assert_eq!(runtime_resources(&state, false, &snapshot, &restricted).unwrap(), expected);
+        assert_eq!(work.finish(), smallclaims::sqlite::work::SqliteWork::default(),
+            "same-cut runtime reuse must not execute status or detail queries");
+        assert_eq!(expected[0]["terminal_access"]["read"], "unavailable");
+        assert_eq!(runtime_resources(&state, false, &snapshot, &privileged).unwrap()[0]["terminal_access"]["read"], "granted",
+            "a restricted caller must not mutate shared eligibility");
+        RUNTIME_DETAIL_SUBJECT_COUNTS.lock().unwrap().insert(snapshot.id.clone(), 0);
+        let request = serde_json::from_value(json!({
+            "kind": "subscribe", "id": "machines", "collection": "machines"
+        })).unwrap();
+        let (items, has_more) = inventory::items(&state, &restricted, &request, &snapshot).unwrap();
+        assert_eq!(items, machines);
+        assert!(!has_more);
+        assert_eq!(RUNTIME_DETAIL_SUBJECT_COUNTS.lock().unwrap().remove(&snapshot.id), Some(0),
+            "machine inventory must reuse the published runtime fold");
+
+        observe_published_runtime(&state, "agent/inventory-new", "running", false);
+        let newer = new_client_snapshot(&state);
+        assert_eq!(runtime_resources(&state, false, &newer, &restricted).unwrap().len(), 2,
+            "an older publication cannot hide a runtime at the inventory cut");
+        publish_runtimes_once(&state);
+        assert_eq!(runtime_resources(&state, false, &snapshot, &restricted).unwrap(), expected,
+            "a newer publication cannot leak into a pinned older snapshot");
+        assert_eq!(runtime_resources_for_owner(&state, false, &newer, &restricted,
+            Some("exec/inventory-terminal")).unwrap(), expected,
+            "owner reads retain their exact-subject semantics");
+        state.store.published_runtime_list().end();
+        assert_eq!(runtime_resources(&state, false, &newer, &restricted).unwrap().len(), 2,
+            "an unavailable publication retains the inventory's direct snapshot read");
     }
 
     #[tokio::test]

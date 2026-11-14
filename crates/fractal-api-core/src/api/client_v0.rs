@@ -1252,6 +1252,13 @@ pub fn runtime_resources_for_owner(
     session: &ClientSession,
     owner: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
+    smallclaims::read_budget::check()?;
+    if !history && owner.is_none()
+        && let Some(items) = published_runtimes::at_snapshot(&state.store, snapshot, session)
+    {
+        smallclaims::read_budget::check()?;
+        return Ok(items);
+    }
     // Runtime authority must come from the same status reduction used by every
     // other control path. A raw claim ordered last by this replica's ingest
     // index is not necessarily the causally current runtime observation.

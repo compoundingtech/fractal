@@ -134,6 +134,14 @@ and original expiry. Terminal permissions are applied to
 each returned page for its authenticated caller. `history=true` and exact runtime detail
 reads keep their existing snapshot reductions.
 
+Machine inventories and summaries reuse these runtime rows when the publication is
+servable and its graph cut exactly equals their already-pinned snapshot. They apply
+the caller's terminal permissions to private copies, never the shared rows. They
+retain direct snapshot reductions for missing, unavailable, older or newer
+publications, history and exact-owner reads. An older runtime publication cannot
+be joined to newer work/fleet membership while advertising one inventory snapshot;
+the inventory does not silently move its cut to the publication's.
+
 OTel metrics `st.runtime_list.publication.age` (gauge, seconds) and
 `st.runtime_list.rebuild.duration` (histogram, seconds) distinguish stale publications
 from slow rebuild attempts. Publication age is absent until a complete list is available;
