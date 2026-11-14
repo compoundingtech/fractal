@@ -383,3 +383,11 @@ after main's step-execution and response-evidence fields were regenerated into t
 This includes v27's non-trimming seed 21 and the earlier provisional controls seeds 610 and 1597.
 The exact v28 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
 no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
+
+`claims-v29.json` captures the combined resource-lane, resource-runtime and host-hold
+registry on top of main's v28. Versions 1 through 28 remain byte-identical historical
+inputs. Generate v29 with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v29.json`;
+do not hand-edit it. The simulation and audit reports select v29. Its fixed-seed
+checkpoint behavior must be measured independently; v28's empty never-trim set is
+not evidence for this new schedule.
