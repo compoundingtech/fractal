@@ -1,5 +1,41 @@
 use super::*;
-use fractal_client::Client as ClientV0;
+// This compatibility probe intentionally sends the old pilot's wire format,
+// which the current generated client's typed operations no longer represent.
+struct ClientV0 {
+    http: reqwest::Client,
+}
+
+impl ClientV0 {
+    fn unix_as(path: impl AsRef<std::path::Path>, person: &str) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-st3-person", person.parse().unwrap());
+        Self::unix(path, headers)
+    }
+
+    fn unix_gateway(path: impl AsRef<std::path::Path>, credential: impl AsRef<str>) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", credential.as_ref()).parse().unwrap());
+        Self::unix(path, headers)
+    }
+
+    fn unix(path: impl AsRef<std::path::Path>, headers: reqwest::header::HeaderMap) -> Self {
+        Self {
+            http: reqwest::Client::builder().unix_socket(path.as_ref().to_owned())
+                .no_proxy().default_headers(headers).build().unwrap(),
+        }
+    }
+
+    async fn get(&self, path: &str) -> Result<Value, reqwest::Error> {
+        self.http.get(format!("http://localhost{path}")).send().await?
+            .error_for_status()?.json().await
+    }
+
+    async fn post(&self, path: &str, value: &Value) -> Result<Value, reqwest::Error> {
+        self.http.post(format!("http://localhost{path}")).json(value).send().await?
+            .error_for_status()?.json().await
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: an actual storage-version-22 thread reader"]

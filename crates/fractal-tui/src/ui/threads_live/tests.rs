@@ -242,6 +242,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         notify: Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
         node: "native-thread-test".into(),
+        api_socket: socket.clone(),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: root.path().join("unused-pty"),

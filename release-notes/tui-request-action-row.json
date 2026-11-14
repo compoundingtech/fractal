@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Terminal Inbox request actions share a row when they fit and wrap at narrower widths. Dismissing a request still asks for confirmation.",
+  "summary": "Terminal Inbox request actions share a row when they fit and wrap at narrower widths. Dismissing a request still asks for confirmation. Buttons without a key shortcut no longer show a blank key cap, so their labels sit two columns further left (for example Revoke in Fleet devices).",
   "replay": {"status": "none", "detail": "Inbox presentation only."},
   "schema": {"status": "none", "detail": "No stored data changes."},
   "rules": {"status": "none", "detail": "No rules or digest changes."},
