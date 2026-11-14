@@ -509,6 +509,22 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "uploads image bytes, outside the graph",
     ),
     (
+        "GET /v1/agent-invocations/{*invocation}",
+        "invocation receipts are read by exact invocation id, not claim-history scan; agent_invocations tests cover the lookup, artifact join and authorization, whose growth with unrelated agent history is not measured here",
+    ),
+    (
+        "GET /v1/client/invocation-artifacts/{id}",
+        "answers retained private bytes, which the JSON cost client cannot decode and the generated cost store never seeds; invocation_artifacts tests cover the content-addressed lookup and authorization",
+    ),
+    (
+        "DELETE /v1/client/invocation-artifacts/{id}",
+        "writes one tombstone per invocation/kind/hash reference; invocation_artifacts tests cover idempotent deletion and revocation authority across later same-hash captures",
+    ),
+    (
+        "POST /v1/invocation-input",
+        "requires a live kernel connector-generation witness descending from the daemon-recorded runtime process of the exact incarnation, absent from generated cost stores; agent_invocations tests cover capture, retry and conflict work",
+    ),
+    (
         "GET /v1/client/blobs/{id}",
         "image bytes, outside the graph",
     ),

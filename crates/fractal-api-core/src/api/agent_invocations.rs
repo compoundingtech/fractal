@@ -23,6 +23,7 @@ pub async fn input(
     bound: Option<BoundActor>,
     peer: Option<Extension<NativeDeliveryPeer>>,
     session: Option<Extension<ClientSession>>,
+    local_peer: Option<Extension<LocalPeer>>,
     Json(request): Json<InputRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = bound.as_ref().map(BoundActor::actor)
@@ -38,6 +39,22 @@ pub async fn input(
     }
     if let Some(Extension(session)) = session.as_ref() {
         require_scope(session, "control.runtimes")?;
+    }
+    // Agent identity alone survives restarts. Reuse the kernel-generation and
+    // daemon-owned runtime provenance guard used for helper launch authority;
+    // never accept the requested incarnation as proof of the caller's process.
+    let process = local_peer.as_ref().and_then(|Extension(peer)| peer.peer_process.as_ref())
+        .or_else(|| session.as_ref().and_then(|Extension(session)| session.peer_process.as_ref()));
+    let incarnation = state.store.verify_helper_launcher_peer(&request.agent, process)
+        .map_err(|_| ApiError { status: StatusCode::FORBIDDEN,
+            code: "invocation-input-caller-incarnation".into(),
+            message: "native input requires the exact live invocation process".into(),
+            details: Box::default() })?;
+    if incarnation != request.incarnation {
+        return Err(ApiError { status: StatusCode::FORBIDDEN,
+            code: "invocation-input-caller-incarnation".into(),
+            message: "native input requires the exact live invocation process".into(),
+            details: Box::default() });
     }
     let receipts = state.store.invocation_receipts(&request.invocation_id).map_err(ApiError::internal)?;
     let message = state.store.message(&request.message_id).map_err(ApiError::internal)?;

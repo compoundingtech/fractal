@@ -160,7 +160,10 @@ labels a later turn or proves fresh context.
 
 The pi/omp channel posts its final native message envelope, including tags and
 attachment notices, to `POST /v1/invocation-input` before provider delivery.
-Capture requires the authenticated exact agent, incarnation and message binding.
+Capture requires the authenticated exact agent, incarnation and message binding,
+plus a live kernel connector-generation witness descending from that incarnation's
+daemon-recorded runtime process. Agent identity or knowledge of historical receipt
+fields alone cannot attest to another incarnation's envelope.
 The envelope is not a hidden provider prompt. Unsupported direct provider
 envelopes remain unknown; failed capture does not block real input delivery.
 
