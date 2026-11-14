@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add actorless offline fractal work validate-request FILE|- to validate a native person request and print its canonical JSON value.",
+  "replay": { "status": "none", "detail": "Uses the existing StructuredRequest::parse; no replay changes." },
+  "schema": { "status": "none", "detail": "No new request schema, serializer, digest, claims or tables." },
+  "rules": { "status": "none", "detail": "No work ask or admission changes. Recognition, including malformed arguments, exits before instance, completion, actor, runtime, configuration or client initialization and does not write ST_GATE_REPORT." },
+  "compatibility": { "status": "none", "detail": "The new source command accepts only a file or stdin (-), without actor or global flags. Success prints one canonical JSON value; errors use stderr and a nonzero exit. Canonical bytes or digests are not promised; server image/attachment enrichment and client_view are outside final-stored equality." },
+  "downtime": { "status": "none", "detail": "No deployment or runtime adoption is authorized by this source change." },
+  "manual": { "status": "none", "detail": "Installed wrapper admission, publication and adoption require separate approval; no wrapper exemption is added." },
+  "recovery": { "status": "none", "detail": "The offline command does not mutate persistent state." }
+}

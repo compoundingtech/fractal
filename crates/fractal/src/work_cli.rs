@@ -33,6 +33,87 @@ fn read_structured_request(path: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&text).context("the request is not JSON")
 }
 
+/// Follow only root -> work -> validate-request; never examine another command's payload.
+fn selects_validate_request(arguments: &[std::ffi::OsString]) -> bool {
+    let mut words = arguments.iter().skip(1);
+    let mut in_work = false;
+    let mut graph = None;
+    while let Some(word) = words.next() {
+        let Some(word) = word.to_str() else { return false };
+        if let Some(option) = word.strip_prefix("--") {
+            let (name, inline) = option.split_once('=')
+                .map_or((option, false), |(name, _)| (name, true));
+            // Metadata only: no typed validation, completer invocation or runtime/config/client/store initialization.
+            let command = graph.get_or_insert_with(Cli::command);
+            let Some(argument) = command.get_arguments()
+                .find(|arg| arg.is_global_set() && arg.get_long() == Some(name))
+            else { return false };
+            if argument.get_action().takes_values() && !inline && words.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        if !in_work {
+            if word != "work" { return false; }
+            in_work = true;
+        } else {
+            return word == "validate-request";
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+#[test]
+fn offline_request_recognition_tracks_command_positions_not_payload_or_typed_values() {
+    let selected = |args: &[&str]| selects_validate_request(
+        &args.iter().map(|arg| std::ffi::OsString::from(*arg)).collect::<Vec<_>>());
+    assert!(selected(&["fractal", "work", "--daemon-wait=invalid", "validate-request", "-"]));
+    assert!(selected(&["fractal", "--daemon-wait", "invalid", "work", "validate-request", "-"]));
+    assert!(selected(&["fractal", "work", "validate-request", "--unknown"]));
+    assert!(!selected(&["fractal", "work", "start", "--idempotency-key", "work",
+        "validate-request", "--as", "agent/owner"]));
+    assert!(!selected(&["fractal", "--endpoint", "work", "validate-request", "-"]));
+    assert!(!selected(&["fractal", "work", "--", "validate-request", "-"]));
+}
+
+/// Recognize even malformed invocations before instance selection, completion or actor lookup.
+pub(super) fn offline_validate_request(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
+    if !selects_validate_request(arguments) {
+        return None;
+    }
+    // A deliberately actorless graph: no inherited global options or dynamic completers.
+    let leaf = WorkValidateRequestArgs::augment_args(clap::Command::new("validate-request"));
+    let command = clap::Command::new("fractal").subcommand_required(true)
+        .subcommand(clap::Command::new("work").subcommand_required(true).subcommand(leaf));
+    let matches = match command.try_get_matches_from(arguments) {
+        Ok(matches) => matches,
+        Err(error) => {
+            // Do not use exit_usage_error: it writes ST_GATE_REPORT on refusals.
+            let code = if error.use_stderr() { 2 } else { 0 };
+            let _ = error.print();
+            return Some(ExitCode::from(code));
+        }
+    };
+    let matches = matches.subcommand_matches("work")?
+        .subcommand_matches("validate-request")?;
+    let result = WorkValidateRequestArgs::from_arg_matches(matches)
+        .map_err(anyhow::Error::from)
+        .and_then(|args| {
+            let value = read_structured_request(&args.file)?;
+            let (_, canonical) = fractal_daemon::person_request::StructuredRequest::parse(&value)?;
+            println!("{canonical}");
+            Ok(())
+        });
+    Some(match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error:#}");
+            ExitCode::FAILURE
+        }
+    })
+}
+
 pub(super) async fn run_work(
     client: &Client,
     endpoint: &Endpoint,
@@ -40,6 +121,9 @@ pub(super) async fn run_work(
     json_output: bool,
 ) -> Result<()> {
     match command {
+        WorkCommand::ValidateRequest(_) => {
+            anyhow::bail!("request validation must be dispatched offline")
+        }
         WorkCommand::Delegation(args) => {
             reject_foreign_agent_actor(&args.actor)?;
             let result: ClaimRecord = client

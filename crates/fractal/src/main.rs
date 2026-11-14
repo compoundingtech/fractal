@@ -4399,8 +4399,20 @@ struct AttentionWithdrawArgs {
     actor: String,
 }
 
+#[derive(Args)]
+struct WorkValidateRequestArgs {
+    /// Request JSON file, or - to read stdin.
+    #[arg(value_name = "FILE|-")]
+    file: PathBuf,
+}
+
 #[derive(Subcommand)]
 enum WorkCommand {
+    /// Validate a person request offline and print its canonical JSON value.
+    ///
+    /// Takes no actor or global options. Server attachment enrichment and client_view
+    /// are outside this value; this does not promise canonical bytes or a digest.
+    ValidateRequest(WorkValidateRequestArgs),
     /// Replace your allowed delegation list; repeat --action, or omit all to revoke.
     Delegation(DelegationPolicyArgs),
     /// Open a one-step run for this agent without authoring a mission; then use claim.
@@ -5459,12 +5471,15 @@ fn fixture() -> bool {
 }
 
 fn cli_main() -> ExitCode {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    if let Some(code) = work_cli::offline_validate_request(&arguments) {
+        return code;
+    }
     let _ = *STDERR_MESSAGE;
     // A recorder link starts st3 as `git` or `gh`. It must not build the async runtime.
     if let Some(program) = fractal_daemon::recorder::invoked_program() {
         fractal_daemon::recorder::run(program);
     }
-    let arguments = std::env::args_os().collect::<Vec<_>>();
     // Parse the local launcher before any raw scanner can mistake its state path
     // for an unrelated option. Inspect clap's value sources, never raw tokens.
     if arguments.get(1).is_some_and(|argument| argument == "web") {
