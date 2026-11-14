@@ -277,7 +277,11 @@ const Question = ({
     {rows.map((row) => (
       <div key={row.map((option) => option.scenario).join(' ')} className="at-gallery-pair">
         {row.map((option) => (
-          <RenderedPanel key={option.scenario} scenario={option.scenario} title={option.title} />
+          <RenderedPanel
+            key={option.scenario}
+            scenario={option.scenario}
+            {...(option.title === undefined ? {} : { title: option.title })}
+          />
         ))}
       </div>
     ))}
