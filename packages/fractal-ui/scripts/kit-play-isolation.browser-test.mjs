@@ -161,7 +161,7 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
     const onWrite = ({ storageId, key }) => {
       if (storageId.securityOrigin === base && storageId.isLocalStorage && key === 'prior-renderer-view') resolve()
     }
-    for (const event of ['DOMStorage.domStorageItemAdded', 'DOMStorage.domStorageItemsSet']) auditClient.on(event, onWrite)
+    for (const event of ['DOMStorage.domStorageItemAdded', 'DOMStorage.domStorageItemUpdated']) auditClient.on(event, onWrite)
   })
   await staleWriter.evaluate(() => localStorage.setItem('prior-renderer-view', 'gone after clear'))
   await writeAcknowledged
