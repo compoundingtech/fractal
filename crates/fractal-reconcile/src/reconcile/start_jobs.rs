@@ -105,6 +105,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             .launch_member
             .environment
             .insert(OPERATION_ENV.into(), id.clone());
+        let trace = if prepared.subject.kind == "agent" {
+            let links = prepared.subject.owner_run.as_deref()
+                .map(|run| self.store.claims_for(run, Some("mission.run.trace")))
+                .transpose()?.unwrap_or_default().into_iter().rev()
+                .find_map(|claim| serde_json::from_value(claim.body["fields"]["trace"].clone()).ok())
+                .into_iter().collect::<Vec<_>>();
+            let trace = self.store.start_invocation_trace(&format!("invocation/{id}"),
+                &prepared.subject.subject, &links);
+            trace.environment(&mut prepared.launch_member.environment);
+            Some(trace)
+        } else { None };
+        if prepared.subject.kind == "agent" {
+            prepared.launch_member.environment.insert(
+                fractal_schema::invocation::ENV.into(), format!("invocation/{id}"));
+        }
         let mut operation = RuntimeStartOperation {
             id: id.clone(),
             subject: prepared.subject.subject.clone(),
@@ -118,6 +133,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             dispatched: false,
             receipted: false,
         };
+        operation.body["trace_context"] = serde_json::to_value(trace)?;
         if let Some(pending) = &failed_start {
             // Operation metadata, retained across queueing and daemon restart. The admission
             // writer uses this exact ID, never whichever start happens to be pending later.
@@ -128,6 +144,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .admit_runtime_start(&mut operation, MAX_START_JOBS)?
         {
             RuntimeStartAdmission::SeatBusy | RuntimeStartAdmission::Superseded => {
+                self.store.finish_invocation_trace(&format!("invocation/{id}"), false);
                 return Ok(false);
             }
             RuntimeStartAdmission::Admitted | RuntimeStartAdmission::CapacityBusy => {}
@@ -222,7 +239,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             let result = caught(|| {
                 guard()?;
                 if prepared.subject.kind == "agent" {
-                    contract = Some(runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?);
+                    let measured = runtime.launch_contract(&store, &prepared.subject, &prepared.launch_member)?;
+                    store.record_invocation_launch_inputs(&id, &measured)?;
+                    contract = Some(measured);
                 }
                 backend_entered = true;
                 runtime.start_guarded(&prepared.launch_member, &guard)?;
@@ -272,6 +291,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Err(error) = store.finish_runtime_start(&id, &result) {
                 eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
             }
+            if result["error"].is_string() && result["producer_closed"] == true {
+                store.finish_invocation_trace(&format!("invocation/{id}"), true);
+            }
             // Drop admission before waking the planner: a completion can admit queued work.
             drop(_lock);
             incremental.touch(&format!("local-runtime-start:{subject}"));
@@ -290,6 +312,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&operation.id);
             self.store.finish_runtime_start(&operation.id, &serde_json::json!({"error": format!("spawn launch worker: {error}"), "producer_closed": true}))?;
+            self.store.finish_invocation_trace(&format!("invocation/{}", operation.id), true);
             self.start_changed(&operation.subject);
         }
         Ok(())
@@ -324,9 +347,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         })?;
         self.store
             .revoke_runtime_start(&operation.id, &request.id)?;
-        if !operation.dispatched {
-            self.store
-                .cancel_undispatched_runtime_start(&operation.id)?;
+        if !operation.dispatched
+            && self.store.cancel_undispatched_runtime_start(&operation.id)?
+        {
+            self.store.finish_invocation_trace(&format!("invocation/{}", operation.id), false);
         }
         self.start_changed(subject);
         Ok(())
