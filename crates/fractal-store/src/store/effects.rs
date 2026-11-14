@@ -31,6 +31,7 @@ fn intended_input(record: &EffectRecord, key: &str) -> Result<ClaimInput, Fracta
 
 fn intended_tx(tx: &Connection, id: &str) -> Result<Option<EffectRecord>, FractalError> {
     let claim: Option<String> = tx.query_row(
+        /* sqlite-large-value: allow-for-now lv-h2cc8692633a8 owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
         &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_ASC(claims) LIMIT 1"),
         params![id, KIND_INTENDED], |row| row.get(0)).optional().map_err(internal)?;
     claim.map(|id| {
@@ -42,6 +43,7 @@ fn intended_tx(tx: &Connection, id: &str) -> Result<Option<EffectRecord>, Fracta
 fn latest_tx(tx: &Connection, id: &str) -> Result<Option<(String, EffectRecord)>, FractalError> {
     // A late observation cannot erase an unresolved fence or regress committed evidence.
     let row: Option<(String, String)> = tx.query_row(
+        /* sqlite-large-value: allow-for-now lv-h115b9b22ffe0 owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
         &canonical_sql("SELECT kind,id FROM claims WHERE subject=?1 AND kind IN (?2,?3,?4,?5)
          ORDER BY CASE kind WHEN ?5 THEN 4 WHEN ?4 THEN 3 WHEN ?3 THEN 2 ELSE 1 END DESC,
                   CANONICAL_DESC(claims) LIMIT 1"),
