@@ -23,16 +23,20 @@ pub enum By {
     Agent,
     Mission,
     Step,
+    Attempt,
+    Invocation,
     Model,
     Account,
     Host,
 }
 
 impl By {
-    const ALL: [By; 6] = [
+    const ALL: [By; 8] = [
         By::Agent,
         By::Mission,
         By::Step,
+        By::Attempt,
+        By::Invocation,
         By::Model,
         By::Account,
         By::Host,
@@ -43,6 +47,8 @@ impl By {
             By::Agent => "agent",
             By::Mission => "mission",
             By::Step => "step",
+            By::Attempt => "attempt",
+            By::Invocation => "invocation",
             By::Model => "model",
             By::Account => "account",
             By::Host => "host",
@@ -61,6 +67,8 @@ impl By {
             "agent" => By::Agent,
             "mission" => By::Mission,
             "step-run" => By::Step,
+            "step-attempt" => By::Attempt,
+            "invocation" => By::Invocation,
             "model" => By::Model,
             "account" => By::Account,
             "machine" => By::Host,
@@ -186,6 +194,9 @@ pub fn key(row: &UsageRow, by: By) -> String {
         By::Agent => row.agent.clone(),
         By::Mission => known(&row.mission_run).map_or_else(none, mission_of),
         By::Step => known(&row.step).map_or_else(none, str::to_owned),
+        By::Attempt => known(&row.step).zip(row.attempt)
+            .map_or_else(none, |(step, attempt)| format!("step-attempt/{step}/{attempt}")),
+        By::Invocation => known(&row.invocation_id).map_or_else(none, str::to_owned),
         By::Model => known(&row.model).map_or_else(none, |model| format!("model/{model}")),
         By::Account => {
             known(&row.account).map_or_else(none, |account| format!("account/{account}"))
@@ -216,6 +227,9 @@ pub fn groups<'a>(rows: impl Iterator<Item = &'a UsageRow>, by: By) -> Vec<(Stri
 
 /// A group as a person reads it: an agent's or mission's name, a step with its mission.
 pub fn label(world: &World, id: &str) -> String {
+    if let Some(attempt) = id.strip_prefix("step-attempt/").and_then(|rest| rest.rsplit_once('/')) {
+        return format!("{} · attempt {}", label(world, attempt.0), attempt.1);
+    }
     if let Some(account) = id.strip_prefix("account/") {
         // An account a person declared reads by its name alone.
         if let Some(declared) = world
@@ -938,6 +952,25 @@ mod tests {
         assert_eq!(By::of("usage/no-mission"), Some(By::Mission));
         assert_eq!(By::of("step-run/atlas-1/compare"), Some(By::Step));
         assert!(label(&world, "step-run/atlas-1/compare").ends_with(" · compare"));
+    }
+
+    #[test]
+    fn invocation_and_attempt_groupings_preserve_unknown_and_step_scope() {
+        let world = super::super::demo::test_world();
+        let mut row = world.usage.items()[0].clone();
+        row.invocation_id = None;
+        row.attempt = None;
+        assert_eq!(key(&row, By::Invocation), "usage/no-invocation");
+        assert_eq!(key(&row, By::Attempt), "usage/no-attempt");
+        row.invocation_id = Some("invocation/launch".into());
+        row.attempt = Some(2);
+        row.step = Some("step-run/one/build".into());
+        assert_eq!(key(&row, By::Invocation), "invocation/launch");
+        assert_eq!(key(&row, By::Attempt), "step-attempt/step-run/one/build/2");
+        row.step = Some("step-run/two/build".into());
+        assert_ne!(key(&row, By::Attempt), "step-attempt/step-run/one/build/2");
+        assert_eq!(By::of("invocation/launch"), Some(By::Invocation));
+        assert_eq!(By::of("step-attempt/step-run/one/build/2"), Some(By::Attempt));
     }
 
     #[test]
