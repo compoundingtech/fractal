@@ -565,14 +565,16 @@ unsaid until its first agents roster. The summary's count of active missions rea
 Precedence (`fractal-ui-model::missions::word`, shared with the terminal UI's own adapter), first match wins: an open human
 gate on the mission (decision); no runs (not_started); a blocked mission or step (stalled);
 completed (done); a failed mission or step (failed); cancelled; only keep-open steps still
-running (watching); a step claimed, working or verifying (working); a ready unclaimed step,
-which is unstaffed when its queuing agent is stopped, failed or faulted, queued when an agent
-queues it, and unclaimed otherwise; a waiting or pending step (held); standing, running, ready or
-draft (idle); otherwise done.
+running (watching); a non-agentless step claimed, working, running or verifying with an agent
+claimant or assignee (working); a ready unclaimed step, which is unstaffed when its queuing agent
+is stopped, failed or faulted, queued when an agent queues it, and unclaimed otherwise; a waiting,
+pending or in-hand step without an assigned agent (held); standing, running, ready or draft (idle);
+otherwise done.
 
-`who` is the person the open gate waits on for decision; the working step's owner for working
-and watching (`st` for an agentless step); the stuck step's seat for queued, unstaffed, stalled
-and failed; and `nobody` otherwise.
+`who` is the person the open gate waits on for decision; the working step's owner for working;
+`st` for watching; the stuck step's seat for queued, unstaffed, stalled and failed; and `nobody`
+otherwise. A gated step uses `needs_you` and names the person who must answer. Other in-hand
+steps without an assigned agent use `waiting`, never `working`.
 
 The existing `must_act` (`you`, `agent`, `system`, `blocked`, `nobody`) stays on the row for
 older clients. `who` replaces it for display.

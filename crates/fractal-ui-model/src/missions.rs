@@ -71,7 +71,7 @@ impl Word {
             Word::Unstaffed => "a step is ready but its agent is stopped or broken",
             Word::Unclaimed => "a step is ready; Fractal has not said which agent takes it",
             Word::Queued => "a step is waiting its turn on a busy agent; nothing to do",
-            Word::Working => "an agent is doing a step now",
+            Word::Working => "an assigned agent is doing a step now",
             Word::Watching => "Fractal keeps this open and starts other missions when something happens",
             Word::Held => "waiting on something outside the fleet",
             Word::Idle => "running, with nothing ready",
@@ -264,10 +264,10 @@ pub(crate) struct QueueOwner {
 
 /// The mission word, first match wins: an open human gate on the mission (decision); no runs
 /// (not started); a blocked mission or step (stalled); completed (done); a failed mission or step
-/// (failed); cancelled; only keep-open steps still running (watching); a step in hand (working); a
-/// ready unclaimed step, unstaffed when its queue owner is down, queued when one queues it, and
-/// unclaimed otherwise; a waiting or pending step (held); standing, running, ready or draft (idle);
-/// otherwise done.
+/// (failed); cancelled; only keep-open steps still running (watching); an assigned agent's step
+/// in hand (working); a ready unclaimed step, unstaffed when its queue owner is down, queued when
+/// one queues it, and unclaimed otherwise; a waiting, pending or agentless in-hand step (held);
+/// standing, running, ready or draft (idle); otherwise done.
 pub(crate) fn word(
     mission: &fractal_client::Mission,
     work: &[&MissionStep],
@@ -296,7 +296,7 @@ pub(crate) fn word(
     {
         // Only st's own keep-open steps are running: an intake that watches.
         Word::Watching
-    } else if states.clone().any(in_hand) {
+    } else if work.iter().any(|step| working_agent(step)) {
         Word::Working
     } else if let Some(ready) = work
         .iter()
@@ -310,7 +310,7 @@ pub(crate) fn word(
         }
     } else if states
         .clone()
-        .any(|state| matches!(state, "waiting" | "pending"))
+        .any(|state| matches!(state, "waiting" | "pending") || in_hand(state))
     {
         Word::Held
     } else if matches!(
@@ -334,6 +334,18 @@ pub fn row_word(mission: &fractal_client::Mission, gates: &[Gate]) -> Word {
 /// Whether a step state means an agent (or st) has it in hand.
 pub(crate) fn in_hand(state: &str) -> bool {
     matches!(state, "claimed" | "working" | "running" | "verifying")
+}
+
+/// Only assigned agent work is working; daemon and human work are not agent activity.
+fn working_agent(step: &MissionStep) -> bool {
+    in_hand(&step.state)
+        && !step.agentless
+        && step
+            .claimant
+            .as_deref()
+            .or(step.assignee.as_deref())
+            .and_then(fractal_schema::canonical_agent_actor)
+            .is_some_and(|actor| actor.starts_with("agent/"))
 }
 
 /// How a client names who holds a step: "you" for its reader, else the name st serves, and an
