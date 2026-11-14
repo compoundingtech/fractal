@@ -206,6 +206,21 @@ tie break. Arrival order belongs to local cursors, caches and operational overla
 must produce equal shared rows and selected source identities through incremental admission,
 restart replay and checkpoint trimming.
 
+An operation ID with different request digests never requests a whole-log replay during
+replication projection. Its registry row is reduced deterministically (minimum request
+digest, then the smallest retained claim ID for that digest, with checkpoint fallback).
+This registry choice does not suppress graph facts: graph projections still fold all
+admitted claims in canonical order, exactly as replay does.
+
+Event-only conflicts update the registry without rebuilding the graph. Affected desired,
+document, mission, run-tree and planning-session histories may refold under the writer only
+up to `OPERATION_CONFLICT_REFOLD_CLAIMS` (4096 claims). Above that bound, or without an
+affected-subject reducer, the previous projection remains and `projection_health` records
+a typed degraded entry. Receipt does not automatically repair these entries: large-history
+repair must commit separate pages rather than hold one writer transaction. Existing
+projection-failure detail and replication/store health retain the operation ID, current
+and previous claim IDs and conflict count. Writer-hold rows report fold `processed`/`total`.
+
 The digest covers everything that is synced: authenticated claim and blob identity, and every
 shared logical projection and its shared columns. Each shared table or claim-derived source has
 its own digest so a mismatch names the source. Local receipt metadata, physical indexes, secrets,
