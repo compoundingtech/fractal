@@ -1991,7 +1991,7 @@
     },
     {
       "command": "st service permissions",
-      "description": "Explain the one-time macOS permissions for service-owned work",
+      "description": "Explain the macOS protected-folder boundary for agent work",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_service_install_status_restart_reset_uninstall_use_isolated_manager"
       ],

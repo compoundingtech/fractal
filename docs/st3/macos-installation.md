@@ -115,6 +115,14 @@ The Nix-managed host integration must obey this protected-operation contract.
 The production operation allowlist is empty. Candidate operations and the
 disposable probe read are not authorized for production.
 
+Do not request or grant Full Disk Access, Developer Tools, Accessibility or Screen
+Recording to the daemon or agents. Agent work roots must remain outside Desktop,
+Documents, Downloads, iCloud Drive and removable volumes. If an agent touches a
+protected folder, macOS may deny access with `Operation not permitted` or show a
+privacy prompt. Do not approve broad access to bypass the boundary; move the work
+or explicitly selected input into an unprotected workspace.
+[Authority](step-run/ask-e62df730e50c152fcd1d8be8f3f3d872/ask).
+
 - Keep only named protected operations in a small signed helper, rather than
   granting the daemon's agents broad Full Disk Access or Developer Tools.
   [Authority](step-run/ask-7f78ee87f8c690d5c15bad2b3da8d998/ask).
@@ -129,11 +137,14 @@ disposable probe read are not authorized for production.
 - Use a Nix-built helper and a user LaunchAgent installed by the existing host
   activation, keeping build outputs unsigned and signing local.
   [Authority](step-run/ask-563ed90daacfeb7a4c53335ae8b73ef2/ask).
-- Prove retention first with a throwaway helper in Johannes's own session: its own
-  bundle ID, one harmless protected read, one version-1 approval, then no renewed
-  approval for changed version 2 signed under the same requirement. Remove the
-  probe and its grant afterwards; do not alter the live daemon for this proof.
-  [Authority](step-run/ask-797dda8c3019b78c983dc0ef4db30928/ask).
+- Build the helper and its disposable probe only when a first real protected
+  operation requires them. Before admitting that operation, prove retention with
+  a throwaway helper in Johannes's session: its own bundle ID, one harmless read,
+  one version-1 approval, then no renewed approval for changed version 2 under the
+  same signing requirement. Remove the probe and grant afterwards; do not alter
+  the live daemon for the proof.
+  [Timing authority](step-run/ask-e62df730e50c152fcd1d8be8f3f3d872/ask);
+  [proof authority](step-run/ask-797dda8c3019b78c983dc0ef4db30928/ask).
 
 Authority links identify native ask subjects (`fractal work show SUBJECT`).
 Successful consent retention for one service does not establish grants for

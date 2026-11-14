@@ -300,11 +300,8 @@ pub fn preflight(enabled: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn permissions(open: bool) -> Result<()> {
+pub fn permissions() -> Result<()> {
     print!("{}", permissions_guidance()?);
-    if open {
-        open_permissions_settings()?;
-    }
     Ok(())
 }
 
@@ -323,32 +320,15 @@ pub fn permissions_guidance() -> Result<String> {
     }
 }
 
-pub fn open_permissions_settings() -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        run_command(
-            "open",
-            &["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"],
-        )?;
-        run_command(
-            "open",
-            &["x-apple.systempreferences:com.apple.preference.security?Privacy_DeveloperTools"],
-        )?;
-    }
-    Ok(())
-}
-
 #[cfg(any(target_os = "macos", test))]
 fn macos_permission_guidance(executable: &Path) -> String {
     format!(
         "st executable\t{}\n\
-1. Open System Settings > Privacy & Security > Full Disk Access.\n\
-2. Add the st executable and enable it.\n\
-3. Open System Settings > Privacy & Security > Developer Tools.\n\
-4. Add the st executable and enable it.\n\
-5. Run `st service restart` after an approval changes.\n\
-macOS assigns service-owned file and developer access to st, not to the terminal that installed it.\n\
-A launchd property list cannot grant these approvals.\n",
+Do not grant Full Disk Access, Developer Tools, Accessibility, or Screen Recording to the daemon or agents.\n\
+Keep agent work roots outside Desktop, Documents, Downloads, iCloud Drive, and removable volumes.\n\
+If an agent touches a protected folder, macOS may deny access (Operation not permitted) or present a privacy prompt.\n\
+Do not approve broad access to bypass that failure; move the work or explicitly selected input to an unprotected workspace.\n\
+The protected-operation helper allowlist is empty. Build a helper and its disposable consent-retention probe only when a real protected operation requires them.\n",
         executable.display()
     )
 }
@@ -1527,12 +1507,17 @@ mod tests {
     }
 
     #[test]
-    fn macos_permission_guidance_names_the_exact_binary_and_manual_steps() {
+    fn macos_permission_guidance_keeps_agents_out_of_protected_folders() {
         let guidance = macos_permission_guidance(Path::new("/Users/example/bin/st3"));
         assert!(guidance.contains("st executable\t/Users/example/bin/st3"));
-        assert!(guidance.contains("Full Disk Access"));
-        assert!(guidance.contains("Developer Tools"));
-        assert!(guidance.contains("cannot grant"));
+        assert!(guidance.contains("Do not grant Full Disk Access"));
+        for folder in ["Desktop", "Documents", "Downloads", "iCloud Drive", "removable volumes"] {
+            assert!(guidance.contains(folder));
+        }
+        assert!(guidance.contains("Operation not permitted"));
+        assert!(guidance.contains("allowlist is empty"));
+        assert!(!guidance.contains("Open System Settings"));
+        assert!(!guidance.contains("service restart"));
     }
 
     #[test]

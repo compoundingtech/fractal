@@ -185,9 +185,12 @@ before restarting repeatedly or overriding admission.
 
 Verify Python 3 is installed, the configured app path is stable, and the selected signing
 identity exists. Release executables are ad-hoc signed, not notarized. Follow macOS's explicit
-approval flow for the verified download and run `fractal service permissions` for the service's
-Full Disk Access/Developer Tools guidance. Permissions can need renewed approval after ad-hoc
-updates. Do not globally disable Gatekeeper or remove quarantine from unrelated files.
+approval flow for the verified download. `fractal service permissions` explains the
+protected-folder boundary; it does not request broad privacy grants. If an agent sees
+`Operation not permitted` or a privacy prompt, move its work or the selected input out
+of Desktop, Documents, Downloads, iCloud Drive and removable volumes. Do not grant
+the daemon or agents Full Disk Access, Developer Tools, Accessibility or Screen Recording.
+Do not globally disable Gatekeeper or remove quarantine from unrelated files.
 A configured missing or wrong-team signing identity fails instead of falling back; see
 [macOS installation](st3/macos-installation.md). The optional voice helper is separate from
 ordinary agent and mission use.
