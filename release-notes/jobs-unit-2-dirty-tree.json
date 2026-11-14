@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Clarify inactive job source identity: dirty-tree input must use a content digest, never only the Git HEAD.",
+  "replay": {"status": "none", "detail": "Documentation only; no claims, receipts or projections change."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No admission policy, authority or configured limits change."},
+  "compatibility": {"status": "none", "detail": "The inactive source contract requires Content for modified trees: equal HEAD commits do not imply equal dirty-tree input. Existing digests distinguish Git and Content references."},
+  "downtime": {"status": "none", "detail": "No runtime wiring or host activation."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Documentation-only clarification; runtime behavior is unchanged."}
+}
