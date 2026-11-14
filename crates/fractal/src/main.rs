@@ -4261,6 +4261,49 @@ enum AttentionCommand {
     Reject(ReviewArgs),
     /// Ask a feedback-mode step to change its work and rerun.
     RequestChanges(FeedbackReviewArgs),
+    /// Mark one of your alerts seen, on every client of yours.
+    Seen(AttentionControlArgs),
+    /// Put one of your alerts off until later, on every client of yours. It stays open, and an
+    /// ask's deadline does not move: hold the deadline clock for that.
+    Snooze(AttentionSnoozeArgs),
+    /// Set an ask aside without answering it: the asker is told you dismissed it. An update is
+    /// read. Other alerts keep their own actions.
+    Dismiss(AttentionDismissArgs),
+}
+
+#[derive(Args)]
+struct AttentionControlArgs {
+    /// The alert: its `attention/...` ID from `fractal alerts ls`.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Attention)))]
+    subject: String,
+    /// The person whose alert it is: only that person may control it.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
+    #[arg(long = "as", value_parser = parse_person_subject)]
+    actor: Option<String>,
+}
+
+#[derive(Args)]
+struct AttentionSnoozeArgs {
+    #[command(flatten)]
+    target: AttentionControlArgs,
+    /// How long to put it off, such as `30m`, `4h` or `1d`.
+    #[arg(long = "for", conflicts_with_all = ["until", "clear"], required_unless_present_any = ["until", "clear"])]
+    duration: Option<String>,
+    /// Put it off until this RFC 3339 instant.
+    #[arg(long, conflicts_with = "clear")]
+    until: Option<String>,
+    /// Bring it back now.
+    #[arg(long)]
+    clear: bool,
+}
+
+#[derive(Args)]
+struct AttentionDismissArgs {
+    #[command(flatten)]
+    target: AttentionControlArgs,
+    /// Why, sent to the asker with the dismissal.
+    #[arg(long)]
+    text: Option<String>,
 }
 
 #[derive(Args)]
@@ -9779,16 +9822,38 @@ async fn run_now(
     if args.all {
         command.push_str(" --all");
     }
+    // A separate read: a person reader sees their own availability, an agent reader (the harness
+    // running `now` for its person) the people it works for. Its failure leaves Now intact.
+    let availability = match fractal_drivers::contracts::env("ST_AGENT").filter(|own| own.starts_with("agent/")) {
+        Some(agent) => match generated_client(endpoint, Some(&agent)) {
+            Ok(reader) => reader.availability_list(None).await.map_err(anyhow::Error::from),
+            Err(error) => Err(error),
+        },
+        None => client.availability_list(None).await.map_err(anyhow::Error::from),
+    }
+    .map(|read| read.value);
+    if let Err(error) = &availability {
+        stderr_message("st", format_args!("could not read availability: {error:#}"));
+    }
     if json_output {
-        print_value(&response, true)?;
+        let mut value = serde_json::to_value(&response)?;
+        if let Ok(availability) = &availability {
+            value["availability"] = serde_json::to_value(availability)?;
+        }
+        print_value(&value, true)?;
     } else {
-        print!("{}", render_now_page(&response.value, &command));
+        let people = availability.map(|read| read.people).unwrap_or_default();
+        print!("{}", render_now_page(&response.value, &people, &command));
     }
     note_partial_page(&response.value);
     Ok(())
 }
 
-fn render_now_page(page: &ClientPage, continuation_command: &str) -> String {
+fn render_now_page(
+    page: &ClientPage,
+    people: &[fractal_client::PersonAvailability],
+    continuation_command: &str,
+) -> String {
     let mut needs_you = page.clone();
     needs_you
         .items
@@ -9821,12 +9886,20 @@ fn render_now_page(page: &ClientPage, continuation_command: &str) -> String {
     if let Some(sync) = &page.sync {
         output.push_str(&render_sync_notice(sync, now_ms()));
     }
+    // Who the reader may wait on, before what waits on the reader.
+    // Only availability that departs from the default; `work ask` always names it.
+    let mut named = false;
+    for person in people.iter().filter(|person| availability::worth_showing(person)) {
+        output.push_str(&availability::summary_line(person));
+        output.push('\n');
+        named = true;
+    }
     // `N alerts` and the alerts, then updates; nothing at all when nothing waits.
-    output.push_str(&render_alert_sections(
-        &needs_you,
-        None,
-        continuation_command,
-    ));
+    let alerts = render_alert_sections(&needs_you, None, continuation_command);
+    if named && !alerts.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&alerts);
     // The server fills Now with attention, and adds work only for an explicit work
     // filter. Print a section only when the page holds its items, so a section the
     // server never filled does not read as zero.

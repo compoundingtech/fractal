@@ -762,6 +762,7 @@
       "private-notes-indeterminate",
       "invalid-answer",
       "not-answerable",
+      "attention-dismiss-unsupported",
       "internal"
     ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
@@ -830,6 +831,11 @@
     "ReadPosition": {"description": "One person's read position in one conversation: the time of the newest prose they have seen there, on any device or host. Forward-only: hosts keep the largest value, ties by canonical claim key. `id` is `read-position/person/NAME/<conversation>`; `revision` is the winning claim.", "allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "owner", "conversation", "at"], "properties": {"kind": {"const": "read-position"}, "owner": {"$ref": "#/$defs/ArrangementPerson"}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp"}}}]},
     "ReadPositionPage": {"type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"], "properties": {"kind": {"const": "page"}, "collection": {"const": "read-positions"}, "filters": {"type": "object", "additionalProperties": {"type": "string"}}, "items": {"type": "array", "items": {"$ref": "#/$defs/ReadPosition"}}, "page": {"$ref": "#/$defs/PageInfo"}, "sync": {"$ref": "#/$defs/SyncNotice"}, "replicated": {"$ref": "#/$defs/ReplicatedNotice"}}},
     "ReadPositionAdvanceParameters": {"type": "object", "additionalProperties": false, "required": ["owner", "conversation", "at"], "properties": {"owner": {"$ref": "#/$defs/ArrangementPerson", "description": "The session's own person."}, "conversation": {"$ref": "#/$defs/ReadPositionConversation"}, "at": {"$ref": "#/$defs/Timestamp", "description": "The newest prose time seen; an `at` not beyond the stored position completes without a claim."}}},
+    "AttentionControlId": {"description": "An open attention row's id: `attention/` and 32 lowercase hex digits.", "type": "string", "pattern": "^attention/[0-9a-f]{32}$"},
+    "AttentionSeenParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}}},
+    "AttentionSnoozeParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id", "until"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}], "description": "When the row comes back: a future instant, or null to bring it back now. A snooze never moves a deadline."}}},
+    "AttentionDismissParameters": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "text": {"type": "string", "maxLength": 8000, "description": "An ask only: why, sent to the asker with the dismissal."}}},
+    "AttentionControlState": {"description": "attention.seen and attention.snooze: the row's controls after the action, whether or not it appended a claim.", "type": "object", "additionalProperties": false, "required": ["attention_id", "seen_at", "snoozed_until"], "properties": {"attention_id": {"$ref": "#/$defs/AttentionControlId"}, "seen_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}, "snoozed_until": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}}},
     "Id": { "x-st-ref": "*", "description": "Subject reference `family/rest`.", "type": "string", "pattern": "^[a-z][a-z0-9-]*/[^\\s]+$" },
     "Timestamp": { "x-st-codec": "timestamp", "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.", "examples": ["2026-10-01T10:00:00.000Z"], "type": "string", "format": "date-time" },
     "Cursor": { "x-st-brand": "Cursor", "description": "Opaque, snapshot-bound page/event cursor.", "type": "string", "minLength": 8, "maxLength": 2048 },
@@ -1292,6 +1298,8 @@
             "deadline_at": { "$ref": "#/$defs/Timestamp", "description": "When a person-step ask resolves by itself if nobody answers it. Absent on an update and on daemons that predate deadlines." },
             "default_answer": { "$ref": "#/$defs/AskDefaultAnswer" },
             "targets": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
+            "seen_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls." },
+            "snoozed_until": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls." },
             "target_states": { "type": "array", "items": { "$ref": "#/$defs/AttentionTargetState" } },
             "actions": { "type": "array", "items": { "type": "string", "enum": [
               "custom.reply",
@@ -3842,6 +3850,9 @@
             "private-notes.write",
             "prompt.respond",
             "attention.resolve",
+            "attention.seen",
+            "attention.snooze",
+            "attention.dismiss",
             "review.approve",
             "review.reject",
             "review.request-changes",
@@ -4068,6 +4079,9 @@
             }
           }
         },
+        {"properties": {"type": {"const": "attention.seen"}, "parameters": {"$ref": "#/$defs/AttentionSeenParameters"}}},
+        {"properties": {"type": {"const": "attention.snooze"}, "parameters": {"$ref": "#/$defs/AttentionSnoozeParameters"}}},
+        {"properties": {"type": {"const": "attention.dismiss"}, "parameters": {"$ref": "#/$defs/AttentionDismissParameters"}}},
         { "properties": { "type": { "enum": ["review.approve", "review.reject", "review.request-changes"] }, "parameters": { "$ref": "#/$defs/TargetParameters" } } },
         {
           "properties": {
@@ -4302,6 +4316,7 @@
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
         "membership_revision": { "$ref": "#/$defs/Revision" },
+        "attention_control": { "$ref": "#/$defs/AttentionControlState" },
         "read_position_at": { "$ref": "#/$defs/Timestamp", "description": "read-position.advance: the stored position after the merge, whether or not this advance moved it." }
       }
     },

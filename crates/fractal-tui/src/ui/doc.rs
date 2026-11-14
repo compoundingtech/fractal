@@ -106,6 +106,8 @@ pub enum Hit {
     PaletteChoice(usize),
     /// A document page's or the documents list's own button: back, try again, more.
     Document(super::documents::Tap),
+    /// An Availability pane button: pressing its key.
+    Availability(char),
 }
 
 pub type Target = fractal_conversation_ui::doc::Target<Hit>;
