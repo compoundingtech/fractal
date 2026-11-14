@@ -61,7 +61,7 @@ pub fn world() -> World {
         "This codex process was found running on lark, but Fractal cannot tell which session file it writes, so there is no conversation to show. Start it through fractal to see it here.",
     )));
     World {
-        inventory_supported: None, inventory_partial: Vec::new(),
+        inventory_supported: None, inventory_partial: Vec::new(), at: chrono::Utc::now().fixed_offset(),
         person: s("person/robin"),
         host: s("lark"),
         link: Link::Live,
@@ -437,6 +437,7 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
             id: s("attention/1"),
             tier: Tier::Stopped,
             title: s("Approve the atlas store cut-over"),
@@ -474,6 +475,7 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
             id: s("attention/2"),
             tier: Tier::Stopped,
             title: s("Feedback on the new pricing page"),
@@ -506,6 +508,7 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
             id: s("attention/3"),
             tier: Tier::Today,
             title: s("Launch harbor/nightly-audit"),
@@ -572,6 +575,7 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
             id: s("attention/4"),
             tier: Tier::Alert,
             title: s("Release Captain keeps restarting"),
@@ -598,6 +602,7 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
             id: s("attention/5"),
             tier: Tier::Today,
             title: s("Add an audit step to the rekey mission"),
@@ -629,6 +634,7 @@ fn attention() -> Vec<Attention> {
         Attention {
             conversations: vec![],
             requested_at: None,
+            snoozed_until: None,
             id: s("attention/6"),
             tier: Tier::Later,
             title: s("Weekly usage is up 18%"),

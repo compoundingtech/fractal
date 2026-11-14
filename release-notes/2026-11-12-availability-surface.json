@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Show the asked person's availability, and whether the ask is urgent and its deadline held, after `fractal work ask`, and the reader's people's availability at the top of `fractal now`",
+  "replay": {
+    "status": "none",
+    "detail": "Both commands make one more read of GET /v1/client/availability; nothing is written or replayed."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Additive CLI JSON only: `work ask --json` gains a top-level boolean `urgent` (priority critical), plus a `person_availability` object when the availability read succeeds and, for an ask that names `--deadline`, `deadline_held` (true, false, or null for a clock word this client does not know); `now --json` gains an `availability` object holding `people`. The availability keys are absent when that read fails. No claim, table or client API change."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "The asker reads the person as itself and never sees raw presence. `now` reads as the harness agent in a seat, else as the person, and names a person only when their availability departs from the default; no device reporting (`unreported`) is the default. `work ask` computes urgency with the server's one rule (priority critical) and, only for an ask that names `--deadline` (the one case where the client knows a deadline exists), whether the deadline clock holds it (hold-all always, hold-routine unless urgent). A failed availability read prints a one-line notice on stderr and never fails the ask or the page. The st skill tells agents to park blocking work while a person is away or takes no interruptions, and to keep `--priority critical` for time-sensitive or irreversible answers."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Against a daemon without the availability client operations, `work ask` and `now` print the notice and otherwise behave as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup migration or service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover: the output reflects the person's current availability."
+  }
+}
