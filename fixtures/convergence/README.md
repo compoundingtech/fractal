@@ -394,3 +394,14 @@ Hosted [burst run 43535467419](https://github.com/compoundingtech/fractal/action
 observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk).
 The exact v29 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
 no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
+
+`claims-v30.json` adds durable native invocation receipts (the `harness.invocation` kind)
+on top of v29 notice-owner registry entry. Versions 1 through 29 stay frozen; v29 is main`s
+notice-owner corpus. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v30.json`;
+do not hand-edit it. The simulation and audit reports select v30.
+
+The local fixed sweep observed only seeds 13 and 294 without a checkpoint trim; each still
+trims on every modern node after its old build is excused and the next cut falls due. The
+exact v30 `NEVER_TRIMS` set is `[13, 294]`, carried from the invocation-receipt corpus
+schedule measured before main took v29.

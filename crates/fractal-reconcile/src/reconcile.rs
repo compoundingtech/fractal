@@ -10786,6 +10786,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             if kind == "runtime.observed" {
                 self.record_runtime_observation_admission(subject, false)?;
+                if let Some(previous) = previous {
+                    self.store.record_invocation_runtime_end(previous)?;
+                }
             }
             return Ok(());
         }
@@ -10806,6 +10809,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(());
             };
             self.record_runtime_observation_admission(subject, false)?;
+            self.store.record_invocation_runtime_end(&record)?;
             record
         } else {
             self.store.append_claim(&input)?
