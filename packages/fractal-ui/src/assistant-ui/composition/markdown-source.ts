@@ -1,3 +1,4 @@
+import { HTML_POLICY } from './markdown-html-policy'
 /**
  * Source-level helpers for the kit's Markdown: where a document may be cut into independently parsed blocks, and the
  * remark steps every surface shares. Nothing here imports a parser, so a later parser swap keeps the block contract.
@@ -10,6 +11,9 @@ const DEFINITION = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[(?:\\[\s\S]|[^\[\]
 const RAW_HTML_OPEN = /^ {0,3}<(script|style|pre|textarea)(?=[\s>]|$)/i
 const RAW_DECLARATION = /^ {0,3}<(?:\?|![A-Za-z]|!\[CDATA\[)/
 const CONTINUATION = /^(?: {2,}|\t)/
+const CONTAINERS = 'blockquote|dd|details|div|dl|dt|h[1-6]|li|ol|p|pre|summary|table|tbody|td|tfoot|th|thead|tr|ul'
+/** HTML that holds blank lines inside it: containers, and the elements the policy drops with their content. */
+const HOLDING = new RegExp(`<(/?)(${CONTAINERS}|${HTML_POLICY.dropWithContent.join('|')})(?=[\\s>/]|$)`, 'gi')
 
 /**
  * Cuts a document at top-level block boundaries, so a settled block is parsed once however long the document grows.
@@ -23,7 +27,8 @@ export function splitMarkdownBlocks(text: string): readonly string[] {
   let blockStart = 0
   let fence: { readonly char: string; readonly length: number; readonly listed: boolean } | undefined
   let rawUntil: string | undefined
-  let details = 0
+  const holding = new Map<string, number>()
+  let held = 0
   let blank = false
   let inList = false
   let lineStart = 0
@@ -46,7 +51,7 @@ export function splitMarkdownBlocks(text: string): readonly string[] {
     }
     if (line.trim() === '') { blank = true; continue }
     const isList = LIST_LINE.test(line)
-    if (blank && details === 0 && !CONTINUATION.test(line) && !(inList && isList)) {
+    if (blank && held === 0 && !CONTINUATION.test(line) && !(inList && isList)) {
       blocks.push(text.slice(blockStart, start))
       blockStart = start
       inList = false
@@ -66,38 +71,20 @@ export function splitMarkdownBlocks(text: string): readonly string[] {
     const raw = RAW_HTML_OPEN.exec(line)?.[1]?.toLowerCase()
     if (raw !== undefined && !line.toLowerCase().includes(`</${raw}`)) { rawUntil = `</${raw}`; continue }
     if (RAW_DECLARATION.test(line) && !line.includes('>')) { rawUntil = '>'; continue }
-    details = Math.max(0, details + (line.match(/<details[\s>]/gi)?.length ?? 0) - (line.match(/<\/details\s*>/gi)?.length ?? 0))
+    // An HTML container left open (a disclosure, a quote, a table) holds the blank lines inside it.
+    // Per name, so a stray close of one element cannot end another; quoted attribute values are not tags.
+    // Comments and quoted attribute values hold no tags.
+    for (const [, slash, tag] of line.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^<>]*>/g, inner => inner.replace(/"[^"]*"|'[^']*'/g, '""')).matchAll(HOLDING)) {
+      const name = tag!.toLowerCase()
+      const open = holding.get(name) ?? 0
+      if (slash === '') { holding.set(name, open + 1); held += 1 } else if (open > 0) { holding.set(name, open - 1); held -= 1 }
+    }
   }
   blocks.push(text.slice(blockStart))
   return blocks
 }
 
 interface SourceNode { type: string; value?: string; children?: SourceNode[] }
-
-const HTML_ELEMENTS = new Set('a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption center cite code col colgroup data datalist dd del details dfn dialog dir div dl dt em embed fieldset figcaption figure font footer form h1 h2 h3 h4 h5 h6 head header hr html i iframe img input ins kbd label legend li link main map mark marquee menu meta meter nav noscript object ol optgroup option output p param picture pre progress q rp rt ruby s samp script search section select slot small source span strike strong style sub summary sup svg table tbody td template textarea tfoot th thead time title tr track tt u ul var video wbr'.split(' '))
-const FLOW_PARENTS = new Set(['root', 'blockquote', 'listItem', 'footnoteDefinition'])
-
-/** What a run of raw HTML says as text: tags of real elements and comments go, and `Array<string>` stays what it was written as. */
-const visibleHtmlText = (html: string): string => html
-  .replace(/<!--[\s\S]*?(?:-->|$)/g, '')
-  .replace(/<(script|style)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, '')
-  .replace(/<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*)?\/?>/g, (tag: string, name: string) => HTML_ELEMENTS.has(name.toLowerCase()) ? '' : tag)
-  .trim()
-
-/** Text never disappears for looking like a tag. No HTML reaches the page: the words go through as escaped text. */
-export function remarkVisibleHtml() {
-  const visit = (parent: SourceNode): void => {
-    if (parent.children === undefined) return
-    parent.children = parent.children.flatMap((child): SourceNode[] => {
-      if (child.type !== 'html') { visit(child); return [child] }
-      const value = visibleHtmlText(child.value ?? '')
-      if (value === '') return []
-      const text = { type: 'text', value }
-      return FLOW_PARENTS.has(parent.type) ? [{ type: 'paragraph', children: [text] }] : [text]
-    })
-  }
-  return (tree: SourceNode) => visit(tree)
-}
 
 /** Each line break in prose stays a line break, as in a GitHub comment, for text written as lines rather than paragraphs. */
 export function remarkHardBreaks() {
@@ -129,4 +116,39 @@ export function markdownPlainText(markdown: string): string {
     .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
     .replace(/\u0000(\d+)\u0001/g, (_, index: string) => code[Number(index)] ?? '')
     .trim()
+}
+
+const MAX_CONTAINER_MARKERS = 32
+const MAX_INDENT = 128
+const CONTAINER_MARKER = /[ \t]*(?:>|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t]))/y
+/**
+ * Bounds what the parser has to nest before it runs: past 32 container markers (quote `>` and list markers, in any
+ * mix) or 128 columns of indentation a line keeps its words but loses the extra nesting. Thousands of nested quotes
+ * otherwise overflow the parser's stack, and deeply indented lists take seconds. Fenced code at the top level keeps
+ * its indentation.
+ */
+export function limitNesting(text: string): string {
+  if (!/^[ \t>*+\-\d.)]{64}/m.test(text)) return text
+  let fence: { readonly char: string; readonly length: number } | undefined
+  return text.split('\n').map(line => {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence !== undefined) {
+      if (marker !== undefined && marker[0] === fence.char && marker.length >= fence.length && line.trim() === marker) fence = undefined
+      return line
+    }
+    if (marker !== undefined && !(marker[0] === '`' && line.slice(line.indexOf(marker) + marker.length).includes('`'))) { fence = { char: marker[0]!, length: marker.length }; return line }
+    let end = 0
+    let markers = 0
+    let kept = 0
+    CONTAINER_MARKER.lastIndex = 0
+    for (let match = CONTAINER_MARKER.exec(line); match !== null; match = CONTAINER_MARKER.exec(line)) {
+      markers += 1
+      end = CONTAINER_MARKER.lastIndex
+      if (markers === MAX_CONTAINER_MARKERS) kept = end
+    }
+    if (markers > MAX_CONTAINER_MARKERS) line = line.slice(0, kept) + ' ' + line.slice(end).trimStart()
+    const indent = /^[ \t]*/.exec(line)![0]
+    const columns = indent.replace(/\t/g, '    ').length
+    return columns > MAX_INDENT ? ' '.repeat(MAX_INDENT) + line.slice(indent.length) : line
+  }).join('\n')
 }
