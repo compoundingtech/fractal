@@ -1,0 +1,23 @@
+# Fixture/preliminary only. NOT RUN; no lifecycle action is sent.
+# Uses the same task-owned simulator and fixture gateway as threads-preview-list.
+appId: com.compoundingtech.fractal.starter
+---
+- runFlow: threads-preview-list.yaml
+- tapOn: 'Rollout notes, 1 message.*closed'
+- scrollUntilVisible:
+    element:
+      text: 'Open thread'
+    direction: DOWN
+    timeout: 30000
+- tapOn: 'Open thread'
+- extendedWaitUntil:
+    visible: '.*Keep the original rollout plan in the release notes.*'
+    timeout: 30000
+# PREVIEW_FINAL_ASSERTIONS
+- assertVisible: '.*Rollout notes.*'
+- assertVisible: '.*1 message.*closed.*'
+- assertVisible: '.*closed the thread.*'
+- assertVisible: '^Closed, replying keeps it closed$'
+- assertVisible: '^Reopen thread$'
+- assertVisible: '^Message thread$'
+- assertVisible: '^Send$'

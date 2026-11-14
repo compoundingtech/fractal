@@ -1,0 +1,33 @@
+# Fixture/preliminary; independent navigation helper, no business assertions.
+appId: com.compoundingtech.fractal.starter
+---
+- openLink:
+    link: 'com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder'
+- runFlow:
+    when:
+      visible: 'Open in.*Fractal Dev.*'
+    commands:
+      - tapOn: 'Open'
+- extendedWaitUntil:
+    visible: '^Threads, [0-9]+( or more)?$'
+    timeout: 30000
+- runFlow:
+    when:
+      notVisible: '${THREAD_TITLE}, [0-9]+ messages?.*'
+    commands:
+      - tapOn: '^Threads, [0-9]+( or more)?$'
+- scrollUntilVisible:
+    element:
+      text: '${THREAD_TITLE}, [0-9]+ messages?.*'
+    direction: DOWN
+    timeout: 30000
+- tapOn: '${THREAD_TITLE}, [0-9]+ messages?.*'
+- scrollUntilVisible:
+    element:
+      text: '^Open thread$'
+    direction: DOWN
+    timeout: 30000
+- tapOn: '^Open thread$'
+- extendedWaitUntil:
+    visible: '^${THREAD_TITLE}$'
+    timeout: 30000

@@ -14,6 +14,7 @@ import { fixtureProjections } from '../fixtures/projections.ts'
 import { ConversationItem } from '../conversation/model.ts'
 import { LiveAgentWorkspace, type WorkspaceNavigation } from '../web/LiveAgentWorkspace.tsx'
 import type { ThreadDraft, ThreadSource } from './threadSource.ts'
+import { threadClockSkewEvents } from '../../../../clients/typescript/fractal-scenarios/src/index.ts'
 
 const review = 'Review PR #42'
 const existing = 'Worker tests'
@@ -64,10 +65,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
   ])
   const history = Atom.make<Readonly<Record<string, readonly Native.ThreadTimelineEvent[]>>>({
     [existingId]: [
-      ...(scenario === 'clock-skew' ? [
-        Native.decodeUnknownSync(Native.ThreadTimelineEvent)({ kind: 'thread.reopened', id: 'event/skew-reopen', actor_id: actor, accepted_at_unix_ms: now - 120_000 }),
-        Native.decodeUnknownSync(Native.ThreadTimelineEvent)({ kind: 'thread.closed', id: 'event/skew-close', actor_id: actor, accepted_at_unix_ms: now - 60_000 }),
-      ] : []),
+      ...(scenario === 'clock-skew' ? threadClockSkewEvents(now, actor).map(event => Native.decodeUnknownSync(Native.ThreadTimelineEvent)(event)) : []),
       message('message/review-ready', agentRef, -2, 'Worker tests pass on Linux. The macOS job is still running.'),
       message('message/review-scope', actor, -9, 'Can you verify the cancellation case too?'),
       message('message/review-first', agentRef, -24, 'The retry fix is ready. I will verify the worker tests before merge.'),

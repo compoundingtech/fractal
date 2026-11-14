@@ -33,7 +33,7 @@ function render(item, enabled = true, start = true) {
   });
   const dependencies = {
     useStore: () => ({ data: { attention: [item], agents: [], missions: [] }, actions: {} }),
-    useMissionsOnFocus() {}, useFocusEffect() {}, useHeaderHeight: () => 0, useCallback: callback => callback, useRef: current => ({ current }), detailRow: () => ({}),
+    useRefresh: () => 'RefreshControl', useMissionsOnFocus() {}, useFocusEffect() {}, useHeaderHeight: () => 0, useCallback: callback => callback, useRef: current => ({ current }), detailRow: () => ({}),
     spaced: text => text, attentionKindLabel: kind => kind, attentionActionLabel: action => action, cleanMessageText: text => text, blockedLine: () => undefined, theme: {},
     Screen: 'Screen', Banners: 'Banners', ScrollView: 'ScrollView', KeyboardAvoidingView: 'KeyboardAvoidingView', T: 'Text',
     AlertBody: 'AlertBody', Button: 'Button', Markdown: 'Markdown', RequestQuestion: 'RequestQuestion', RequestAnswers: 'RequestAnswers', ThreadViewport: 'ThreadViewport', isRequest, InboxThread,

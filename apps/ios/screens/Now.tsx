@@ -93,10 +93,10 @@ export function NowScreen() {
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
-        <PendingInboxThreads onOpen={id => navigation.navigate('Thread', { id })} />
+        <PendingInboxThreads onOpen={(id, title) => navigation.navigate('Thread', { id, title })} />
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
         <ThreadViewport viewport={threadViewport}>
-          <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={id => navigation.navigate('Thread', { id })} />
+          <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
         </ThreadViewport>
       </View>}
       style={{ flex: 1 }}
@@ -108,6 +108,8 @@ export function NowScreen() {
 export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) {
   const { data, busy, status, actions, hasSynced, loadErrors } = useStore();
   useMissionsOnFocus();
+  // Pulling also reloads the item's threads, which show no manual refresh while followed.
+  const refresh = useRefresh();
   const requestScroll = useRef<ScrollView>(null);
   const headerHeight = useHeaderHeight();
   useFocusEffect(useCallback(() => {
@@ -139,13 +141,13 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const threadEntry = <ThreadViewport viewport={requestScroll}><InboxThread sourceId={item.source_id}
     origin={item.source_id && item.episode ? { sourceId: item.source_id, episode: item.episode } : undefined}
-    agentId={agentId} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /></ThreadViewport>;
+    agentId={agentId} initialTitle={item.title} onOpen={(id, title) => navigation.navigate('Thread', { id, title })} /></ThreadViewport>;
   const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
   // Closed elsewhere, so nothing here can be answered; it stays until the person clears it.
   if (item.closedElsewhere && !item.update) {
     return <Screen>
       <Banners />
-      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
         <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
@@ -160,7 +162,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     const from = publisher ? agentName(publisher) : item.requester_id?.replace(/^agent\//, '') ?? 'An agent';
     return <Screen>
       <Banners />
-      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
         <T><T bold color={theme[row.color]}>{row.glyph} update</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         <T><T dim>from  </T><T bold color={theme.person}>{from}</T></T>
@@ -185,7 +187,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       <Banners />
       {/* Automatic insets keep the end of a long request clear of the floating tab bar. */}
       <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={headerHeight}>
-  <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+  <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
           <T><T bold color={theme[row.color]}>{row.glyph} request</T><T dim>  {item.priority} · waited {row.age}</T></T>
           <T bold selectable>{row.title}</T>
           <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
@@ -205,7 +207,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   }
   return <Screen>
     <Banners />
-    <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+    <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
       <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {attentionKindLabel(item.attention_kind)} · {item.priority} · waited {row.age}</T></T>
       <T bold selectable>{row.title}</T>
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'

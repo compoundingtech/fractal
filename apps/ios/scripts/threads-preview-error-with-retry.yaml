@@ -1,0 +1,23 @@
+# Fixture/preliminary source preparation; NOT RUN against the revised UI.
+appId: com.compoundingtech.fractal.starter
+---
+- {"openLink": {"link": "com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder"}}
+- {"extendedWaitUntil": {"visible": "^Threads, [0-9]+( or more)?$", "timeout": 30000}}
+- {"tapOn": "^Threads, [0-9]+( or more)?$"}
+- {"tapOn": "Writable thread — fixture, 1 message.*open"}
+- {"scrollUntilVisible": {"element": {"text": "^Open thread$"}, "direction": "DOWN", "timeout": 30000}}
+- {"runScript": {"file": "${CONTROL_SCRIPT}", "env": {"CONTROL_JSON": "{\"state\":\"error\"}"}}}
+- {"tapOn": "^Open thread$"}
+- {"extendedWaitUntil": {"visible": ".*Fixture thread read failed.*", "timeout": 30000}}
+- {"assertVisible": "^Refresh thread$"}
+- {"takeScreenshot": "${CAPTURE_DIR}/error-with-retry"}
+# PREVIEW_FINAL_ASSERTIONS
+- {"assertVisible": ".*Fixture thread read failed.*"}
+- {"assertVisible": "^Refresh thread$"}
+- {"tapOn": "^Refresh thread$"}
+- {"extendedWaitUntil": {"visible": ".*Fixture thread read failed.*", "timeout": 30000}}
+# The explicit retry remains refused while the fixture is unavailable. Restoring
+# the fixture then recovers through its live snapshot, not a claimed retry success.
+- {"runScript": {"file": "${CONTROL_SCRIPT}", "env": {"CONTROL_JSON": "{\"state\":\"ready\"}"}}}
+- {"extendedWaitUntil": {"visible": ".*Disposable fixture thread; no real agent or authority is affected.*", "timeout": 30000}}
+- {"assertNotVisible": ".*Fixture thread read failed.*"}

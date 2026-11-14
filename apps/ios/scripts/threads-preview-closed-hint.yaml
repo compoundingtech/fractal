@@ -1,0 +1,10 @@
+# Fixture/preliminary source preparation; NOT RUN against the revised UI.
+appId: com.compoundingtech.fractal.starter
+---
+- {"runFlow": {"file": "threads-preview-thread.yaml", "env": {"THREAD_TITLE": "Rollout notes"}}}
+- {"extendedWaitUntil": {"visible": "^Closed, replying keeps it closed$", "timeout": 30000}}
+# PREVIEW_FINAL_ASSERTIONS
+- {"assertVisible": "^Closed, replying keeps it closed$"}
+- {"assertVisible": "^Message thread$"}
+- {"assertVisible": "^Reopen thread$"}
+- {"assertVisible": "^Send$"}

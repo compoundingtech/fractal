@@ -53,6 +53,8 @@ Observation reporting holds one send slot during both batch preparation and tran
 
 ## Layout
 
+Thread close, reopen and rename update every visible thread surface immediately, without a confirmation dialog. Rename uses an inline title field. A four-second, screen-reader-announced confirmation appears only after the server accepts the change: `Closed "Title"` (with a Reopen thread hint), `Reopened "Title"`, or `Renamed to "Title"`. A refused change restores the authoritative title/state and shows the server error. An unconfirmed delivery keeps the optimistic value and the existing original-request retry; it never announces success until a receipt confirms acceptance. These local overlays are connection-scoped and never change the authoritative summary or action fence. A closed thread still accepts replies: above its composer, `Closed · replying keeps it closed` sits beside Reopen thread. Without the reply grant, `Replies aren't available on this connection.` replaces the composer. A thread row shows only an unread dot, the title and a trailing `Closed`; its message count, state and unread status are in the VoiceOver label. The Threads header shows its count with Show/Hide. Rows, headers and buttons are at least 44pt tall. The thread screen's navigation bar carries the thread title and follows renames. On the timeline's latest day, rows show their HH:mm time; earlier days keep their age, and a latest day other than today is named once above its rows. Followed lists and timelines drop the manual Refresh buttons. Pull to refresh on the thread screen, agent conversation, mission detail, Now and Inbox items reloads them; Refresh buttons remain only for readers without a live feed. Threads, on their own screen and embedded in a conversation, mission or Inbox item, use system text with Dynamic Type's natural line heights; thread titles wrap instead of truncating at accessibility text sizes. An embedded thread group scrolls within half the screen above a conversation and three quarters inside a scrolling mission or Inbox screen. The thread screen docks the confirmation, closed hint and composer (or the no-grant line) below its scrolling history, lifted by the keyboard; embedded threads keep the composer inline.
+
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
 | Piece | Native component | Package |
@@ -435,6 +437,31 @@ It completes the phone's real device-key verification read-only: the unauthentic
 Like the real gateway, its collections socket sends a WebSocket protocol ping every eight seconds, keeping an idle native client inside its twenty-four-second receive deadline.
 The capture flow waits for **Review the loadUser rename** on Now and opens **Atlas Builder** (`agent/example/atlas/builder`) for the conversation. Pairing uses the world's first person and an invented host authority; only pairing preflight/completion and phone observation acknowledgement sit outside replay. The gateway decode test exercises real HTTP and WebSocket responses through the app's `FractalClient` and `Feed`, covering all three Now windows and the builder conversation without duplicating the scenario.
 For deterministic screenshots, `EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1` also loads the world at the kit anchor and uses a frozen `manualClock`, so neither wall-clock time nor timed replay events change the captured product state. The landing script already exports this flag. Ordinary manual demo launches retain the advancing real clock.
+
+For a **fixture/preliminary** native thread preview, add the final argument `clock-skew`:
+`EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1 node --experimental-transform-types demoGateway.mjs 8792 clock-skew`.
+Use an independently coordinated Metro port, pair only a disposable simulator with the invented
+demo grant, and open Atlas Builder (`agent/example/atlas/builder`), then its Threads group.
+`thread/worker-tests` is read-only and stays Open: Close at 12:59 is followed authoritatively by
+Reopen at 12:58. Native REST and live windows use the generated thread schemas and the same
+clock-skew event factory as the web story. Timestamp ordering is unchanged; no thread mutation
+capabilities are granted. This fixture endpoint is not simulator, connected-runtime, or final
+approval evidence. The ordinary landing capture remains unchanged without this argument.
+The builder's context also includes closed `thread/rollout-notes` and open
+`thread/cancellation`. The existing **Review the loadUser rename** Inbox item gets
+an explicit fixture episode and a read-only `thread/review-rename`, bound to that
+item's original requester and source. Wrong origin episodes return no threads;
+reading any fixture thread neither answers nor marks the Inbox request read.
+
+Preliminary tap flows live in `scripts/threads-preview-{pair,list,open,closed,inbox}.yaml`.
+`list` covers the agent context and multiple threads; `open` covers dedicated
+Open/read-only/clock-skew; `closed` covers Closed; `inbox` leaves the real Inbox
+detail's inline thread visible. `pair` requires the exact task gateway URL on
+port 8792 and invented demo pairing. Run only on the task-owned simulator after
+separate native/tool admission. These flows are source-only until exercised:
+capture screenshots/recording independently with `simctl`, and never present an
+unexecuted selector or the fixture HTTP endpoint as native UI evidence.
+Focused fixture check: `node --experimental-transform-types --import ./testHooks.mjs --test --test-name-pattern='clock-skew' demoGateway.test.mjs`.
 
 `apps/ios/scripts/landing-screenshots --gateway-host LAN_IPV4 --output DIR` automates this on a disposable simulator. It sets `EXPO_PUBLIC_FRACTAL_LANDING_CAPTURE=1`, which disables only the Debug LogBox overlay; warnings still reach `metro.log`. Normal Debug launches and Release builds do not apply this capture-only policy. The flow requires the unpinned-pairing confirmation, allows at most three presses while that confirmation is absent and its enabled button remains visible, and submits pairing only once. Alongside the four PNGs, `pairing-simulator.log` retains simulator unified logs from app launch through pairing, including on failure. Treat these diagnostic logs as private and review them before sharing.
 

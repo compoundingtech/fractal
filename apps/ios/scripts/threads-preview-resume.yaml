@@ -1,0 +1,24 @@
+# Fixture/preliminary: dismiss only the replayed Debug pairing draft.
+# cancelPairDraft leaves the existing credential/profile intact (store.tsx:1157).
+appId: com.compoundingtech.fractal.starter
+---
+- extendedWaitUntil:
+    visible: '^cancel re-pairing$'
+    timeout: 30000
+- tapOn: '^cancel re-pairing$'
+- assertNotVisible: '^Pair this device$'
+- openLink:
+    link: 'com.compoundingtech.fractal.starter://tab/Fleet'
+- runFlow:
+    when:
+      visible: 'Open in.*Fractal Dev.*'
+    commands:
+      - tapOn: 'Open'
+- scrollUntilVisible:
+    element:
+      text: '^forget this device$'
+    direction: DOWN
+    timeout: 30000
+- assertVisible: '^re-pair this device$'
+- assertVisible: '^forget this device$'
+- assertNotVisible: '^cancel re-pairing$'

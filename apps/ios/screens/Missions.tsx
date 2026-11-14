@@ -92,6 +92,8 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const { data, status, actions, caps, client } = useStore();
   const threadViewport = useRef<ScrollView>(null);
   useMissionsOnFocus();
+  // Pulling also reloads this mission's thread group, which shows no manual refresh while followed.
+  const refresh = useRefresh();
   const listed = data.missions.find(mission => mission.id === route.params.id);
   const [detail, setDetail] = useState<Mission | null>(null);
   useEffect(() => { let live = true; void actions.mission(route.params.id).then(found => { if (live && found) setDetail(found); }); return () => { live = false; }; }, [route.params.id, listed?.revision, status]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -120,7 +122,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const waiting = homeRows(data.attention.filter(item => item.mission_id === mission.id), caps?.session_actor);
   return <Screen>
     <Banners />
-    <ScrollView ref={threadViewport} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 32 }}>
+    <ScrollView ref={threadViewport} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ paddingBottom: 32 }}>
       <StatusLine />
       <View style={{ padding: 12, gap: 4 }}>
         <T><T bold color={wordStyle(word).color}>{wordStyle(word).glyph} {missionLabel(mission)}</T><T dim>  {mission.state} · {mission.runs.length} run{mission.runs.length === 1 ? '' : 's'}</T></T>
@@ -140,7 +142,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
         />)}
       </> : null}
       <ThreadViewport viewport={threadViewport}>
-        <ThreadGroup context={{ mission_id: mission.id }} openThread={id => navigation.navigate('Thread', { id })} />
+        <ThreadGroup context={{ mission_id: mission.id }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
       </ThreadViewport>
       <SectionHeader title="steps" count={steps.length} />
       {steps.map(({ shown, step }) => {

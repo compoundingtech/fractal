@@ -1,0 +1,27 @@
+# Fixture/preliminary only. NOT RUN; navigation selectors require native observation.
+# Requires the task-owned simulator paired ONLY to demoGateway :8792 clock-skew.
+# Covers Open + read-only + clock-skew in the real dedicated ThreadScreen.
+# Capture with simctl after this flow; Maestro supplies taps, not screenshot proof.
+appId: com.compoundingtech.fractal.starter
+---
+- runFlow: threads-preview-list.yaml
+- tapOn: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
+- scrollUntilVisible:
+    element:
+      text: 'Open thread'
+    direction: DOWN
+    timeout: 30000
+- tapOn: 'Open thread'
+- extendedWaitUntil:
+    visible: '.*Fixture/preliminary: Close at 12:59, then Reopen at 12:58.*'
+    timeout: 30000
+# PREVIEW_FINAL_ASSERTIONS
+- assertVisible: '.*Worker tests — clock-skew fixture.*'
+- assertVisible: '.*1 message.*open.*unread.*'
+- assertVisible: '.*reopened the thread.*'
+- assertVisible: '.*closed the thread.*'
+# The superset thread-actions fixture grants disposable mutations.
+- assertVisible: '^Rename$'
+- assertVisible: '^Close thread$'
+- assertVisible: '^Message thread$'
+- assertVisible: '^Send$'

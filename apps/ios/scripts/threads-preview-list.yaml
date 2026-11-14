@@ -1,0 +1,32 @@
+# Fixture/preliminary only. NOT RUN; native selectors require observation.
+# Requires task-owned simulator paired ONLY to demoGateway :8792 clock-skew.
+# Covers actual agent context list and multiple threads (Open + Closed + Open).
+# Capture with simctl after this flow; no screenshot or connected proof is implied.
+appId: com.compoundingtech.fractal.starter
+---
+- openLink:
+    link: 'com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder'
+- runFlow:
+    when:
+      visible: 'Open in.*Fractal Dev.*'
+    commands:
+      - tapOn: 'Open'
+- extendedWaitUntil:
+    visible: '.*Atlas Builder.*'
+    timeout: 30000
+- assertNotVisible: '.*Open debugger to view warnings.*'
+- extendedWaitUntil:
+    visible: '^Threads, [0-9]+( or more)?$'
+    timeout: 30000
+- runFlow:
+    when:
+      notVisible: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
+    commands:
+      - tapOn: '^Threads, [0-9]+( or more)?$'
+- extendedWaitUntil:
+    visible: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
+    timeout: 30000
+# PREVIEW_FINAL_ASSERTIONS
+- assertVisible: 'Worker tests — clock-skew fixture, 1 message.*open.*unread'
+- assertVisible: 'Rollout notes, 1 message.*closed'
+- assertVisible: 'Cancellation behavior, 1 message.*open'
