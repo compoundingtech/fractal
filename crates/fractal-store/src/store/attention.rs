@@ -552,6 +552,7 @@ impl Store {
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
         let mut items = self.mission_run_attention_items(person)?;
+        items.extend(self.host_hold_attention_items(person)?);
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
         items.extend(self.model_drift_attention_items(person, as_of)?);
