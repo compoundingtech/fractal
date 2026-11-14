@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document the Nix-managed macOS protected-operation helper contract and disposable consent-retention proof",
+  "replay": { "status": "none", "detail": "Documentation only; no claim replay changes." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Records the target host permission contract; runtime admission and service permission guidance are unchanged." },
+  "compatibility": { "status": "none", "detail": "No executable, installer or API changes." },
+  "downtime": { "status": "none", "detail": "No rollout, daemon restart or service change." },
+  "manual": { "status": "none", "detail": "No action to adopt this documentation; a future disposable probe requires separately approved local signing and human consent." },
+  "recovery": { "status": "none", "detail": "No persistent runtime state is changed." }
+}

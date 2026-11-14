@@ -210,3 +210,33 @@ still applies. The receipt format is unchanged.
 A second install for testing: `scripts/install --instance NAME` (or `install.sh --instance NAME`) puts
 the app, commands, bundle identifier and launchd services below `~/.st-instance/NAME` and never
 rewrites the default install's plists. See [Instances](instances.md).
+
+## Protected-operation helper contract
+
+The Nix-managed host integration must obey this protected-operation contract.
+The production operation allowlist is empty. Candidate operations and the
+disposable probe read are not authorized for production.
+
+- Keep only named protected operations in a small signed helper, rather than
+  granting the daemon's agents broad Full Disk Access or Developer Tools.
+  [Authority](step-run/ask-7f78ee87f8c690d5c15bad2b3da8d998/ask).
+- Sign locally at activation with Johannes's Apple-issued certificate through a
+  declared human-approved signing path. Agents neither create nor use signing
+  identities, unlock keychains, nor grant consent.
+  [Authority](step-run/ask-998fbdc2ebeb476f009cecd084c65d2f/ask).
+- Serve callers over a same-user Unix socket with a fixed operation allowlist and
+  an audit log, not arbitrary command execution or caller-selected paths.
+  Same-user IPC does not authenticate individual seats or resist same-uid tampering.
+  [Authority](step-run/ask-1cd7d6ea959b711614ab9c3352e8a4ce/ask).
+- Use a Nix-built helper and a user LaunchAgent installed by the existing host
+  activation, keeping build outputs unsigned and signing local.
+  [Authority](step-run/ask-563ed90daacfeb7a4c53335ae8b73ef2/ask).
+- Prove retention first with a throwaway helper in Johannes's own session: its own
+  bundle ID, one harmless protected read, one version-1 approval, then no renewed
+  approval for changed version 2 signed under the same requirement. Remove the
+  probe and its grant afterwards; do not alter the live daemon for this proof.
+  [Authority](step-run/ask-797dda8c3019b78c983dc0ef4db30928/ask).
+
+Authority links identify native ask subjects (`fractal work show SUBJECT`).
+Successful consent retention for one service does not establish grants for
+other services or authorize a broader production operation list.
