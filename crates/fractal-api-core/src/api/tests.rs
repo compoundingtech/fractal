@@ -14345,6 +14345,26 @@ version 2
         })
         .unwrap();
     let store = state.store.clone();
+    // Attention links use the full step-run identity, not the review's display path.
+    let resources = client_attention_resources(&store, Some("person/alex"), false).unwrap();
+    let gate = resources
+        .iter()
+        .find(|item| item["source_id"] == step.subject)
+        .unwrap();
+    let step_id = gate["step_run_id"].as_str().unwrap();
+    fractal_schema::registry().validate_subject(step_id).unwrap();
+    assert!(step_id.starts_with("step-run/"));
+    assert_eq!(step_id, step.subject);
+    assert_eq!(gate["step_run_id"], gate["source_id"]);
+    let items = store.mission_run_attention_items(Some("person/alex")).unwrap();
+    let item = items.iter().find(|item| item.subject == step.subject).unwrap();
+    let projected = crate::store::attention_ivm::resource(item).unwrap();
+    assert_eq!(projected["step_run_id"], gate["step_run_id"]);
+    let mission_gate = resources
+        .iter()
+        .find(|item| item["source_id"] == run.subject)
+        .unwrap();
+    assert!(mission_gate.get("step_run_id").is_none());
     let app = router(state);
     let (status, listed) = get_request(app.clone(), "/v1/reviews").await;
     assert_eq!(status, StatusCode::OK, "{listed}");

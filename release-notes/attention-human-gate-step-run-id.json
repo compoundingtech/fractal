@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep mission human-gate alerts in Inbox by publishing full step-run identities",
+  "replay": {"status": "none", "detail": "Gate claims and step paths are unchanged. Attention is derived from current reviews on read."},
+  "schema": {"status": "none", "detail": "No stored-data migration: the faulty human-gate field is assembled on read, not persisted in the person/custom local_attention_open IVM families. Both public row serializers now receive the full step identity from their shared producer."},
+  "rules": {"status": "none", "detail": "Review ownership, authority and gate decisions are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Human-gate attention step_run_id now contains the full step-run Id, matching source_id for step-owned gates. Loop-owned gates link their owning step and mission-owned gates omit the field. TypeScript schemas already require Id; web and mission consumers compare against full step ids. Swift treats the field as a string and presentation consumers derive the display path separately. No inspected TypeScript, iOS or TUI consumer requires the bare name. The reviews API keeps its separate display-path step field unchanged."},
+  "downtime": {"status": "none", "detail": "Corrected rows are returned on the next read after the producer upgrade."},
+  "manual": {"status": "none", "detail": "No operator action or client upgrade is required."},
+  "recovery": {"status": "none", "detail": "No claims or persisted projections are rewritten."}
+}
