@@ -28,6 +28,44 @@ const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_host_holds_preserve_owner_and_revision_across_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    async fn configure_operator(daemon: &mut Daemon) {
+        let server = daemon.server.take().unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        std::fs::remove_file(daemon.socket()).unwrap();
+        daemon.state.owning_person = Some(PERSON.into());
+        daemon.serve().await;
+    }
+    let mut daemon = Daemon::new().await;
+    configure_operator(&mut daemon).await;
+    let placed = cli_value(daemon.cli(PERSON, &[
+        "hosts", "hold", NODE, "--reason", "Investigate activation",
+        "--operation", "activation", "--as", PERSON,
+    ]).await);
+    let id = placed["id"].as_str().unwrap();
+    let revision = placed["revision"].as_u64().unwrap().to_string();
+    assert_eq!(placed["owner"], PERSON);
+    daemon.restart().await;
+    configure_operator(&mut daemon).await;
+    let active = cli_value(daemon.cli(PERSON, &["hosts", "ls"]).await);
+    assert_eq!(active.as_array().unwrap(), std::slice::from_ref(&placed));
+    assert!(!daemon.cli(PERSON, &[
+        "hosts", "release", NODE, id, "--expected-revision", "0",
+        "--resolution", "stale", "--as", PERSON,
+    ]).await.status.success());
+    let released = cli_value(daemon.cli(PERSON, &[
+        "hosts", "release", NODE, id, "--expected-revision", &revision,
+        "--resolution", "Activation verified", "--as", PERSON,
+    ]).await);
+    assert!(released["released_at_unix_ms"].is_number());
+    assert!(cli_value(daemon.cli(PERSON, &["hosts", "ls"]).await).as_array().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated() {
     if fractal_daemon::test_support::supervise_test() {
         return;
