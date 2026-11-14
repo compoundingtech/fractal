@@ -54,7 +54,7 @@ fn listed_program_error_retries_unlisted_is_final_and_engine_fault_retries() {
     for (tag, final_failure) in [(Some("HostUnavailable"), false), (Some("ReviewRefused"), true), (None, false)] {
         let (_clock, store, reconciler, run, mission) = fixture("attempts 4; on \"HostUnavailable\"");
         let failed = fail(&store, &run.steps[0].subject, tag);
-        assert_eq!(reconciler.failed_step_is_final(&run, &mission.steps[0], &failed).unwrap(), final_failure);
+        assert_eq!(reconciler.failed_step_is_final(&run, &mission.steps["program"], &failed).unwrap(), final_failure);
     }
 }
 
@@ -62,7 +62,7 @@ fn listed_program_error_retries_unlisted_is_final_and_engine_fault_retries() {
 fn schedule_applies_each_delay_repeats_last_and_exhausts_attempts() {
     let (_clock, store, reconciler, run, mission) = fixture("attempts 5; delays \"2m\" \"10m\" \"30m\"");
     let subject = &run.steps[0].subject;
-    let spec = &mission.steps[0];
+    let spec = &mission.steps["program"];
     let mut now = START;
     for (attempt, delay) in [(1, 120_000), (2, 600_000), (3, 1_800_000), (4, 1_800_000)] {
         let failed = fail(&store, subject, None);
@@ -78,7 +78,9 @@ fn schedule_applies_each_delay_repeats_last_and_exhausts_attempts() {
         assert_eq!(reconciler.next_reconcile_deadline(), pending.not_before_unix_ms);
         now += u128::from(delay);
         at(&store, now);
-        store.set_step_state(subject, "ready", None).unwrap();
+        let (view, mission) = store.mission_run_for_evaluation(&run.id).unwrap();
+        reconciler.evaluate_active_mission_run(&view, mission).unwrap();
+        assert_eq!(store.step_run(subject).unwrap().unwrap().status, "ready");
     }
     let failed = fail(&store, subject, None);
     assert!(reconciler.failed_step_is_final(&run, spec, &failed).unwrap());
@@ -90,19 +92,19 @@ fn window_anchors_at_first_attempt_start_and_expires_strictly_after_deadline() {
     let subject = &run.steps[0].subject;
     let failed = fail(&store, subject, None);
     at(&store, START + 7_200_000);
-    assert!(!reconciler.failed_step_is_final(&run, &mission.steps[0], &failed).unwrap());
+    assert!(!reconciler.failed_step_is_final(&run, &mission.steps["program"], &failed).unwrap());
     store.retry_step(subject, "another attempt", 0).unwrap();
     store.set_step_state(subject, "ready", None).unwrap();
     let failed = fail(&store, subject, None);
     at(&store, START + 7_200_001);
-    assert!(reconciler.failed_step_is_final(&run, &mission.steps[0], &failed).unwrap());
+    assert!(reconciler.failed_step_is_final(&run, &mission.steps["program"], &failed).unwrap());
 }
 
 #[test]
 fn legacy_retry_keeps_any_failure_and_uniform_backoff() {
     let (_clock, store, reconciler, run, mission) = fixture("attempts 3; backoff \"2m\"");
     let failed = fail(&store, &run.steps[0].subject, Some("ReviewRefused"));
-    assert!(!reconciler.failed_step_is_final(&run, &mission.steps[0], &failed).unwrap());
-    assert_eq!(mission.steps[0].retry.delay_ms(1), 120_000);
-    assert_eq!(mission.steps[0].retry.delay_ms(2), 120_000);
+    assert!(!reconciler.failed_step_is_final(&run, &mission.steps["program"], &failed).unwrap());
+    assert_eq!(mission.steps["program"].retry.delay_ms(1), 120_000);
+    assert_eq!(mission.steps["program"].retry.delay_ms(2), 120_000);
 }
