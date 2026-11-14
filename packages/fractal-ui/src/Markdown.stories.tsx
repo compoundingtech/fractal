@@ -24,6 +24,7 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'CodeHeaderLongLabelNarrow:contract-fixture',
   'CodeHeaders:contract-fixture',
   'CodeHeadersLight:contract-fixture',
   'CopyFailure:contract-fixture',
@@ -281,3 +282,34 @@ const codeHeaders = (scheme: 'dark' | 'light'): Story => ({ ...contractFixture,
 })
 export const CodeHeaders: Story = codeHeaders('dark')
 export const CodeHeadersLight: Story = codeHeaders('light')
+
+/** The header keeps both controls inside a narrow block when an unrestricted fence info string runs long. */
+const longFenceLabel = 'notarealprogramminglanguage'.repeat(8)
+const narrowStyles = stylex.create({ narrowLane: { width: '100%', maxWidth: '440px', minWidth: 0, marginInline: 'auto' } })
+export const CodeHeaderLongLabelNarrow: Story = { ...contractFixture,
+  render: ({ scheme }) => <main data-testid="markdown-story" {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal><div data-testid="markdown-narrow-lane" {...stylex.props(narrowStyles.narrowLane)}><Markdown text={markdownBlock(`\`\`\`${longFenceLabel}\nconst keep = 1\n\`\`\``)} /></div></ThemePortal></main>,
+  play: async ({ canvasElement }) => {
+    await document.fonts.ready
+    const lane = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-narrow-lane"]')
+    const fence = requireElement<HTMLElement>(canvasElement, '[data-testid="markdown-code-block"]')
+    const label = requireElement<HTMLElement>(fence, '[data-testid="markdown-code-language"]')
+    await expect(label.textContent).toBe(longFenceLabel)
+    // The label wraps within the lane instead of stretching the header past the clipped block.
+    await expect(label.getBoundingClientRect().width).toBeLessThanOrEqual(lane.getBoundingClientRect().width)
+    const fenceBox = fence.getBoundingClientRect()
+    const insideFence = (element: HTMLElement) => { const box = element.getBoundingClientRect(); return box.left >= fenceBox.left - 0.5 && box.right <= fenceBox.right + 0.5 && box.top >= fenceBox.top - 0.5 && box.bottom <= fenceBox.bottom + 0.5 }
+    const copy = requireElement<HTMLButtonElement>(fence, '[aria-label="Copy code"]')
+    const actions = requireElement<HTMLButtonElement>(fence, '[aria-label="Code actions"]')
+    await expect(insideFence(actions)).toBe(true)
+    await expect(insideFence(copy)).toBe(true)
+    await userEvent.click(within(fence).getByRole('button', { name: 'Code actions' }))
+    const items = await within(document.body).findAllByRole('menuitem')
+    await expect(items.map(item => item.textContent)).toEqual(['Wrap lines', 'Copy code'])
+    await userEvent.keyboard('{Escape}')
+    await userEvent.hover(fence)
+    await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
+    await userEvent.click(copy)
+    for (let frame = 0; copy.getAttribute('aria-label') === 'Copy code' && frame < 600; frame++) await settle()
+    await expect(copy.getAttribute('aria-label')).toBe('Copy code: Copied')
+  },
+}

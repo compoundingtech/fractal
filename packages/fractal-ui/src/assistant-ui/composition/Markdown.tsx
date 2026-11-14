@@ -559,7 +559,7 @@ const styles = stylex.create({
   codeMenuPopover: { minWidth: g.menuMin, padding: s.xs, backgroundColor: surface.raised, color: textColor.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, fontFamily: t.fontSans, fontSize: t.metaSize },
   codeMenu: { outlineStyle: 'none' },
   codeMenuItem: { display: 'flex', alignItems: 'center', minHeight: g.controlSm, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outlineStyle: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive } },
-  codeLanguage: { flexShrink: 0, fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
+  codeLanguage: { minWidth: 0, flexShrink: 1, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
   codeButton: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: s.xs, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   codeButtonSelected: { backgroundColor: surface.rowActive, borderColor: border.borderStrong, color: textColor.fg },
   codePre: { margin: 0, paddingBlock: s.md, paddingInline: s.lg, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
