@@ -75,7 +75,9 @@ mission "example/report" state="ready" {
     fn replace_attempt(&mut self) {
         let step = self.owner().step.clone();
         let previous_attempt = self.owner().attempt;
+        self.state.store.set_step_state(&step, "failed", Some("interrupted worker")).unwrap();
         assert!(self.state.store.retry_step(&step, "replace interrupted worker", 0).unwrap());
+        self.state.store.set_step_state(&step, "ready", None).unwrap();
         let incarnation = "example-worker:replacement";
         runtime(&self.state, &self.request.from, incarnation);
         let claimed = self.state.store.work_action(&step, "claim", &WorkRequest {
