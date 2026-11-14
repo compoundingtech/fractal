@@ -402,10 +402,10 @@ fn declaration_live_uncached(connection: &Connection, subject: &str) -> Result<b
     if !declaration_present(&row)? {
         return Ok(false);
     }
-    if let Some(run) = row.owner_run.as_deref() {
-        if !run_live(connection, run, row.owner_generation.as_deref(), false)? {
-            return Ok(false);
-        }
+    if let Some(run) = row.owner_run.as_deref()
+        && !run_live(connection, run, row.owner_generation.as_deref(), false)?
+    {
+        return Ok(false);
     }
     Ok(true)
 }
@@ -636,15 +636,15 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
     {
         return Ok(false);
     }
-    if let Some(owner) = fields["owner_run"].as_str() {
-        if !run_live(
+    if let Some(owner) = fields["owner_run"].as_str()
+        && !run_live(
             connection,
             owner,
             fields["owner_generation"].as_str(),
             false,
-        )? {
-            return Ok(false);
-        }
+        )?
+    {
+        return Ok(false);
     }
     if let Some(origin) = fields["origin_step"].as_str() {
         let Some(origin) = step(connection, origin)? else {
@@ -1018,33 +1018,33 @@ pub fn project(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool, Fracta
             tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbbd28d35da4a owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET status=?2,phase='terminal',updated_at_unix_ms=?3 WHERE id=?1").map_err(internal)?.execute(
                 /* sqlite-large-value: allow-for-now lv-he50bebd64535 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![ask.body["fields"]["run"].as_str().unwrap_or_default().trim_start_matches("mission-run/"), fields["status"].as_str(), claim.accepted_at_unix_ms.to_string()]).map_err(internal)?;
         }
-        if let Some(origin) = ask.body["fields"]["origin_step"].as_str() {
-            if !step_owner_is_terminal_tx(tx, origin)? {
-                let cancelled = claim.kind == "work.person-cancelled";
-                // The response's asking claim is the episode fence, not merely the origin
-                // subject. A stale replica may cancel after another member resumed or retried.
-                if cancelled {
-                    let exact_episode = match fields.get("episode") {
-                        Some(Value::String(episode)) => episode == &ask.id,
-                        // Older automatic cancellations bind the asking claim causally
-                        // instead of recording its ID in the response fields.
-                        None => claim.predecessors.contains(&ask.id),
-                        _ => false,
-                    };
-                    if !exact_episode {
-                        return Ok(true);
-                    }
+        if let Some(origin) = ask.body["fields"]["origin_step"].as_str()
+            && !step_owner_is_terminal_tx(tx, origin)?
+        {
+            let cancelled = claim.kind == "work.person-cancelled";
+            // The response's asking claim is the episode fence, not merely the origin
+            // subject. A stale replica may cancel after another member resumed or retried.
+            if cancelled {
+                let exact_episode = match fields.get("episode") {
+                    Some(Value::String(episode)) => episode == &ask.id,
+                    // Older automatic cancellations bind the asking claim causally
+                    // instead of recording its ID in the response fields.
+                    None => claim.predecessors.contains(&ask.id),
+                    _ => false,
+                };
+                if !exact_episode {
+                    return Ok(true);
                 }
-                let failed = cancelled && step(tx, origin).map_err(internal)?
-                    .map(|view| runs_program(tx, &view)).transpose().map_err(internal)? == Some(false);
-                let reason = failed.then(|| format!("ask cancelled by {}", claim.actor.as_deref().unwrap_or_default()));
-                tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8c515cfc602a owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?5,blocked_reason=?6,
+            }
+            let failed = cancelled && step(tx, origin).map_err(internal)?
+                .map(|view| runs_program(tx, &view)).transpose().map_err(internal)? == Some(false);
+            let reason = failed.then(|| format!("ask cancelled by {}", claim.actor.as_deref().unwrap_or_default()));
+            tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8c515cfc602a owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?5,blocked_reason=?6,
                     readiness_epoch=readiness_epoch+CASE WHEN ?5='ready' THEN 1 ELSE 0 END,
                     activated_at_unix_ms=CASE WHEN ?5='ready' THEN ?3 ELSE activated_at_unix_ms END,
                     updated_at_unix_ms=?3 WHERE subject=?1 AND attempt=?2 AND status='waiting-person' AND blocked_reason=?4").map_err(internal)?.execute(
-                    /* sqlite-large-value: allow-for-now lv-h109f5388a001 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject,
-                        if failed { "failed" } else { "ready" }, reason]).map_err(internal)?;
-            }
+                /* sqlite-large-value: allow-for-now lv-h109f5388a001 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ params![origin, ask.body["fields"]["origin_attempt"].as_u64(), claim.accepted_at_unix_ms.to_string(), ask.subject,
+                    if failed { "failed" } else { "ready" }, reason]).map_err(internal)?;
         }
     }
     Ok(true)

@@ -236,7 +236,7 @@ mod tests {
         store.connection.batched(|tx| -> anyhow::Result<()> {
             let selected = resolve(&store, tx, person, &origin, now_ms()).unwrap();
             assert_eq!(selected.item.conversation.as_deref(), Some("agent/garden/seed"));
-            assert_eq!(selected.evidence, [opening.id.clone()]);
+            assert_eq!(selected.evidence, std::slice::from_ref(&opening.id));
             assert!(resolve(&store, tx, "person/other", &origin, now_ms()).is_err());
             let stale = InboxOrigin { episode: "claim/stale".into(), ..origin.clone() };
             assert!(resolve(&store, tx, person, &stale, now_ms()).is_err());

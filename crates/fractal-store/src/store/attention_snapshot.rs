@@ -23,11 +23,11 @@ fn fold_operational_failures(claims: impl IntoIterator<Item = ClaimRecord>) -> V
             let f = &claim.body["fields"];
             let episode = f["episode"].as_str().unwrap_or_default();
             if claim.kind == "operational.recovered" {
-                if let Some(kept) = episodes.get_mut(episode) {
-                    if f["failure"] == kept.request {
-                        kept.status = "resolved".into();
-                        kept.resolved_at_unix_ms = Some(claim.accepted_at_unix_ms);
-                    }
+                if let Some(kept) = episodes.get_mut(episode)
+                    && f["failure"] == kept.request
+                {
+                    kept.status = "resolved".into();
+                    kept.resolved_at_unix_ms = Some(claim.accepted_at_unix_ms);
                 }
                 continue;
             }
@@ -349,10 +349,10 @@ impl Store {
         };
         let mut items = Vec::new();
         for seat in seats {
-            if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
+            if let Some(item) = self.screen_prompt_item(connection, &seat, person)? {
                 items.push(item);
             }
-            items.extend(self.denial_items(&connection, &seat, person)?);
+            items.extend(self.denial_items(connection, &seat, person)?);
             let Some((claim, at, harness)) = newest(&seat, "harness.observed")? else {
                 continue;
             };
@@ -368,7 +368,7 @@ impl Store {
                          AND json_extract(body, '$._operation.id')=?1)",
                 )?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h5f2b2d51372d owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [native_prompt_gone_operation(&claim)], |row| row.get(0))?;
-            if gone || native_prompt_answer(&connection, &claim)?.is_some() {
+            if gone || native_prompt_answer(connection, &claim)?.is_some() {
                 continue;
             }
             // Only the running incarnation's prompt waits: a restarted seat's old prompt is gone.
@@ -377,7 +377,7 @@ impl Store {
             };
             if runtime["status"] != "running"
                 || runtime["incarnation_id"] != harness["incarnation_id"]
-                || !person_work::declaration_live(&connection, &seat)?
+                || !person_work::declaration_live(connection, &seat)?
             {
                 continue;
             }
@@ -408,7 +408,7 @@ impl Store {
                 .unwrap_or("its terminal shows a prompt");
             let answerable = !missing_principal && answerable(&harness, as_of);
             // The exact call it asks about, as its hook or driver named it for this observation.
-            let call = prompt_call(&connection, &seat, &harness)?;
+            let call = prompt_call(connection, &seat, &harness)?;
             items.push(AttentionItemView {
                 deadline_unix_ms: None,
                 default_answer: None,
@@ -1151,12 +1151,11 @@ impl Store {
                 if !matches!(view.status.as_str(), "failed" | "cancelled") {
                     continue;
                 }
-                if let Some(item) = self.stopped_loop_item(&run, &view, spec)? {
-                    if item.requested_at_unix_ms <= as_of
-                        && person.is_none_or(|person| person == item.person)
-                    {
-                        items.push(item);
-                    }
+                if let Some(item) = self.stopped_loop_item(&run, &view, spec)?
+                    && item.requested_at_unix_ms <= as_of
+                    && person.is_none_or(|person| person == item.person)
+                {
+                    items.push(item);
                 }
             }
         }
@@ -1585,18 +1584,16 @@ impl Store {
         if matches!(
             f["condition"].as_str(),
             Some("readiness" | "provider-auth" | "provider-trust" | "provider-update")
-        ) {
-            if self
-                .current_harness(source)?
-                .is_some_and(|harness| harness.is_ready())
-            {
-                return Ok(None);
-            }
+        ) && self
+            .current_harness(source)?
+            .is_some_and(|harness| harness.is_ready())
+        {
+            return Ok(None);
         }
-        if let Some(revision) = f["source_revision"].as_str() {
-            if self.selected_desired_token(source)?.as_deref() != Some(revision) {
-                return Ok(None);
-            }
+        if let Some(revision) = f["source_revision"].as_str()
+            && self.selected_desired_token(source)?.as_deref() != Some(revision)
+        {
+            return Ok(None);
         }
         if let Some(incarnation) = f["incarnation"].as_str() {
             if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
