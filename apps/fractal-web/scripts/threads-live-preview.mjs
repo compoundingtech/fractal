@@ -4,7 +4,7 @@
  *
  *   node apps/fractal-web/scripts/threads-live-preview.mjs serve        # up + seed + serve on loopback
  *   node apps/fractal-web/scripts/threads-live-preview.mjs up           # up + seed without serving
- *   node apps/fractal-web/scripts/threads-live-preview.mjs offline|online|revoke|status|down
+ *   node apps/fractal-web/scripts/threads-live-preview.mjs offline|online|revoke|status|agent-reply|link-ask|down
  *
  * `serve` makes a throwaway instance (`threadspreview`) under its own HOME in PREVIEW_ROOT
  * (default /var/tmp/fractal-threadspreview), so neither `~/.st-instance` nor the default install
@@ -21,10 +21,12 @@
  * WF_ST_GATEWAY/WF_ST_AUTHORIZATION paired gateway. The browser authenticates only through that path.
  *
  * Agents in this instance are program seats: they never write on their own. The asks name Atlas
- * as their requester via `work ask --as`, but the seeded thread messages are person-authored.
- * The fixture disables Unix peer ancestry binding: ST_AGENT/FRACTAL_AGENT and `--as` cannot
- * establish the BoundAgent authority required for agent replies or linking asks. Device pairing
- * grants person authority, not agent authority. Do not read person replies as agent evidence.
+ * as their requester via `work ask --as`, and the seeded thread messages are person-authored.
+ * `agent-reply` (Atlas answers the checklist thread, the Manager the mission thread) and `link-ask`
+ * (Atlas links a new follow-up ask to the checklist thread) act as those declared agents through
+ * the local identity header. They need a fixture executable with declared-agent attribution; any
+ * other build refuses them with 403, because the fixture disables Unix peer ancestry binding and
+ * device pairing grants person authority, not agent authority. Do not read person replies as agent evidence.
  * `offline` stops the daemon (the app shows its paused and reconnecting states), `online` starts
  * it again, `revoke` revokes the browser pairing (the app falls back to its refused state;
  * `serve` pairs a new device on the next start), and `down` removes everything.
@@ -87,9 +89,9 @@ const fractalJson = (args, options) => JSON.parse(fractal(['--json', ...args], o
 const alive = () => existsSync(gateway()) && fractal(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
 const marker = (name) => join(root, name)
 
-const gatewayCall = (method, path, body, authorization) => new Promise((resolve, reject) => {
+const gatewayCall = (method, path, body, authorization, extra = {}) => new Promise((resolve, reject) => {
   const payload = body === undefined ? undefined : JSON.stringify(body)
-  const headers = { host: '127.0.0.1', ...(authorization === undefined ? {} : { authorization }),
+  const headers = { host: '127.0.0.1', ...extra, ...(authorization === undefined ? {} : { authorization }),
     ...(payload === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }) }
   const req = request({ socketPath: gateway(), path, method, headers }, (res) => {
     let text = ''
@@ -246,6 +248,38 @@ function discussGate() {
   writeFileSync(marker('mission-thread'), `${thread}\n`)
 }
 
+/**
+ * A declared agent acts through the local identity header on the Unix socket. Only a fixture executable with
+ * declared-agent attribution binds it as that agent; any other build answers 403, and nothing is written.
+ */
+async function actAs(agent, type, parameters) {
+  const as = { 'x-st3-person': agent }
+  const capabilities = await gatewayCall('GET', '/v1/client/capabilities', undefined, undefined, as)
+  const id = `action/${randomUUID()}`
+  const response = await gatewayCall('POST', '/v1/client/actions', {
+    api_version: capabilities.api_version, id, type, idempotency_key: id,
+    fence: { snapshot_id: capabilities.snapshot.id }, parameters,
+  }, undefined, as)
+  if (response.value?.status !== 'completed') throw new Error(`${type} as ${agent} was not completed: ${JSON.stringify(response)}`)
+  console.log(`${type} as ${agent}: completed`)
+}
+
+/** Atlas answers the checklist thread and the Manager answers the mission gate thread. */
+async function agentReplies() {
+  await actAs(agents.atlas, 'thread.reply', { target_id: readFileSync(marker('seeded'), 'utf8').trim(),
+    content: 'Yes: the migration is step 4, and I added the rollback right after it.' })
+  await actAs(agents.manager, 'thread.reply', { target_id: readFileSync(marker('mission-thread'), 'utf8').trim(),
+    content: 'They are: the breaking changes open the notes, under “Before you upgrade”.' })
+}
+
+/** Atlas asks a follow-up and links it to the checklist thread, as the ask's bound requesting agent. */
+async function linkAsk() {
+  const subject = ask('follow-up', 'Confirm the migration window', 'The migration takes about four minutes; which window should I use?')
+  const item = fractalJson(['attention', 'ls', '--as', person]).value.items.find((each) => each.source_id === subject)
+  if (item?.episode === undefined) throw new Error(`no open attention for ${subject}`)
+  await actAs(agents.atlas, 'thread.link-ask', { target_id: readFileSync(marker('seeded'), 'utf8').trim(), ask_id: subject, ask_episode: item.episode })
+}
+
 async function serve() {
   await up()
   process.env.WF_ST_GATEWAY = gateway()
@@ -292,5 +326,7 @@ else if (command === 'offline') spawnSync('systemctl', ['--user', 'stop', unit],
 else if (command === 'online') await start()
 else if (command === 'revoke') await revoke()
 else if (command === 'status') console.log(JSON.stringify(fractalJson(['attention', 'ls', '--as', person], { check: false }), null, 2))
+else if (command === 'agent-reply') await agentReplies()
+else if (command === 'link-ask') await linkAsk()
 else if (command === 'down') down()
-else throw new Error('usage: threads-live-preview.mjs [serve|up|offline|online|revoke|status|down]')
+else throw new Error('usage: threads-live-preview.mjs [serve|up|offline|online|revoke|status|agent-reply|link-ask|down]')

@@ -597,14 +597,16 @@ one thread so the Missions view lists it. Vite then serves the app on `127.0.0.1
 `WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`, with the browser's credential.
 
 The asks name Atlas as their requester through `work ask --as agent/example/atlas`; the seeded
-thread messages are all person-authored, and the program seats never write on their own. This
-fixture cannot act as an agent: its login shell disables Unix peer ancestry binding, so every local
-caller is a person, and `ST_AGENT`, `FRACTAL_AGENT` or `--as` do not establish the bound-agent
-authority that agent replies and linking an ask require (`thread edits require a concrete person`,
-`only the bound requesting agent can attach an ask`). The preview therefore has no agent-authored
-replies and no linked asks; do not read person replies as agent evidence.
+thread messages are all person-authored, and the program seats never write on their own. The
+fixture's login shell disables Unix peer ancestry binding, so `ST_AGENT`, `FRACTAL_AGENT` or `--as`
+do not establish the bound-agent authority that agent replies and linking an ask require.
+`agent-reply` (Atlas answers the checklist thread, the Manager the mission thread) and `link-ask`
+(Atlas links a new follow-up ask to the checklist thread) act as those declared agents through the
+local identity header. Only a fixture executable with declared-agent attribution binds that header;
+any other build answers 403 and writes nothing. Do not read person replies as agent evidence.
 
-`up` seeds without serving. `offline` and `online` stop and restart the daemon for the paused and
+`up` seeds without serving. `agent-reply` and `link-ask` write as agents while the app is open, so
+the unread and linked-ask states arrive live. `offline` and `online` stop and restart the daemon for the paused and
 reconnect states, `revoke` revokes the browser pairing as the app's own revoke does (the refused
 state), and `down` removes the instance.
 The script needs a systemd user manager, `pty`, and `FRACTAL_BINARY` set to the test-support
