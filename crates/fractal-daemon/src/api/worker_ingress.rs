@@ -47,7 +47,12 @@ pub fn worker_observer(pid: Option<u32>) -> anyhow::Result<Observe> {
 
 /// Observe by default; explicit enforcement refuses before body decoding.
 pub fn worker_authenticated(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) -> Router {
-    protect(app, observe, mode)
+    let app = protect(app, observe, mode);
+    #[cfg(unix)]
+    let app = app.layer(axum::Extension(fractal_api_core::api::SupervisorHealth(Arc::new(|| {
+        crate::service::launchd_health::snapshot().map(|health| serde_json::json!(health))
+    }))));
+    app
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

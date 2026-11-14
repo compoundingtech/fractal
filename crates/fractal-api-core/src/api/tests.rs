@@ -16,6 +16,25 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn health_reports_read_only_supervisor_failure_and_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let failure = json!({"reason":"launchd-unresponsive", "since_unix_ms":1000,
+        "retry_after_unix_ms":6000, "consecutive_timeouts":1});
+    let current = Arc::new(std::sync::Mutex::new(Some(failure.clone())));
+    let observed = current.clone();
+    let app = router(state).layer(Extension(SupervisorHealth(Arc::new(move || {
+        observed.lock().unwrap().clone()
+    }))));
+    let (status, health) = get_request(app.clone(), "/v1/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["service_manager"], failure);
+    *current.lock().unwrap() = None;
+    let (_, health) = get_request(app, "/v1/health").await;
+    assert!(health.get("service_manager").is_none());
+}
+
 #[test]
 fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
     assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
@@ -5855,7 +5874,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let health_of = |state: &AppState| {
         let state = state.clone();
-        async move { health(State(state)).await.unwrap().0 }
+        async move { health(State(state), None).await.unwrap().0 }
     };
     assert!(health_of(&state).await.get("messages_store_index").is_none(), "no shard, no stream index");
     crate::store::messages_shard::open(&state.store, root.path()).unwrap();
