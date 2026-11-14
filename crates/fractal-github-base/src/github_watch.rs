@@ -726,10 +726,15 @@ fn excerpts() -> &'static Mutex<HashMap<(String, String, u64), Option<String>>> 
     EXCERPTS.get_or_init(Default::default)
 }
 
-/// `text` cut to `EXCERPT_CHARS` at a word, quoted line by line.
+/// `text` cut to `EXCERPT_CHARS` at a word, quoted line by line. HTML goes first: comments (bot metadata, hidden
+/// notes) and script or style content entirely, other tags of real HTML elements leaving their words. So hidden markup
+/// neither spends the excerpt nor leaves a half tag or an open `<!--` at the cut. A code fence the cut leaves open is
+/// closed, so the quote renders as the comment does.
 pub fn quote(text: &str) -> Option<String> {
-    let text = text.trim();
-    if text.is_empty() {
+    let visible = without_html_tags(text);
+    // Indentation is Markdown syntax, not disposable whitespace.
+    let text = visible.trim_matches(['\n', '\r']);
+    if text.trim().is_empty() {
         return None;
     }
     let mut cut = text.chars().take(EXCERPT_CHARS).collect::<String>();
@@ -738,6 +743,9 @@ pub fn quote(text: &str) -> Option<String> {
             cut.truncate(space);
         }
         cut = format!("{} …", cut.trim_end());
+        if let Some(fence) = open_fence(&cut) {
+            cut = format!("{cut}\n{fence}");
+        }
     }
     Some(
         cut.lines()
@@ -745,6 +753,324 @@ pub fn quote(text: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+
+/// HTML element names whose tags an excerpt drops. A tag-like word outside them (`Array<string>`) stays.
+const HTML_ELEMENTS: &[&str] = &[
+    "a", "abbr", "b", "blockquote", "br", "caption", "center", "code", "col", "colgroup", "dd", "del", "details", "div",
+    "dl", "dt", "em", "figcaption", "figure", "font", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd",
+    "li", "mark", "ol", "p", "picture", "pre", "q", "s", "samp", "section", "small", "source", "span", "strike",
+    "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var",
+    "video", "audio", "iframe", "wbr",
+];
+
+#[derive(Clone, Copy)]
+enum MarkdownContainer {
+    Quote,
+    List(usize),
+}
+
+/// A tab can straddle a container boundary. Keep its remaining virtual spaces without changing
+/// source offsets, and advance columns one at a time so every tab uses the next four-column stop.
+#[derive(Clone, Copy, Default)]
+struct MarkdownCursor {
+    at: usize,
+    column: usize,
+    pending: usize,
+}
+
+impl MarkdownCursor {
+    fn byte(self, bytes: &[u8]) -> Option<u8> {
+        if self.pending == 0 { bytes.get(self.at).copied() } else { Some(b' ') }
+    }
+
+    fn space(&mut self, bytes: &[u8]) -> bool {
+        if self.pending > 0 {
+            self.pending -= 1;
+        } else {
+            match bytes.get(self.at) {
+                Some(b' ') => {}
+                Some(b'\t') => self.pending = 3 - self.column % 4,
+                _ => return false,
+            }
+            self.at += 1;
+        }
+        self.column += 1;
+        true
+    }
+
+    fn indent(&mut self, bytes: &[u8], limit: usize) {
+        let start = self.column;
+        while self.column - start < limit && self.space(bytes) {}
+    }
+
+    fn advance(&mut self, width: usize) {
+        self.at += width;
+        self.column += width;
+    }
+}
+
+/// Consume only containers already open on the preceding line. In particular, a list sibling is not
+/// a continuation of an unclosed fence in the previous item.
+fn markdown_container_continuation(
+    line: &str,
+    containers: &[MarkdownContainer],
+    quote_count: usize,
+) -> (MarkdownCursor, usize) {
+    let bytes = line.as_bytes();
+    let mut cursor = MarkdownCursor::default();
+    let mut matched_quotes = 0;
+    for (matched, container) in containers.iter().enumerate() {
+        let start = cursor;
+        match container {
+            MarkdownContainer::Quote => {
+                cursor.indent(bytes, 3);
+                if cursor.byte(bytes) != Some(b'>') {
+                    return (start, matched);
+                }
+                matched_quotes += 1;
+                cursor.advance(1);
+                cursor.space(bytes);
+            }
+            MarkdownContainer::List(indent) => {
+                cursor.indent(bytes, *indent);
+                if cursor.column - start.column < *indent {
+                    // Missing quotes still end their fence. Scanning to one removes that suffix,
+                    // so repeated blank lines in deeply nested lists also stay linear.
+                    if bytes[cursor.at..].iter().all(u8::is_ascii_whitespace) {
+                        let matched = if matched_quotes == quote_count {
+                            containers.len()
+                        } else {
+                            matched + containers[matched..].iter()
+                                .position(|container| matches!(container, MarkdownContainer::Quote))
+                                .unwrap()
+                        };
+                        cursor.at = bytes.len();
+                        cursor.pending = 0;
+                        return (cursor, matched);
+                    }
+                    return (start, matched);
+                }
+            }
+        }
+    }
+    (cursor, containers.len())
+}
+
+/// Discover new quote/list prefixes only outside code. Offsets always refer to the original line.
+fn markdown_container_openings(
+    line: &str,
+    containers: &mut Vec<MarkdownContainer>,
+    quote_count: &mut usize,
+    mut cursor: MarkdownCursor,
+) -> MarkdownCursor {
+    let bytes = line.as_bytes();
+    loop {
+        let start = cursor;
+        cursor.indent(bytes, 3);
+        if cursor.byte(bytes) == Some(b'>') {
+            cursor.advance(1);
+            cursor.space(bytes);
+            containers.push(MarkdownContainer::Quote);
+            *quote_count += 1;
+            continue;
+        }
+        let marker = cursor.at;
+        if matches!(cursor.byte(bytes), Some(b'-' | b'+' | b'*')) {
+            cursor.advance(1);
+        } else {
+            while cursor.byte(bytes).is_some_and(|byte| byte.is_ascii_digit()) && cursor.at - marker < 9 {
+                cursor.advance(1);
+            }
+            if cursor.at == marker || !matches!(cursor.byte(bytes), Some(b'.' | b')')) {
+                return start;
+            }
+            cursor.advance(1);
+        }
+        let padding = cursor;
+        cursor.indent(bytes, 5);
+        let width = cursor.column - padding.column;
+        if width == 0 {
+            return start;
+        }
+        if width > 4 {
+            // Excess padding belongs to the item's content; a tab may be consumed only partly.
+            cursor = padding;
+            cursor.space(bytes);
+        }
+        containers.push(MarkdownContainer::List(cursor.column - start.column));
+    }
+}
+
+/// Code islands, scanned once so HTML-looking code remains literal. Matching backtick runs are indexed from the
+/// end: an unmatched run never scans the remaining document again.
+fn markdown_code_ranges(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut runs = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'`' { at += 1; continue; }
+        let start = at;
+        while at < bytes.len() && bytes[at] == b'`' { at += 1; }
+        runs.push((start, at - start));
+    }
+    let mut next = HashMap::new();
+    let mut closing = HashMap::new();
+    for (start, length) in runs.into_iter().rev() {
+        if let Some(end) = next.insert(length, start) { closing.insert(start, end + length); }
+    }
+    let mut ranges = Vec::new();
+    let mut fence: Option<(u8, usize, usize)> = None;
+    let mut containers = Vec::new();
+    let mut quote_count = 0;
+    at = 0;
+    while at < bytes.len() {
+        if at == 0 || bytes[at - 1] == b'\n' {
+            let end = text[at..].find('\n').map_or(bytes.len(), |end| at + end + 1);
+            let line = &text[at..end];
+            let (mut content, matched) = markdown_container_continuation(line, &containers, quote_count);
+            if matched < containers.len() {
+                // A fence ends with its container, not at the next fence-shaped line in unrelated prose.
+                if let Some((_, _, start)) = fence.take() { ranges.push((start, at)); }
+                for container in containers.drain(matched..) {
+                    if matches!(container, MarkdownContainer::Quote) { quote_count -= 1; }
+                }
+            }
+            if fence.is_none() {
+                content = markdown_container_openings(line, &mut containers, &mut quote_count, content);
+            }
+            let start_column = content.column;
+            content.indent(line.as_bytes(), usize::MAX);
+            let indent = content.column - start_column;
+            let trimmed = &line[content.at..];
+            let marker = trimmed.as_bytes().first().copied().unwrap_or_default();
+            let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
+            if let Some((character, width, start)) = fence {
+                if indent <= 3 && marker == character && length >= width && trimmed[length..].trim().is_empty() {
+                    ranges.push((start, end));
+                    fence = None;
+                }
+                at = end;
+                continue;
+            }
+            if indent <= 3 && matches!(marker, b'`' | b'~') && length >= 3
+                && !(marker == b'`' && trimmed[length..].contains('`'))
+            {
+                fence = Some((marker, length, at));
+                at = end;
+                continue;
+            }
+            if indent >= 4 {
+                ranges.push((at, end));
+                at = end;
+                continue;
+            }
+        }
+        // A comment owns its entire span, even if it contains code-looking delimiters.
+        if bytes[at..].starts_with(b"<!--") {
+            at = text[at + 4..].find("-->").map_or(bytes.len(), |end| at + 4 + end + 3);
+        } else if bytes[at] == b'\\' && bytes.get(at + 1).is_some_and(|next| matches!(*next, b'`' | b'\\')) {
+            at += 2;
+        } else if bytes[at] == b'`' {
+            if let Some(end) = closing.get(&at) {
+                ranges.push((at, *end));
+                at = *end;
+            } else {
+                while at < bytes.len() && bytes[at] == b'`' { at += 1; }
+            }
+        } else { at += 1; }
+    }
+    if let Some((_, _, start)) = fence { ranges.push((start, bytes.len())); }
+    ranges
+}
+
+/// Strip HTML only in prose. Every search consumes its prefix and compares fixed-size ASCII windows in place,
+/// keeping repeated hidden elements linear without allocating lowercase copies of the remaining document.
+fn without_html_tags(text: &str) -> String {
+    let ranges = markdown_code_ranges(text);
+    let mut range = 0;
+    let mut visible = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        let absolute = text.len() - rest.len() + start;
+        while range < ranges.len() && ranges[range].1 <= absolute { range += 1; }
+        if range < ranges.len() && ranges[range].0 <= absolute {
+            let end = ranges[range].1 - (text.len() - rest.len());
+            visible.push_str(&rest[..end]);
+            rest = &rest[end..];
+            continue;
+        }
+        visible.push_str(&rest[..start]);
+        let tag = &rest[start..];
+        if let Some(comment) = tag.strip_prefix("<!--") {
+            rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
+            continue;
+        }
+        let Some(end) = tag[1..].find(['<', '>']).map(|end| end + 1) else {
+            visible.push_str(tag);
+            return visible;
+        };
+        let name = tag[1..end]
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("");
+        if tag.as_bytes()[end] != b'>' {
+            visible.push('<');
+            rest = &tag[1..];
+            continue;
+        }
+        if (name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("style")) && !tag[1..].starts_with('/') {
+            let close = if name.eq_ignore_ascii_case("script") { "</script" } else { "</style" };
+            let hidden = &text.as_bytes()[absolute + end + 1..];
+            rest = match hidden.windows(close.len()).enumerate().position(|(at, candidate)| {
+                candidate.eq_ignore_ascii_case(close.as_bytes())
+                    && hidden.get(at + close.len()).is_some_and(|byte| {
+                        *byte == b'>' || *byte == b'/' || byte.is_ascii_whitespace()
+                    })
+            }) {
+                Some(close) => {
+                    let closing = absolute + end + 1 + close;
+                    text[closing..].find('>').map_or("", |end| &text[closing + end + 1..])
+                }
+                None => "",
+            };
+            continue;
+        }
+        if HTML_ELEMENTS.iter().any(|element| name.eq_ignore_ascii_case(element)) {
+            rest = &tag[end + 1..];
+        } else {
+            visible.push_str(&tag[..=end]);
+            rest = &tag[end + 1..];
+        }
+    }
+    visible.push_str(rest);
+    visible
+}
+
+/// The fence that closes a code block still open at the end of `text`, if one is.
+fn open_fence(text: &str) -> Option<String> {
+    let mut open: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() > 3 {
+            continue;
+        }
+        let Some(marker) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~') else {
+            continue;
+        };
+        let run = trimmed.chars().take_while(|c| *c == marker).count();
+        if run < 3 {
+            continue;
+        }
+        match open {
+            None if !(marker == '`' && trimmed[run..].contains('`')) => open = Some((marker, run)),
+            Some((char, length)) if char == marker && run >= length && trimmed[run..].trim().is_empty() => open = None,
+            _ => {}
+        }
+    }
+    open.map(|(marker, length)| marker.to_string().repeat(length))
 }
 
 /// Read a comment's or review's text from GitHub, at most `EXCERPT_TIMEOUT`. A review without a
@@ -1412,5 +1738,168 @@ mod tests {
         assert!(quoted.chars().count() <= EXCERPT_CHARS + 4);
         assert!(quoted.ends_with("word …"));
         assert_eq!(quote("  "), None);
+        // Hidden HTML neither spends the excerpt nor hides what follows it.
+        let bot = format!("<!-- {} -->\nThe real comment.", "metadata ".repeat(200));
+        assert_eq!(quote(&bot).as_deref(), Some("> The real comment."));
+        assert_eq!(quote("Shown <!-- never closed").as_deref(), Some("> Shown"));
+        assert_eq!(quote("<!-- only metadata -->"), None);
+        // Tags of real elements go before the cut, so it never lands inside one; their words stay.
+        let image = format!("{}<img src=\"https://example.test/{}\">done", "word ".repeat(115), "x".repeat(80));
+        assert!(!quote(&image).unwrap().contains("<img"));
+        assert_eq!(
+            quote("<details><summary>Plan</summary>Use Array<string> here.<script>x()</script></details>").as_deref(),
+            Some("> PlanUse Array<string> here.")
+        );
+        // A cut inside a code block closes it.
+        let code = format!("Run this:\n```sh\n{}", "echo step\n".repeat(120));
+        let quoted = quote(&code).unwrap();
+        assert!(quoted.ends_with("> ```"), "{quoted}");
+        assert!(quoted.chars().count() <= EXCERPT_CHARS + 2 * quoted.lines().count() + 8);
+    }
+
+    #[test]
+    fn excerpts_preserve_html_looking_markdown_code() {
+        for source in [
+            "Use `<!--` then continue.",
+            "Use ``<script>x()</script>`` then continue.",
+            "```\n<!-- literal -->\n<b>literal</b>\n```\nAfter.",
+            "~~~html\n<script>literal</script>\n~~~\nAfter.",
+            "    <!-- literal -->\n    <b>literal</b>\nAfter.",
+        ] {
+            let expected = source.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+            assert_eq!(quote(source).as_deref(), Some(expected.as_str()), "{source}");
+        }
+        assert_eq!(quote("<!-- hidden `code` -->After").as_deref(), Some("> After"));
+        assert_eq!(quote("\\`<!-- hidden -->` after").as_deref(), Some("> \\`` after"));
+    }
+
+    #[test]
+    fn excerpts_preserve_fenced_html_in_markdown_containers() {
+        for source in [
+            "> ```html\n> <!-- literal -->\n> <script>literal</script>\n> ```",
+            "> ~~~html\n> <style>literal</style>\n> ~~~",
+            "- ```html\n  <!-- literal -->\n  <b>literal</b>\n  ```",
+            "* ~~~html\n  <script>literal</script>\n  ~~~",
+            "12. item\n    ```html\n    <!-- literal -->\n    ```",
+            "+ item\n  ~~~html\n  <style>literal</style>\n  ~~~",
+            "> - ```html\n>   <!-- literal -->\n>   <script>literal</script>\n>   ```",
+            "- > ~~~html\n  > <!-- literal -->\n  > <style>literal</style>\n  > ~~~",
+            "> 1. > - ~~~html\n>    >   <b>literal</b>\n>    >   ~~~",
+            "- outer\n  - inner\n    ```html\n    <!-- literal -->\n\n    <b>literal</b>\n    ```",
+            "1. ```html\n\t<!-- literal -->\n\t```",
+            "> ```\n> <!-- literal -->",
+            "- ~~~\n  <style>literal</style>",
+            "> - ~~~\n>   <!-- literal -->",
+            "- > ```\n  > <script>literal</script>",
+            "> ```\n> ~~~\n> <!-- literal -->\n> ````",
+            "- ~~~~\n  ~~~\n  <!-- literal -->\n  ~~~~",
+        ] {
+            let expected = source.lines().map(|line| format!("> {line}").trim_end().to_owned())
+                .collect::<Vec<_>>().join("\n");
+            assert_eq!(quote(source).as_deref(), Some(expected.as_str()), "{source}");
+        }
+    }
+
+    #[test]
+    fn unclosed_container_fences_do_not_protect_outside_html() {
+        for (source, expected) in [
+            ("> ```\n> <!-- literal -->\n<script>hidden</script><b>Visible</b>",
+             "> ```\n> <!-- literal -->\nVisible"),
+            ("- ~~~\n  <style>literal</style>\n<!-- hidden --><b>Visible</b>",
+             "- ~~~\n  <style>literal</style>\nVisible"),
+            ("- ```\n  <!-- literal -->\n- <script>hidden</script>Visible",
+             "- ```\n  <!-- literal -->\n- Visible"),
+            ("> - ~~~\n>   <!-- literal -->\n> <style>hidden</style>Visible",
+             "> - ~~~\n>   <!-- literal -->\n> Visible"),
+            ("- > ```\n  > <!-- literal -->\n  <script>hidden</script>Visible",
+             "- > ```\n  > <!-- literal -->\n  Visible"),
+            ("- > ~~~\n  > <!-- literal -->\n\n  <b>Visible</b>",
+             "- > ~~~\n  > <!-- literal -->\n\n  Visible"),
+            ("> ```\n> <!-- literal -->\n<b>Visible</b>\n~~~\n<!-- literal again -->\n~~~\n<style>hidden</style>After",
+             "> ```\n> <!-- literal -->\nVisible\n~~~\n<!-- literal again -->\n~~~\nAfter"),
+        ] {
+            assert_eq!(without_html_tags(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn container_fences_expand_tabs_and_preserve_partial_tab_indentation() {
+        for source in [
+            ">\t~~~html\n> <script>literal</script>\n> ~~~",
+            ">\t~~~html\n> <!-- literal -->\n> ~~~",
+            "> ~~~html\n>\t<script>literal</script>\n>\t~~~",
+            ">\t```html\n> <!-- literal -->",
+            ">\t~~~html\n> <script>literal</script>",
+            "- item\n\t~~~html\n  <script>literal</script>\n  ~~~",
+            "- item\n \t~~~html\n  <!-- literal -->\n \t~~~",
+            "-\t~~~html\n    <script>literal</script>\n\t~~~",
+            "> -\t~~~html\n>   <!-- literal -->\n> \t~~~",
+            "> \t> \t~~~html\n>   > <script>literal</script>\n>   > ~~~",
+            "- ~~~html\n\t  ~~~\n  <script>literal</script>\n  ~~~",
+            "> ~~~html\n>\t \t~~~\n> <!-- literal -->\n> ~~~",
+        ] {
+            let expected = source.lines().map(|line| format!("> {line}")).collect::<Vec<_>>().join("\n");
+            assert_eq!(quote(source).as_deref(), Some(expected.as_str()), "{source}");
+        }
+    }
+
+    #[test]
+    fn tabbed_container_indentation_does_not_create_or_extend_fences() {
+        for (source, expected) in [
+            (">\t~~~html\n> <!-- literal -->\n<script>hidden</script>Visible",
+             ">\t~~~html\n> <!-- literal -->\nVisible"),
+            ("- item\n\t~~~html\n  <!-- literal -->\n<script>hidden</script>Visible",
+             "- item\n\t~~~html\n  <!-- literal -->\nVisible"),
+            ("- item\n\t  ~~~html\n  <script>hidden</script>Visible",
+             "- item\n\t  ~~~html\n  Visible"),
+            ("- item\n \t  ~~~html\n  <!-- hidden -->Visible",
+             "- item\n \t  ~~~html\n  Visible"),
+            ("- item\n\t  <!-- literal -->\n  <script>hidden</script>Visible",
+             "- item\n\t  <!-- literal -->\n  Visible"),
+            ("- item\n \t<script>hidden</script>Visible",
+             "- item\n \tVisible"),
+            (">\t \t~~~html\n> <script>hidden</script>Visible",
+             ">\t \t~~~html\n> Visible"),
+            ("-\t  ~~~html\n  <script>hidden</script>Visible",
+             "-\t  ~~~html\n  Visible"),
+        ] {
+            assert_eq!(without_html_tags(source), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn hidden_html_closing_tags_require_an_exact_name_boundary() {
+        for name in ["script", "style", "ScRiPt", "StYlE"] {
+            for boundary in [">", " >", "\t>", "\n>", "\r>", "/>"] {
+                let source = format!(
+                    "<{name}>hidden</{name}ure>LEAK</{name}-suffix>LEAK</{name}{boundary}Visible"
+                );
+                assert_eq!(quote(&source).as_deref(), Some("> Visible"), "{source}");
+            }
+            let unclosed = format!("<{name}>hidden</{name}ure>LEAK");
+            assert_eq!(quote(&unclosed), None, "{unclosed}");
+        }
+    }
+
+    #[test]
+    fn excerpts_keep_unicode_boundaries_blank_input_and_long_fences() {
+        assert_eq!(quote("\n\n\n"), None);
+        for offset in 599..=601 {
+            let source = format!("{}é 界 🙂 end", "a".repeat(offset));
+            let quoted = quote(&source).unwrap();
+            assert!(quoted.starts_with("> "));
+            assert!(!quoted.contains('\u{fffd}'));
+        }
+        let fence = "`".repeat(80);
+        let source = format!("{fence}html\n{}", "<!-- literal -->\n".repeat(80));
+        assert!(quote(&source).unwrap().ends_with(&format!("> {fence}")));
+    }
+
+    #[test]
+    fn repeated_script_style_excerpt_preprocessing_is_linear() {
+        let source = format!("{}Visible", "<ScRiPt>hidden</sCrIpT><STYLE>hidden</style>".repeat(64_000));
+        let start = std::time::Instant::now();
+        assert_eq!(quote(&source).as_deref(), Some("> Visible"));
+        assert!(start.elapsed() < Duration::from_secs(2), "excerpt preprocessing took {:?}", start.elapsed());
     }
 }
