@@ -227,6 +227,12 @@ Mission-owned runtime declarations follow their owner lifetime; independent top-
 
 Within a fleet, an agent may publish, start, and revise missions and move agent queues as itself without a separate grant. This is broad authority, not isolation: review declarations before publication and give agents only access you intend them to use. A bound harness must retain its own identity; free mode does not allow it to impersonate a person or bypass operation-specific fences, human review, or a claimed producing step.
 
+New publications and local claims reject the ignored agent `mission-authority`,
+`queue-authority`, `seat-authority` and `agent-authority` blocks with
+`retired-agent-authority`, including `mission-authority "none"`. Remove them from
+authored declarations, including declarations inside missions and revisions. Historical
+records still parse and replay; accepting historical bytes does not enforce these fields.
+
 A mission run is the exception. A program step acts as `mission-run/RUN` and holds only what its
 mission's `authority` block grants, intersected with the authority of whoever started the run. The
 daemon's `[programs]` table says what a write outside it does:

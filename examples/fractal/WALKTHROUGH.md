@@ -81,9 +81,9 @@ Then run these four ST commands in order.
    st missions show mission-run/example/garden-work/first-change
    ```
 
-`apply FILE --as ACTOR` previews and publishes exact authored KDL. A person actor is an
-explicit trusted local operator. An agent actor is checked against the agent's already-current
-`mission-authority`; authority written into the candidate being published cannot grant itself.
+`apply FILE --as ACTOR` previews and publishes exact authored KDL. An agent acts as itself
+in free mode, not as a person. Legacy agent authority blocks are refused on new writes;
+mission `authority` restricts run actors, not agents executing arbitrary commands.
 
 ## Why the work mission has this shape
 

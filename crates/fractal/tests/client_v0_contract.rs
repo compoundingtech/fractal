@@ -3495,7 +3495,7 @@ async fn an_agent_session_runs_every_action_as_itself_behind_its_fences() {
     let state = test_state(root.path());
     let store = state.store.clone();
     let source = r#"version 2
-agent "example/operator" { workspace "."; command "true"; mission-authority { cancel "example/jobs/*" } }
+agent "example/operator" { workspace "."; command "true" }
 mission "example/jobs/one" state="ready" { concurrent-runs; goal "Wait for cancellation."; step "wait" { agentless } }
 mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside any grant."; step "wait" { agentless } }
 "#;

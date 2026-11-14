@@ -2580,6 +2580,8 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
     if let Some(tags) = unique_child(document, "tags")? {
         validate_tags(tags)?;
     }
+    // Historical syntax only. Local publication/claim admission rejects these ignored blocks;
+    // parsing must remain available to replay immutable mission revisions and desired claims.
     if let Some(authority) = unique_child(document, "mission-authority")?
         && !declares_no_mission_authority(authority)?
     {

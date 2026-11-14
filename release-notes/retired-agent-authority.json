@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reject new writes of ignored agent authority blocks while preserving historical readers; consolidate the universal-grants roadmap under native run authority",
+  "replay": {"status": "none", "detail": "Historical KDL parsing, immutable claim bytes, replicated admission and replay remain unchanged."},
+  "schema": {"status": "none", "detail": "No schema or projection change."},
+  "rules": {"status": "changed", "detail": "New publications and local claims reject mission-authority, queue-authority, seat-authority and agent-authority on agents, including mission-authority none and declarations nested in missions or revisions. Mission authority for run actors is unchanged; this does not introduce universal agent, expiry or revocation enforcement."},
+  "compatibility": {"status": "changed", "detail": "New writes return retired-agent-authority. Historical records remain readable and previewable. Producers must remove ignored agent blocks before publishing to an upgraded daemon."},
+  "downtime": {"status": "none", "detail": "No migration or additional downtime."},
+  "manual": {"status": "changed", "detail": "Remove ignored agent authority blocks from authored declarations before publication. Coordinate external producer rollout before deploying the write rejection."},
+  "recovery": {"status": "none", "detail": "Remove the ignored blocks and republish; do not rewrite historical claims."}
+}

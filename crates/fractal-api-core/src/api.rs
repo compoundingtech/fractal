@@ -2163,7 +2163,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "agent-charter-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
-        "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
+        "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period"
+        | "retired-agent-authority" => "validation-failed".into(),
         "launch-review-not-authorized"
         | "wrong-message-recipient"
         | "lane-approval-denied"
@@ -4412,6 +4413,19 @@ mod declared_admission_tests {
         assert_eq!(envelope["applied"], "none");
         assert_eq!(envelope["details"]["subject"], "agent/example");
         assert_eq!(envelope["details"]["field"], "declared_budgets.cpu_seconds");
+    }
+
+    #[test]
+    fn retired_agent_authority_uses_the_declared_client_validation_code() {
+        let raw = json!({
+            "code": "retired-agent-authority",
+            "message": "remove the ignored authority block",
+            "details": {"subject": "agent/example/worker", "field": "mission-authority"}
+        });
+        let envelope = client_error_envelope(StatusCode::UNPROCESSABLE_ENTITY, &raw, "request/test");
+        assert_eq!(envelope["code"], "validation-failed");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["details"], raw["details"]);
     }
 
     #[test]

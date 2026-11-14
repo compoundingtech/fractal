@@ -2352,7 +2352,12 @@ If the standby restarts while the primary is down, the standby cannot take over 
 
 In [free mode](../site/reference/configuration.md#free-mode), any person or agent may revise any part of a run, as
 itself. Human-only revision protection still selects the reviewers who must approve the change.
-`mission-authority` blocks still parse and are ignored.
+Historical `mission-authority`, `queue-authority`, `seat-authority` and `agent-authority`
+blocks remain parseable for immutable history and replay, including `mission-authority "none"`.
+New publications and local claims carrying them are refused with `retired-agent-authority`,
+including mission, step, nested and loop declarations and revision proposals. Remove the
+blocks from authored declarations; they never restricted agents. Mission `authority` is the
+separate run-actor contract described in [Program engine](program-engine.md#run-authority).
 
 Publishing a generated nested mission requires a claimed step with the exact `produces-mission`
 declaration. The agent must use `fractal work publish-mission`.

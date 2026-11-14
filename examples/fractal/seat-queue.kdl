@@ -27,14 +27,14 @@ version 2
 // Move the release run ahead. A move never interrupts or releases the step the seat holds now; the
 // new order applies when the seat is free. Use exactly one of --top, --bottom, --before RUN, or
 // --after RUN. A person moves runs with a person identity; the chief uses its own identity, and
-// the daemon checks its `queue-authority` on every move:
+// the daemon records the executing actor on every move:
 //
 //   st agents queue move agent/example/worker mission-run/example/release-notes/2026-10-01 \
 //     --top --reason "the release needs its notes first" --as person/operator
 //   st agents queue move agent/example/worker mission-run/example/docs-refresh/2026-10-01 \
 //     --after mission-run/example/release-notes/2026-10-01 --as agent/example/chief
 //
-// The worker cannot reorder its own queue unless a person grants it `queue-authority` over itself.
+// In free mode the worker can also reorder its own queue, acting as itself.
 // `queue {}` inside a mission orders steps within one run; the seat queue orders runs.
 
 mission "example/docs-refresh" state="ready" {

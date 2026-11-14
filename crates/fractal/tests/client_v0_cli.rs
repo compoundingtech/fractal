@@ -1290,13 +1290,11 @@ agent "example/operations/coordinator" {
 agent "example/operations/deputy" {
   workspace "."
   command "true"
-  mission-authority { cancel "example/jobs/docs/*" }
 }
 "#,
     )
     .unwrap();
-    // Free mode: the seat declares another seat with no grant, and st says it ignores the
-    // deputy's authority block.
+    // Free mode: the seat declares another seat without a grant, as itself.
     let applied = run_cli_with_agent_env(
         &socket,
         actor,
@@ -1304,13 +1302,6 @@ agent "example/operations/deputy" {
     )
     .await;
     value(&applied);
-    assert!(
-        String::from_utf8_lossy(&applied.stderr).contains(
-            "`agent/example/operations/deputy` declares `mission-authority`, which st ignores"
-        ),
-        "{}",
-        String::from_utf8_lossy(&applied.stderr)
-    );
     let mission = root.path().join("mission.kdl");
     std::fs::write(&mission, "version 2\nmission \"example/jobs/docs/one\" state=\"ready\" { goal \"Do the assigned work.\"; step \"wait\" { agentless } }\n").unwrap();
     value(
@@ -2943,7 +2934,6 @@ agent "queue-seat" { workspace "/tmp"; command "true" }
 agent "queue-chief" {
   workspace "/tmp"
   command "true"
-  queue-authority { move "client-v0-cli.queue-seat" }
 }
 mission "queued-work" state="ready" {
   concurrent-runs

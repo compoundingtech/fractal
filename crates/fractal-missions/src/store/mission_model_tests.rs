@@ -12,7 +12,7 @@ use crate::model::{BaselineSpec, CompletionSpec, DependencySpec, GateSpec, LoopA
 
 
 #[test]
-fn mission_authority_still_parses_and_free_mode_names_it_as_ignored() {
+fn historical_mission_authority_still_parses_and_is_inspectable() {
     let intent = crate::graph::parse_intent(
         r#"version 2
 mission "standing" state="ready" {

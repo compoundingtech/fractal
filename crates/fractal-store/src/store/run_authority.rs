@@ -34,6 +34,113 @@ pub fn run_authority_mode() -> RunAuthorityMode {
     if ENFORCE.load(Ordering::Relaxed) { RunAuthorityMode::Enforce } else { RunAuthorityMode::Audit }
 }
 
+const RETIRED_AGENT_AUTHORITY: [&str; 4] = [
+    "mission-authority", "queue-authority", "seat-authority", "agent-authority",
+];
+
+fn retired_authority(subject: &str, field: &str) -> FractalError {
+    FractalError::new(
+        "retired-agent-authority",
+        format!("`{subject}` declares `{field}`, which never restricts agents; remove it; mission `authority` applies only to run actors"),
+    ).with_detail("subject", subject).with_detail("field", field)
+}
+
+fn validate_agent_declaration(subject: &str, desired: &Value) -> Result<(), FractalError> {
+    for child in desired.get("children").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(field) = child.get("name").and_then(Value::as_str)
+            && RETIRED_AGENT_AUTHORITY.contains(&field)
+        {
+            return Err(retired_authority(subject, field));
+        }
+    }
+    Ok(())
+}
+
+fn validate_declaration_source(source: &str, subject: &str) -> Result<(), FractalError> {
+    fn walk(document: &kdl::KdlDocument, subject: &str) -> Result<(), FractalError> {
+        for node in document.nodes() {
+            if let Some(children) = node.children() {
+                if node.name().value() == "agent" {
+                    for child in children.nodes() {
+                        let field = child.name().value();
+                        if RETIRED_AGENT_AUTHORITY.contains(&field) {
+                            return Err(retired_authority(subject, field));
+                        }
+                    }
+                }
+                walk(children, subject)?;
+            }
+        }
+        Ok(())
+    }
+    let document = source.parse::<kdl::KdlDocument>()
+        .map_err(|error| FractalError::new("invalid-kdl", error.to_string()))?;
+    walk(&document, subject)
+}
+
+/// Authoring admission only: historical parsing, replicated claims and replay stay unchanged.
+pub fn validate_publication(intent: &NormalizedIntent) -> Result<(), FractalError> {
+    fn mission(spec: &crate::model::MissionSpec) -> Result<(), FractalError> {
+        if let Some(source) = &spec.declarations_kdl {
+            validate_declaration_source(source, &spec.subject)?;
+        }
+        for step in spec.steps.values() {
+            if let Some(source) = &step.declarations_kdl {
+                validate_declaration_source(source, &spec.subject)?;
+            }
+            for nested in std::iter::once(step.nested_mission.as_deref()).chain(
+                step.loop_spec.iter().flat_map(|spec| [
+                    Some(spec.round.as_ref()), spec.on_keep.as_deref(), spec.on_discard.as_deref(),
+                ]),
+            ).flatten() {
+                mission(nested)?;
+            }
+        }
+        Ok(())
+    }
+    for desired in intent.subjects.values().filter(|desired| desired.kind == "agent") {
+        validate_agent_declaration(&desired.subject, &desired.desired)?;
+    }
+    for spec in intent.missions.values() {
+        mission(spec)?;
+    }
+    Ok(())
+}
+
+/// Inspect raw author input before decoding can discard fields, including nested revisions.
+pub fn validate_new_claim(kind: &str, subject: &str, body: &Value) -> Result<(), FractalError> {
+    fn walk(value: &Value, subject: &str) -> Result<(), FractalError> {
+        match value {
+            Value::Object(object) => {
+                if object.get("kind").and_then(Value::as_str) == Some("agent")
+                    && let Some(desired) = object.get("desired") {
+                    validate_agent_declaration(subject, desired)?;
+                }
+                if let Some(source) = object.get("declarations_kdl").and_then(Value::as_str) {
+                    validate_declaration_source(source, subject)?;
+                }
+                // Traverse schema locations, never arbitrary env, tags, inputs or message data.
+                for key in ["fields", "body", "mission_spec", "nested_mission", "loop_spec",
+                    "round", "on_keep", "on_discard"] {
+                    if let Some(child) = object.get(key) { walk(child, subject)?; }
+                }
+                for step in object.get("steps").and_then(Value::as_object)
+                    .into_iter().flat_map(|steps| steps.values()) {
+                    walk(step, subject)?;
+                }
+            }
+            Value::Array(values) => for child in values { walk(child, subject)?; },
+            _ => {}
+        }
+        Ok(())
+    }
+    if matches!(kind, "intent.desired" | "mission.published" | "run-generation.created"
+        | "revision-proposal.created" | "mission-run.created" | "work.person-asked") {
+        walk(body, subject)?;
+    }
+    Ok(())
+}
+
 /// Whether `pattern` covers `target`, itself exact or a terminal `/*` namespace.
 pub fn covers(pattern: &str, target: &str) -> bool {
     pattern == target
