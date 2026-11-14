@@ -76,7 +76,7 @@ fn seed_scratch_threads() {
         None,
     )
     .unwrap();
-    let first_id = first.0.id.clone();
+    let first_id = first.0.subject.clone();
     store::thread_delivery::append_reply(
         &store,
         &input("message.sent", botanist, "seed/calib-2", serde_json::json!({
