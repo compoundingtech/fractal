@@ -51521,7 +51521,9 @@ mission "work-alert" state="ready" {
                 harness_incarnation_key("worker-one")
             )
         );
-        assert_eq!(messages[0].tags[1], format!("mission-run:{}", run.subject));
+        assert!(messages[0].tags.contains(&format!("mission-run:{}", run.subject)));
+        assert_eq!(messages[0].tags.iter()
+            .filter(|tag| tag.starts_with("fractal-invocation:")).count(), 1);
         assert!(messages[0].tags.contains(&"st3-wake-attempt:1".into()));
         assert!(
             messages[0]
