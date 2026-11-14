@@ -1552,7 +1552,11 @@ fn ts_object(value: &Value) -> Result<String> {
             } else {
                 "?"
             };
-            fields.push(format!("  {name}{optional}: {};", ts_type(definition)?));
+            // A wire word used as a key, such as `hold-routine`, is no identifier: quote it.
+            let identifier = !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
+            let key = if identifier { name.clone() } else { serde_json::to_string(name)? };
+            fields.push(format!("  {key}{optional}: {};", ts_type(definition)?));
         }
     }
     // `{}` accepts arbitrary properties in TypeScript; closed empty args must not.

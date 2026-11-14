@@ -1243,8 +1243,8 @@ export type AvailabilityDeadlineClockChange = {
 };
 
 export type AvailabilityDeadlineClockDurations = {
-  hold-all: number;
-  hold-routine: number;
+  "hold-all": number;
+  "hold-routine": number;
   run: number;
 };
 
