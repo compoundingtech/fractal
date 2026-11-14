@@ -237,8 +237,12 @@ export function truncatePatch(file: NormalizedDiffFile, maxLines: number): { rea
   return { file: short, hidden: total - kept, kept }
 }
 
-/** Kit diff rows (DiffPanel, tool previews) as one normalized file. */
+/**
+ * Kit diff rows (DiffPanel, tool previews) as one normalized file. A `hunk` row is either a header
+ * (kept when it carries ranges, a bare `@@` boundary otherwise) or a `\ No newline at end of file`
+ * marker, which stays a marker on the line before it.
+ */
 export function patchFromRows(path: string, rows: readonly DiffRowInput[], options: { readonly excerpt?: boolean } = {}): NormalizedDiffFile {
-  const text = rows.map(row => row.kind === 'hunk' ? (row.text.startsWith('@@') ? row.text : '@@') : `${row.kind === 'added' ? '+' : row.kind === 'removed' ? '-' : ' '}${row.text}`).join('\n')
+  const text = rows.map(row => row.kind === 'hunk' ? (row.text.startsWith('@@') || row.text.startsWith('\\') ? row.text : '@@') : `${row.kind === 'added' ? '+' : row.kind === 'removed' ? '-' : ' '}${row.text}`).join('\n')
   return normalizePatch(text, { path, excerpt: options.excerpt })[0] ?? { path, patch: `--- a/${path}\n+++ b/${path}\n`, added: 0, removed: 0, excerpt: options.excerpt === true }
 }

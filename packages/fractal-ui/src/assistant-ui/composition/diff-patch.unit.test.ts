@@ -1,3 +1,4 @@
+import { parseUnifiedDiff } from '../embrace-tool-preview.ts'
 import { collapseWhitespaceChanges, diffStats, normalizePatch, patchFromRows, truncatePatch } from './diff-patch.ts'
 
 // Standalone pure TypeScript suite: no DOM, React, runner or Node type dependency.
@@ -147,6 +148,27 @@ test('patchFromRows turns kit diff rows into a normalized patch', () => {
   const file = patchFromRows('r.ts', [{ kind: 'context', text: 'a' }, { kind: 'removed', text: 'b' }, { kind: 'added', text: 'c' }], { excerpt: true })
   equal([file.added, file.removed, file.excerpt], [1, 1, true], 'counts')
   assert(file.patch.includes('\n a\n-b\n+c\n'), file.patch)
+})
+
+// Tool previews: parseUnifiedDiff keeps each `\ No newline at end of file` marker as a `hunk` row.
+const finalLineRows = (removedMarker: boolean, addedMarker: boolean) => {
+  const [diff] = parseUnifiedDiff(['--- a/n.ts', '+++ b/n.ts', '@@ -4,2 +4,2 @@', ' z', '-a', ...(removedMarker ? [noNewline] : []), '+b', ...(addedMarker ? [noNewline] : [])].join('\n'))
+  return patchFromRows(diff!.path, diff!.lines)
+}
+
+test('patchFromRows keeps no-newline markers from parsed tool diffs on both sides', () => {
+  const file = finalLineRows(true, true)
+  equal([file.path, file.added, file.removed, file.excerpt], ['n.ts', 1, 1, false], 'counts')
+  equal(file.patch.split('\n'), ['--- a/n.ts', '+++ b/n.ts', '@@ -4,2 +4,2 @@', ' z', '-a', noNewline, '+b', noNewline, ''], 'real ranges, no fabricated context, each marker after its line')
+})
+
+test('patchFromRows keeps a no-newline marker that only one side has', () => {
+  const removed = finalLineRows(true, false)
+  equal([removed.added, removed.removed], [1, 1], 'removal side counts')
+  equal(removed.patch.split('\n').slice(2), ['@@ -4,2 +4,2 @@', ' z', '-a', noNewline, '+b', ''], 'removal side only')
+  const added = finalLineRows(false, true)
+  equal([added.added, added.removed], [1, 1], 'addition side counts')
+  equal(added.patch.split('\n').slice(2), ['@@ -4,2 +4,2 @@', ' z', '-a', '+b', noNewline, ''], 'addition side only')
 })
 
 test('a removed line that looks like a file header stays inside its counted hunk', () => {
