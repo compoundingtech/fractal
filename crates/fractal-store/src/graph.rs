@@ -28,6 +28,7 @@ const ROOT_NODES: &[&str] = &[
     "planning-session",
     "message",
     "objective",
+    "notice-owner",
     "repair",
     "schedule",
     "stop",
@@ -388,6 +389,12 @@ fn parse_desired_node(
             "an objective declaration must be at the root",
         ));
     }
+    if kind == crate::notice_owner::KIND && context.owner_run.is_some() {
+        return Err(FractalError::new(
+            "notice-owner-inside-mission",
+            "a notice-owner declaration must be at the root",
+        ));
+    }
     match kind {
         "host" => parse_host(node, context),
         "agent" => parse_agent(node, enclosing_host, context),
@@ -398,6 +405,7 @@ fn parse_desired_node(
         "resource" => parse_resource_declaration(node, context),
         "repair" => parse_replica_repair(node, context),
         "stop" => parse_stop(node, context),
+        "notice-owner" => parse_notice_owner(node, context),
         _ => parse_structure(node, kind, context),
     }
 }
@@ -1753,6 +1761,26 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     Ok(())
 }
 
+/// The fleet's single notice owner, read by the kernel's strict reader. Its subject is fixed, so
+/// a handover edits the one declaration and no apply can leave two owners behind.
+fn parse_notice_owner(node: &KdlNode, context: &mut ParseContext) -> Result<(), FractalError> {
+    let desired = canonical_node(node)?;
+    crate::notice_owner::parse(&desired)?;
+    insert_subject(
+        context,
+        DesiredSubject {
+            accountable: None,
+            subject: crate::notice_owner::SUBJECT.into(),
+            kind: crate::notice_owner::KIND.into(),
+            desired,
+            member: None,
+            owner_run: None,
+            owner_generation: None,
+            owner_step: None,
+        },
+    )
+}
+
 /// An objective a fleet declares: the kernel's strict reader, and only an interval or count over
 /// claims named `NAMESPACE/NAME`, since native telemetry counts toward the objectives Fractal ships.
 fn validate_objective(node: &KdlNode) -> Result<(), FractalError> {
@@ -2459,7 +2487,6 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "one-shot",
         "capacity",
         "handles-faults",
-        "notice-runtime",
         "accountable",
         "principal",
         "mission-authority",
@@ -2505,7 +2532,6 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "one-shot",
         "capacity",
         "handles-faults",
-        "notice-runtime",
         "accountable",
         "mission-authority",
         "queue-authority",
@@ -2546,10 +2572,6 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
     }
     if let Some(flag) = unique_child(document, "handles-faults")? {
         ensure_bare(flag)?;
-    }
-    if let Some(flag) = unique_child(document, "notice-runtime")? {
-        ensure_bare(flag)?;
-        ensure_no_children(flag)?;
     }
     if let Some(flag) = unique_child(document, "one-shot")? {
         ensure_bare(flag)?;
