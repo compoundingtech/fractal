@@ -4,8 +4,8 @@
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "No persistent schema changes."},
   "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
-  "compatibility": {"status": "none", "detail": "Chromium's per-origin localStorage commits in the browser before a retained audit page's cached view updates; the isolation worker now re-reads a probe whose read raced a DOMStorage mutation acknowledgment, and the browser test awaits the same acknowledgment. No product behavior or protocol changes."},
+  "compatibility": {"status": "none", "detail": "The isolation browser test awaits the localStorage write acknowledgment on the audit target's CDP session before capturing its stale-view fixture. The isolation worker and its existing storage-clear acknowledgment are unchanged. No product behavior or protocol changes."},
   "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
   "manual": {"status": "none", "detail": "No user action is required."},
-  "recovery": {"status": "none", "detail": "Test-harness and audit-read hardening only; residual storage detection semantics are unchanged."}
+  "recovery": {"status": "none", "detail": "Browser-test ordering only; residual storage detection semantics are unchanged."}
 }
