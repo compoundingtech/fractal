@@ -1531,6 +1531,40 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st hosts ls",
+      "description": "List active execution-host admission holds",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts hold",
+      "description": "Place an authenticated execution-host admission hold",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts release",
+      "description": "Resolve an owned hold at its observed revision",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_host_holds_preserve_owner_and_revision_across_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st hosts recover",
+      "description": "Recover a terminal run-owned hold as the configured host operator",
+      "tests": [
+        "crates/fractal/src/hosts_cli.rs::host_hold_commands_preserve_revision_and_identity",
+        "crates/fractal-api-core/src/api/host_holds.rs::operator_recovery_rejects_payload_impersonation_and_stale_revision",
+        "crates/fractal-store/src/store/host_holds.rs::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"
+      ],
+      "verification": "real Clap parsing plus API and store authority, revision and history regressions"
+    },
+    {
       "command": "st lanes approve",
       "description": "Approve an entry as the lane's approver",
       "tests": [

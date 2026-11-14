@@ -2,20 +2,34 @@
 //! which asks may interrupt them, whether their asks' deadlines are held, and the note agents
 //! read. No collection stream carries availability, so the pane reads `availability.list` and
 //! `notes.list` when it opens, when the terminal regains focus, after a reconnect and on `r`,
-//! never on a timer.
+//! never on a timer. Its keys set or clear each axis and the note through `availability.set`
+//! and `notes.set`, and the pane shows what Fractal answered.
 
 use super::doc::{Doc, DocExt, Hit};
 use super::{text, theme};
-use chrono::{DateTime, TimeZone};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, SecondsFormat, TimeDelta, TimeZone, Utc};
 use fractal_client::{
-    AvailabilityDeadlineClock, AvailabilityInterruptions, AvailabilityPresence, AvailabilityStatus, AvailabilityStatusSource, Client,
-    ClientError, DirectiveNote, ErrorCode, PersonAvailability,
+    AvailabilityDeadlineClock, AvailabilityDeadlineClockChange, AvailabilityInterruptions, AvailabilityInterruptionsChange,
+    AvailabilityPresence, AvailabilitySet, AvailabilityStatus, AvailabilityStatusChange, AvailabilityStatusSource, Client,
+    ClientError, DirectiveNote, DirectiveNoteSet, ErrorCode, PersonAvailability,
 };
 use ratatui::text::{Line, Span};
+use std::collections::VecDeque;
 use std::fmt::Display;
 
 /// Labels are padded to this many cells, so the values line up.
 const LABEL: usize = 16;
+/// The keys a button presses that are not letters.
+pub(crate) const ENTER: char = '\n';
+pub(crate) const ESC: char = '\u{1b}';
+/// Until when a value holds, by key; `5` types one and Enter keeps it until changed.
+const PRESETS: [(char, &str, Preset); 4] = [
+    ('1', "30 minutes", Preset::HalfHour),
+    ('2', "1 hour", Preset::Hour),
+    ('3', "2 hours", Preset::TwoHours),
+    ('4', "tomorrow 09:00", Preset::TomorrowNine),
+];
+const TYPED_HELP: &str = "type a duration such as 45m or 1h30m, or a time such as 17:30, tomorrow 09:00 or 2026-11-14 09:00";
 
 /// Under a word a newer Fractal sent, which this version does not know and shows as `unknown`.
 const UNKNOWN: &str = "A word this version does not know; updating shows it.";
@@ -27,16 +41,118 @@ pub(crate) struct Reading {
     pub(crate) note: Option<DirectiveNote>,
 }
 
+/// What the person can change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Axis {
+    Status,
+    Interruptions,
+    DeadlineClock,
+    Note,
+}
+
+impl Axis {
+    fn title(self) -> &'static str {
+        match self {
+            Axis::Status => "status",
+            Axis::Interruptions => "interruptions",
+            Axis::DeadlineClock => "deadline clock",
+            Axis::Note => "note",
+        }
+    }
+
+    /// Each value's key, label and word; `None` returns the axis to its default.
+    fn choices(self) -> &'static [(char, &'static str, Option<Word>)] {
+        match self {
+            Axis::Status => &[
+                ('1', "away", Some(Word::Status(AvailabilityStatus::Away))),
+                ('2', "available", Some(Word::Status(AvailabilityStatus::Available))),
+                ('0', "from presence", None),
+            ],
+            Axis::Interruptions => &[
+                ('1', "urgent asks only", Some(Word::Interruptions(AvailabilityInterruptions::Urgent))),
+                ('2', "none", Some(Word::Interruptions(AvailabilityInterruptions::None))),
+                ('0', "all asks", None),
+            ],
+            Axis::DeadlineClock => &[
+                ('1', "hold routine asks", Some(Word::DeadlineClock(AvailabilityDeadlineClock::HoldRoutine))),
+                ('2', "hold every ask", Some(Word::DeadlineClock(AvailabilityDeadlineClock::HoldAll))),
+                ('0', "run", None),
+            ],
+            Axis::Note => &[],
+        }
+    }
+}
+
+/// A value the person can choose, as the client names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Word {
+    Status(AvailabilityStatus),
+    Interruptions(AvailabilityInterruptions),
+    DeadlineClock(AvailabilityDeadlineClock),
+}
+
+impl Word {
+    /// The word on the wire.
+    fn as_str(self) -> &'static str {
+        match self {
+            Word::Status(word) => word.as_str(),
+            Word::Interruptions(word) => word.as_str(),
+            Word::DeadlineClock(word) => word.as_str(),
+        }
+    }
+}
+
+/// A preset end: from now, or tomorrow at 09:00 local time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Preset {
+    HalfHour,
+    Hour,
+    TwoHours,
+    TomorrowNine,
+}
+
+/// What the person is choosing: an axis's value, then until when it holds, or the note's words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Editor {
+    Value(Axis),
+    Until { axis: Axis, value: String, label: String, typed: Option<String>, problem: Option<String> },
+    Note(String),
+}
+
+/// One change, sent alone: each answer is the whole availability or note after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Write {
+    Availability(AvailabilitySet),
+    Note(DirectiveNoteSet),
+}
+
 /// A request the live loop sends for the pane, answered with a [`Done`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Want {
-    /// Read availability and the note; the generation fences an answer from an older connection.
+    /// Read availability and the note; the generation fences an answer that a reconnect or a
+    /// write has made old.
     Read(u64),
+    Write(Write),
+}
+
+#[derive(Debug)]
+pub(crate) enum Wrote {
+    Availability(PersonAvailability),
+    Note(Option<DirectiveNote>),
 }
 
 #[derive(Debug)]
 pub(crate) enum Done {
     Read(u64, Result<Reading, String>),
+    Wrote(Result<Wrote, String>),
+}
+
+/// What a key did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Pressed {
+    Ignored,
+    Done,
+    Say(String),
 }
 
 #[derive(Default)]
@@ -45,12 +161,19 @@ pub(crate) struct Availability {
     shown: bool,
     /// Something may have changed since the last read: focus came back, a reconnect, `r`.
     stale: bool,
-    reading: bool,
-    /// Bumped by a reconnect, so a read sent before it is never shown.
+    /// The generation of the read in flight.
+    reading: Option<u64>,
+    /// Bumped by a reconnect and by each write, so an older read is never shown.
     generation: u64,
     last: Option<Reading>,
     /// Why the last read failed: said beside an older reading, or alone.
     failed: Option<String>,
+    editor: Option<Editor>,
+    /// Changes not sent yet, one at a time in the order they were made.
+    writes: VecDeque<Write>,
+    writing: bool,
+    /// Why Fractal did not take the last change.
+    refused: Option<String>,
 }
 
 impl Availability {
@@ -59,9 +182,16 @@ impl Availability {
         self.stale |= shown && !self.shown;
         self.shown = shown;
         let mut wants = Vec::new();
-        if shown && self.stale && !self.reading {
+        if !self.writing
+            && let Some(write) = self.writes.pop_front()
+        {
+            self.writing = true;
+            self.generation += 1;
+            wants.push(Want::Write(write));
+        }
+        if shown && self.stale && self.reading.is_none() && !self.writing {
             self.stale = false;
-            self.reading = true;
+            self.reading = Some(self.generation);
             wants.push(Want::Read(self.generation));
         }
         wants
@@ -74,18 +204,31 @@ impl Availability {
 
     /// A new connection, perhaps to another member: a read sent before it is not shown.
     pub(crate) fn connected(&mut self) {
+        self.writes.clear();
+        self.editor = None;
         self.generation += 1;
-        self.reading = false;
+        self.reading = None;
+        self.stale = true;
+    }
+
+    /// Unsent edits are never replayed after an outage; an in-flight write remains ambiguous.
+    pub(crate) fn disconnected(&mut self) {
+        self.writes.clear();
+        self.editor = None;
+        self.generation += 1;
+        self.reading = None;
         self.stale = true;
     }
 
     pub(crate) fn done(&mut self, done: Done) {
         match done {
             Done::Read(generation, outcome) => {
+                if self.reading == Some(generation) {
+                    self.reading = None;
+                }
                 if generation != self.generation {
                     return;
                 }
-                self.reading = false;
                 match outcome {
                     Ok(reading) => {
                         self.last = Some(reading);
@@ -94,7 +237,139 @@ impl Availability {
                     Err(why) => self.failed = Some(why),
                 }
             }
+            Done::Wrote(outcome) => {
+                self.writing = false;
+                match outcome {
+                    Ok(wrote) => {
+                        self.refused = None;
+                        if let Some(last) = self.last.as_mut() {
+                            match wrote {
+                                Wrote::Availability(availability) => last.availability = availability,
+                                Wrote::Note(note) => last.note = note,
+                            }
+                        }
+                    }
+                    // Whatever happened, the pane shows Fractal's word on it next.
+                    Err(why) => {
+                        self.refused = Some(why);
+                        self.stale = true;
+                    }
+                }
+            }
         }
+    }
+
+    pub(crate) fn editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    /// The words being typed: the note, or a custom end.
+    pub(crate) fn typed_mut(&mut self) -> Option<&mut String> {
+        match &mut self.editor {
+            Some(Editor::Note(text) | Editor::Until { typed: Some(text), .. }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// A key, or the button that presses it. `s`, `i`, `d` and `n` choose what to change, a
+    /// digit its value or end, Enter goes on (or keeps a value until changed), Esc puts it away.
+    pub(crate) fn press<Tz: TimeZone>(&mut self, key: char, live: bool, now: &DateTime<Tz>) -> Pressed {
+        if !live && key != ESC && key != 'r' && (self.editor.is_some() || matches!(key, 's' | 'i' | 'd' | 'n')) {
+            self.editor = None;
+            return Pressed::Say("Reconnect to Fractal before changing availability".into());
+        }
+        let Some(editor) = self.editor.clone() else {
+            let axis = match key {
+                'r' => {
+                    self.refresh();
+                    return Pressed::Done;
+                }
+                's' => Axis::Status,
+                'i' => Axis::Interruptions,
+                'd' => Axis::DeadlineClock,
+                'n' => Axis::Note,
+                _ => return Pressed::Ignored,
+            };
+            let Some(reading) = &self.last else {
+                return Pressed::Say("Your availability is not read yet: r reads it".into());
+            };
+            self.editor = Some(match axis {
+                Axis::Note => Editor::Note(reading.note.as_ref().map(|note| note.text.clone()).unwrap_or_default()),
+                axis => Editor::Value(axis),
+            });
+            return Pressed::Done;
+        };
+        if key == ESC {
+            self.editor = None;
+            return Pressed::Done;
+        }
+        match editor {
+            Editor::Value(axis) => match axis.choices().iter().find(|(choice, ..)| *choice == key) {
+                Some((_, label, Some(value))) => {
+                    self.editor = Some(Editor::Until { axis, value: value.as_str().into(), label: (*label).into(), typed: None, problem: None });
+                }
+                Some((_, _, None)) => self.queue(axis, None, None),
+                None => return Pressed::Ignored,
+            },
+            Editor::Note(text) if key == ENTER => {
+                let text = text.trim();
+                if text.is_empty() {
+                    self.queue(Axis::Note, None, None);
+                } else {
+                    self.editor = Some(Editor::Until { axis: Axis::Note, value: text.into(), label: "note".into(), typed: None, problem: None });
+                }
+            }
+            Editor::Note(_) => return Pressed::Ignored,
+            Editor::Until { axis, value, label, typed, .. } => {
+                let until = match (&typed, key) {
+                    (None, ENTER) => Ok(None),
+                    (None, '5') => {
+                        self.editor = Some(Editor::Until { axis, value, label, typed: Some(String::new()), problem: None });
+                        return Pressed::Done;
+                    }
+                    (None, key) => match PRESETS.iter().find(|(preset, ..)| *preset == key) {
+                        Some((_, _, preset)) => Ok(Some(preset_until(*preset, now))),
+                        None => return Pressed::Ignored,
+                    },
+                    (Some(typed), ENTER) => parse_until(typed, now).map(Some),
+                    (Some(_), _) => return Pressed::Ignored,
+                };
+                match until {
+                    Ok(until) => self.queue(axis, Some(value), until),
+                    Err(problem) => self.editor = Some(Editor::Until { axis, value, label, typed, problem: Some(problem) }),
+                }
+            }
+        }
+        Pressed::Done
+    }
+
+    /// Send one change: `value: None` returns the axis to its default or clears the note.
+    fn queue(&mut self, axis: Axis, value: Option<String>, until: Option<DateTime<Utc>>) {
+        let until = until.map(|at| at.to_rfc3339_opts(SecondsFormat::Millis, true));
+        let write = match axis {
+            Axis::Status => Write::Availability(AvailabilitySet {
+                status: Some(AvailabilityStatusChange { value, until }),
+                ..AvailabilitySet::default()
+            }),
+            Axis::Interruptions => Write::Availability(AvailabilitySet {
+                interruptions: Some(AvailabilityInterruptionsChange {
+                    value: value.unwrap_or_else(|| AvailabilityInterruptions::All.as_str().into()),
+                    until,
+                }),
+                ..AvailabilitySet::default()
+            }),
+            Axis::DeadlineClock => Write::Availability(AvailabilitySet {
+                deadline_clock: Some(AvailabilityDeadlineClockChange {
+                    value: value.unwrap_or_else(|| AvailabilityDeadlineClock::Run.as_str().into()),
+                    until,
+                }),
+                ..AvailabilitySet::default()
+            }),
+            Axis::Note => Write::Note(DirectiveNoteSet { text: value, expires_at: until }),
+        };
+        self.editor = None;
+        self.refused = None;
+        self.writes.push_back(write);
     }
 
     /// The pane. `now` is the person's local clock, which every time is shown in.
@@ -184,14 +459,92 @@ impl Availability {
             doc.wrap(&[text::run(format!("Could not read it again: {why}"), theme::soft())], width);
         }
         doc.blank();
-        doc.buttons(&[("r", "read again", Hit::Availability('r'), theme::ACCENT)]);
+        self.editor_section(&mut doc, width);
+        if self.writing || !self.writes.is_empty() {
+            doc.blank();
+            doc.line(Line::from(Span::styled("Saving…", theme::dim())));
+        }
+        if let Some(why) = &self.refused {
+            doc.blank();
+            doc.wrap(&[text::run(format!("Not changed: {why}"), theme::fg(theme::RED))], width);
+        }
         doc
+    }
+
+    /// The keys for what can be changed now, and the box being typed in.
+    fn editor_section(&self, doc: &mut Doc, width: usize) {
+        let accent = |key: &'static str, label: &'static str, press: char| (key, label, Hit::Availability(press), theme::ACCENT);
+        let cancel = ("Esc", "cancel", Hit::Availability(ESC), theme::OVERLAY1);
+        match &self.editor {
+            None => doc.buttons_fit(
+                &[
+                    accent("s", "status", 's'),
+                    accent("i", "interruptions", 'i'),
+                    accent("d", "deadline clock", 'd'),
+                    accent("n", "note", 'n'),
+                    accent("r", "read again", 'r'),
+                ],
+                width,
+            ),
+            Some(Editor::Value(axis)) => {
+                doc.section(&format!("Set {}", axis.title()), None, width);
+                let keys = axis.choices().iter().map(|(key, _, _)| key.to_string()).collect::<Vec<_>>();
+                let mut buttons = axis
+                    .choices()
+                    .iter()
+                    .zip(&keys)
+                    .map(|((key, label, _), shown)| (shown.as_str(), *label, Hit::Availability(*key), theme::ACCENT))
+                    .collect::<Vec<_>>();
+                buttons.push(cancel);
+                doc.buttons_fit(&buttons, width);
+            }
+            Some(Editor::Until { label, typed, problem, .. }) => {
+                doc.section(&format!("{} until", text::sanitize(label)), None, width);
+                match typed {
+                    None => {
+                        let mut buttons = PRESETS
+                            .iter()
+                            .zip(["1", "2", "3", "4"])
+                            .map(|((key, label, _), shown)| (shown, *label, Hit::Availability(*key), theme::ACCENT))
+                            .collect::<Vec<_>>();
+                        buttons.push(accent("5", "custom", '5'));
+                        buttons.push(accent("Enter", "until you change it", ENTER));
+                        buttons.push(cancel);
+                        doc.buttons_fit(&buttons, width);
+                    }
+                    Some(typed) => {
+                        input(doc, "Until", typed, width);
+                        doc.wrap(&[text::run("45m, 1h30m, 17:30, tomorrow 09:00 or 2026-11-14 09:00 · Enter sets it · Esc cancels", theme::dim())], width);
+                    }
+                }
+                if let Some(problem) = problem {
+                    doc.wrap(&[text::run(problem.clone(), theme::fg(theme::RED))], width);
+                }
+            }
+            Some(Editor::Note(typed)) => {
+                doc.section("Set note", None, width);
+                input(doc, "Note", typed, width);
+                doc.wrap(&[text::run("Enter goes on to when it ends · an empty note clears it · Esc cancels", theme::dim())], width);
+            }
+        }
     }
 }
 
 /// `label   value · details`, the value wrapped under itself.
 fn row(doc: &mut Doc, label: &str, value: &str, style: ratatui::style::Style, details: &str, width: usize) {
     let runs = [text::run(text::sanitize(value), style), text::run(details.to_owned(), theme::dim())];
+    doc.lines(text::wrap(
+        &runs,
+        width,
+        &[text::run(format!("{label:<LABEL$}"), theme::dim())],
+        &[text::run(" ".repeat(LABEL), theme::dim())],
+        None,
+    ));
+}
+
+/// A box being typed in, with the cursor at its end.
+fn input(doc: &mut Doc, label: &str, typed: &str, width: usize) {
+    let runs = [text::run(text::sanitize(typed), theme::text()), text::run("█", theme::fg(theme::ACCENT))];
     doc.lines(text::wrap(
         &runs,
         width,
@@ -227,17 +580,97 @@ where
     }
 }
 
-/// A refusal as the person reads it: an older daemon, or a pairing without the scope, says
-/// what to do about it.
+/// The end a preset names: from `now`, or literally tomorrow at 09:00 in `now`'s zone.
+pub(crate) fn preset_until<Tz: TimeZone>(preset: Preset, now: &DateTime<Tz>) -> DateTime<Utc> {
+    let utc = now.with_timezone(&Utc);
+    match preset {
+        Preset::HalfHour => utc + TimeDelta::minutes(30),
+        Preset::Hour => utc + TimeDelta::hours(1),
+        Preset::TwoHours => utc + TimeDelta::hours(2),
+        Preset::TomorrowNine => at_local(now, tomorrow(now), NaiveTime::from_hms_opt(9, 0, 0).expect("09:00 is a time")),
+    }
+}
+
+/// A typed end: a duration from now (`45m`, `1h30m`, `2d`), a local time (`17:30`, the next one
+/// to come; `tomorrow 09:00`; `2026-11-14 09:00`), or an RFC 3339 time. It must be in the future.
+pub(crate) fn parse_until<Tz: TimeZone>(input: &str, now: &DateTime<Tz>) -> Result<DateTime<Utc>, String> {
+    let input = input.trim();
+    let utc = now.with_timezone(&Utc);
+    let clock = |input: &str| NaiveTime::parse_from_str(input.trim(), "%H:%M").ok();
+    let at = if let Some(span) = duration(input) {
+        utc.checked_add_signed(span).ok_or("that is too far away")?
+    } else if let Some(time) = input.strip_prefix("tomorrow").and_then(clock) {
+        at_local(now, tomorrow(now), time)
+    } else if let Some(time) = clock(input) {
+        let today = at_local(now, now.date_naive(), time);
+        if today > utc { today } else { at_local(now, tomorrow(now), time) }
+    } else if let Ok(local) = NaiveDateTime::parse_from_str(input, "%Y-%m-%d %H:%M") {
+        at_local(now, local.date(), local.time())
+    } else if let Ok(at) = DateTime::parse_from_rfc3339(input) {
+        at.with_timezone(&Utc)
+    } else {
+        return Err(TYPED_HELP.into());
+    };
+    if at <= utc {
+        return Err("that time has passed".into());
+    }
+    Ok(at)
+}
+
+/// `45m`, `1h30m`, `2d`: whole units, more than nothing.
+fn duration(input: &str) -> Option<TimeDelta> {
+    let mut total = TimeDelta::zero();
+    let mut digits = String::new();
+    for character in input.chars() {
+        if character.is_ascii_digit() {
+            digits.push(character);
+            continue;
+        }
+        let count = digits.parse::<i64>().ok()?;
+        digits.clear();
+        let span = match character {
+            'd' => TimeDelta::try_days(count),
+            'h' => TimeDelta::try_hours(count),
+            'm' => TimeDelta::try_minutes(count),
+            _ => None,
+        }?;
+        total = total.checked_add(&span)?;
+    }
+    (digits.is_empty() && total > TimeDelta::zero()).then_some(total)
+}
+
+fn tomorrow<Tz: TimeZone>(now: &DateTime<Tz>) -> NaiveDate {
+    now.date_naive().succ_opt().expect("a day after today")
+}
+
+/// A wall-clock time on a day in `now`'s zone; in a gap a clock change skipped, the first
+/// quarter hour after it.
+fn at_local<Tz: TimeZone>(now: &DateTime<Tz>, day: NaiveDate, time: NaiveTime) -> DateTime<Utc> {
+    let zone = now.timezone();
+    let mut local = day.and_time(time);
+    loop {
+        if let Some(at) = zone.from_local_datetime(&local).earliest() {
+            return at.with_timezone(&Utc);
+        }
+        local += TimeDelta::minutes(15);
+    }
+}
+
+/// A refusal as the person reads it: an older daemon, a pairing without the scope, or an
+/// agent's session says what to do about it.
 pub(crate) fn refusal(error: &ClientError) -> String {
     if error.is_missing_route() {
         return "this Fractal does not know availability yet: its daemon needs an update".into();
     }
-    if let ClientError::Api(ErrorCode::Forbidden, message, _) = error
-        && message.contains("not granted")
-        && let Some(scope) = message.split('`').nth(1)
-    {
-        return format!("this device's pairing does not grant {scope}: pair the device again to allow it");
+    if let ClientError::Api(ErrorCode::Forbidden, message, _) = error {
+        if message.contains("agents are refused") {
+            return "only a person changes their own availability and note, and this session is an agent's".into();
+        }
+        if message.contains("not granted")
+            && let Some(scope) = message.split('`').nth(1)
+        {
+            return format!("this device's pairing does not grant {scope}: pair the device again to allow it");
+        }
     }
     error.human()
 }
@@ -245,6 +678,12 @@ pub(crate) fn refusal(error: &ClientError) -> String {
 pub(crate) async fn perform(client: &Client, want: Want) -> Done {
     match want {
         Want::Read(generation) => Done::Read(generation, read(client).await),
+        Want::Write(Write::Availability(request)) => Done::Wrote(
+            client.availability_set(&request).await.map(|reply| Wrote::Availability(reply.value)).map_err(|error| refusal(&error)),
+        ),
+        Want::Write(Write::Note(request)) => Done::Wrote(
+            client.notes_set(&request).await.map(|reply| Wrote::Note(reply.value.note)).map_err(|error| refusal(&error)),
+        ),
     }
 }
 
@@ -265,25 +704,39 @@ async fn read(client: &Client) -> Result<Reading, String> {
 }
 
 impl super::Ui {
-    /// A key on the focused Availability pane: `r` reads it again.
+    /// A key on the focused Availability pane. While a box is open every typing key is its.
     pub(crate) fn availability_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        use crossterm::event::KeyCode;
-        if self.focused_pane() != Some(super::pane::Pane::Availability) || !key.modifiers.is_empty() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        if self.focused_pane() != Some(super::pane::Pane::Availability) {
             return false;
         }
+        let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+        if self.availability.editing() && plain {
+            match key.code {
+                KeyCode::Esc => return self.availability_press(ESC),
+                KeyCode::Enter => return self.availability_press(ENTER),
+                _ => {}
+            }
+        }
+        if let Some(typed) = self.availability.typed_mut() {
+            return super::edit_text(typed, key);
+        }
         match key.code {
-            KeyCode::Char(letter) => self.availability_press(letter),
+            KeyCode::Char(letter) if plain => self.availability_press(letter),
             _ => false,
         }
     }
 
     /// A key pressed or its button clicked.
-    pub(crate) fn availability_press(&mut self, letter: char) -> bool {
-        match letter {
-            'r' => self.availability.refresh(),
-            _ => return false,
+    pub(crate) fn availability_press(&mut self, key: char) -> bool {
+        match self.availability.press(key, matches!(self.world.link, super::view::Link::Live), &chrono::Local::now()) {
+            Pressed::Ignored => false,
+            Pressed::Done => true,
+            Pressed::Say(message) => {
+                self.flash(message);
+                true
+            }
         }
-        true
     }
 }
 
@@ -378,7 +831,7 @@ mod tests {
                 "Note            Heads down on the release; ask only about production. · until",
                 "                18:00",
                 "",
-                " r  read again",
+                " s  status    i  interruptions    d  deadline clock    n  note    r  read again",
             ]
         );
     }
@@ -486,5 +939,261 @@ mod tests {
         assert!(ui.availability.wanted(true).is_empty());
         ui.key(KeyEvent::from(KeyCode::Char('r')));
         assert_eq!(ui.availability.wanted(true), vec![Want::Read(0)], "r reads again");
+    }
+
+    fn loaded() -> Availability {
+        let mut pane = Availability::default();
+        pane.wanted(true);
+        pane.done(Done::Read(0, Ok(reading())));
+        pane
+    }
+
+    fn at(time: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(time).unwrap().with_timezone(&Utc)
+    }
+
+    /// The changes the live loop would send now.
+    fn sent(pane: &mut Availability) -> Vec<Write> {
+        pane.wanted(true)
+            .into_iter()
+            .filter_map(|want| match want {
+                Want::Write(write) => Some(write),
+                Want::Read(_) => None,
+            })
+            .collect()
+    }
+
+    fn keys(pane: &mut Availability, keys: &str) {
+        for key in keys.chars() {
+            assert_eq!(pane.press(key, true, &now()), Pressed::Done, "{key:?}");
+        }
+    }
+
+    fn set(change: AvailabilitySet) -> Write {
+        Write::Availability(change)
+    }
+
+    #[test]
+    fn presets_end_from_now_or_literally_tomorrow_at_nine() {
+        assert_eq!(preset_until(Preset::HalfHour, &now()), at("2026-11-12T12:50:00Z"));
+        assert_eq!(preset_until(Preset::Hour, &now()), at("2026-11-12T13:20:00Z"));
+        assert_eq!(preset_until(Preset::TwoHours, &now()), at("2026-11-12T14:20:00Z"));
+        assert_eq!(preset_until(Preset::TomorrowNine, &now()), at("2026-11-13T08:00:00Z"));
+        let early = DateTime::parse_from_rfc3339("2026-11-12T06:00:00+01:00").unwrap();
+        assert_eq!(preset_until(Preset::TomorrowNine, &early), at("2026-11-13T08:00:00Z"), "tomorrow, even before nine today");
+        let late = DateTime::parse_from_rfc3339("2026-11-12T23:59:00-08:00").unwrap();
+        assert_eq!(preset_until(Preset::TomorrowNine, &late), at("2026-11-13T17:00:00Z"), "the local day decides");
+    }
+
+    #[test]
+    fn typed_ends_are_durations_or_local_times_in_the_future() {
+        let parse = |input: &str| parse_until(input, &now());
+        assert_eq!(parse("45m"), Ok(at("2026-11-12T13:05:00Z")));
+        assert_eq!(parse(" 1h30m "), Ok(at("2026-11-12T13:50:00Z")));
+        assert_eq!(parse("2d"), Ok(at("2026-11-14T12:20:00Z")));
+        assert_eq!(parse("17:30"), Ok(at("2026-11-12T16:30:00Z")), "later today");
+        assert_eq!(parse("09:00"), Ok(at("2026-11-13T08:00:00Z")), "past today, so tomorrow");
+        assert_eq!(parse("tomorrow 13:00"), Ok(at("2026-11-13T12:00:00Z")));
+        assert_eq!(parse("2026-11-14 09:00"), Ok(at("2026-11-14T08:00:00Z")));
+        assert_eq!(parse("2026-11-12T18:00:00Z"), Ok(at("2026-11-12T18:00:00Z")));
+        assert_eq!(parse("2026-11-12 09:00"), Err("that time has passed".into()));
+        for wrong in ["", "soon", "0m", "5x", "m", "45", "99999999999999d"] {
+            assert_eq!(parse(wrong), Err(TYPED_HELP.into()), "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn keys_choose_a_value_then_its_end_and_changes_go_one_at_a_time() {
+        assert_eq!(Availability::default().press('s', true, &now()), Pressed::Say("Your availability is not read yet: r reads it".into()));
+        let mut pane = loaded();
+        keys(&mut pane, "s12");
+        keys(&mut pane, "i0");
+        keys(&mut pane, "d2\n");
+        let away = AvailabilityStatusChange {
+            value: Some(AvailabilityStatus::Away.as_str().into()),
+            until: Some("2026-11-12T13:20:00.000Z".into()),
+        };
+        assert_eq!(sent(&mut pane), [set(AvailabilitySet { status: Some(away), ..AvailabilitySet::default() })], "away for an hour");
+        assert!(sent(&mut pane).is_empty(), "the next change waits for the answer");
+        assert!(lines(&pane.page(true, 80, &now())).contains(&"Saving…".to_owned()));
+        let mut answer = reading().availability;
+        answer.status_until = Some("2026-11-12T13:20:00.000Z".into());
+        pane.done(Done::Wrote(Ok(Wrote::Availability(answer.clone()))));
+        assert_eq!(pane.last.as_ref().map(|last| &last.availability), Some(&answer), "the answer is shown");
+        let all = AvailabilityInterruptionsChange { value: AvailabilityInterruptions::All.as_str().into(), until: None };
+        assert_eq!(sent(&mut pane), [set(AvailabilitySet { interruptions: Some(all), ..AvailabilitySet::default() })], "0 clears");
+        pane.done(Done::Wrote(Err("this device's pairing does not grant write.availability: pair the device again to allow it".into())));
+        let shown = lines(&pane.page(true, 80, &now()));
+        assert!(shown.iter().any(|line| line.starts_with("Not changed: this device's pairing does not grant write.availability")), "{shown:?}");
+        let held = AvailabilityDeadlineClockChange { value: AvailabilityDeadlineClock::HoldAll.as_str().into(), until: None };
+        assert_eq!(sent(&mut pane), [set(AvailabilitySet { deadline_clock: Some(held), ..AvailabilitySet::default() })], "Enter: until changed");
+        pane.done(Done::Wrote(Ok(Wrote::Availability(answer))));
+        assert_eq!(pane.wanted(true), [Want::Read(3)], "after a refusal Fractal's word is read again, newer than every write");
+        pane.done(Done::Read(2, Ok(reading())));
+        assert!(pane.reading.is_some(), "an answer older than a write is not taken");
+        keys(&mut pane, "s\u{1b}");
+        assert!(!pane.editing() && sent(&mut pane).is_empty(), "Esc sends nothing");
+    }
+
+    #[test]
+    fn disconnected_edits_are_not_replayed_and_unsent_changes_are_discarded() {
+        let mut pane = loaded();
+        keys(&mut pane, "s1");
+        assert!(matches!(pane.press(ENTER, false, &now()), Pressed::Say(_)), "an editor opened online cannot commit offline");
+        pane.disconnected();
+        for key in "s1\n".chars() {
+            let _ = pane.press(key, false, &now());
+        }
+        pane.connected();
+        assert!(sent(&mut pane).is_empty());
+        let mut pane = loaded();
+        keys(&mut pane, "s1\ni0");
+        assert_eq!(sent(&mut pane).len(), 1);
+        pane.disconnected();
+        assert!(pane.writing, "an in-flight write is neither retried nor treated as canceled");
+        pane.connected();
+        pane.done(Done::Wrote(Ok(Wrote::Availability(reading().availability))));
+        assert!(sent(&mut pane).is_empty(), "the queued second write must not cross a disconnect");
+    }
+
+    #[test]
+    fn note_edits_and_queued_notes_do_not_cross_a_connection_boundary() {
+        for replace in [false, true] {
+            let mut pane = loaded();
+            keys(&mut pane, "n");
+            assert!(matches!(pane.press(ENTER, false, &now()), Pressed::Say(_)));
+            assert!(!pane.editing(), "a note opened online cannot advance offline");
+            keys(&mut pane, "n\n\nn");
+            assert!(!pane.writes.is_empty() && pane.editing());
+            if replace {
+                pane.connected();
+            } else {
+                pane.disconnected();
+            }
+            assert!(!pane.editing() && pane.writes.is_empty(), "both connection boundaries discard notes");
+            assert!(sent(&mut pane).is_empty());
+        }
+    }
+
+    #[test]
+    fn keyboard_and_click_dispatch_refuse_edits_when_offline_or_connecting() {
+        let mut ui = super::super::Ui::new(super::super::demo::test_world());
+        for link in [super::super::view::Link::Connecting, super::super::view::Link::Offline("disconnected".into())] {
+            ui.world.link = link;
+            for key in ['s', 'i', 'd', 'n'] {
+                ui.availability = loaded();
+                assert!(ui.availability_press(key));
+                assert!(!ui.availability.editing());
+                assert!(sent(&mut ui.availability).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn the_note_is_typed_then_given_an_end_and_an_empty_note_clears_it() {
+        let mut pane = loaded();
+        keys(&mut pane, "n");
+        assert_eq!(pane.typed_mut().map(|typed| typed.as_str()), Some("Heads down on the release; ask only about production."));
+        *pane.typed_mut().unwrap() = "Back at three".into();
+        keys(&mut pane, "\n5");
+        pane.typed_mut().unwrap().push_str("soon");
+        keys(&mut pane, "\n");
+        assert!(matches!(&pane.editor, Some(Editor::Until { problem: Some(problem), .. }) if problem == TYPED_HELP), "a typo is said and kept");
+        *pane.typed_mut().unwrap() = "tomorrow 09:00".into();
+        keys(&mut pane, "\n");
+        let note = DirectiveNoteSet { text: Some("Back at three".into()), expires_at: Some("2026-11-13T08:00:00.000Z".into()) };
+        assert_eq!(sent(&mut pane), [Write::Note(note)]);
+        pane.done(Done::Wrote(Ok(Wrote::Note(None))));
+        assert!(lines(&pane.page(true, 80, &now())).contains(&"Note            none".to_owned()));
+        keys(&mut pane, "n\n");
+        assert_eq!(sent(&mut pane), [Write::Note(DirectiveNoteSet { text: None, expires_at: None })], "an empty note clears it");
+    }
+
+    #[test]
+    fn the_editor_shows_its_choices_and_the_box() {
+        let mut pane = loaded();
+        let tail = |pane: &Availability| lines(&pane.page(true, 80, &now()))[12..].to_vec();
+        keys(&mut pane, "i");
+        assert_eq!(
+            tail(&pane),
+            [
+                "Set interruptions ──────────────────────────────────────────────────────────────",
+                " 1  urgent asks only    2  none    0  all asks    Esc  cancel",
+            ]
+        );
+        keys(&mut pane, "1");
+        assert_eq!(
+            tail(&pane),
+            [
+                "urgent asks only until ─────────────────────────────────────────────────────────",
+                " 1  30 minutes    2  1 hour    3  2 hours    4  tomorrow 09:00    5  custom",
+                " Enter  until you change it    Esc  cancel",
+            ]
+        );
+        keys(&mut pane, "5");
+        pane.typed_mut().unwrap().push_str("45");
+        keys(&mut pane, "\n");
+        assert_eq!(
+            tail(&pane),
+            [
+                "urgent asks only until ─────────────────────────────────────────────────────────",
+                "Until           45█",
+                "45m, 1h30m, 17:30, tomorrow 09:00 or 2026-11-14 09:00 · Enter sets it · Esc",
+                "cancels",
+                "type a duration such as 45m or 1h30m, or a time such as 17:30, tomorrow 09:00 or",
+                "2026-11-14 09:00",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_keys_and_paste_reach_the_open_box() {
+        use crate::ui::{Ui, demo, pane::Pane};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ui = Ui::new(demo::test_world());
+        ui.live = true;
+        ui.open_in_glass(Pane::Availability, crate::ui::glass::Open::Tab);
+        ui.availability.wanted(true);
+        ui.availability.done(Done::Read(0, Ok(reading())));
+        for code in [KeyCode::Char('n'), KeyCode::Char('u')] {
+            let modifiers = if code == KeyCode::Char('u') { KeyModifiers::CONTROL } else { KeyModifiers::NONE };
+            ui.key(KeyEvent::new(code, modifiers));
+        }
+        for letter in "Ready, r is typed".chars() {
+            ui.key(KeyEvent::from(KeyCode::Char(letter)));
+        }
+        ui.paste(" · pasted\nnot this line".into());
+        assert_eq!(ui.availability.typed_mut().map(|typed| typed.as_str()), Some("Ready, r is typed · pasted"));
+        ui.key(KeyEvent::from(KeyCode::Enter));
+        ui.key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(
+            sent(&mut ui.availability),
+            [Write::Note(DirectiveNoteSet { text: Some("Ready, r is typed · pasted".into()), expires_at: None })]
+        );
+        ui.key(KeyEvent::from(KeyCode::Char('s')));
+        ui.key(KeyEvent::from(KeyCode::Esc));
+        assert!(!ui.availability.editing());
+    }
+
+    #[test]
+    fn terminal_keys_and_clicks_reach_the_pane() {
+        use crate::ui::{Ui, demo, pane::Pane};
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut ui = Ui::new(demo::test_world());
+        ui.live = true;
+        ui.open_in_glass(Pane::Availability, crate::ui::glass::Open::Tab);
+        ui.availability.wanted(true);
+        ui.availability.done(Done::Read(0, Ok(reading())));
+        ui.key(KeyEvent::from(KeyCode::Char('d')));
+        ui.click(Hit::Availability('1'));
+        ui.key(KeyEvent::from(KeyCode::Char('4')));
+        let [Write::Availability(change)] = &sent(&mut ui.availability)[..] else { panic!("one change") };
+        let clock = change.deadline_clock.as_ref().expect("the deadline clock");
+        assert_eq!(clock.value, AvailabilityDeadlineClock::HoldRoutine.as_str());
+        let until = DateTime::parse_from_rfc3339(clock.until.as_deref().expect("an end")).unwrap();
+        assert_eq!(until.with_timezone(&chrono::Local).format("%H:%M").to_string(), "09:00", "tomorrow 09:00 local");
+        ui.key(KeyEvent::from(KeyCode::Char('s')));
+        ui.key(KeyEvent::from(KeyCode::Esc));
+        assert!(!ui.availability.editing(), "Esc puts the choice away");
     }
 }

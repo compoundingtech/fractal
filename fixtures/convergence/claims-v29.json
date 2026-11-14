@@ -3686,12 +3686,6 @@
         "immutable": false,
         "reference": false
       },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "matched_line": {
         "value_type": "string",
         "required": false,
@@ -3706,12 +3700,6 @@
       },
       "ownership_sequence": {
         "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "producer_version": {
-        "value_type": "string",
         "required": false,
         "immutable": false,
         "reference": false
@@ -3853,230 +3841,6 @@
     "projection": null,
     "wakes_reconciler": false,
     "retention": "latest"
-  },
-  "harness.invocation": {
-    "kind": "harness.invocation",
-    "subjects": [
-      "agent"
-    ],
-    "fields": {
-      "agent": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "agent"
-        ]
-      },
-      "error": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "event_key": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "evidence": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "fallback": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "freshness": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "harness": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "harness_version": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "incarnation": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "invocation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "launch_input_digest": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "operation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "owner_attempt": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "owner_run": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "owner_step": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "parent_invocation_id": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "phase": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "admitted",
-          "launch-inputs",
-          "launch-accepted",
-          "started",
-          "startup-failed",
-          "revoked",
-          "cancelled",
-          "producer-closed",
-          "ended",
-          "observed"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "prompt_digest": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "provider_binary_digest": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "requested_model": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "trace_context": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "transcript_ref": {
-        "value_type": "any",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
-  "harness.invocation-artifact": {
-    "kind": "harness.invocation-artifact",
-    "subjects": [
-      "agent"
-    ],
-    "fields": {
-      "artifact": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "deleted_at_unix_ms": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "invocation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "kind": {
-        "value_type": "string",
-        "required": false,
-        "values": [
-          "input",
-          "transcript"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "sha256": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "status": {
-        "value_type": "string",
-        "required": false,
-        "values": [
-          "retained",
-          "unavailable",
-          "deleted"
-        ],
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": "harnesses",
-    "wakes_reconciler": false
   },
   "harness.limits": {
     "kind": "harness.limits",
@@ -4614,12 +4378,6 @@
         "immutable": false,
         "reference": false
       },
-      "attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "cache_write_1h_tokens": {
         "value_type": "integer",
         "required": false,
@@ -4706,12 +4464,6 @@
       },
       "input_tokens": {
         "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "invocation_id": {
-        "value_type": "string",
         "required": false,
         "immutable": false,
         "reference": false
@@ -4869,6 +4621,7 @@
       "message",
       "observer",
       "objective",
+      "notice-owner",
       "mission",
       "mission-run",
       "planning-session",
@@ -10824,12 +10577,6 @@
         "immutable": false,
         "reference": true
       },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "readiness_epoch": {
         "value_type": "integer",
         "required": false,
@@ -10967,12 +10714,6 @@
         "immutable": false,
         "reference": true
       },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "readiness_epoch": {
         "value_type": "integer",
         "required": false,
@@ -11109,12 +10850,6 @@
         "required": false,
         "immutable": false,
         "reference": true
-      },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
       },
       "readiness_epoch": {
         "value_type": "integer",
@@ -11722,12 +11457,6 @@
         "immutable": false,
         "reference": true
       },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "readiness_epoch": {
         "value_type": "integer",
         "required": false,
@@ -11864,12 +11593,6 @@
         "required": false,
         "immutable": false,
         "reference": true
-      },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
       },
       "readiness_epoch": {
         "value_type": "integer",
@@ -12008,12 +11731,6 @@
         "immutable": false,
         "reference": true
       },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "readiness_epoch": {
         "value_type": "integer",
         "required": false,
@@ -12150,12 +11867,6 @@
         "required": false,
         "immutable": false,
         "reference": true
-      },
-      "invocation_id": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
       },
       "readiness_epoch": {
         "value_type": "integer",

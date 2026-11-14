@@ -23,9 +23,9 @@ impl Store {
 
     pub fn finish_invocation_trace(&self, invocation: &str, failed: bool) {
         let owners = self.extension::<InvocationTraces>();
-        if let Some(owner) = owners.0.lock().unwrap_or_else(PoisonError::into_inner).remove(invocation) {
-            if failed { owner.failed(); }
-        }
+        let Some(owner) = owners.0.lock().unwrap_or_else(PoisonError::into_inner).remove(invocation)
+            else { return; };
+        if failed { owner.failed(); }
     }
 }
 
@@ -87,8 +87,12 @@ pub fn append_receipt_tx(tx: &Transaction<'_>, origin: &str, receipt: &Invocatio
          AND json_extract(body,'$.fields.event_key') IS ?4)",
         params![receipt.agent, receipt.invocation_id, fields["phase"].as_str(), receipt.event_key], |row| row.get(0))?;
     if !exists {
+        // Receipts are ordinary claims on the agent's timeline: keep the subject's causal
+        // chain connected so acknowledgement walks through a receipt reach its predecessors.
+        let predecessors: Vec<String> = latest_claim_id_tx(tx, &receipt.agent)?
+            .into_iter().collect();
         append_claim_tx(tx, origin, &receipt.agent, fractal_schema::invocation::KIND, None,
-            &json!({"fields":fields,"evidence":receipt.evidence}), &[], None)?;
+            &json!({"fields":fields,"evidence":receipt.evidence}), &predecessors, None)?;
     }
     Ok(())
 }
@@ -229,7 +233,7 @@ mod tests {
         let retained = store.invocation_receipts("invocation/op").unwrap();
         assert_eq!(retained[0].trace_context, receipt.trace_context);
         assert_ne!(store.start_invocation_trace("invocation/retry", "agent/example/worker",
-            &[correlation.clone()]).trace_id(), correlation.trace_id());
+            std::slice::from_ref(&correlation)).trace_id(), correlation.trace_id());
         let unknown = native_receipt("unknown", "agent/example/worker", &prepared(),
             InvocationPhase::Admitted, None).unwrap().unwrap();
         assert_eq!(unknown.trace_context, None);

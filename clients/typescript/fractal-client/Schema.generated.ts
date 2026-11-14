@@ -1220,6 +1220,10 @@ export const NoticeActor = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent
 export type NoticeActor = typeof NoticeActor.Type
 export type NoticeActorEncoded = typeof NoticeActor.Encoded
 
+export const NoticeAgent = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent)/[^\\s]+$", "u"), "agent").annotate({ identifier: "NoticeAgent" }))()
+export type NoticeAgent = typeof NoticeAgent.Type
+export type NoticeAgentEncoded = typeof NoticeAgent.Encoded
+
 export const NoticeClaimId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/NoticeClaimId")).annotate({ identifier: "NoticeClaimId" }))()
 export type NoticeClaimId = typeof NoticeClaimId.Type
 export type NoticeClaimIdEncoded = typeof NoticeClaimId.Encoded
@@ -1235,13 +1239,9 @@ export const NoticePerson = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:pers
 export type NoticePerson = typeof NoticePerson.Type
 export type NoticePersonEncoded = typeof NoticePerson.Encoded
 
-export const NoticeRuntime = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent)/[^\\s]+$", "u"), "agent").annotate({ identifier: "NoticeRuntime" }))()
-export type NoticeRuntime = typeof NoticeRuntime.Type
-export type NoticeRuntimeEncoded = typeof NoticeRuntime.Encoded
-
 /** Execution-context provenance; repository and cwd are informational, never authenticated sender evidence. */
 export const NoticeSource = /*#__PURE__*/ (() => Schema.Struct({
-  "agent": optionalKey(NoticeRuntime),
+  "agent": optionalKey(NoticeAgent),
   "cwd": optionalKey(Schema.String),
   "host": subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host"),
   "pty": optionalKey(subjectRef(new RegExp("^(?:pty)/[^\\s]+$", "u"), "pty")),
@@ -1346,7 +1346,7 @@ export const NoticeSnapshot = /*#__PURE__*/ (() => Schema.Struct({
   "policy": NoticePolicy,
   "producer": NoticeActor,
   "revision": Revision,
-  "runtime": NoticeRuntime,
+  "runtime": subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host"),
   "schema_version": Schema.Literal(1),
   "seen_at": Schema.OptionFromNullOr(NoticeTimestamp),
   "snoozed_until": Schema.OptionFromNullOr(NoticeTimestamp),
