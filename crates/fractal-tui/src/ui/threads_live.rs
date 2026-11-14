@@ -1136,6 +1136,7 @@ impl Threads {
                         &origin.title,
                         &format!(" · Draft · to {}", origin.agent),
                         true,
+                        false,
                         width,
                     ));
                 }
@@ -1258,6 +1259,7 @@ impl Threads {
                 })
             })
             .or(quote);
+        let hotkeys = self.hotkeys_for(host, id);
         let rendered = thread::client_panel(
             summary,
             &history,
@@ -1265,6 +1267,10 @@ impl Threads {
                 open,
                 awaiting_history: !loaded,
                 notice,
+                // Keep the selected destination visible while its composer owns the keys.
+                selected: open
+                    && !standalone
+                    && self.selected.get(host).is_some_and(|selected| selected == id),
                 standalone,
                 draft: draft_text,
                 cursor: focus.then(|| cursor.at(&key, draft_text)),
@@ -1277,7 +1283,7 @@ impl Threads {
                 pending_reply: draft
                     .and_then(|draft| draft.delivery.as_ref())
                     .is_some_and(|delivery| delivery.pending),
-                hotkeys: self.hotkeys_for(host, id),
+                hotkeys,
                 can_rename: self.access.rename,
                 can_close: self.access.close,
                 can_reopen: self.access.reopen,

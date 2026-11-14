@@ -3862,6 +3862,30 @@ impl Ui {
                 ("1-5", "open the palette at a section"),
             ],
         );
+        keys(
+            &mut left,
+            "threads",
+            &[
+                (
+                    "click ▸ ▾",
+                    "expand or collapse a thread; ▌ marks the expanded thread the keys below act on",
+                ),
+                ("t", "Inbox item: start a thread about it"),
+                ("p", "open the marked thread in its own tab"),
+                ("z", "close the thread, or reopen a closed one"),
+                ("n", "rename the thread"),
+                ("v", "mark the visible replies read"),
+                ("r", "send an action again when its outcome was not confirmed"),
+                (
+                    "esc",
+                    "leave the thread's message box; the letters above work again",
+                ),
+                (
+                    "ctrl+r",
+                    "in a thread's message box: quote the agent's latest message",
+                ),
+            ],
+        );
         let mut right = Doc::new();
         keys(
             &mut right,

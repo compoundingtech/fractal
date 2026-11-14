@@ -163,3 +163,106 @@ fn paused_threads_stay_visibly_open_with_their_own_notice_and_one_view_explanati
         1
     );
 }
+
+#[test]
+fn the_selected_thread_gutter_remains_visible_while_its_composer_takes_focus() {
+    let first = "thread/first";
+    let second = "thread/second";
+    let (mut threads, pane) = listed(
+        &[(first, "First follow-up"), (second, "Second follow-up")],
+        ThreadAccess {
+            close: true,
+            ..ThreadAccess::default()
+        },
+    );
+    for id in [first, second] {
+        threads.histories.insert(id.into(), History::default());
+    }
+    let mut texts = HashMap::new();
+    threads.tap(&pane.key(), thread::Tap::Toggle(first.into()), &mut texts);
+    threads.tap(&pane.key(), thread::Tap::Toggle(second.into()), &mut texts);
+    let heading = |lines: &[String], title: &str| {
+        lines
+            .iter()
+            .find(|line| line.contains(&format!("▾ {title}")))
+            .unwrap_or_else(|| panic!("{title}: {lines:#?}"))
+            .clone()
+    };
+    let selected = render(&threads, &pane, 100);
+    assert!(heading(&selected, "Second follow-up").starts_with("▌▾ Second follow-up"));
+    assert!(heading(&selected, "First follow-up").starts_with("▾ First follow-up"));
+    assert_eq!(
+        selected.iter().filter(|line| line.starts_with('▌')).count(),
+        1,
+        "exactly one heading is marked"
+    );
+    capture_mount("p1-4-selected-thread-100", &threads, &pane, 100);
+
+    threads.set_access(ThreadAccess {
+        reply: true,
+        close: true,
+        ..ThreadAccess::default()
+    });
+    threads.tap(&pane.key(), thread::Tap::Compose(second.into()), &mut texts);
+    let composing = render(&threads, &pane, 100);
+    assert!(
+        heading(&composing, "Second follow-up").starts_with("▌▾ Second follow-up"),
+        "composer focus must not hide the selected thread destination"
+    );
+    threads.key(
+        &pane,
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    let left = render(&threads, &pane, 100);
+    assert!(heading(&left, "Second follow-up").starts_with("▌▾ Second follow-up"));
+}
+
+#[test]
+fn help_lists_thread_keys_in_lowercase_with_the_selection_context() {
+    let ui = super::super::Ui::new(super::super::demo::test_world());
+    let draw = |width: u16| {
+        let area = ratatui::layout::Rect::new(0, 0, width, 200);
+        let mut screen = ratatui::buffer::Buffer::empty(area);
+        ui.draw_help(&mut screen, area);
+        screen
+    };
+    // One column, so a wrapped meaning continues on the next row and can be rejoined.
+    let screen = draw(90);
+    let rows: Vec<String> = screen
+        .content
+        .chunks(90)
+        .map(|row| {
+            let row: String = row.iter().map(|cell| cell.symbol()).collect();
+            row.trim_matches(|c: char| matches!(c, ' ' | '│' | '┃')).to_owned()
+        })
+        .collect();
+    let joined = rows.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+    for expected in [
+        "threads",
+        "expand or collapse a thread; ▌ marks the expanded thread the keys below act on",
+        "Inbox item: start a thread about it",
+        "open the marked thread in its own tab",
+        "close the thread, or reopen a closed one",
+        "rename the thread",
+        "mark the visible replies read",
+        "leave the thread's message box; the letters above work again",
+        "in a thread's message box: quote the agent's latest message",
+    ] {
+        assert!(joined.contains(expected), "{expected:?} missing from help:\n{}", rows.join("\n"));
+    }
+    for (key, meaning) in [
+        ("t", "Inbox item: start a thread"),
+        ("p", "open the marked thread"),
+        ("z", "close the thread, or reopen"),
+        ("n", "rename the thread"),
+        ("v", "mark the visible replies"),
+        ("ctrl+r", "in a thread's message box"),
+    ] {
+        let row = rows.iter().find(|row| row.contains(meaning)).unwrap();
+        assert!(row.starts_with(&format!("{key} ")), "lowercase {key:?} keycap: {row:?}");
+    }
+    capture("p1-4-help-90", &screen);
+    capture("p1-4-help-140", &draw(140));
+}

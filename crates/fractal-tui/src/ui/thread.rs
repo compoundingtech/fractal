@@ -2,7 +2,10 @@
 //! authoritative thread and records after checking the negotiated capability.
 
 use fractal_conversation_ui::doc::Target;
-use ratatui::text::{Line, Span};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 
 use super::{composer, doc::DocExt, text, theme};
 
@@ -69,6 +72,8 @@ pub struct State<'a> {
     pub awaiting_history: bool,
     /// One status line drawn directly under this thread's own heading.
     pub notice: Option<&'a str>,
+    /// The thread the keyboard acts on in a list of threads; its heading gets the gutter.
+    pub selected: bool,
     pub standalone: bool,
     pub draft: &'a str,
     pub cursor: Option<usize>,
@@ -165,8 +170,17 @@ pub fn client_panel(
     Some(panel(&summary, &records, state, width))
 }
 
-pub(super) fn heading(title: &str, metadata: &str, open: bool, width: usize) -> Line<'static> {
+/// `selected` marks the thread the keyboard acts on the way the Inbox marks its selected
+/// row: a `▌` gutter (visible without color) on a full-width selected-row background.
+pub(super) fn heading(
+    title: &str,
+    metadata: &str,
+    open: bool,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
     let title = inline(title);
+    let gutter = if selected && width > 2 { "▌" } else { "" };
     let marker = if width == 1 {
         if open { "▾" } else { "▸" }
     } else if open {
@@ -174,7 +188,7 @@ pub(super) fn heading(title: &str, metadata: &str, open: bool, width: usize) -> 
     } else {
         "▸ "
     };
-    let room = width.saturating_sub(text::width(marker));
+    let room = width.saturating_sub(text::width(gutter) + text::width(marker));
     let title_min = text::width(&title).min(12);
     let metadata = if text::width(metadata) <= room.saturating_sub(title_min) {
         metadata.to_owned()
@@ -182,11 +196,33 @@ pub(super) fn heading(title: &str, metadata: &str, open: bool, width: usize) -> 
         String::new()
     };
     let title = text::truncate(&title, room.saturating_sub(text::width(&metadata)));
-    Line::from(vec![
-        Span::styled(marker, theme::strong(theme::SAPPHIRE)),
-        Span::styled(title, theme::strong(theme::SAPPHIRE)),
-        Span::styled(metadata, theme::dim()),
-    ])
+    let row = |style: Style| {
+        if gutter.is_empty() {
+            style
+        } else {
+            style.bg(theme::ROW_SELECTED)
+        }
+    };
+    let mut spans = Vec::with_capacity(5);
+    if !gutter.is_empty() {
+        spans.push(Span::styled(gutter, row(theme::fg(theme::ACCENT))));
+    }
+    let used = text::width(gutter)
+        + text::width(marker)
+        + text::width(&title)
+        + text::width(&metadata);
+    spans.extend([
+        Span::styled(marker, row(theme::strong(theme::SAPPHIRE))),
+        Span::styled(title, row(theme::strong(theme::SAPPHIRE))),
+        Span::styled(metadata, row(theme::dim())),
+    ]);
+    if !gutter.is_empty() {
+        spans.push(Span::styled(
+            " ".repeat(width.saturating_sub(used)),
+            row(Style::default()),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// A collapsed embed takes exactly one line. The header remains the toggle when open.
@@ -209,7 +245,13 @@ pub fn panel(
             if summary.closed { " · closed" } else { "" },
             if summary.unread { " · unread" } else { "" },
         );
-        doc.line(heading(summary.title, &metadata, state.open, width));
+        doc.line(heading(
+            summary.title,
+            &metadata,
+            state.open,
+            state.selected,
+            width,
+        ));
         target(&mut doc, 0, 0, width, Tap::Toggle(summary.id.to_owned()));
         if !state.open {
             return doc;
@@ -662,5 +704,21 @@ mod tests {
             "the chevron follows the requested open state and the notice follows its own heading"
         );
         assert_eq!(doc.targets[0].hit, Tap::Toggle(summary.id.to_owned()));
+    }
+
+    #[test]
+    fn selected_heading_has_a_glyph_gutter_and_full_row_background() {
+        let line = heading("Worker test", " · 1 message", true, true, 40);
+        let shown = line.to_string();
+        assert!(
+            shown.starts_with("▌▾ Worker test · 1 message"),
+            "the gutter is a glyph, so it survives NO_COLOR: {shown:?}"
+        );
+        assert_eq!(text::width(&shown), 40, "the selected background spans the row");
+        assert!(line.spans.iter().all(|span| span.style.bg == Some(theme::ROW_SELECTED)));
+        assert_eq!(line.spans[0].style.fg, Some(theme::ACCENT));
+        let plain = heading("Worker test", " · 1 message", true, false, 40);
+        assert_eq!(plain.to_string(), "▾ Worker test · 1 message");
+        assert!(plain.spans.iter().all(|span| span.style.bg.is_none()));
     }
 }
