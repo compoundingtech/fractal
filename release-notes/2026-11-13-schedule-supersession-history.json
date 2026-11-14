@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A schedule keeps its reached occurrences when its parent run is automatically superseded: the replacement run's same-named schedule continues every predecessor's history, so publishing a new parent revision no longer replays an already reached tick.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim kinds or fields change. Schedules read existing schedule.occurrence-reached claims of the same-named schedule in every run their owner supersedes, following existing mission-run.supersede-linked lineage."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, index or projection change."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Schedule arming, the due-time recheck and the replication-block warning compute the last reached occurrence across the owner's supersession ancestry instead of only the owner's own schedule subject. Explicit work revise and same-run revisions keep their existing schedule subject and history."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No API or response change. An older owner still replays the reached tick after automatic supersession; upgraded owners do not."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration or restart requirement beyond the ordinary upgrade."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No new state or recovery path."
+  }
+}

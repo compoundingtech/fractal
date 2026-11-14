@@ -328,6 +328,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/missions-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
     ("GET /v1/client/assistant/agents-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
     ("GET /v1/client/assistant/summary", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/availability", "requires a paired assistant granted read.assistant.availability and per-read authorization; fractal-api-client-v0 assistant authorization tests cover the grant person's availability and directive note read"),
     ("GET /v1/client/assistant/attention", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
     ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
@@ -393,6 +394,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
     ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     ("POST /v1/faults/dismiss", "an operator's rare action on an ended run: one fault snapshot and one claim"),
+    ("POST /v1/hosts/holds", "host-local admission mutation; authenticated ownership and committed invalidation covered by host_holds::tests"),
+    ("POST /v1/hosts/holds/release", "owner/revision-fenced host-local resolution; covered by host_holds::tests::owner_and_revision_fence_release_without_occupying_capacity"),
+    ("POST /v1/hosts/holds/recover", "configured-operator terminal-owner recovery; authority/revision/history checks covered by host_holds::tests::live_owner_release_and_terminal_recovery_are_revision_fenced_and_audited"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -708,11 +712,18 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/changes", "/v1/client/changes?repository=cost/garden&offline=true&limit=10"),
     get("GET /v1/client/change", "/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001"),
     post("POST /v1/client/changes/sync", "/v1/client/changes/sync", |_, _| json!({"repository":"cost/garden"})),
-    put("PUT /v1/notes", "/v1/notes", |_, attempt| json!({
-        "person":"person/bench-operator", "actor":"person/bench-operator",
+    get("GET /v1/client/notes", "/v1/client/notes"),
+    put("PUT /v1/client/notes", "/v1/client/notes", |_, attempt| json!({
         "text":format!("Invented current person context {attempt}"),
     })),
-    get("GET /v1/client/notes", "/v1/client/notes"),
+    get("GET /v1/client/availability", "/v1/client/availability"),
+    put("PUT /v1/client/availability", "/v1/client/availability", |_, attempt| json!({
+        "interruptions": {"value": if attempt % 2 == 0 { "urgent" } else { "all" }},
+    })),
+    post("POST /v1/client/presence", "/v1/client/presence", |_, _| json!({
+        "state": "active",
+        "observed_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    })),
     get(
         "GET /v1/client/adapter/deliveries",
         "/v1/client/adapter/deliveries?after={adapter_frontier}&wait_ms=0",
@@ -1220,6 +1231,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/hosts/{host}/agent-workspace",
         "/v1/hosts/bench-host/agent-workspace?identity=bench/seat-0",
     ),
+    get("GET /v1/hosts/holds", "/v1/hosts/holds"),
     // Writes, each with a new idempotency key.
     post("POST /v1/claims", "/v1/claims", |fixture, attempt| {
         let seat = &fixture.subjects.seats[0];
@@ -3320,8 +3332,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     assert!(change["item"]["last_indexed"].is_object());
     let sync: Value = person.post("/v1/client/changes/sync", &json!({"repository":"cost/garden"})).await.unwrap();
     assert_eq!(sync["sync"]["status"], "unavailable");
-    let seeded: Value = person.request("PUT", "/v1/notes", Some(&json!({
-        "person":"person/bench-operator", "actor":"person/bench-operator",
+    let seeded: Value = person.request("PUT", "/v1/client/notes", Some(&json!({
         "text":"Invented current person context",
     }))).await.expect("the note write probe must pass the real feature barrier");
     assert_eq!(seeded["note"]["person"], "person/bench-operator");
@@ -3655,7 +3666,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path == "/v1/notes" {
+                } else if path.starts_with("/v1/client/") {
                     person.clone()
                 } else {
                     client.clone()

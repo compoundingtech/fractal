@@ -174,6 +174,8 @@ pub const FEATURE: &str = "mission_capacity";
 pub const AUTHORITY_FEATURE: &str = "mission_authority";
 /// The `daemon.started` feature of a build that reads a step's `program`.
 pub const PROGRAM_FEATURE: &str = "mission_program";
+/// The `daemon.started` feature of a build that reads finite execution resource lanes.
+pub const RESOURCE_LANE_FEATURE: &str = "mission_resource_lane";
 
 /// One mission field behind a fleet barrier: the feature that says a member reads it, the
 /// refusal code, and what to do once every member is upgraded.
@@ -184,7 +186,7 @@ struct Barrier {
     later: &'static str,
 }
 
-const BARRIERS: [Barrier; 3] = [
+const BARRIERS: [Barrier; 4] = [
     Barrier {
         feature: FEATURE,
         code: "mission-capacity-unavailable",
@@ -203,6 +205,12 @@ const BARRIERS: [Barrier; 3] = [
         declares: |mission| !mission.programs().is_empty(),
         later: "declare a program step",
     },
+    Barrier {
+        feature: RESOURCE_LANE_FEATURE,
+        code: "mission-resource-lane-unavailable",
+        declares: declares_resource_lane,
+        later: "declare a finite execution resource lane",
+    },
 ];
 
 const WRITER_TABLES: [(&str, &str); 3] = [
@@ -217,6 +225,17 @@ fn declares_capacity(mission: &MissionSpec) -> bool {
         || mission.steps.values().any(|step| {
             step.capacity.is_some() || step.nested_mission.as_deref().is_some_and(declares_capacity)
         })
+}
+
+fn declares_resource_lane(mission: &MissionSpec) -> bool {
+    mission.steps.values().any(|step| {
+        step.resource_lane.is_some()
+            || step.nested_mission.as_deref().is_some_and(declares_resource_lane)
+            || step.loop_spec.as_ref().is_some_and(|spec| {
+                [Some(&spec.round), spec.on_keep.as_ref(), spec.on_discard.as_ref()]
+                    .into_iter().flatten().any(|branch| declares_resource_lane(branch))
+            })
+    })
 }
 
 /// Refuses each new mission revision in `intent` that declares a field behind a barrier while a
@@ -593,5 +612,29 @@ mission "authorized" state="ready" {
         sync(&peer, &store);
         assert!(publish(&store, &source, "upgraded").unwrap().is_empty());
         assert_eq!(store.mission_spec("programmed", None).unwrap().unwrap().programs().len(), 1);
+    }
+
+    #[test]
+    fn resource_lane_publication_waits_for_reader_capability() {
+        const SOURCE: &str = r#"version 2
+mission "resource-laned" state="ready" {
+  goal "Verify."
+  step "verify" {
+    agentless
+    lane "verification" host="alder"
+    exec "verify" { command "true"; }
+  }
+}
+"#;
+        let (store, peer) = two_members();
+        let error = publish(&store, SOURCE, "old-reader").unwrap_err();
+        assert_eq!(error.code, "mission-resource-lane-unavailable");
+        assert!(store.mission_spec("resource-laned", None).unwrap().is_none());
+        publish(&store, PLAIN, "unaffected-history").unwrap();
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {RESOURCE_LANE_FEATURE: 1}}));
+        sync(&peer, &store);
+        assert!(publish(&store, SOURCE, "lane-reader").unwrap().is_empty());
+        assert!(store.mission_spec("resource-laned", None).unwrap().unwrap().steps["verify"].resource_lane.is_some());
     }
 }

@@ -96,6 +96,7 @@ use crate::store::local_commits;
 
 pub mod wire_names;
 pub mod seat_freshness;
+mod host_holds;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -154,6 +155,7 @@ pub use published_attention::{
 pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
     refresh_agent_roster(store, false)
 }
+mod availability;
 mod directive_notes;
 mod request_latency;
 mod client_observations;
@@ -661,8 +663,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(client_diagnostics::ingest)
                 .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
         )
-        .route("/v1/client/notes", get(directive_notes::read))
-        .route("/v1/notes", axum::routing::put(directive_notes::write))
+        .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
+        .route("/v1/client/availability", get(availability::list).put(availability::set))
+        .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/observations", post(client_observations::report)
@@ -774,6 +777,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/resume", post(agents::resume_agent))
         .route("/v1/agents/lane", get(agents::agent_lane))
         .route("/v1/agents/lane/burst", post(agents::hold_lane_burst).delete(agents::release_lane_burst))
+        .route("/v1/hosts/holds", get(host_holds::list).post(host_holds::place))
+        .route("/v1/hosts/holds/release", post(host_holds::release))
+        .route("/v1/hosts/holds/recover", post(host_holds::recover))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -2066,6 +2072,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "set-managed-subject"
         | "not-found"
         | "forbidden"
+        | "directive-note-feature-barrier"
         | "pairing-origin-required"
         | "pairing-restart-required"
         | "attention-migrated"
@@ -2075,6 +2082,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "invalid-answer"
         | "not-answerable"
+        | "attention-dismiss-unsupported"
         | "idempotency-key-expired"
         | "legacy-action-receipt-untrusted"
         | "issuer-required"
@@ -5018,6 +5026,7 @@ fn client_attention_resources_from_items(
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
         let alert = item.is_alert();
+        let urgent = item.is_urgent();
         let conversations = item.conversations();
         let mut resource = json!({
             "id": id, "kind": "attention", "attention_kind": item.kind,
@@ -5029,6 +5038,7 @@ fn client_attention_resources_from_items(
             "targets": item.targets, "actions": client_attention_actions(&item.kind, item.review_mode.as_deref()),
             "operational": {"layer": "current", "actionable": true, "reasons": []},
             "alert": alert,
+            "urgent": urgent,
         });
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
@@ -5105,6 +5115,10 @@ fn client_attention_resources_from_items(
         }
         resources.push(resource);
     }
+    // Each row's person's own controls: when they first saw it and until when they put it off.
+    // A control claim folds the list again like any other claim attention reads, so watchers
+    // see it.
+    store.overlay_attention_controls(&mut resources)?;
     Ok(resources)
 }
 
@@ -8378,7 +8392,9 @@ pub async fn guard_bound_request(
         "/v1/agents/resume",
         "/v1/agents/native-session",
         "/v1/agents/lane/burst",
+        "/v1/hosts/holds",
         "/v1/delivery/hold",
+        "/v1/hosts/holds",
         "/v1/lane-changes",
         "/v1/work/",
         "/v1/github/",

@@ -70,9 +70,37 @@ export default Fractal.objective({
 
 A count takes one `per-hour` target with `min` or `max`: `Fractal.indicator.count({ subjectPrefix: 'custom/factory/merged-pr/', event: { kind: 'custom.factory.pr-merged', at: 'merged_at' }, labels: ['repository'] })` with `window: { span: '24h' }` and `targets: [{ stat: 'per-hour', min: 10 }]`. Only the count's own row is judged against the target; each label row is a part of it, shown without a verdict.
 
-`Fractal.objective` checks the rules the native reader enforces and throws on the first broken one. The other indicators (`latency`, `share`, `statement`, `transaction`, `writerHold`, `cpu`, `database`, `divergence`, `ciDuration`, `ciCount`) are native telemetry: Fractal ships them in [`slo/objectives.kdl`](../../slo/objectives.kdl), rendered by [`slo/objectives.kdl.genie.ts`](../../slo/objectives.kdl.genie.ts), and the tree loader refuses them. `src/objective.ts` and `src/kdl.ts` import nothing outside the package, so Genie bundles that file without installing dependencies.
+An interval or count keeps a sample or event only when its start (or event) claim has one of the values of each `only: [{ field, values }]`, one per field; a claim without the field is left out, and left-out ones are counted with the excluded. An interval's `stop` may name its `start` kind when both name different `at` fields: one claim is then the whole sample, as `start: { kind: 'github.workflow-run', at: 'created_at' }, stop: { kind: 'github.workflow-run', at: 'completed_at' }` reads a CI run from creation to completion. Such a stop takes no `expect` or `member`.
+
+`Fractal.objective` checks the rules the native reader enforces and throws on the first broken one. The other indicators (`latency`, `share`, `statement`, `transaction`, `writerHold`, `cpu`, `database`, `divergence`) are native telemetry: Fractal ships them in [`slo/objectives.kdl`](../../slo/objectives.kdl), rendered by [`slo/objectives.kdl.genie.ts`](../../slo/objectives.kdl.genie.ts), and the tree loader refuses them. `src/objective.ts` and `src/kdl.ts` import nothing outside the package, so Genie bundles that file without installing dependencies.
 
 The namespace also holds `step`, `gate`, `person`, `input`, `product`, `t`, `doc`, `pr`, `childMission`, `runId`, `completed`/`failed`/`terminal`, `Timing`, `Launch`, `Review`, `Fragment`, `Mission`, `Round`, `omp` and `pinMission`. `Fractal.defineAgent`, `Fractal.defineMission`, `Fractal.defineSchedule` and `Fractal.defineObjective` are the low-level forms: `{ meta, intent }`, where `intent` may be a function of the loader's `context`.
+
+### Harness startup messages
+
+OMP, Codex and Claude harnesses accept an optional `message: { text, id }`:
+
+```ts
+Fractal.agent({
+  id: 'garden/worker',
+  harness: Fractal.omp({
+    model: '@generalist_root',
+    message: { text: 'Read the garden plan and begin.', id: 'garden-start-v1' },
+  }),
+})
+```
+
+This lowers to `harness "omp" { model "@generalist_root"; message "Read the garden plan and begin." id="garden-start-v1"; }`.
+For Codex or Claude, supply the same `message` field on the harness record.
+The native runtime delivers it as a one-shot first-turn message keyed by
+`(subject, id)`, not as a recurring prompt. Changing either the text or the id
+restarts the agent. Text must be nonblank, contain no NUL, and fit in 64 KiB of
+UTF-8; the nonempty id must fit in 256 UTF-8 bytes, matching native admission.
+Blankness follows Unicode `White_Space`, as in the native Rust reader:
+U+0085 alone is blank, while U+FEFF alone is not.
+All rendered strings (including node names and property keys) use KDL v2
+escaping for control characters, Unicode newlines, BOM and directional controls.
+Unpaired UTF-16 surrogates cannot represent Unicode scalars and are rejected.
 
 `step()` and `gate.*()` validate eagerly, so a step handle's `assignedTo` must be an object with an `id`; a path-derived reference works in an inline step object, which the loader lowers.
 
@@ -160,6 +188,53 @@ Every `input` field must be required and encode to a string, since each one is a
 
 A program mission's default export carries `[ProgramEntry]` (`Symbol.for('fractal.program.v1')`), the entry the program host calls with a `HostContextV1`. `fixtures/programs/factory/land-program` is the factory's landing program; `src/program-bundle.unit.test.ts` runs its bundle against an in-memory host.
 
+### Scoped resource lanes
+
+`Fractal.resources.lane(name, options)` acquires a host-authoritative membership in an Effect
+scope, not a JavaScript semaphore. Use its native operations for admitted work:
+
+```ts
+const check = Effect.scoped(Effect.gen(function* () {
+  const lane = yield* Fractal.resources.lane('checks', {
+    host: 'executor',
+    maxMembers: 1,
+    capacity: { cores: 4, memory: 8 * 1024 ** 3 },
+    coverage: 'enforced',
+    admissionTimeout: '30m',
+  })
+  return yield* lane.exec('check', ['tools/check'], { cwd: '/source', timeout: '4h' })
+}))
+```
+
+Capacity memory is bytes. Admission timeout bounds waiting and preparation; command timeout
+starts at payload release, not at scope entry. The host shares its existing seat/step/burst fit
+accountant: assigned-agent `capacity` remains a seat raise, never a second reservation. Required
+enforcement refuses unsupported coverage rather than silently running a detached command.
+
+`lane.run(id, mission, input)` passes the exact membership to linked execution roots; a child
+workflow alone is not a memory reservation or a relocated parent harness. Arbitrary Effects in
+the scope do not inherit process containment. `lane.exec` and `lane.run` cross the daemon
+boundary; they never call the ordinary program-host `spawn`.
+Lane-bound child programs also route ordinary `Fractal.command` calls through that exact native
+membership. Their command identities include the journaled step key, so replaying an earlier
+step cannot cause a later command to adopt the wrong execution. Republish child bundles with
+the resource-capable SDK before using `lane.run`; legacy detached host `spawn` is refused in
+this context rather than silently escaping containment.
+
+`ResourceError.code` distinguishes `admission-expired`, `unsupported-coverage`,
+`impossible-capacity`, `clock-uncertain`, `execution-timeout` and exact-generation
+retirement/cancellation outcomes. Queue expiry is not a failed payload execution.
+The tagged failure retains both `code` and the host's `message` through program-result
+encoding, so admission diagnostics remain available to callers and on replay.
+
+Each acquisition reattaches and validates with the owning host even when a journal contains a
+grant-shaped result. Keep acquisition outside journaled `Fractal.step` bodies. Scope closure
+sends exact-generation release and awaits confirmed retirement; neither a command's exit nor
+a completed program journal entry alone frees capacity. Interruption withdraws the exact
+queued request, or cancels its racing admitted generation, through the same native boundary.
+Durable host holds are independent admission conditions and are not cleared by scope closure.
+
+
 ### Publishing a program
 
 `loadSubjectTree({ root, context, bundleDir })` bundles every program mission it loads with `bun build --target=bun --minify-whitespace` (`bun` on `PATH`, or the `bun` option) and writes the bundle to `<bundleDir>/<sha256>.mjs`; `bundleDir` must be absolute, and a tree with a program mission and no `bundleDir` is refused. Minified whitespace drops the comment Bun writes above each inlined module with its path from the build directory, so the same sources and lockfile give the same bytes wherever the tree and its dependencies are checked out. Before it pins the bundle the loader checks that its default export carries the entry. The mission then loads like any other, so `emit([mission(intent)])` renders it:
@@ -181,7 +256,7 @@ mission "factory/land-program" report-to="agent/factory" state="ready" timeout="
 }
 ```
 
-The intent's `timeout` bounds the mission and its program step, `stalledAfter` becomes the program's `stalled-after`, `concurrentRuns` becomes `concurrent-runs max=N`, and `authority` (`publish`, `start`, `revise` and `write` rules, rendered in canonical order) becomes the run authority block. `fractal validate` checks the KDL and that each bundle still has its pinned sha256; `fractal apply` publishes the mission and carries the bundle to the daemon. `fixtures/land-program.kdl` is the landing program's rendering; after an intended change to the program or to code its bundle inlines, `FRACTAL_UPDATE_GOLDENS=1 pnpm --filter fractal test` rewrites it.
+The intent's `timeout` bounds the mission and its program step, `stalledAfter` becomes the program's `stalled-after`, `concurrentRuns` becomes `concurrent-runs max=N`, and `authority` (`publish`, `start`, `revise` and `write` rules, rendered in canonical order) becomes the run authority block. `fractal validate` checks the KDL and that each bundle still has its pinned sha256; `fractal apply` publishes the mission and carries the bundle to the daemon. `fixtures/land-program.kdl` is the landing program's rendering; after an intended change to the program or to code its bundle inlines, `nix develop .#web -c env FRACTAL_UPDATE_GOLDENS=1 pnpm --filter fractal test` rewrites it. Use the web shell's pinned Bun, as hosted TypeScript CI does: the default Rust shell uses a separate Nixpkgs input and can produce different bundle bytes.
 
 A loader that walks its own tree renders one program mission the same way with `programMission({ root, file, definition, bundleDir, bun? })`: `file` is a `mission.ts` below the tree `root`, `definition` its default export, and the subject ID its real directory below `root`'s real path. The result is `{ kdl, bundle, sha256 }`, the bytes `loadSubjectTree` would render for that subject.
 

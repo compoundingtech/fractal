@@ -79,6 +79,11 @@ export const ArrangementPerson = /*#__PURE__*/ (() => Schema.String.check(Schema
 export type ArrangementPerson = typeof ArrangementPerson.Type
 export type ArrangementPersonEncoded = typeof ArrangementPerson.Encoded
 
+/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
+export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
+export type Timestamp = typeof Timestamp.Type
+export type TimestampEncoded = typeof Timestamp.Encoded
+
 export const Attachment = /*#__PURE__*/ (() => Schema.Struct({
   "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
   "media_type": Schema.Literals(["image/png","image/jpeg","image/gif","image/webp"]),
@@ -163,11 +168,6 @@ export type PrivateNotesUriEncoded = typeof PrivateNotesUri.Encoded
 export const ReadPositionConversation = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/[^\\s]+$", "u"))).check(Schema.isMaxCodePoints(512)).annotate({ identifier: "ReadPositionConversation", description: "The conversation a read position belongs to: an agent (`agent/...`) or a saved session (`session/...`). At most 512 UTF-8 bytes." }))()
 export type ReadPositionConversation = typeof ReadPositionConversation.Type
 export type ReadPositionConversationEncoded = typeof ReadPositionConversation.Encoded
-
-/** RFC 3339 UTC instant; servers emit millisecond precision with `Z`. */
-export const Timestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isInstant).pipe(Schema.decodeTo(Schema.DateTimeUtc.check(rfc3339Range), utcFromIso)).annotate({ identifier: "Timestamp", description: "RFC 3339 UTC instant; servers emit millisecond precision with `Z`." }))()
-export type Timestamp = typeof Timestamp.Type
-export type TimestampEncoded = typeof Timestamp.Encoded
 
 export const HarnessResolvedAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "positions": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(63))).check(Schema.isMaxLength(64)).check(Schema.isUnique()),
@@ -696,6 +696,7 @@ export const AgentMessageDay = /*#__PURE__*/ (() => Schema.Struct({
   "low_percent": Schema.OptionFromOptionalNullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   "messages": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "usage_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
@@ -1490,6 +1491,8 @@ export type LaunchPreviewEncoded = typeof LaunchPreview.Encoded
 export const PersonUpdate = /*#__PURE__*/ (() => Schema.Struct({
   /** Where the person asked: their mission run or step run, or their message to the agent. */
   "about": Id,
+  /** Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it. */
+  "speech": optionalKey(Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(300))).annotate({ description: "Words to speak aloud. Present only when the person asked to be told this outcome; absent means do not speak it." }),
   "subjects": optionalKey(Schema.Array(RequestSubject).check(Schema.isMaxLength(12))),
   "summary": optionalKey(Schema.String),
   "type": Schema.Literal("update"),
@@ -1561,6 +1564,10 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "requester_id": optionalKey(Id),
   "review_mode": optionalKey(Schema.Literals(["approve","feedback"])),
   "revision": Revision,
+  /** When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls. */
+  "seen_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls." }),
+  /** Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls. */
+  "snoozed_until": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls." }),
   "source_id": Id,
   "source_kind": optionalKey(Schema.String),
   "state": Schema.Literals(["open","resolved"]),
@@ -1571,6 +1578,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   /** Information the person asked for. It asks nothing: reading it (work.done with answer id read) clears it. */
   "update": optionalKey(PersonUpdate),
   "updated_at": Timestamp,
+  /** Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent. */
+  "urgent": optionalKey(Schema.Boolean).annotate({ description: "Whether this item is urgent, by the one server rule: an ask with priority critical. Interruptions urgent admit only urgent items, the deadline clock's hold-routine keeps their deadlines running, and clients decide speech and banners from this field alone. Absent on daemons that predate it, which is not urgent." }),
   "variant_id": optionalKey(Id),
   "what": optionalKey(Schema.String)
 }).annotate({ identifier: "Attention" }))()
@@ -1608,6 +1617,31 @@ export const AttentionBudgetReport = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "AttentionBudgetReport" }))()
 export type AttentionBudgetReport = typeof AttentionBudgetReport.Type
 export type AttentionBudgetReportEncoded = typeof AttentionBudgetReport.Encoded
+
+/** A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown. */
+export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","hold-routine","hold-all"]).annotate({ identifier: "AvailabilityDeadlineClock", description: "A hold pauses the deadline clock of asks that are not urgent (`hold-routine`) or of every ask (`hold-all`). Readers retain future values as Unknown." }))()
+export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type
+export type AvailabilityDeadlineClockEncoded = typeof AvailabilityDeadlineClock.Encoded
+
+/** Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown. */
+export const AvailabilityInterruptions = /*#__PURE__*/ (() => openEnum(["all","urgent","none"]).annotate({ identifier: "AvailabilityInterruptions", description: "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown." }))()
+export type AvailabilityInterruptions = typeof AvailabilityInterruptions.Type
+export type AvailabilityInterruptionsEncoded = typeof AvailabilityInterruptions.Encoded
+
+/** Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown. */
+export const AvailabilityPresence = /*#__PURE__*/ (() => openEnum(["present","idle","locked","unreported"]).annotate({ identifier: "AvailabilityPresence", description: "Presence the daemon derives from device states, folded over devices: `present` anywhere wins, then `idle`, then `locked`; `unreported` when no device's state counts. Readers retain future values as Unknown." }))()
+export type AvailabilityPresence = typeof AvailabilityPresence.Type
+export type AvailabilityPresenceEncoded = typeof AvailabilityPresence.Encoded
+
+/** A person's effective status. Readers retain future values as Unknown. */
+export const AvailabilityStatus = /*#__PURE__*/ (() => openEnum(["available","away"]).annotate({ identifier: "AvailabilityStatus", description: "A person's effective status. Readers retain future values as Unknown." }))()
+export type AvailabilityStatus = typeof AvailabilityStatus.Type
+export type AvailabilityStatusEncoded = typeof AvailabilityStatus.Encoded
+
+/** Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown. */
+export const AvailabilityStatusSource = /*#__PURE__*/ (() => openEnum(["override","presence","unreported"]).annotate({ identifier: "AvailabilityStatusSource", description: "Where the status comes from: the person's override, their devices' presence, or `unreported` when no device's state has counted for 24 hours (status then reads `available`, so agents ask as usual). Readers retain future values as Unknown." }))()
+export type AvailabilityStatusSource = typeof AvailabilityStatusSource.Type
+export type AvailabilityStatusSourceEncoded = typeof AvailabilityStatusSource.Encoded
 
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */
@@ -1803,6 +1837,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "private-notes-indeterminate",
   "invalid-answer",
   "not-answerable",
+  "attention-dismiss-unsupported",
   "internal"
 ]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement and ordered-membership admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
@@ -2552,6 +2587,46 @@ export const MissionWake = /*#__PURE__*/ (() => Schema.Struct({
 export type MissionWake = typeof MissionWake.Type
 export type MissionWakeEncoded = typeof MissionWake.Encoded
 
+export const StepExecutionUsage = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "StepExecutionUsage" }))()
+export type StepExecutionUsage = typeof StepExecutionUsage.Type
+export type StepExecutionUsageEncoded = typeof StepExecutionUsage.Encoded
+
+export const StepExecution = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": Schema.String,
+  "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  /** Declaration captured at claim time, never the seat's current declaration. */
+  "declared_model": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Declaration captured at claim time, never the seat's current declaration." }),
+  "duration_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "ended_at_unix_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Runtime observation claim ID retaining exit evidence for this incarnation. */
+  "exit_evidence": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Runtime observation claim ID retaining exit evidence for this incarnation." }),
+  /** Explicit fallback evidence; model mismatch alone does not establish fallback. */
+  "fallback": Schema.OptionFromNullOr(Schema.Boolean).annotate({ description: "Explicit fallback evidence; model mismatch alone does not establish fallback." }),
+  /** Durable work.claimed claim ID; invocation identity, not the logical attempt. */
+  "id": Schema.String.annotate({ description: "Durable work.claimed claim ID; invocation identity, not the logical attempt." }),
+  "incarnation_id": Schema.OptionFromNullOr(Schema.String),
+  "observed_models": Schema.Array(Schema.String),
+  "started_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "status": Schema.OptionFromNullOr(Schema.String),
+  "step_subject": Schema.String,
+  /** Actual trace correlation when recorded; unknown without tracing evidence. */
+  "trace_id": Schema.OptionFromNullOr(Schema.String).annotate({ description: "Actual trace correlation when recorded; unknown without tracing evidence." }),
+  "usage": Schema.OptionFromNullOr(StepExecutionUsage)
+}).annotate({ identifier: "StepExecution" }))()
+export type StepExecution = typeof StepExecution.Type
+export type StepExecutionEncoded = typeof StepExecution.Encoded
+
 export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "agentless": optionalKey(Schema.Boolean),
   "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
@@ -2566,6 +2641,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Authoritative terminal transition of the selected attempt, in Unix milliseconds." }),
   "constraints": optionalKey(Schema.Array(Schema.String)),
   "eta": optionalKey(MissionStepEta),
+  /** Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons. */
+  "executions": optionalKey(Schema.Array(StepExecution)).annotate({ description: "Mission detail only: claim-backed agent invocations with historical model and response-attributed usage. An empty array is not evidence that an unclaimed launch succeeded. Absent on older daemons." }),
   "goals": optionalKey(Schema.Array(Schema.String)),
   /** Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history. */
   "history_complete": optionalKey(Schema.Boolean).annotate({ description: "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." }),
@@ -2874,6 +2951,7 @@ export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 export const UsageCredits = /*#__PURE__*/ (() => Schema.Struct({
   "budget_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "period_start_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "used_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsageCredits", description: "An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free." }))()
@@ -2937,6 +3015,7 @@ export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
   "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
   "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
 export type UsagePricing = typeof UsagePricing.Type
@@ -2962,6 +3041,7 @@ export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
   "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "step": optionalKey(Id),
   "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_responses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "UsageRow" }))()
 export type UsageRow = typeof UsageRow.Type
@@ -3751,11 +3831,34 @@ export const TimelineTruncationBody = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelineTruncationBody = typeof TimelineTruncationBody.Type
 export type TimelineTruncationBodyEncoded = typeof TimelineTruncationBody.Encoded
 
+export const TimelineProviderQuotaUnit = /*#__PURE__*/ (() => Schema.Literals(["premium_requests"]).annotate({ identifier: "TimelineProviderQuotaUnit" }))()
+export type TimelineProviderQuotaUnit = typeof TimelineProviderQuotaUnit.Type
+export type TimelineProviderQuotaUnitEncoded = typeof TimelineProviderQuotaUnit.Encoded
+
+/** Provider quota consumption, separate from token counts and money. The enclosing response provider identifies the quota authority. */
+export const TimelineProviderQuota = /*#__PURE__*/ (() => Schema.Struct({
+  "quantity": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unit": TimelineProviderQuotaUnit
+}).annotate({ identifier: "TimelineProviderQuota", description: "Provider quota consumption, separate from token counts and money. The enclosing response provider identifies the quota authority." }))()
+export type TimelineProviderQuota = typeof TimelineProviderQuota.Type
+export type TimelineProviderQuotaEncoded = typeof TimelineProviderQuota.Encoded
+
+/** Harness-reported USD components, not additional spend. The existing usage cost field is the reported total. Missing components are unknown, not zero; never derive a reported total from a partial object. */
+export const TimelineResponseCostComponents = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_read": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "cache_write": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "input": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "output": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "TimelineResponseCostComponents", description: "Harness-reported USD components, not additional spend. The existing usage cost field is the reported total. Missing components are unknown, not zero; never derive a reported total from a partial object." }))()
+export type TimelineResponseCostComponents = typeof TimelineResponseCostComponents.Type
+export type TimelineResponseCostComponentsEncoded = typeof TimelineResponseCostComponents.Encoded
+
+/** Response evidence is one terminal model response, not an invocation total. Optional absent fields mean unknown or unsupported, never zero. Actual response model/provider/API must not be inferred from the requested model. Reasoning and one-hour cache writes are subsets, not additive buckets. */
 export const TimelineUsageBody = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "currency": optionalKey(Schema.String), "driver": Schema.String, "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "semantics": Schema.Literal("context_occupancy"), "total_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) }).check(Schema.makeFilter((o: object) => ("context_used_tokens" in o) || ("context_window_tokens" in o) || ("context_used_percent" in o) || ("compactions" in o), { expected: "fields [\"context_used_tokens\"] or [\"context_window_tokens\"] or [\"context_used_percent\"] or [\"compactions\"]" })),
-  Schema.Struct({ "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "currency": optionalKey(Schema.String), "driver": Schema.String, "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "semantics": Schema.Literal("session_cumulative"), "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "turn_id": optionalKey(Schema.String) }),
-  Schema.Struct({ "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "currency": optionalKey(Schema.String), "driver": Schema.String, "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "semantics": Schema.Literal("response"), "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "turn_id": optionalKey(Schema.String) })
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("semantics")).annotate({ identifier: "TimelineUsageBody" }))()
+  Schema.Struct({ "account": optionalKey(Schema.String), "api": optionalKey(Schema.String), "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_1h_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "completed_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "cost_components": optionalKey(TimelineResponseCostComponents), "currency": optionalKey(Schema.String), "driver": Schema.String, "duration_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "provider": optionalKey(Schema.String), "provider_quota": optionalKey(TimelineProviderQuota), "reasoning_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "response_id": optionalKey(Schema.String), "semantics": Schema.Literal("context_occupancy"), "started_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "stop_reason": optionalKey(Schema.String), "total_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "ttft_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) }).check(Schema.makeFilter((o: object) => ("context_used_tokens" in o) || ("context_window_tokens" in o) || ("context_used_percent" in o) || ("compactions" in o), { expected: "fields [\"context_used_tokens\"] or [\"context_window_tokens\"] or [\"context_used_percent\"] or [\"compactions\"]" })),
+  Schema.Struct({ "account": optionalKey(Schema.String), "api": optionalKey(Schema.String), "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_1h_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "completed_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "cost_components": optionalKey(TimelineResponseCostComponents), "currency": optionalKey(Schema.String), "driver": Schema.String, "duration_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "provider": optionalKey(Schema.String), "provider_quota": optionalKey(TimelineProviderQuota), "reasoning_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "response_id": optionalKey(Schema.String), "semantics": Schema.Literal("session_cumulative"), "started_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "stop_reason": optionalKey(Schema.String), "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "ttft_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) }),
+  Schema.Struct({ "account": optionalKey(Schema.String), "api": optionalKey(Schema.String), "attribution": Schema.Struct({ "agent_id": Id, "generation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "mission_run_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "step_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }), "blocks": optionalKey(Schema.Array(TimelineBlock)), "cache_write_1h_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cached_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "compactions": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "completed_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "context_used_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "context_window_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "cost_components": optionalKey(TimelineResponseCostComponents), "currency": optionalKey(Schema.String), "driver": Schema.String, "duration_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "last_compaction_trigger": optionalKey(Schema.Literals(["manual","auto","threshold","overflow","idle","unknown"])), "model": optionalKey(Schema.String), "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "provider": optionalKey(Schema.String), "provider_quota": optionalKey(TimelineProviderQuota), "reasoning_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "response_id": optionalKey(Schema.String), "semantics": Schema.Literal("response"), "started_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "stop_reason": optionalKey(Schema.String), "total_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "ttft_ms": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))), "turn_id": optionalKey(Schema.String) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("semantics")).annotate({ identifier: "TimelineUsageBody", description: "Response evidence is one terminal model response, not an invocation total. Optional absent fields mean unknown or unsupported, never zero. Actual response model/provider/API must not be inferred from the requested model. Reasoning and one-hour cache writes are subsets, not additive buckets." }))()
 export type TimelineUsageBody = typeof TimelineUsageBody.Type
 export type TimelineUsageBodyEncoded = typeof TimelineUsageBody.Encoded
 
@@ -4315,6 +4418,30 @@ export const Page = /*#__PURE__*/ (() => Schema.Struct({
 export type Page = typeof Page.Type
 export type PageEncoded = typeof Page.Encoded
 
+/** A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person. */
+export const PersonAvailability = /*#__PURE__*/ (() => Schema.Struct({
+  "deadline_clock": AvailabilityDeadlineClock,
+  "deadline_clock_since": Schema.OptionFromNullOr(Timestamp),
+  "deadline_clock_until": Schema.OptionFromNullOr(Timestamp),
+  "interruptions": AvailabilityInterruptions,
+  "interruptions_until": Schema.OptionFromNullOr(Timestamp),
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "presence": Schema.OptionFromNullOr(AvailabilityPresence),
+  "presence_observed_at": Schema.OptionFromNullOr(Timestamp),
+  /** The override while one is in force; otherwise `available` while some device is present or no device has reported, `away` while devices report but none is present. */
+  "status": AvailabilityStatus,
+  "status_source": AvailabilityStatusSource,
+  "status_until": Schema.OptionFromNullOr(Timestamp)
+}).annotate({ identifier: "PersonAvailability", description: "A person's effective availability, folded when read. It informs and never grants authority. `presence` and `presence_observed_at` are null for anyone but the person." }))()
+export type PersonAvailability = typeof PersonAvailability.Type
+export type PersonAvailabilityEncoded = typeof PersonAvailability.Encoded
+
+export const PersonAvailabilities = /*#__PURE__*/ (() => Schema.Struct({
+  "people": Schema.Array(PersonAvailability)
+}).annotate({ identifier: "PersonAvailabilities" }))()
+export type PersonAvailabilities = typeof PersonAvailabilities.Type
+export type PersonAvailabilitiesEncoded = typeof PersonAvailabilities.Encoded
+
 export const PrivateNotesAction = /*#__PURE__*/ (() => Schema.Struct({
   /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
   "fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": PrivateNotesFence, "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }),
@@ -4480,7 +4607,8 @@ export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
   "resets_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   /** When the allowance runs out at that rate, present only when that is before it resets. */
   "runs_out_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "When the allowance runs out at that rate, present only when that is before it resets." }),
-  "status": Schema.Literals(["met","missed","no-data","stale"]),
+  /** met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown. */
+  "status": openEnum(["met","missed","no-data","stale"]).annotate({ description: "met, missed, no-data or stale; readers retain a word a later daemon adds as Unknown." }),
   "target": Schema.String,
   /** How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule. */
   "tone": optionalKey(Schema.String).annotate({ description: "How urgent the row is, one of red, green, yellow or quiet (a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one): red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." }),

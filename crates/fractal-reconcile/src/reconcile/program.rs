@@ -40,7 +40,7 @@ pub use crate::program_journal::{JOURNAL_KIND, RESULT_KEY};
 pub const RUNNING_STATES: [&str; 4] = ["ready", "working", "blocked", "waiting-person"];
 /// A run credential has no expiry of its own: it binds only while its attempt is its step run's
 /// current, live attempt, however long that attempt waits on an ask or a child run.
-const RUN_CREDENTIAL_LIFETIME_MS: u64 = u64::MAX;
+pub(super) const RUN_CREDENTIAL_LIFETIME_MS: u64 = u64::MAX;
 const HOST_SOURCE: &str = /* sqlite-large-value: allow-for-now lv-h344eb4debbcf owner=fractal_reconcile::reconcile::program TODO=trace-statement-and-value-representation */ include_str!("program_host.mjs");
 /// How long a crashed host waits before its replacement starts, so a host that cannot start does
 /// not spin.
@@ -113,6 +113,8 @@ struct Running {
     generation: u64,
     /// By journal key: the child runs and asks the program waits on.
     requests: BTreeMap<String, Request>,
+    /// Closed whenever this exact host attempt is forgotten, including cancellation.
+    _trace: crate::otel::AttemptTrace,
 }
 
 /// A child run or person ask a program waits on (§6). The run's evaluation starts it and, once it
@@ -128,6 +130,8 @@ pub struct Request {
     /// The bundle hash of the program that asked, which journals the key's entries.
     program: String,
     seq: Value,
+    generation: u64,
+    watched_generation: Option<String>,
     since: Instant,
 }
 
@@ -137,6 +141,8 @@ pub enum Wait {
     Run { mission: String, input: BTreeMap<String, String> },
     /// A native person ask on the program step, asked by [`PROGRAM_ASKER`].
     Ask(Box<PersonAskRequest>),
+    /// Resource operations always visit the host authority, including journal replay.
+    Resource { operation: String, payload: Value, cancelled: bool },
 }
 
 impl Request {
@@ -186,9 +192,19 @@ impl ProgramEngine {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The same authoritative `run.env` used by spawnEffect, only for this live attempt.
+    pub(super) fn attempt_environment(&self, step: &str, attempt: u32) -> Result<BTreeMap<String, String>> {
+        let inner = self.lock();
+        let running = inner.running.get(step)
+            .filter(|running| running.dispatch.attempt == attempt
+                && inner.host.as_ref().is_some_and(|host| host.generation == running.generation))
+            .context("program attempt has no live execution environment")?;
+        Ok(running.dispatch.env.clone())
+    }
+
     /// Start or resume `dispatch` unless the live host already runs that attempt or its step no
     /// longer runs it.
-    pub fn dispatch(self: &Arc<Self>, dispatch: Dispatch) -> Result<Dispatched> {
+    pub fn dispatch(self: &Arc<Self>, mut dispatch: Dispatch) -> Result<Dispatched> {
         if self.runs(&dispatch) {
             return Ok(Dispatched::Running);
         }
@@ -219,7 +235,9 @@ impl ProgramEngine {
         // minted only here, once the host runs and this attempt is about to start, so a refused,
         // already running or host-down dispatch leaves no row; each start or resume mints one, and
         // it never enters the journal or a log.
-        let mut env = dispatch.env.clone();
+        let trace = self.start_trace(&dispatch)?;
+        let mut env = std::mem::take(&mut dispatch.env);
+        trace.correlation.environment(&mut env);
         env.insert(
             crate::store::run_credentials::RUN_CREDENTIAL_ENV.to_owned(),
             self.store.issue_run_credential(&dispatch.step, dispatch.attempt, RUN_CREDENTIAL_LIFETIME_MS)?,
@@ -230,6 +248,8 @@ impl ProgramEngine {
             dispatch.attempt,
             journal.len()
         );
+        let resource_context = self.store.resource_context_for_run(&dispatch.run)?;
+        let resource_membership = resource_context.as_ref().and_then(|context| context.grant.as_ref());
         let message = json!({
             "t": "start",
             "step": dispatch.step,
@@ -241,10 +261,63 @@ impl ProgramEngine {
             "env": env,
             "cwd": dispatch.cwd,
             "journal": journal,
+            "resourceMembership": resource_membership,
         });
-        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, requests: BTreeMap::new() });
+        // Keep exactly the environment sent to spawnEffect's host, including this attempt's
+        // trace and credential, for native lane commands. Never reconstruct a parallel context.
+        dispatch.env = env;
+        inner.running.insert(dispatch.step.clone(), Running { dispatch, generation, requests: BTreeMap::new(), _trace: trace });
         send(&inner, &message);
         Ok(Dispatched::Started)
+    }
+
+    fn start_trace(&self, dispatch: &Dispatch) -> Result<crate::otel::AttemptTrace> {
+        use opentelemetry::KeyValue;
+        let existing = self.store.claims_for_subject_kind_at(&dispatch.run, "mission.run.trace", None, true, 1)?;
+        let run_claim = if let Some(claim) = existing.claims.into_iter().next() {
+            claim
+        } else {
+            let run_root = crate::otel::AttemptTrace::start("st.mission.run", vec![
+                KeyValue::new("span.label", "mission run"),
+                KeyValue::new("st.run", dispatch.run.clone()),
+            ], &[]);
+            self.store.append_claim(&ClaimInput {
+                subject: dispatch.run.clone(), kind: "mission.run.trace".to_owned(),
+                actor: None,
+                fields: BTreeMap::from([("trace".to_owned(), serde_json::to_value(&run_root.correlation)?)]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some(format!("mission-run-trace:{}", dispatch.run)),
+            })?
+        };
+        let mut links = vec![serde_json::from_value(run_claim.body["fields"]["trace"].clone())?];
+        let previous = self.store.claims_for_subject_kind_at(&dispatch.step, "program.attempt.trace", None, true, 1)?;
+        if let Some(previous) = previous.claims.first() {
+            links.push(serde_json::from_value(previous.body["fields"]["trace"].clone())?);
+        } else if let Some(run) = self.store.mission_run(&dispatch.run)?
+            && let Some(source) = run.retry_of.as_deref().or(run.supersedes.as_deref())
+            && let Some(source) = self.store.mission_run(source)?
+            && let Some(current) = self.store.step_run(&dispatch.step)?
+            && let Some(prior) = source.steps.iter().find(|prior| prior.step == current.step)
+            && let Some(previous) = self.store.claims_for_subject_kind_at(&prior.subject, "program.attempt.trace", None, true, 1)?.claims.first()
+        {
+            links.push(serde_json::from_value(previous.body["fields"]["trace"].clone())?);
+        }
+        let trace = crate::otel::AttemptTrace::start("st.program.attempt", vec![
+            KeyValue::new("span.label", format!("attempt {}", dispatch.attempt)),
+            KeyValue::new("st.run", dispatch.run.clone()),
+            KeyValue::new("st.step", dispatch.step.clone()),
+            KeyValue::new("st.attempt", i64::from(dispatch.attempt)),
+        ], &links);
+        self.store.append_claim(&ClaimInput {
+            subject: dispatch.step.clone(), kind: "program.attempt.trace".to_owned(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("attempt".to_owned(), Value::from(dispatch.attempt)),
+                ("trace".to_owned(), serde_json::to_value(&trace.correlation)?),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        })?;
+        Ok(trace)
     }
 
     /// Why `attempt` must not start, read under the engine lock. A pass may hand over a view read
@@ -382,6 +455,50 @@ impl ProgramEngine {
         Ok(())
     }
 
+    /// Resolve a live host capability operation without replaying a journaled grant. The
+    /// resource module owns durable request identity and generation reattachment.
+    pub fn resolve_resource(&self, request: &Request, exit: Value) -> Result<()> {
+        let mut inner = self.lock();
+        let Some(running) = inner.running.get_mut(&request.step)
+            .filter(|running| running.dispatch.attempt == request.attempt && running.generation == request.generation)
+        else { return Ok(()) };
+        let Some(pending) = running.requests.get(&request.key) else { return Ok(()) };
+        if pending.seq != request.seq { return Ok(()) }
+        // Cancellation can replace the queued operation while its admission is in flight.
+        if matches!((&request.wait, &pending.wait),
+            (Wait::Resource { cancelled: false, .. }, Wait::Resource { cancelled: true, .. }))
+        {
+            return Ok(());
+        }
+        let generation = running.generation;
+        let pending = running.requests.remove(&request.key).expect("request checked above");
+        send_to(&inner, generation, &json!({
+            "t": "resolved", "step": request.step, "attempt": request.attempt,
+            "seq": pending.seq, "key": request.key, "exit": exit,
+        }));
+        Ok(())
+    }
+
+    /// Register an OS completion waiter once per live request/generation, before inspecting its
+    /// completion again. A resumed worker gets a fresh subscription to the same generation.
+    pub fn watch_resource_once(&self, request: &Request, generation: &str, start: impl FnOnce() -> Result<()>) -> Result<()> {
+        let mut inner = self.lock();
+        let Some(pending) = inner.running.get_mut(&request.step)
+            .filter(|running| running.dispatch.attempt == request.attempt && running.generation == request.generation)
+            .and_then(|running| running.requests.get_mut(&request.key))
+        else { return Ok(()) };
+        if pending.watched_generation.as_deref() == Some(generation) { return Ok(()) }
+        start()?;
+        pending.watched_generation = Some(generation.to_owned());
+        Ok(())
+    }
+
+    pub fn resource_owner_live(&self, step: &str, attempt: u32) -> bool {
+        let inner = self.lock();
+        inner.running.get(step).is_some_and(|running| running.dispatch.attempt == attempt
+            && inner.host.as_ref().is_some_and(|host| host.generation == running.generation))
+    }
+
     /// The program asked for something the daemon refuses (a defect of the bundle): its step fails
     /// and the program stops, with what it already waits on.
     pub fn fail(&self, step: &str, attempt: u32, reason: &str) -> Result<()> {
@@ -391,7 +508,10 @@ impl ProgramEngine {
         {
             let mut inner = self.lock();
             let generation = inner.running.get(step).filter(|running| running.dispatch.attempt == attempt)
-                .map(|running| running.generation);
+                .map(|running| {
+                    running._trace.failed();
+                    running.generation
+                });
             if let Some(generation) = generation
                 && forget(&mut inner, step, attempt, generation)
             {
@@ -734,7 +854,7 @@ impl ProgramEngine {
         };
         match message["t"].as_str() {
             Some("journal") => self.journal_entry(step, attempt, generation, &program, message),
-            Some("run" | "ask") => self.request(step, attempt, generation, &program, message),
+            Some("run" | "ask" | "resource" | "resource-cancel") => self.request(step, attempt, generation, &program, message),
             Some("done") => self.done(step, attempt, generation, &program, message),
             Some("unresponsive") => self.unresponsive(step, attempt, generation, message),
             other => Err(anyhow!("unknown message type {other:?}")),
@@ -756,7 +876,9 @@ impl ProgramEngine {
             Ok(wait) => wait,
             Err(reason) => return self.fail(step, attempt, &format!("the program made an invalid request for `{key}`: {reason}")),
         };
-        self.write_journal(step, attempt, program, key, "started", &Value::Null, None)?;
+        if !matches!(wait, Wait::Resource { .. }) {
+            self.write_journal(step, attempt, program, key, "started", &Value::Null, None)?;
+        }
         {
             let mut inner = self.lock();
             let Some(running) = inner
@@ -774,6 +896,8 @@ impl ProgramEngine {
                 child: None,
                 program: program.to_owned(),
                 seq: message["seq"].clone(),
+                generation,
+                watched_generation: None,
                 since: Instant::now(),
             };
             running.requests.insert(key.to_owned(), request);
@@ -824,6 +948,12 @@ impl ProgramEngine {
             ("attempt".to_owned(), Value::from(attempt)),
             ("program".to_owned(), Value::from(program)),
         ]);
+        let traces = self.store.claims_for_subject_kind_at(step, "program.attempt.trace", None, true, 1)
+            .map_err(smallclaims::error::typed)?;
+        let evidence = traces.claims.first()
+            .filter(|claim| claim.body["fields"]["attempt"].as_u64() == Some(u64::from(attempt)))
+            .map(|trace| vec![trace.id.clone()])
+            .unwrap_or_default();
         for name in ["value", "error", "ms"] {
             if let Some(value) = result.get(name).filter(|value| !value.is_null()) {
                 fields.insert(name.to_owned(), value.clone());
@@ -839,7 +969,7 @@ impl ProgramEngine {
             kind: JOURNAL_KIND.to_owned(),
             actor: run,
             fields,
-            evidence: Vec::new(),
+            evidence,
             expected_subject: None,
             idempotency_key: (status != "started").then(|| format!("program:{step}:{attempt}:{key}:result")),
         })
@@ -880,15 +1010,18 @@ impl ProgramEngine {
     }
 
     fn done(&self, step: &str, attempt: u32, generation: u64, program: &str, message: &Value) -> Result<()> {
-        if !self.end(step, attempt, generation, None) {
+        let Some(trace) = self.end(step, attempt, generation, None, message["exit"]["_tag"] != "Success") else {
             return Ok(());
-        }
+        };
         let exit = &message["exit"];
         let written = self.settle(step, attempt, || {
             let (status, reason) = match exit["_tag"].as_str() {
                 Some("Success") => match self.write_journal(step, attempt, program, RESULT_KEY, "completed", &json!({"value": exit["value"]}), None) {
                     Ok(_) => ("completed", None),
-                    Err(error) => ("failed", Some(format!("the program's result could not be journaled: {error}"))),
+                    Err(error) => {
+                        trace.failed();
+                        ("failed", Some(format!("the program's result could not be journaled: {error}")))
+                    }
                 },
                 _ => ("failed", Some(failure_reason(&exit["error"]))),
             };
@@ -915,9 +1048,9 @@ impl ProgramEngine {
     fn unresponsive(&self, step: &str, attempt: u32, generation: u64, message: &Value) -> Result<()> {
         let ms = message["ms"].as_u64().unwrap_or_default();
         let reason = format!("the program's worker missed its {ms} ms liveness deadline and was terminated");
-        if !self.end(step, attempt, generation, Some(&reason)) {
+        let Some(_trace) = self.end(step, attempt, generation, Some(&reason), true) else {
             return Ok(());
-        }
+        };
         eprintln!("fractal: program {step} attempt {attempt}: {reason}");
         self.settle(step, attempt, || self.store.set_step_state_unless_terminal(step, "failed", Some(&reason)))?;
         self.cancel_waits(step, attempt, &reason)?;
@@ -925,18 +1058,21 @@ impl ProgramEngine {
         Ok(())
     }
 
-    /// Forget `attempt` of `step` as ended by this engine, with the `fault` that stopped it; false
-    /// when this engine no longer runs exactly that attempt on that host generation.
-    fn end(&self, step: &str, attempt: u32, generation: u64, fault: Option<&str>) -> bool {
+    /// Forget exactly this host attempt, returning its span owner so terminal journal
+    /// writes can still mark it failed before it closes.
+    fn end(&self, step: &str, attempt: u32, generation: u64, fault: Option<&str>, failed: bool) -> Option<crate::otel::AttemptTrace> {
         let mut inner = self.lock();
-        if !forget(&mut inner, step, attempt, generation) {
-            return false;
+        inner.running.get(step)
+            .filter(|running| running.dispatch.attempt == attempt && running.generation == generation)?;
+        let running = inner.running.remove(step)?;
+        if failed {
+            running._trace.failed();
         }
         if let Some(fault) = fault {
             inner.faults.insert(step.to_owned(), (attempt, fault.to_owned()));
         }
         inner.ended.insert(step.to_owned(), attempt);
-        true
+        Some(running._trace)
     }
 
     /// Write the new state of a step whose `attempt` this engine just ended, unless the step
@@ -1108,6 +1244,22 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
             .map(str::to_owned)
             .ok_or_else(|| format!("`{name}` must be a non-empty string"))
     };
+    if matches!(message["t"].as_str(), Some("resource" | "resource-cancel")) {
+        let operation = text("operation")?;
+        if !matches!(operation.as_str(),
+            "resource.lane.acquire" | "resource.lane.release" | "resource.lane.exec" | "resource.lane.run")
+        {
+            return Err(format!("unknown resource operation `{operation}`"));
+        }
+        if !message["payload"].is_object() {
+            return Err("resource payload must be an object".to_owned());
+        }
+        return Ok(Wait::Resource {
+            operation,
+            payload: message["payload"].clone(),
+            cancelled: message["t"] == "resource-cancel",
+        });
+    }
     if message["t"] == "run" {
         let mission = text("mission")?;
         let input = serde_json::from_value::<BTreeMap<String, String>>(message["input"].clone())
@@ -1127,6 +1279,7 @@ fn wait(step: &str, attempt: u32, key: &str, message: &Value) -> std::result::Re
     };
     let title = text("title")?;
     Ok(Wait::Ask(Box::new(PersonAskRequest {
+        priority: None,
         legacy_request: None,
         person: text("for")?,
         reason: title.clone(),

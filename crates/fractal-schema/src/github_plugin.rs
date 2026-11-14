@@ -1,7 +1,8 @@
-//! The two graph kinds the GitHub plugin may write (docs/st3/plugins.md). `vcs.item.state` is one
-//! pull request's or issue's current state, a fixed compact field set written on change on the
-//! item's own resource subject. `github.event` is one keyed thing that happened to an item, once
-//! per key. Everything else the poller sees stays in its plugin database.
+//! The three graph kinds the GitHub plugin may write (docs/st3/plugins.md). `vcs.item.state` is
+//! one pull request's or issue's current state, a fixed compact field set written on change on
+//! the item's own resource subject. `github.event` is one keyed thing that happened to an item,
+//! once per key. `github.workflow-run` is one completed Workspace CI run, once per run. Everything
+//! else the poller sees stays in its plugin database.
 use super::*;
 
 pub const ITEM_STATE: &str = "vcs.item.state";
@@ -9,6 +10,11 @@ pub const EVENT: &str = "github.event";
 /// The subject family of `github.event` claims: `github-event/RESOURCE/ITEM/NUMBER/KEY...`, the
 /// item's resource subject without its `resource/` prefix, then the event key.
 pub const EVENT_FAMILY: &str = "github-event";
+/// One completed CI run of a repository, written once by the repository's poller.
+pub const WORKFLOW_RUN: &str = "github.workflow-run";
+/// The subject family of `github.workflow-run` claims: `github-workflow-run/OWNER/REPO/RUN_ID`,
+/// the repository lowercased as in `resource/github/OWNER/REPO`. Re-run attempts are the same run.
+pub const WORKFLOW_RUN_FAMILY: &str = "github-workflow-run";
 pub const VERSION: i64 = 1;
 
 /// The most failed check names one `vcs.item.state` carries; the rest are in the mirror.
@@ -16,6 +22,7 @@ pub const MAX_FAILED_CHECKS: usize = 20;
 /// The largest body the plugin may write for each kind, in bytes of canonical JSON fields.
 pub const MAX_ITEM_STATE_BYTES: usize = 2 * 1024;
 pub const MAX_EVENT_BYTES: usize = 1024;
+pub const MAX_WORKFLOW_RUN_BYTES: usize = 1024;
 
 /// The item kinds `vcs.item.state` describes.
 pub const ITEM_KINDS: &[&str] = &["vcs.pull-request", "vcs.issue"];
@@ -101,6 +108,34 @@ pub(crate) fn event_fields() -> &'static [(&'static str, FieldSpec)] {
             ("at", required_string()),
             ("head_sha", string()),
             ("detail", object()),
+        ]
+    })
+}
+
+/// The fields of one completed CI run. Its times are GitHub's RFC 3339 strings: `created_at`,
+/// `started_at` (the attempt's `run_started_at`) and `completed_at` (the completed run's
+/// `updated_at`); `duration_ms` is `completed_at - started_at`. `flaky_tests` sums the counts its
+/// `nextest-flaky-<lane>-<N>` artifacts name, and `flakes` adds one for a merge group the run
+/// ejected (`merge_group` with conclusion `failure`).
+pub(crate) fn workflow_run_fields() -> &'static [(&'static str, FieldSpec)] {
+    static FIELDS: OnceLock<Vec<(&'static str, FieldSpec)>> = OnceLock::new();
+    FIELDS.get_or_init(|| {
+        vec![
+            ("version", required_integer()),
+            ("observer", required_reference_to(&["observer"])),
+            ("repository", required_string()),
+            ("workflow", required_string()),
+            ("run_id", required_integer()),
+            ("attempt", required_integer()),
+            ("event", required_string()),
+            ("conclusion", required_string()),
+            ("head_sha", required_string()),
+            ("created_at", required_string()),
+            ("started_at", required_string()),
+            ("completed_at", required_string()),
+            ("duration_ms", required_integer()),
+            ("flaky_tests", required_integer()),
+            ("flakes", required_integer()),
         ]
     })
 }
@@ -323,5 +358,44 @@ mod tests {
         registry().validate_claim(&subject, EVENT, &event).unwrap();
         assert!(registry().validate_claim("resource/github/acme/garden/pull-request/7", EVENT, &event).is_err());
         assert!(event_subject("observer/github/acme/garden", "x").is_none());
+    }
+
+    #[test]
+    fn a_workflow_run_has_a_closed_required_field_set_within_its_bound() {
+        let subject = "github-workflow-run/acme/garden/9001";
+        let run: BTreeMap<String, Value> = BTreeMap::from([
+            ("version".into(), json!(VERSION)),
+            ("observer".into(), json!("observer/github/acme/garden")),
+            ("repository".into(), json!("Acme/Garden")),
+            ("workflow".into(), json!("Workspace CI")),
+            ("run_id".into(), json!(9001)),
+            ("attempt".into(), json!(1)),
+            ("event".into(), json!("merge_group")),
+            ("conclusion".into(), json!("failure")),
+            ("head_sha".into(), json!("a".repeat(40))),
+            ("created_at".into(), json!("2026-11-13T10:00:00Z")),
+            ("started_at".into(), json!("2026-11-13T10:00:30Z")),
+            ("completed_at".into(), json!("2026-11-13T10:09:30Z")),
+            ("duration_ms".into(), json!(540_000)),
+            ("flaky_tests".into(), json!(2)),
+            ("flakes".into(), json!(3)),
+        ]);
+        let spec = registry().validate_claim(subject, WORKFLOW_RUN, &run).unwrap();
+        assert_eq!(spec.subjects, [WORKFLOW_RUN_FAMILY]);
+        assert_eq!((&spec.write_policy, &spec.cardinality), (&WritePolicy::SystemOnly, &Cardinality::Once));
+        assert!(spec.retention.is_durable() && !spec.additional_fields);
+        assert_eq!(spec.fields.keys().map(String::as_str).collect::<Vec<_>>(), run.keys().map(String::as_str).collect::<Vec<_>>());
+        assert!(spec.fields.values().all(|field| field.required));
+        assert!(serde_json::to_vec(&run).unwrap().len() <= MAX_WORKFLOW_RUN_BYTES);
+        for name in run.keys() {
+            let mut missing = run.clone();
+            missing.remove(name);
+            assert!(registry().validate_claim(subject, WORKFLOW_RUN, &missing).is_err(), "{name}");
+        }
+        let mut extra = run.clone();
+        extra.insert("jobs".into(), json!([]));
+        assert!(registry().validate_claim(subject, WORKFLOW_RUN, &extra).is_err());
+        assert!(registry().validate_claim("resource/github/acme/garden", WORKFLOW_RUN, &run).is_err());
+        assert!(registry().validate_claim("github-event/github/acme/garden/pull-request/7/x", WORKFLOW_RUN, &run).is_err());
     }
 }

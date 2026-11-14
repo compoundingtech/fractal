@@ -50,7 +50,7 @@ use crate::model::{
 };
 use crate::resource::{
     LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
-    RegisteredResourceProvider, ResourceProvider,
+    RegisteredResourceProvider, ResourceProvider, WorkflowRunLedger,
 };
 use crate::store::Store;
 use crate::store::model_drift::{
@@ -70,6 +70,8 @@ mod program_faults;
 pub mod start_jobs;
 pub mod seat_admission;
 mod seat_admission_queue;
+mod resource_lanes;
+mod program_resources;
 mod lane_bursts;
 mod step_lanes;
 pub mod waits;
@@ -203,6 +205,30 @@ fn owned_schedule_spec(
         return Ok(None);
     };
     Ok(crate::graph::schedule_spec(&schedule.desired, &origin))
+}
+
+/// The largest occurrence reached by this schedule's stable identity: whole history, which
+/// both hosts write and catch-up can skip. A run that supersedes another starts under a new
+/// run subject, so its schedule continues the history of the same-named schedule in every
+/// run it supersedes; publishing a new parent revision never replays a reached tick.
+fn schedule_last_reached(store: &Store, schedule: &DesiredSubject) -> Result<Option<u64>> {
+    let mut subjects = vec![schedule.subject.clone()];
+    if let Some(owner) = schedule.owner_run.as_deref() {
+        let owner = owner.strip_prefix("mission-run/").unwrap_or(owner);
+        if let Some(local) = schedule.subject.strip_prefix(&format!("schedule/{owner}/")) {
+            for ancestor in store.mission_run_supersession_ancestry(owner)?.into_iter().skip(1) {
+                let ancestor = ancestor.strip_prefix("mission-run/").unwrap_or(&ancestor);
+                subjects.push(format!("schedule/{ancestor}/{local}"));
+            }
+        }
+    }
+    let mut last = None;
+    for subject in subjects {
+        for claim in store.claims_for(&subject, Some("schedule.occurrence-reached"))? {
+            last = last.max(claim.body["fields"]["occurrence"].as_u64());
+        }
+    }
+    Ok(last)
 }
 
 /// On a fleet member's cold start, occurrence history may still be elsewhere. Require a fresh
@@ -553,6 +579,28 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         guard()?;
         self.start(member)
+    }
+    /// A finite resource grant must never silently fall back to an ordinary detached start.
+    fn start_resource_guarded(&self, _store: &Store, _member: &MemberSpec, _guard: &dyn Fn() -> Result<()>) -> Result<()> {
+        anyhow::bail!("runtime does not support finite resource memberships")
+    }
+    fn retire_resource_lane(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+        anyhow::bail!("runtime does not support finite resource retirement")
+    }
+    fn recover_resource_lanes(&self, _store: &Store, _host: &str, _now_ms: u64) -> Result<usize> {
+        anyhow::bail!("runtime does not support finite resource recovery")
+    }
+    fn watch_resource_exec(&self, _id: &str, _generation: &str, _wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+        anyhow::bail!("runtime does not support reactive resource execution")
+    }
+    fn resource_exec_output(&self, _id: &str, _generation: &str) -> Result<(String, String)> {
+        anyhow::bail!("runtime does not support generation-fenced execution output")
+    }
+    fn resource_exec_signal(&self, _id: &str, _generation: &str) -> Result<Option<i32>> {
+        anyhow::bail!("runtime does not support generation-fenced execution status")
+    }
+    fn retire_resource_exec(&self, _store: &Store, _request: &crate::store::resource_membership::LaneRequest, _id: &str) -> Result<()> {
+        anyhow::bail!("runtime does not support exact resource execution cancellation")
     }
     fn launch_contract(
         &self,
@@ -939,6 +987,59 @@ impl RuntimeControl for NativeRuntime {
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, Some(guard))
     }
+    fn start_resource_guarded(&self, store: &Store, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
+        let request = resource_lanes::request(member)?.context("finite start lacks lane request")?;
+        let mut backend_entered = false;
+        self.start_checked_inner(member, Some(guard), &mut backend_entered, Some((store, &request)))
+    }
+    fn retire_resource_lane(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest) -> Result<bool> {
+        let now = u64::try_from(now_ms()).unwrap_or(u64::MAX);
+        let record = store.resource_membership_record(&request.id, &request.owner)?;
+        match record.state.as_str() {
+            "queued" => {
+                store.withdraw_resource_membership(&request.id, &request.owner, now)?;
+                Ok(true)
+            }
+            "retired" | "refused" | "withdrawn" => Ok(true),
+            "admitted" | "launched" | "retiring" | "uncertain" => {
+                let grant = record.grant.context("active resource custody has no grant")?;
+                store.cancel_resource_membership(&grant, &request.owner, now)?;
+                store.retire_resource_membership(&grant, &request.owner, &self.exec, now)
+            }
+            state => anyhow::bail!("unknown resource membership state {state}"),
+        }
+    }
+    fn recover_resource_lanes(&self, store: &Store, host: &str, now_ms: u64) -> Result<usize> {
+        store.recover_resource_memberships(host, &self.exec, now_ms)
+    }
+    fn watch_resource_exec(&self, id: &str, generation: &str, wake: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
+        let runtime = self.exec.clone();
+        let id = id.to_owned();
+        let generation = generation.to_owned();
+        std::thread::Builder::new().name("fractal-resource-exit".into()).spawn(move || {
+            if let Err(error) = runtime.wait_for_exit(&id, &generation) {
+                eprintln!("fractal: resource execution {id} completion: {error:#}");
+            }
+            wake();
+        })?;
+        Ok(())
+    }
+    fn resource_exec_output(&self, id: &str, generation: &str) -> Result<(String, String)> {
+        self.exec.read_output(id, generation)
+    }
+    fn resource_exec_signal(&self, id: &str, generation: &str) -> Result<Option<i32>> {
+        match self.exec.observe(id)? {
+            Some(fractal_runtime::ExecObservation::Exited(current)) if current.generation_id == generation => Ok(current.exit_signal),
+            _ => anyhow::bail!("resource execution exit status is missing or belongs to another generation"),
+        }
+    }
+    fn retire_resource_exec(&self, store: &Store, request: &crate::store::resource_membership::LaneRequest, id: &str) -> Result<()> {
+        let record = store.resource_membership_record(&request.id, &request.owner)?;
+        let root = record.roots.iter().find(|root| root.runtime_id == id).context("resource execution root missing")?;
+        let generation = root.execution.as_ref().context("resource execution preparation is uncertain; custody retained")?;
+        self.exec.retire_if(id, &generation.generation_id)?;
+        store.end_resource_execution(record.grant.as_ref().context("resource generation missing")?, id, u64::try_from(now_ms()).unwrap_or(u64::MAX))
+    }
     fn launch_contract(
         &self,
         store: &Store,
@@ -1066,7 +1167,7 @@ impl NativeRuntime {
         // The backend owns its launch boundary and returns an exact StartRejected
         // witness when it can prove that no producer was created.
         let mut backend_entered = false;
-        self.start_checked_inner(member, guard, &mut backend_entered)
+        self.start_checked_inner(member, guard, &mut backend_entered, None)
             .map_err(|error| {
                 if backend_entered {
                     error
@@ -1083,6 +1184,7 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
         backend_entered: &mut bool,
+        resource: Option<(&Store, &crate::store::resource_membership::LaneRequest)>,
     ) -> Result<()> {
         let executable = launch_executable()?;
         let mut environment =
@@ -1186,6 +1288,55 @@ impl NativeRuntime {
                 )
             }
         } else {
+            if let Some((store, request)) = resource {
+                use crate::store::resource_membership::{Admission, Coverage};
+                let now = || u64::try_from(now_ms()).unwrap_or(u64::MAX);
+                let Admission::Admitted(grant) = store.resource_membership(&request.id, &request.owner, now())? else {
+                    anyhow::bail!("finite execution membership is not admitted");
+                };
+                let aggregate = request.capacity.map(|capacity| -> Result<fractal_runtime::Capacity> {
+                    Ok(fractal_runtime::Capacity {
+                        cores: capacity.cores.checked_mul(request.max_members).context("aggregate lane cores overflow")?,
+                        memory: capacity.memory.checked_mul(u64::from(request.max_members)).context("aggregate lane memory overflow")?,
+                    })
+                }).transpose()?;
+                let lane = fractal_runtime::FiniteLane {
+                    name: request.name.clone(), capacity: aggregate,
+                    require_enforced: request.coverage == Coverage::Enforced,
+                };
+                lane.coverage()?;
+                store.prepare_resource_membership(&grant, &member.runtime_id)?;
+                let guarded = || -> Result<()> {
+                    if let Some(guard) = guard { guard()?; }
+                    anyhow::ensure!(matches!(store.resource_membership(&request.id, &request.owner, now())?,
+                        Admission::Admitted(current) if current == grant), "finite membership was fenced before payload release");
+                    Ok(())
+                };
+                *backend_entered = true;
+                let binding = fractal_runtime::ResourceExecutionBinding {
+                    membership_id: grant.membership_id.clone(), generation: grant.generation.clone(),
+                    authority_epoch: grant.authority_epoch.clone(),
+                };
+                let authorize = |execution: &fractal_runtime::ExecGeneration, release: &mut dyn FnMut() -> Result<u64>| {
+                    store.release_resource_payload(&grant, &member.runtime_id, execution, &mut || {
+                        guarded()?;
+                        release()
+                    })
+                };
+                let execution = match self.exec.spawn_in_lane_authorized(&member.runtime_id, &launch, &cwd, &environment, fractal_runtime::FiniteExecutionAuthorization {
+                    lane: &lane, binding: &binding, guard: &guarded, authorize: &authorize,
+                }) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        if let Some(proof) = error.downcast_ref::<fractal_runtime::StartRejected>() {
+                            store.reject_resource_preparation(&grant, &member.runtime_id, proof)?;
+                        }
+                        return Err(error);
+                    }
+                };
+                store.launch_resource_membership(&grant, &member.runtime_id, &execution, now())?;
+                return Ok(());
+            }
             if let Some(guard) = guard {
                 *backend_entered = true;
                 return self
@@ -1439,6 +1590,7 @@ pub struct Reconciler<R = NativeRuntime> {
     launch_input_wake: std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>,
     /// Runs `program` steps; started with the first one (docs/st3/program-engine.md).
     program_engine: std::sync::OnceLock<Arc<program::ProgramEngine>>,
+    resource_authority: std::sync::OnceLock<std::result::Result<(), String>>,
     resource_provider: Arc<dyn ResourceProvider>,
     /// Open faults by subject and scope, loaded from the graph on first use.
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
@@ -1665,6 +1817,7 @@ impl Reconciler<NativeRuntime> {
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
+            resource_authority: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -1887,6 +2040,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             file_watch_revision: Default::default(),
             launch_input_wake: Default::default(),
             program_engine: Default::default(),
+            resource_authority: Default::default(),
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
@@ -4916,20 +5070,42 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn decide_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
         let mut started = None;
         let mut replaced = false;
+        let mut predecessor = None;
         // Whole history: the oldest running claim of this incarnation, and any other incarnation's.
-        for claim in self.store.claims_for(subject, Some("runtime.observed"))? {
+        let observations = self.store.claims_for(subject, Some("runtime.observed"))?;
+        for claim in &observations {
             if claim.body.pointer("/fields/status").and_then(Value::as_str) != Some("running") {
                 continue;
             }
-            if claim_incarnation(&claim) == Some(incarnation) {
+            if claim_incarnation(claim) == Some(incarnation) {
                 started.get_or_insert(claim.accepted_at_unix_ms);
             } else {
+                if started.is_none() {
+                    predecessor = claim_incarnation(claim);
+                }
                 replaced = true;
             }
         }
         let now = now_ms();
         if !replaced
             || started.is_none_or(|started| now.saturating_sub(started) > SESSION_START_WINDOW_MS)
+        {
+            return Ok(());
+        }
+        // A step's fresh-context reset deliberately discards continuity. Do not put the
+        // predecessor's handoff (or held work rendered with it) back into the new session.
+        // Match the immediately preceding incarnation, not any historical reset: an ordinary
+        // crash/restart after this new session should retain the usual continuity behavior.
+        if let Some(predecessor) = predecessor
+            && self
+                .store
+                .observations_for(subject, "runtime.action.requested")?
+                .iter()
+                .any(|claim| {
+                    claim.body.pointer("/fields/action").and_then(Value::as_str)
+                        == Some("fresh-context")
+                        && claim_incarnation(claim) == Some(predecessor)
+                })
         {
             return Ok(());
         }
@@ -10501,6 +10677,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         adopted: bool,
     ) -> Result<()> {
+        if !self.observe_resource_retirement(subject, member, observation)? {
+            return Ok(());
+        }
         // An end is recorded only once the member knows the seat is still placed here; a
         // runtime that is alive is recorded wherever the seat is placed.
         if matches!(observation.status.as_str(), "exited" | "vanished" | "stopped" | "absent" | "failed")
@@ -10740,6 +10919,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             if kind == "runtime.observed" {
                 self.record_runtime_observation_admission(subject, false)?;
+                if let Some(previous) = previous {
+                    self.store.record_invocation_runtime_end(previous)?;
+                }
             }
             return Ok(());
         }
@@ -10760,6 +10942,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(());
             };
             self.record_runtime_observation_admission(subject, false)?;
+            self.store.record_invocation_runtime_end(&record)?;
             record
         } else {
             self.store.append_claim(&input)?
@@ -11919,12 +12102,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     {
                         return Ok(true);
                     }
-                    // Agentless work has no worker claim to open its execution interval. Admit every
-                    // eligible agentless step automatically before materializing declarations or waiting
-                    // on gates, so its timeout and lifecycle are real instead of remaining `ready`
-                    // forever. Nested missions need the persisted parent transition before their children
-                    // can be evaluated; other agentless work can materialize in this same pass.
-                    if view.status == "ready" && view.agentless {
+                    // Materialize first so only a step's actual lane-bound payload members defer
+                    // execution until release. Inheriting a run's lane does not turn programs,
+                    // after-run waits, or agentless gates into queued payload work.
+                    changed |= self.materialize_step_declarations(run, mission, &step, view, false)?;
+                    // Agentless work has no worker claim to open its execution interval. Nested
+                    // missions need the persisted parent transition before evaluating their children.
+                    if view.status == "ready" && view.agentless && !self.resource_step_has_lane(view)?
+                    {
                         let reason = awaited_run(run, &step, view)?
                             .map(|after| format!("waiting for `{after}` to complete"));
                         changed |= self.store.set_step_state_unless_terminal(
@@ -11936,7 +12121,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                             return Ok(changed);
                         }
                     }
-                    changed |= self.materialize_step_declarations(run, mission, &step, view, false)?;
+                    if view.status == "ready" && self.resource_step_has_lane(view)?
+                        && self.resource_step_elapsed(view)?.is_some()
+                    {
+                        changed |= self.store.set_step_state_unless_terminal(&view.subject, "working", None)?;
+                    }
                     if let Some(reason) = self.step_declaration_failure(&view.subject)? {
                         changed |=
                             self.store
@@ -12574,6 +12763,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             .is_some_and(|mission| mission.state == MissionState::Ready))
     }
 
+    /// Track both sides of a capacity-refused start: a holder ending during the start must
+    /// still wake the parent, and a newly admitted holder must wake it on the next release.
+    fn note_mission_capacity_holders(&self, mission: &str) -> Result<()> {
+        for holder in self.store.active_mission_runs_for_mission(mission)? {
+            smallclaims::touched::note_read(|| holder.subject.clone());
+        }
+        Ok(())
+    }
+
     fn evaluate_used_mission(
         &self,
         run: &MissionRunView,
@@ -12635,7 +12833,17 @@ impl<R: RuntimeControl> Reconciler<R> {
             if let Some(child) = self.store.mission_run_for_parent_step(&view.subject)? {
                 (child, false)
             } else {
+                self.note_mission_capacity_holders(&mission)?;
                 let selector = step_run_selector(view);
+                let idempotency_key = format!(
+                    "uses-mission:{}:{}:mission/{mission}@{revision}", view.subject, view.attempt,
+                );
+                let child_subject = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+                let context = self.store.resource_context_for_run(&run.subject)?;
+                if let Some(context) = &context {
+                    let grant = context.grant.as_ref().context("inherited resource context lacks grant")?;
+                    self.store.attach_resource_child(grant, &context.request.owner, &child_subject)?;
+                }
                 let child = match self.store.create_child_mission_run(
                     &MissionRunRequest {
                         mission: mission.clone(),
@@ -12644,20 +12852,29 @@ impl<R: RuntimeControl> Reconciler<R> {
                         requester: Some(run.requester.clone()),
                         mode: Some(run.mode.clone()),
                         inputs: BTreeMap::new(),
-                        idempotency_key: format!(
-                            "uses-mission:{}:{}:mission/{mission}@{revision}",
-                            view.subject, view.attempt
-                        ),
+                        idempotency_key,
                     },
                     run,
                     &view.subject,
                     Some(&selector),
                 ) {
-                    Ok(child) => child,
-                    Err(error) if error.code == "mission-run-capacity" => {
-                        return Ok((false, UsedMissionOutcome::Pending));
+                    Ok(child) => {
+                        // A newly created view did not pass through the annotated child lookup.
+                        // Follow its outcome now, including a child that ends before our next read.
+                        smallclaims::touched::note_read(|| child.subject.clone());
+                        child
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => {
+                        if let Some(context) = &context {
+                            let grant = context.grant.as_ref().context("inherited resource context lacks grant")?;
+                            self.store.reject_resource_child(grant, &context.request.owner, &child_subject, &error)?;
+                        }
+                        if error.code == "mission-run-capacity" {
+                            self.note_mission_capacity_holders(&mission)?;
+                            return Ok((false, UsedMissionOutcome::Pending));
+                        }
+                        return Err(error.into());
+                    }
                 };
                 (child, true)
             };
@@ -14829,56 +15046,54 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                 }
                 DependencySpec::Predicate { gate } => {
-                    let fake = crate::model::StepRunView {
-                        subject: format!(
-                            "step-run/{}/{}",
-                            run.generation
-                                .strip_prefix("run-generation/")
-                                .unwrap_or(&run.generation),
-                            step.spec.path
-                        ),
-                        run: run.subject.clone(),
-                        generation: run.generation.clone(),
-                        step: step.spec.path.clone(),
-                        fresh_context: step.spec.fresh_context,
-                        queue: None,
-                        queue_position: None,
-                        definition_hash: step.spec.definition_hash.clone(),
-                        status: "pending".into(),
-                        attempt: 1,
-                        assigned_to: None,
-                        available_to: Vec::new(),
-                        agentless: true,
-                        title: None,
-                        goals: Vec::new(),
-                        constraints: Vec::new(),
-                        under: Vec::new(),
-                        worker_reported: false,
-                        claimant: None,
-                        claim_incarnation: None,
-                        submitted_incarnation: None,
-                        claim_expires_at_unix_ms: None,
-                        carried_claimant: None,
-                        execution_started_at_unix_ms: None,
-                        execution_paused_until_unix_ms: None,
-                        execution_waited_ms: 0,
-                        execution_elapsed_ms: 0,
-                        timeout_ms: None,
-                        timeout_extension_ms: 0,
-                        ready_age_ms: None,
-                        wake: None,
-                        progress_summary: None,
-                        progress_at_unix_ms: None,
-                        completion_summary: None,
-                        readiness_epoch: 0,
-                        blocked_reason: None,
-                        blockers: Vec::new(),
-                        not_before_unix_ms: None,
-                        nudged_at_unix_ms: None,
-                        created_at_unix_ms: run.created_at_unix_ms,
-                        updated_at_unix_ms: run.updated_at_unix_ms,
-                        person_answers: Vec::new(),
-                    };
+                    let fake = crate::model::StepRunView { executions: None, subject: format!(
+                        "step-run/{}/{}",
+                        run.generation
+                            .strip_prefix("run-generation/")
+                            .unwrap_or(&run.generation),
+                        step.spec.path
+                    ),
+                    run: run.subject.clone(),
+                    generation: run.generation.clone(),
+                    step: step.spec.path.clone(),
+                    fresh_context: step.spec.fresh_context,
+                    queue: None,
+                    queue_position: None,
+                    definition_hash: step.spec.definition_hash.clone(),
+                    status: "pending".into(),
+                    attempt: 1,
+                    assigned_to: None,
+                    available_to: Vec::new(),
+                    agentless: true,
+                    title: None,
+                    goals: Vec::new(),
+                    constraints: Vec::new(),
+                    under: Vec::new(),
+                    worker_reported: false,
+                    claimant: None,
+                    claim_incarnation: None,
+                    submitted_incarnation: None,
+                    claim_expires_at_unix_ms: None,
+                    carried_claimant: None,
+                    execution_started_at_unix_ms: None,
+                    execution_paused_until_unix_ms: None,
+                    execution_waited_ms: 0,
+                    execution_elapsed_ms: 0,
+                    timeout_ms: None,
+                    timeout_extension_ms: 0,
+                    ready_age_ms: None,
+                    wake: None,
+                    progress_summary: None,
+                    progress_at_unix_ms: None,
+                    completion_summary: None,
+                    readiness_epoch: 0,
+                    blocked_reason: None,
+                    blockers: Vec::new(),
+                    not_before_unix_ms: None,
+                    nudged_at_unix_ms: None,
+                    created_at_unix_ms: run.created_at_unix_ms,
+                    updated_at_unix_ms: run.updated_at_unix_ms,
+                    person_answers: Vec::new(), };
                     if !matches!(
                         self.evaluate_mission_gate(run, step, &fake, gate)?,
                         GateOutcome::Pass
@@ -14946,6 +15161,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             changed |= match &request.wait {
                 program::Wait::Run { mission, input } => self.settle_program_child(engine, run, &request, mission, input)?,
                 program::Wait::Ask(ask) => self.settle_program_ask(engine, &request, ask)?,
+                program::Wait::Resource { operation, payload, cancelled } =>
+                    self.settle_program_resource(engine, run, &request, operation, payload, *cancelled)?,
             };
         }
         Ok(changed)
@@ -14966,22 +15183,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
         let child = self.store.mission_run_supersession_successor(&child)?;
         let Some(status) = self.store.mission_run_status(&child)? else {
-            // The runs holding the mission's capacity are read before the start and again after a
-            // refusal, so the end of any holder, even one that ends in between, evaluates this run.
-            let note_holders = || -> Result<()> {
-                for holder in self.store.active_mission_runs_for_mission(mission)? {
-                    smallclaims::touched::note_read(|| holder.subject.clone());
-                }
-                Ok(())
-            };
-            note_holders()?;
-            return match self.start_program_child(run, &request.step, mission, input, idempotency_key) {
+            self.note_mission_capacity_holders(mission)?;
+            return match self.start_program_child(run, &request.step, mission, input, idempotency_key, None) {
                 Ok(started) => {
                     engine.waiting(request, &started.subject)?;
                     Ok(true)
                 }
                 Err(error) if error.code == "mission-run-capacity" => {
-                    note_holders()?;
+                    self.note_mission_capacity_holders(mission)?;
                     Ok(false)
                 }
                 // A store failure or contention (a run-mutation fence while projections catch up)
@@ -15014,8 +15223,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         mission: &str,
         input: &BTreeMap<String, String>,
         idempotency_key: String,
+        resource: Option<&crate::store::resource_membership::Membership>,
     ) -> std::result::Result<MissionRunView, crate::model::FractalError> {
-        self.store.create_program_child_mission_run(
+        let inherited = if resource.is_none() {
+            self.store.resource_context_for_run(&run.subject).map_err(smallclaims::error::typed)?
+        } else { None };
+        let context = resource.or(inherited.as_ref());
+        let child = self.store.mission_run_subject_for_idempotency_key(&idempotency_key);
+        if let Some(context) = context {
+            let grant = context.grant.as_ref().ok_or_else(|| crate::model::FractalError::new("resource-context", "inherited lane has no grant"))?;
+            self.store.attach_resource_child(grant, &context.request.owner, &child).map_err(smallclaims::error::typed)?;
+        }
+        let result = self.store.create_program_child_mission_run(
             &MissionRunRequest {
                 mission: mission.to_owned(),
                 revision: None,
@@ -15027,7 +15246,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
             run,
             step,
-        )
+        );
+        if let (Some(context), Err(error)) = (context, &result) {
+            let grant = context.grant.as_ref().expect("context grant checked before child creation");
+            self.store.reject_resource_child(grant, &context.request.owner, &child, error).map_err(smallclaims::error::typed)?;
+        }
+        result
     }
 
     /// A child run's end as its program receives it: `{run, status: 'completed', products?}`
@@ -15038,8 +15262,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .mission_run_steps(child, false)?
             .with_context(|| format!("the child run {child} disappeared"))?;
+        let executions = view.steps.iter().map(|step| {
+            self.store.step_executions(&step.subject)
+        }).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect::<Vec<_>>();
         if status == "completed" {
-            let mut value = serde_json::json!({"run": child, "status": status});
+            let mut value = serde_json::json!({"run": child, "status": status, "executions": executions});
             let products = self.program_child_products(&view)?;
             if !products.is_empty() {
                 value["products"] = Value::Object(products);
@@ -15056,7 +15283,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
             })
             .unwrap_or_else(|| format!("the child run is {status}"));
-        Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason}}))
+        Ok(serde_json::json!({"_tag": "Failure", "error": {"_tag": "ChildFailed", "run": child, "status": status, "reason": reason, "executions": executions}}))
     }
 
     fn program_child_products(&self, child: &MissionRunView) -> Result<serde_json::Map<String, Value>> {
@@ -15184,6 +15411,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             subject.owner_generation = Some(run.generation.clone());
             subject.owner_step = Some(view.subject.clone());
             if let Some(member) = subject.member.as_mut() {
+                self.bind_resource_lane(run, step, view, member, &subject.subject)?;
                 let workspace = PathBuf::from(&member.workspace);
                 if workspace.is_relative() {
                     member.workspace = Path::new(&run.workspace)
@@ -16288,6 +16516,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         let timeout = timeout.saturating_add(view.timeout_extension_ms);
+        if self.resource_step_has_lane(view)? {
+            let Some(elapsed) = self.resource_step_elapsed(view)? else { return Ok(false); };
+            if elapsed >= u128::from(timeout) { return Ok(true); }
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                self.arm_step_deadline(&handle, &view.subject, (u128::from(timeout) - elapsed).max(1) as u64);
+            }
+            return Ok(false);
+        }
         let elapsed = view.execution_elapsed_ms;
         if elapsed >= timeout as u128 {
             return Ok(true);
@@ -16650,20 +16886,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(revision) = self.store.selected_desired_revision(&schedule.subject)? else {
             return Ok(());
         };
-        // Whole history: the largest occurrence reached, which both hosts write and catch-up can
-        // skip, so it need not be the newest claim's.
-        let reached = self
-            .store
-            .claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
-        let last = reached
-            .iter()
-            .filter_map(|claim| {
-                claim
-                    .body
-                    .pointer("/fields/occurrence")
-                    .and_then(Value::as_u64)
-            })
-            .max();
+        let last = schedule_last_reached(&self.store, schedule)?;
         let now = now_ms() as i64;
         let (occurrence, scheduled_at) = if let Some(at) = spec.at_unix_ms {
             if last.is_some() {
@@ -16898,11 +17121,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
-                // Whole history: the largest occurrence reached, as in reconcile_schedule.
-                let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
-                let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
-                    .filter_map(|claim| claim.body["fields"]["occurrence"].as_u64()).max());
-                let already_reached = reached_history.is_err() || last_reached.is_some_and(|last| last >= occurrence);
+                // The schedule's whole history, as in reconcile_schedule.
+                let last_reached = schedule_last_reached(&store, &schedule_declaration);
+                let already_reached = match &last_reached {
+                    Ok(last) => last.is_some_and(|last| last >= occurrence),
+                    Err(_) => true,
+                };
+                let last_reached = last_reached.ok().flatten();
                 let candidate_current = takeover.is_none() || current_spec.as_ref().is_some_and(|spec|
                     Self::standby_candidate_current(spec, occurrence, last_reached, now_ms() as i64).unwrap_or(false));
                 if !ready || already_reached || !candidate_current {
@@ -18414,6 +18639,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     every_ms: spec.every_ms,
                     refresh: refresh_attempt.is_some(),
                     webhook_covered,
+                    // A repository observer records each completed CI run it reads in the graph.
+                    workflow_runs: (spec.provider == "github.repository").then(|| {
+                        Arc::new(GraphWorkflowRuns { store: store.clone(), observer: observer_subject.clone() })
+                            as Arc<dyn WorkflowRunLedger>
+                    }),
                 };
                 // Reload under the look lock: a retired arm may have completed while we waited.
                 let refreshed = github_plugin.observer_freshness(&observer_subject, now_ms());
@@ -20472,6 +20702,38 @@ fn mirror_observation(
     }
 }
 
+/// The graph as a repository observer's [`WorkflowRunLedger`]. A run is written once its subject
+/// holds a claim, this member's or one replicated from another; each write is one
+/// `github.workflow-run` claim within the GitHub plugin's allowlist, naming the observer that
+/// polled the run.
+struct GraphWorkflowRuns {
+    store: Arc<Store>,
+    observer: String,
+}
+
+impl WorkflowRunLedger for GraphWorkflowRuns {
+    fn written(&self, subject: &str) -> Result<bool> {
+        Ok(self.store.latest_claim_id(subject)?.is_some())
+    }
+
+    fn write(&self, subject: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+        let mut fields = fields.clone();
+        fields.insert("observer".to_owned(), Value::String(self.observer.clone()));
+        github_plugin_store::MANIFEST.admit(subject, fractal_schema::github_plugin::WORKFLOW_RUN, &fields)?;
+        let key = github_events::workflow_run_observation_key(subject, &fields)?;
+        self.store.append_claim(&ClaimInput {
+            subject: subject.to_owned(),
+            kind: fractal_schema::github_plugin::WORKFLOW_RUN.into(),
+            actor: None,
+            fields,
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key),
+        }).map_err(|error| anyhow::anyhow!(error.message))?;
+        Ok(())
+    }
+}
+
 /// What a repository's poller lays beside a look it records, from a filled mirror: each listed
 /// item's mirrored facts, and whether the repository is in compact mode. Compact mode, where an
 /// item's change is recorded as `vcs.item.state` alone, needs every current member of the fleet
@@ -20559,6 +20821,7 @@ async fn refill_mirror(
         every_ms: spec.every_ms,
         refresh: false,
         webhook_covered: false,
+        workflow_runs: None,
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
@@ -41999,6 +42262,59 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert!(store.messages(None, true).unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn a_repository_observer_records_each_completed_ci_run_once_in_the_graph() {
+        const RUN: &str = "github-workflow-run/example/repo/9001";
+        struct Recorder {
+            calls: Arc<AtomicUsize>,
+            written: Arc<Mutex<Vec<bool>>>,
+        }
+        impl ResourceProvider for Recorder {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let ledger = request.workflow_runs.expect("a repository observer is given the graph's ledger");
+                let fields = BTreeMap::from([
+                    ("version".to_owned(), serde_json::json!(1)), ("repository".to_owned(), serde_json::json!("example/repo")),
+                    ("workflow".to_owned(), serde_json::json!("Workspace CI")), ("run_id".to_owned(), serde_json::json!(9001)),
+                    ("attempt".to_owned(), serde_json::json!(1)), ("event".to_owned(), serde_json::json!("merge_group")),
+                    ("conclusion".to_owned(), serde_json::json!("failure")), ("head_sha".to_owned(), serde_json::json!("a".repeat(40))),
+                    ("created_at".to_owned(), serde_json::json!("2026-11-13T10:00:00Z")),
+                    ("started_at".to_owned(), serde_json::json!("2026-11-13T10:00:30Z")),
+                    ("completed_at".to_owned(), serde_json::json!("2026-11-13T10:09:30Z")),
+                    ("duration_ms".to_owned(), serde_json::json!(540_000)), ("flaky_tests".to_owned(), serde_json::json!(0)),
+                    ("flakes".to_owned(), serde_json::json!(1)),
+                ]);
+                let mut written = self.written.lock().unwrap();
+                written.push(ledger.written(RUN).unwrap());
+                ledger.write(RUN, &fields).unwrap();
+                written.push(ledger.written(RUN).unwrap());
+                ledger.write(RUN, &fields).unwrap();
+                drop(written);
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(crate::resource::ProviderObservation {
+                    facts: serde_json::json!({"repository_id": 7, "issues": []}),
+                    cursor: Some("runs".into()),
+                    next_check_unix_ms: now_ms().saturating_add(60_000),
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "record-runs");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()),
+            "node".into(), Arc::new(Notify::new()))
+            .with_resource_provider(Arc::new(Recorder { calls: calls.clone(), written: written.clone() }));
+        observe_now(&reconciler, &calls).await;
+        assert_eq!(*written.lock().unwrap(), [false, true], "a written run reads as written");
+        let claims = store.claims_for(RUN, None).unwrap();
+        assert_eq!(claims.len(), 1, "an identical second write is the same claim");
+        assert_eq!(claims[0].kind, fractal_schema::github_plugin::WORKFLOW_RUN);
+        assert_eq!(claims[0].body["fields"]["observer"], "observer/repo");
+        assert_eq!(claims[0].body["fields"]["flakes"], 1);
+    }
+
     fn failure_for_item(
         store: &Store,
         item: &crate::model::AttentionItemView,
@@ -49699,6 +50015,39 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                     == vec![format!("{}worker-three", crate::handoff::SESSION_START_TAG_PREFIX)])
         );
 
+        // A fresh step must not smuggle the discarded context back through the handoff.
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "runtime.action.requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), Value::String("fresh-context".into())),
+                    ("operation".into(), Value::String("step-fresh-reset".into())),
+                    ("incarnation_id".into(), Value::String("worker-three".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("step-fresh-reset".into()),
+            })
+            .unwrap();
+        ready("worker-four");
+        ready("worker-four");
+        assert_eq!(inbox().len(), 2, "a fresh reset does not send the old handoff");
+        // Suppression survives daemon restart; it is not just the session_starts cache.
+        Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        .deliver_session_start(&desired.subject, "worker-four")
+        .unwrap();
+        assert_eq!(inbox().len(), 2);
+        // A later ordinary restart is not itself a freshness request.
+        ready("worker-five");
+        assert_eq!(inbox().len(), 3, "ordinary continuity resumes after the fresh session");
+
         // A seat that has written nothing and holds no work is sent nothing at all.
         let quiet = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&quiet, &source, "session-start-quiet");
@@ -51560,6 +51909,7 @@ mission "ios-proof-blocked" state="ready" {
             .unwrap();
         let ask = store
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,
@@ -51637,50 +51987,48 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn inherited_nested_work_keeps_one_parent_alert() {
-        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView {
-            subject: subject.into(),
-            run: "mission-run/run-1".into(),
-            generation: "run-generation/run-1".into(),
-            step: path.into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition".into(),
-            status: "ready".into(),
-            attempt: 1,
-            assigned_to: Some(assignee.into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: None,
-            goals: Vec::new(),
-            constraints: Vec::new(),
-            under: Vec::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: None,
-            wake: None,
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 1,
-            updated_at_unix_ms: 1,
-            person_answers: Vec::new(),
-        };
+        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { executions: None, subject: subject.into(),
+        run: "mission-run/run-1".into(),
+        generation: "run-generation/run-1".into(),
+        step: path.into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition".into(),
+        status: "ready".into(),
+        attempt: 1,
+        assigned_to: Some(assignee.into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: None,
+        goals: Vec::new(),
+        constraints: Vec::new(),
+        under: Vec::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: None,
+        wake: None,
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+        person_answers: Vec::new(), };
         let legacy = step("step-run/run-1/legacy", "legacy", "node/worker");
         assert_eq!(
             next_work_wake_for_agent("agent/node/worker", std::slice::from_ref(&legacy), &[]),
@@ -51810,59 +52158,57 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn busy_agent_keeps_cross_run_work_queued_without_wake_deadline() {
-        let mut first = StepRunView {
-            subject: "step-run/older/work".into(),
-            run: "mission-run/older".into(),
-            generation: "run-generation/older".into(),
-            step: "work".into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition".into(),
-            status: "ready".into(),
-            attempt: 1,
-            assigned_to: Some("agent/worker".into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: None,
-            goals: Vec::new(),
-            constraints: Vec::new(),
-            under: Vec::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: None,
-            wake: Some(crate::model::WorkWakeView {
-                assignee: "agent/worker".into(),
-                assignee_state: "working".into(),
-                incarnation_id: "worker-one".into(),
-                attempts: 1,
-                last_attempt_at_unix_ms: Some(1_000),
-                acknowledged_by: None,
-                failure: None,
-                asks: Default::default(),
-            }),
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 10,
-            updated_at_unix_ms: 10,
-            person_answers: Vec::new(),
-        };
+        let mut first = StepRunView { executions: None, subject: "step-run/older/work".into(),
+        run: "mission-run/older".into(),
+        generation: "run-generation/older".into(),
+        step: "work".into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition".into(),
+        status: "ready".into(),
+        attempt: 1,
+        assigned_to: Some("agent/worker".into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: None,
+        goals: Vec::new(),
+        constraints: Vec::new(),
+        under: Vec::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: None,
+        wake: Some(crate::model::WorkWakeView {
+            assignee: "agent/worker".into(),
+            assignee_state: "working".into(),
+            incarnation_id: "worker-one".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: Some(1_000),
+            acknowledged_by: None,
+            failure: None,
+            asks: Default::default(),
+        }),
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 10,
+        updated_at_unix_ms: 10,
+        person_answers: Vec::new(), };
         let mut legacy = first.clone();
         legacy.assigned_to = Some("node/worker".into());
         assert_eq!(
@@ -52322,59 +52668,57 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
 
     #[test]
     fn only_the_assignee_host_arms_a_work_wake_deadline() {
-        let step = StepRunView {
-            subject: "step-run/run-1/work".into(),
-            run: "mission-run/run-1".into(),
-            generation: "run-generation/run-1".into(),
-            step: "work".into(),
-            fresh_context: false,
-            queue: None,
-            queue_position: None,
-            definition_hash: "definition".into(),
-            status: "ready".into(),
-            attempt: 1,
-            assigned_to: Some("agent/remote.worker".into()),
-            available_to: Vec::new(),
-            agentless: false,
-            title: None,
-            goals: Vec::new(),
-            constraints: Vec::new(),
-            under: Vec::new(),
-            worker_reported: false,
-            claimant: None,
-            claim_incarnation: None,
-            submitted_incarnation: None,
-            claim_expires_at_unix_ms: None,
-            carried_claimant: None,
-            execution_started_at_unix_ms: None,
-            execution_paused_until_unix_ms: None,
-            execution_waited_ms: 0,
-            execution_elapsed_ms: 0,
-            timeout_ms: None,
-            timeout_extension_ms: 0,
-            ready_age_ms: Some(1),
-            wake: Some(crate::model::WorkWakeView {
-                assignee: "agent/remote.worker".into(),
-                assignee_state: "ready".into(),
-                incarnation_id: "remote-one".into(),
-                attempts: 1,
-                last_attempt_at_unix_ms: Some(1_000),
-                acknowledged_by: None,
-                failure: None,
-                asks: Default::default(),
-            }),
-            progress_summary: None,
-            progress_at_unix_ms: None,
-            completion_summary: None,
-            readiness_epoch: 1,
-            blocked_reason: None,
-            blockers: Vec::new(),
-            not_before_unix_ms: None,
-            nudged_at_unix_ms: None,
-            created_at_unix_ms: 1,
-            updated_at_unix_ms: 1,
-            person_answers: Vec::new(),
-        };
+        let step = StepRunView { executions: None, subject: "step-run/run-1/work".into(),
+        run: "mission-run/run-1".into(),
+        generation: "run-generation/run-1".into(),
+        step: "work".into(),
+        fresh_context: false,
+        queue: None,
+        queue_position: None,
+        definition_hash: "definition".into(),
+        status: "ready".into(),
+        attempt: 1,
+        assigned_to: Some("agent/remote.worker".into()),
+        available_to: Vec::new(),
+        agentless: false,
+        title: None,
+        goals: Vec::new(),
+        constraints: Vec::new(),
+        under: Vec::new(),
+        worker_reported: false,
+        claimant: None,
+        claim_incarnation: None,
+        submitted_incarnation: None,
+        claim_expires_at_unix_ms: None,
+        carried_claimant: None,
+        execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
+        execution_elapsed_ms: 0,
+        timeout_ms: None,
+        timeout_extension_ms: 0,
+        ready_age_ms: Some(1),
+        wake: Some(crate::model::WorkWakeView {
+            assignee: "agent/remote.worker".into(),
+            assignee_state: "ready".into(),
+            incarnation_id: "remote-one".into(),
+            attempts: 1,
+            last_attempt_at_unix_ms: Some(1_000),
+            acknowledged_by: None,
+            failure: None,
+            asks: Default::default(),
+        }),
+        progress_summary: None,
+        progress_at_unix_ms: None,
+        completion_summary: None,
+        readiness_epoch: 1,
+        blocked_reason: None,
+        blockers: Vec::new(),
+        not_before_unix_ms: None,
+        nudged_at_unix_ms: None,
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+        person_answers: Vec::new(), };
         let work = [step];
 
         assert_eq!(

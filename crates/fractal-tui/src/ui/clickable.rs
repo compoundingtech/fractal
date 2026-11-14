@@ -151,7 +151,7 @@ impl Ui {
             Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
             Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
-            Hit::Key(_) | Hit::Enter | Hit::ChatEnter | Hit::Escape | Hit::Menu(_) => label,
+            Hit::Key(_) | Hit::Availability(_) | Hit::Enter | Hit::ChatEnter | Hit::Escape | Hit::Menu(_) => label,
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
@@ -498,12 +498,16 @@ mod tests {
             pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), row.x, row.y);
             assert!(ui.confirm.is_none(), "{kind}");
             match kind {
-                "request" | "named" | "update" | "message" => {
+                // Requests follow main's dismissal semantics: the person's own dismissal
+                // (`attention.dismiss`), not a work.done answer.
+                "request" | "named" => {
+                    assert!(matches!(ui.effects.as_slice(), [Effect::Dismiss { id: sent, .. }]
+                        if sent == &id), "{kind}: {:?}", ui.effects);
+                }
+                "update" | "message" => {
                     let expected = if kind == "message" { "message.read" } else { "work.done" };
                     assert!(matches!(ui.effects.as_slice(), [Effect::Attention { id: sent, action, reason, answer, .. }]
                         if sent == &id && action == expected && match kind {
-                            "request" => reason.as_deref() == Some("Nothing for me to do here.") && answer.is_none(),
-                            "named" => reason.as_deref() == Some("Dismissed without an answer.") && answer.as_deref() == Some("dismiss"),
                             "update" => reason.as_deref() == Some("Read") && answer.as_deref() == Some("read"),
                             _ => answer.is_none(),
                         }), "{kind}: {:?}", ui.effects);
@@ -533,8 +537,8 @@ mod tests {
         pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), button.x, button.y);
         assert!(ui.effects.is_empty() && ui.confirm.is_none());
         pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), button.x, button.y);
-        assert!(matches!(ui.effects.as_slice(), [Effect::Attention { id: sent, action, .. }]
-            if sent == &id && action == "work.done"));
+        assert!(matches!(ui.effects.as_slice(), [Effect::Dismiss { id: sent, .. }]
+            if sent == &id), "{:?}", ui.effects);
         assert!(ui.confirm.is_none());
     }
 

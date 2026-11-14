@@ -321,3 +321,87 @@ focused lineage regression validates, admits, and replicates both retry and supe
 inputs through the existing generic paths. No old-build admission or checkpoint comparison
 exception is added. Earlier per-seed trim characterizations do not establish v24 behavior:
 every fixed seed must converge and trim, without inheriting v22's negative exception.
+
+`claims-v25.json` adds `github.workflow-run`, the GitHub poller's once-per-run claim of a completed
+Workspace CI run on `github-workflow-run/OWNER/REPO/RUN_ID` (docs/st3/plugins.md), and carries the
+optional `gate.requested`, `runtime.action.requested` and `runtime.observed` fields the registry has
+gained since v24. Versions 1 through 24 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v25.json`;
+do not hand-edit it. The simulation selects v25; a draw writes the kind through the generic append
+path on a fresh run subject, as it does `github.event`. With v25 every fixed seed converges; seeds
+2 and 233 are the exact never-trim set, observed by hosted linux-tests (runs 43416435882 and
+43424149648) and hosted burst cargo-test run 43411988505. In both seeds the old build draws the new
+kind, and that one replicated claim makes it a writer every later checkpoint waits for; an old build
+never seals. Seed 233 never excuses it (quiesce's even draw says no). Seed 2 does, but its schedule
+ends with `checkpoint/2100-01-24` sealed under two participant sets and no later cut. Hosted burst
+runs on throwaway tracing commits show this: in
+[43425100378](https://github.com/compoundingtech/fractal/actions/runs/43425100378) excusing seed
+233's old build trims every modern node; in
+[43428226636](https://github.com/compoundingtech/fractal/actions/runs/43428226636) skipping only
+the old build's `github.workflow-run` write, after drawing it so the schedule is unchanged, trims
+both seeds; in [43431112343](https://github.com/compoundingtech/fractal/actions/runs/43431112343)
+one more cut trims seed 2 on every modern node. So the kind changes which writers a checkpoint
+waits for, not how claims trim. Each never-trim seed's test goes on to excuse the old build and let
+the next cut fall due, and requires every modern node to trim then. Hosted linux-tests remains the
+authority (#6210).
+
+`claims-v26.json` adds the person-availability kinds `person.status-set`,
+`person.interruptions-set`, `person.deadline-clock-set` and `person.presence-observed`, the
+optional `source` of `person.directive-note-set` and the optional `priority` of
+`work.person-asked`. Versions 1 through 25 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v26.json`;
+do not hand-edit it. The simulation and audit reports select v26. Draws use the generic append
+path: only the subject person's own claims are admitted, as on every admission path. The new
+kinds and fields shift the shared random schedule.
+
+Hosted [burst run 43455339387](https://github.com/compoundingtech/fractal/actions/runs/43455339387)
+observed every fixed seed converge and trim a checkpoint, including v25's non-trimming seeds 2
+and 233 and the earlier availability corpus's seed 21. The exact v26 `NEVER_TRIMS` set is empty:
+no previous corpus's schedule-specific exception carries forward. There are no untrimmed seeds
+requiring the old-build excusal and next-cut continuation in this corpus.
+
+`claims-v27.json` captures the merged registry with the system-only `mission.run.trace` and
+`program.attempt.trace` correlation claims. Versions 1 through 26 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v27.json`;
+do not hand-edit it. The simulation and audit reports select v27. The fixed local sweep observed
+only seed 21 without a checkpoint trim; all other fixed seeds trimmed. Its test additionally
+requires every modern node to trim after the old build is excused and the next cut falls due.
+This characterization belongs to v27, not an inherited older corpus schedule.
+
+`claims-v28.json` adds the person-only `person.attention-seen` and `person.attention-snoozed`
+kinds (docs/st3/schema.md, "Person attention controls") on top of v27's trace and availability
+registry. Versions 1 through 27 stay frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v28.json`;
+do not hand-edit it. The simulation and audit reports select v28. Control draws use the person's
+native admission path over a few rows, with a snooze that sometimes ends; the focused regression
+admits both kinds and replicates their merged controls to the oracle. Every fixed seed must still
+converge.
+
+Hosted [burst run 43519468054](https://github.com/compoundingtech/fractal/actions/runs/43519468054)
+observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk)
+after main's step-execution and response-evidence fields were regenerated into the snapshot.
+This includes v27's non-trimming seed 21 and the earlier provisional controls seeds 610 and 1597.
+The exact v28 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
+no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
+
+`claims-v29.json` adds the `notice-owner` registry entry (docs/st3/schema.md, "Daemon-owned
+notice delivery") on top of v28's person attention controls. Versions 1 through 28 stay frozen.
+Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v29.json`;
+do not hand-edit it. The simulation and audit reports select v29.
+
+Hosted [burst run 43535467419](https://github.com/compoundingtech/fractal/actions/runs/43535467419)
+observed all 32 fixed seeds converge and trim (33 passing tests including seed 1 on a real disk).
+The exact v29 `NEVER_TRIMS` set is empty; no older corpus exception carries forward. There are
+no untrimmed seeds requiring old-build excusal and next-cut continuation in this corpus.
+
+`claims-v30.json` adds durable native invocation receipts (the `harness.invocation` kind)
+on top of v29 notice-owner registry entry. Versions 1 through 29 stay frozen; v29 is main`s
+notice-owner corpus. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v30.json`;
+do not hand-edit it. The simulation and audit reports select v30.
+
+The local fixed sweep observed only seeds 13 and 294 without a checkpoint trim; each still
+trims on every modern node after its old build is excused and the next cut falls due. The
+exact v30 `NEVER_TRIMS` set is `[13, 294]`, carried from the invocation-receipt corpus
+schedule measured before main took v29.

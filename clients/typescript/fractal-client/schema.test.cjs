@@ -574,6 +574,55 @@ test('directive notes decode metadata and expiry without becoming gate evidence'
     assert.throws(() => decode(invalid));
 });
 
+test('availability decodes the coarse view, the full view and a status clear', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const people = Rich.decodeUnknownSync(Rich.PersonAvailabilities, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/person-availability.json').value;
+    const result = Schema.encodeSync(Rich.PersonAvailabilities)(people(wire));
+    assert.equal(result.people[0].presence, null);
+    assert.equal(result.people[0].status_until, '2026-11-12T12:00:00.000Z');
+    assert.equal(result.people[1].deadline_clock, 'hold-routine');
+    assert.deepEqual([result.people[2].status, result.people[2].status_source], ['available', 'unreported']);
+    // Words a newer daemon adds stay readable.
+    const future = { ...wire.people[0], status: 'busy', status_source: 'calendar', presence: 'in-call', interruptions: 'priority', deadline_clock: 'hold-weekend' };
+    const decodedFuture = Rich.decodeUnknownSync(Rich.PersonAvailability)(future);
+    assert.equal(Rich.containsUnknownCase(decodedFuture), true);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict')(future));
+    const kept = Schema.encodeSync(Rich.PersonAvailability)(decodedFuture);
+    assert.deepEqual([kept.status, kept.status_source, kept.presence, kept.interruptions, kept.deadline_clock], ['busy', 'calendar', 'in-call', 'priority', 'hold-weekend']);
+    const own = require('../../../docs/st3/client-v0/fixtures/availability-set-result.json').value;
+    const full = Rich.decodeUnknownSync(Rich.PersonAvailability, 'strict');
+    assert.equal(Schema.encodeSync(Rich.PersonAvailability)(full(own)).presence, 'present');
+    const set = Rich.decodeUnknownSync(Rich.AvailabilitySet, 'strict');
+    assert.equal(Schema.encodeSync(Rich.AvailabilitySet)(set({ status: { value: null } })).status.value, null);
+    for (const invalid of [{ interruptions: { value: 'focus' } }, { status: { value: 'away' }, person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const report = Rich.decodeUnknownSync(Rich.PresenceReport, 'strict');
+    report(require('../../../docs/st3/client-v0/fixtures/presence-report.json'));
+    assert.throws(() => report({ state: 'idle', observed_at: '2026-11-12T09:58:00Z' }));
+    assert.throws(() => report({ presence: 'present', observed_at: '2026-11-12T09:58:00Z' }));
+    const reportResult = Rich.decodeUnknownSync(Rich.PresenceReportResult, 'strict');
+    const reported = require('../../../docs/st3/client-v0/fixtures/presence-report-result.json').value;
+    assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(reportResult(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
+});
+
+test('a note write requires text, clears with null and never names the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const set = Rich.decodeUnknownSync(Rich.DirectiveNoteSet, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set(wire)).expires_at, '2026-11-16T09:00:00.000Z');
+    assert.equal(Schema.encodeSync(Rich.DirectiveNoteSet)(set({ text: null })).text, null);
+    for (const invalid of [{}, { text: '' }, { text: 'Approved', person: 'person/avery' }]) {
+        assert.throws(() => set(invalid));
+    }
+    const result = Rich.decodeUnknownSync(Rich.DirectiveNoteSetResult, 'strict');
+    const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json').value;
+    const encode = Schema.encodeSync(Rich.DirectiveNoteSetResult);
+    assert.equal(encode(result(written)).note.person, 'person/ada');
+    assert.equal(encode(result({ note: null })).note, null);
+});
+
 test('person-ask mission rows retain actor references through the generated decoder', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');

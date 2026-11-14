@@ -385,6 +385,9 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
+/// Native finite-execution context carried with the effective member launch.
+pub const RESOURCE_LANE_REQUEST_TAG: &str = "st3.resource-lane";
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemberSpec {
     pub kind: MemberKind,
@@ -447,6 +450,9 @@ impl MemberSpec {
         }
         if authored_launch(&self.launch) != authored_launch(&launched.launch) {
             changes.push("launch");
+        }
+        if self.tags.get(RESOURCE_LANE_REQUEST_TAG) != launched.tags.get(RESOURCE_LANE_REQUEST_TAG) {
+            changes.push("resource-lane");
         }
         changes
     }
@@ -847,6 +853,9 @@ pub struct StepSpec {
     /// did before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<fractal_runtime::Raise>,
+    /// Finite exec admission policy; independent of an assigned seat's scoped capacity raise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_lane: Option<ResourceLaneSpec>,
     pub retry: RetrySpec,
     pub finally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -881,6 +890,25 @@ pub struct StepSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// The declarative counterpart of `resources.lane`: one host-local admission policy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLaneSpec {
+    pub name: String,
+    pub host: String,
+    pub max_members: u32,
+    pub capacity: Option<fractal_runtime::Capacity>,
+    pub coverage: ResourceLaneCoverage,
+    pub admission_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceLaneCoverage {
+    Logical,
+    Enforced,
 }
 
 /// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The
@@ -2395,6 +2423,13 @@ impl AttentionItemView {
         attention_is_alert(&self.kind, self.is_update())
     }
 
+    /// Whether this item is urgent: the one server rule, priority `critical`
+    /// ([`fractal_schema::availability::urgent_priority`]). Interruptions `urgent`, the deadline
+    /// clock's `hold-routine` and spoken delivery read only this.
+    pub fn is_urgent(&self) -> bool {
+        fractal_schema::availability::urgent_priority(Some(&self.priority))
+    }
+
     /// Every agent conversation this item shows in: its own, and for a login, every seat that
     /// shares it, since one sign-in answers them all.
     pub fn conversations(&self) -> Vec<String> {
@@ -3212,6 +3247,9 @@ pub struct StepRunView {
     pub run: String,
     pub generation: String,
     pub step: String,
+    /// Detail-read execution evidence; absent on lean work reads and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions: Option<Vec<crate::step_execution::StepExecution>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3604,6 +3642,11 @@ pub struct PersonAskRequest {
     /// the ask resolves as timed out with no answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_answer: Option<String>,
+    /// `critical`, `high`, `normal` or `low` ([`fractal_schema::availability::PRIORITIES`]);
+    /// absent is `normal`. Only `critical` is urgent: it keeps running under `hold-routine` and
+    /// may interrupt a person whose interruptions are `urgent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     pub idempotency_key: String,
 }
 

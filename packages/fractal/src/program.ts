@@ -4,13 +4,16 @@
  * the daemon resolves), `Fractal.command`, `Fractal.env` and `Fractal.cwd`.
  * See docs/st3/program-engine.md §11.
  */
-import { Context, Effect, Layer, Schedule, Schema, SchemaAST } from 'effect'
+import { Context, Effect, Layer, Option, Schedule, Schema, SchemaAST } from 'effect'
 import { Activity, DurableDeferred, type Workflow } from 'effect/workflow'
 
 import { mission as dataMission, type MissionIntent } from './define.ts'
 import type { Authority, PersonReference } from './mod.ts'
 import {
   keyed,
+  CommandResultSchema,
+  ResourceError,
+  ResourceCommandScope,
   Program,
   programEntry,
   ProgramEntry,
@@ -23,6 +26,7 @@ import {
   type Tagged,
 } from './program-engine.ts'
 import type { SubjectDefinition } from './subject-ref.ts'
+import { StepExecution } from './step-execution.ts'
 
 /** A schema without decoding or encoding services. */
 type Codec = Schema.Codec<any, any>
@@ -36,6 +40,7 @@ export const ChildRun = Schema.Struct({
   run: Schema.String,
   status: Schema.Literal('completed'),
   products: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+  executions: Schema.optionalKey(Schema.Array(StepExecution)),
 })
 export type ChildRun = typeof ChildRun.Type
 
@@ -44,6 +49,7 @@ export class ChildFailed extends Schema.TaggedError<ChildFailed>()('ChildFailed'
   run: Schema.String,
   status: Schema.String,
   reason: Schema.String,
+  executions: Schema.optionalKey(Schema.Array(StepExecution)),
 }) {}
 
 /** A person's answer to an ask; `resolved_by` is the person or `deadline`. */
@@ -239,12 +245,20 @@ export function step<ES extends Codec, S extends Codec = typeof Schema.Void, R =
   effect: Effect.Effect<S['Type'], ES['Type'], R>,
 ): Effect.Effect<S['Type'], ES['Type'], R | ProgramServices>
 export function step<S extends Codec = typeof Schema.Void>(
-  options: StepOptions & { readonly success?: S },
+  options: StepOptions & { readonly success?: S; readonly execution: true },
+): Effect.Effect<
+  { readonly value: S['Type']; readonly executions?: readonly StepExecution[] },
+  ChildFailed,
+  Worker | ProgramServices
+>
+export function step<S extends Codec = typeof Schema.Void>(
+  options: StepOptions & { readonly success?: S; readonly execution?: false },
 ): Effect.Effect<S['Type'], ChildFailed, Worker | ProgramServices>
 export function step(
   options: StepOptions & {
     readonly success?: Codec | undefined
     readonly error?: Codec | undefined
+    readonly execution?: boolean | undefined
   },
   effect?: Effect.Effect<unknown, unknown, unknown>,
 ): Effect.Effect<unknown, unknown, unknown> {
@@ -255,21 +269,29 @@ export function step(
         name: key,
         success: success ?? Schema.Void,
         error: options.error ?? TaggedFailure,
-        execute: success === undefined ? Effect.asVoid(effect) : effect,
+        execute: Effect.provideService(success === undefined ? Effect.asVoid(effect) : effect, ResourceCommandScope, key),
         interruptRetryPolicy: noInterruptRetry,
       }),
     )
   return Effect.flatMap(Effect.service(Worker), (worker) =>
     Effect.flatMap(child(options.id, worker.mission, worker.input ?? {}), (done) => {
-      if (success === undefined) return Effect.void
-      // The daemon keys products by full subject: `resource/<child run>/<path>`.
-      const subject = `resource/${done.run}/${worker.product}`
-      const value = worker.product === undefined ? undefined : done.products?.[subject]
-      if (value === undefined)
-        return Effect.die(
-          new Error(`worker turn ${options.id}: ${done.run} has no product ${subject}`),
-        )
-      return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
+      const decode = () => {
+        if (success === undefined) return Effect.void
+        // The daemon keys products by full subject: `resource/<child run>/<path>`.
+        const subject = `resource/${done.run}/${worker.product}`
+        const value = worker.product === undefined ? undefined : done.products?.[subject]
+        if (value === undefined)
+          return Effect.die(
+            new Error(`worker turn ${options.id}: ${done.run} has no product ${subject}`),
+          )
+        return Effect.orDie(Schema.decodeUnknownEffect(success)(value))
+      }
+      return options.execution === true
+        ? Effect.map(decode(), (value) => ({
+          value,
+          ...(done.executions === undefined ? {} : { executions: done.executions }),
+        }))
+        : decode()
     }),
   )
 }
@@ -326,15 +348,27 @@ export function run(
 /**
  * Runs a command as its own process group, which the host ends when the program is cancelled.
  * `priority: 'background'` runs it as background work. Commands are not journaled: run them
- * inside a step.
+ * inside a step. In a lane-bound run, repeated commands in one fiber use successive keys within
+ * their durable activity. Concurrent branches must use separate steps (or explicit lane.exec ids).
  */
 export const command = (
   argv: readonly string[],
   options?: CommandOptions,
-): Effect.Effect<CommandResult, never, Program> =>
-  Effect.flatMap(Effect.service(Program), (program) =>
-    Effect.promise(() => program.host.spawn(argv, options)),
-  )
+): Effect.Effect<CommandResult, ResourceError, Program> =>
+  Effect.gen(function* () {
+    const program = yield* Program
+    if (program.host.resourceMembership === undefined)
+      return yield* Effect.promise(() => program.host.spawn(argv, options))
+    const scope = Option.getOrElse(yield* Effect.serviceOption(ResourceCommandScope), () => 'program')
+    return yield* keyed(`resource.command/${scope}`, (key) =>
+      Effect.flatMap(Effect.promise((signal) => program.host.resource({
+        key, operation: 'resource.lane.exec',
+        payload: { membership: program.host.resourceMembership, argv, options: options ?? {} },
+      }, signal)), (exit) => exit._tag === 'Success'
+        ? Effect.orDie(Schema.decodeUnknownEffect(CommandResultSchema)(exit.value))
+        : Effect.flatMap(Effect.orDie(Schema.decodeUnknownEffect(ResourceError)(exit.error)), Effect.fail)),
+    )
+  })
 
 /** The run's `ST_*` variables (`ST_MISSION_RUN`, `ST_STEP_RUN`, …). */
 export const env: Effect.Effect<Readonly<Record<string, string>>, never, Program> = Effect.map(

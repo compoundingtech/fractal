@@ -46,6 +46,7 @@ import type { AgentControlPort } from '../agents/agent-control-port.ts'
 import type { PromptAnswerPort } from '../conversation/alerts/prompt-answer-port.ts'
 import type { AlertActionPort } from '../conversation/alerts/alert-action-port.ts'
 import type { DocumentPort } from '../documents/document-port.ts'
+import type { AvailabilityPort } from '../availability/availability-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { NativeDetailsSource } from './nativeDetailsSource.ts'
@@ -405,6 +406,8 @@ export interface DataSource {
   readonly agentControls?: AgentControlPort
   /** Fractal documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
+  /** The session person's own availability and directive note (`/v1/client/availability`, `/v1/client/notes`). */
+  readonly availability?: AvailabilityPort
   /** Explicit geometry action; never tied to the browser pane dimensions. The raw ATTACH path resizes on the socket instead. */
   readonly terminalResize?: TerminalResizePort
   /** Answers to native harness prompts (`prompt.respond`), one submission each. */
