@@ -71,6 +71,16 @@
           fi
         '';
 
+        cargoDebugShellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+          # macOS keeps unpacked debug objects in target; disable debug info by default.
+          if [ -z "''${CARGO_PROFILE_DEV_DEBUG+x}" ]; then
+            export CARGO_PROFILE_DEV_DEBUG=0
+          fi
+          if [ -z "''${CARGO_PROFILE_TEST_DEBUG+x}" ]; then
+            export CARGO_PROFILE_TEST_DEBUG=0
+          fi
+        '';
+
         ciRustcWrapper = pkgs.writeShellApplication {
           name = "ci-rustc-wrapper";
           runtimeInputs = [ pkgs.coreutils pkgs.gnugrep ];
@@ -2214,7 +2224,7 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
-          shellHook = sccacheShellHook + ''
+          shellHook = sccacheShellHook + cargoDebugShellHook + ''
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               source ${./scripts/ci-cargo-tools-env} || exit $?
               # The wrapper is selected above only when no host wrapper is inherited.
@@ -2238,7 +2248,7 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
-          shellHook = sccacheShellHook + ''
+          shellHook = sccacheShellHook + cargoDebugShellHook + ''
             export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | sed -n '\|^/nix/store/|p' | paste -sd:):/usr/bin:/bin"
           '';
         };
