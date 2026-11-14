@@ -30,7 +30,7 @@ fn snapshot() -> Snapshot {
 }
 
 #[test]
-fn start_thread_t_and_shift_t_and_rendered_click_start_the_draft() {
+fn start_thread_t_and_rendered_click_start_the_draft() {
     for item in super::super::demo::test_world().attention.items() {
         let item = item.id.as_str();
         let context = ThreadInterest::Inbox {
@@ -38,11 +38,8 @@ fn start_thread_t_and_shift_t_and_rendered_click_start_the_draft() {
             episode: "claim/ask".into(),
         };
         let inbox = Pane::Home(Some(item.into()));
-        for key in [
-            Some(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
-            Some(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT)),
-            None,
-        ] {
+        // Shift+T and lowercase keycap labels belong to the TUI preview.
+        for key in [Some(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)), None] {
             let mut threads = Threads::default();
             threads.enable(true);
             threads.set_access(ThreadAccess {
