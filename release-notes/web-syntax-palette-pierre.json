@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Code blocks and diffs share Pierre's default theme as the one syntax palette, held to WCAG AA on the change washes, and DiffView follows a live light/dark switch",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Web UI only; no wire, protocol, runtime or client changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous rendering."
+  }
+}

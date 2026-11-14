@@ -29,6 +29,8 @@ export { Pane, PaneHeader, PaneHeaderButton, PaneHeaderToggle } from './composit
 export type { PaneProps, PaneTabItem } from './composition/Pane.tsx'
 export { DiffPanel } from './composition/DiffPanel.tsx'
 export type { DiffPanelProps, DiffFile, DiffTurn, DiffRevealRequest } from './composition/DiffPanel.tsx'
+export { DiffView, diffStats, normalizePatch, patchFromRows, preloadDiffView } from './composition/DiffView.tsx'
+export type { DiffViewProps, DiffStats, NormalizedDiffFile } from './composition/DiffView.tsx'
 export { markdownBlock, markdownInline, markdownSource, inlineFromPlain, markdownFromPlain, markdownCodeFence } from './composition/markdown-text.ts'
 export type { MarkdownBlock, MarkdownInline, MarkdownText } from './composition/markdown-text.ts'
 export { Markdown, InlineMarkdown, ResourceChip, HighlightedSource, completeStreamingTail, MarkdownLinkPreviewContext } from './composition/Markdown.tsx'

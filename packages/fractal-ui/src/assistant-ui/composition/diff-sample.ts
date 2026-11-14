@@ -1,0 +1,20 @@
+/** Shared story sample: one TypeScript file with context, removals and additions. */
+export const samplePatch = [
+  'diff --git a/src/rows.ts b/src/rows.ts',
+  'index 1111111..2222222 100644',
+  '--- a/src/rows.ts',
+  '+++ b/src/rows.ts',
+  '@@ -1,9 +1,10 @@',
+  ' // Rows the table keeps between renders.',
+  ' import { retain } from "./retain"',
+  ' ',
+  '-export const rows = [',
+  '-  [PREVIOUS, 1, false, "previous row"],',
+  '+export const rows: readonly Row[] = [',
+  '+  [RETAINED, 2, true, "retained row"],',
+  '+  [ADDED, 3, null, `template ${name}`],',
+  ' ]',
+  ' ',
+  ' export function keep(row: Row) {',
+  '   return retain(row, { strict: true })',
+].join('\n')
