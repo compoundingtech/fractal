@@ -11,7 +11,7 @@ name=${3:?Usage: build-and-swap.sh SOURCE_DIR SHA NAME}
 [[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && $name != . && $name != .. ]] || { echo 'Invalid deployment name' >&2; exit 2; }
 SOURCE=$(realpath "$SOURCE")
 # Validate the security boundary before creating build roots or worktrees.
-python3 -I "$script_dir/candidate_sandbox.py" --check-config
+python3 -I "$script_dir/candidate_sandbox.py" --check-config --worktree "$SOURCE"
 # A sandbox-policy namespace cannot reuse an immutable pre-sandbox layout.
 dependency_policy=$(python3 -I "$script_dir/candidate_sandbox.py" --print-policy)
 DEPCACHE=$DEPCACHE/$dependency_policy
