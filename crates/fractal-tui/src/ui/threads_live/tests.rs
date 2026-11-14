@@ -661,7 +661,7 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     );
     threads.histories.insert(new.id.clone(), History::default());
     let accepted = lines(&threads, &texts);
-    assert_eq!(accepted[slot], "▾ Worker test · 1 message · unread");
+    assert_eq!(accepted[slot].trim_end(), "▌▾ Worker test · 1 message · unread");
     assert!(
         accepted[slot + 1..]
             .iter()
@@ -2072,6 +2072,25 @@ fn ordinary_agent_composer_keeps_thread_shortcut_letters_as_text() {
         "typing n must not open the selected thread's rename editor"
     );
     assert_eq!(ui.conversation_state.drafts[agent], "Please zinc never help");
+}
+
+#[test]
+fn expanding_a_writable_thread_transfers_composer_ownership_without_losing_either_draft() {
+    let mut ui = super::super::Ui::new(super::super::demo::test_world());
+    let agent = "agent/example/atlas/builder";
+    let pane = Pane::Agent(Some(agent.into()));
+    ui.open_in_glass(pane.clone(), super::super::glass::Open::Tab);
+    ui.threads = observed_threads(ThreadState::Open);
+    ui.click(Hit::Composer);
+    ui.paste("Keep the ordinary draft.".into());
+    ui.click(Hit::Thread(pane.key(), thread::Tap::Toggle("thread/worker".into())));
+    assert!(!ui.editing, "the visible thread composer now owns the keys");
+    for letter in "zinc never help".chars() {
+        ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+    }
+    assert_eq!(ui.conversation_state.drafts[agent], "Keep the ordinary draft.");
+    assert_eq!(ui.conversation_state.drafts[&Input::Reply("thread/worker".into()).key()], "zinc never help");
+    assert!(ui.threads.writes().is_empty(), "typing queues no thread actions");
 }
 
 #[test]

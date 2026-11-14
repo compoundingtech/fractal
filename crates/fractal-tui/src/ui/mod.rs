@@ -6483,6 +6483,14 @@ impl Ui {
                         self.threads.tap(&key, thread::Tap::Compose(id), &mut self.conversation_state.drafts);
                     }
                 }
+                if self.threads.editing_in(&self.main_pane()) {
+                    // Expanding a writable thread can focus its composer just like Compose.
+                    // Transfer the keys without changing the ordinary composer's saved draft.
+                    self.editing = false;
+                    self.find = None;
+                    self.answering = None;
+                    self.confirm = None;
+                }
                 self.flash_thread_refusal();
             }
             Hit::Link(url) => {
