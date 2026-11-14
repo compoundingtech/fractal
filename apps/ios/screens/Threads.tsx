@@ -319,7 +319,7 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, s
   useEffect(() => { if (standalone && title) navigation.setOptions({ title }); }, [navigation, standalone, title]);
   if (thread || start) {
     const pending = start?.accepted ? 'Loading history…' : 'draft';
-    const summary = standalone ? <T dim>{displayed ? threadSummaryLine(displayed) : pending}</T>
+    const summary = standalone ? <T dim>{displayed ? threadSummaryLine(displayed, ' · ', displayed.state !== 'closed') : pending}</T>
       : <ThreadRow bold title={title!} label={`${title}, ${displayed ? threadSummaryLine(displayed, ', ') : pending}`} unread={displayed?.unread}
         trailing={displayed ? displayed.state === 'closed' ? 'Closed' : undefined : pending} expanded={expanded} toggle={() => setExpanded(value => !value)} />;
     // A framed (docked) thread puts its summary line at the top of the scrolling history.
@@ -336,11 +336,11 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, s
   return frame ? frame(status) : status;
 }
 
-function threadSummaryLine(thread: ThreadSummary, separator = ' · '): string {
+function threadSummaryLine(thread: ThreadSummary, separator = ' · ', includeState = true): string {
   const count = thread.message_count;
   return [
     count === undefined ? undefined : `${count} message${count === 1 ? '' : 's'}`,
-    thread.state,
+    includeState ? thread.state : undefined,
     thread.unread ? 'unread' : undefined,
   ].filter(Boolean).join(separator);
 }
@@ -761,7 +761,8 @@ function ThreadComposeField({ inputRef, rowRef, onReveal, text, onChange, onSend
   onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean;
 }) {
   return <View ref={rowRef} onLayout={onReveal} style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
-    <Field ref={inputRef} onFocus={onReveal} accessibilityLabel="Message thread" placeholder="Message thread" value={text} editable={enabled}
+    {/* The native text field exposes its placeholder; a matching label is spoken twice on iOS. */}
+    <Field ref={inputRef} onFocus={onReveal} placeholder="Message thread" value={text} editable={enabled}
       onChangeText={onChange} multiline autoFocus={autoFocus} style={{ flex: 1 }} />
     <Button label="Send" disabled={!enabled || !canSend} onPress={onSend} />
     {onCancel ? <Button label="Cancel" disabled={!enabled} onPress={onCancel} /> : null}

@@ -13,7 +13,7 @@ const button = (node, label) => findBy(node, candidate => candidate.type === 'Bu
 function compile(name, next, dependencies, file = './screens/Threads.tsx') {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
   const a = source.search(new RegExp(`function ${name}(?=[(<])`));
-  const b = source.indexOf(`\n${next}`, a);
+  const b = next ? source.indexOf(`\n${next}`, a) : source.length;
   assert.ok(a >= 0 && b > a);
   const { outputText } = ts.transpileModule(source.slice(a, b) + `\nexports.component = ${name};`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React },
@@ -35,6 +35,17 @@ function hooks() {
     },
   };
 }
+
+test('the composer exposes Message thread exactly once as its accessible name', () => {
+  const compose = compile('ThreadComposeField', undefined, { View: 'View', Field: 'Field', Button: 'Button' });
+  const tree = compose({ text: '', onChange() {}, onSend() {}, enabled: true, canSend: false });
+  const field = find(tree, 'Field');
+  // iOS exposes both an explicit label and the placeholder when both are supplied.
+  const accessibleName = [field.props.accessibilityLabel, field.props.placeholder].filter(Boolean).join(' ');
+  assert.equal(accessibleName, 'Message thread');
+  assert.equal(field.props.accessibilityLabel, undefined);
+  assert.equal(tree.props.accessibilityLabel, undefined, 'the wrapper does not repeat the field name');
+});
 
 test('a closed thread keeps its composer and exact-message quote without implicitly reopening', async () => {
   const thread = Object.freeze({ id: 'thread/closed', agent_id: 'agent/reviewer', title: 'Review', state: 'closed', unread: false });
@@ -330,7 +341,7 @@ test('the thread screen docks its one composer below the scrolling history; embe
   const framedBody = detail({ client: {}, thread: { ...thread, message_count: 1 }, loading: false, reload() {}, frame });
   assert.equal(framedBody.type, 'ThreadBody');
   framedBody.props.frame('history', 'dock');
-  assert.deepEqual(frames[0].content.children[0], { type: 'T', props: { dim: true }, children: ['1 message · closed'] }, 'the summary line scrolls with the history');
+  assert.deepEqual(frames[0].content.children[0], { type: 'T', props: { dim: true }, children: ['1 message'] }, 'the summary line scrolls with the history without repeating the closed banner');
   assert.equal(frames[0].dock, 'dock');
   detail({ client: {}, loading: true, reload() {}, frame });
   assert.deepEqual(frames[1].content.children, ['Loading thread…']);
