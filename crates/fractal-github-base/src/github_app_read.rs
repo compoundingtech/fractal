@@ -209,6 +209,7 @@ async fn replay_pat(request: reqwest::RequestBuilder, source: &ReadSource, pat: 
     let (client, request) = request.build_split();
     let mut request = request?;
     request.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+    request.headers_mut().remove(reqwest::header::IF_MODIFIED_SINCE);
     let builder = reqwest::RequestBuilder::from_parts(client, request);
     Ok((crate::github_http::send_once(builder, pat).await?, None))
 }
@@ -233,6 +234,7 @@ pub async fn send(request: reqwest::RequestBuilder, source: &ReadSource, pat: &G
             let (client, request) = retry.build_split();
             let mut request = request?;
             request.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+            request.headers_mut().remove(reqwest::header::IF_MODIFIED_SINCE);
             reqwest::RequestBuilder::from_parts(client, request)
         } else { retry };
         let auth = GithubAuth::Local { token: reloaded.token.clone(), cache: None };

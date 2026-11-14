@@ -285,6 +285,7 @@ impl GitHubIssueInvocation {
         if let Some(reason) = self.control.interruption_reason() {
             return Err(interruption_error(reason));
         }
+        let path = reqwest::Url::parse(&endpoint).map_err(|_| IssueError::Denied)?.path().to_owned();
         let mut builder = client
             .get(endpoint)
             .timeout(remaining(deadline)?)
@@ -302,9 +303,17 @@ impl GitHubIssueInvocation {
             reason = wait_for_interruption(&self.control) => {
                 return Err(interruption_error(reason));
             }
-            response = builder.send() => response.map_err(map_transport_error)?,
+            response = builder.send() => response.map_err(|error| {
+                fractal_runtime::github_usage::log_github_call(
+                    &reqwest::Method::GET, &path, None, &reqwest::header::HeaderMap::new(), None, None,
+                );
+                map_transport_error(error)
+            })?,
         };
         let status = response.status();
+        fractal_runtime::github_usage::log_github_call(
+            &reqwest::Method::GET, &path, Some(status), response.headers(), None, None,
+        );
         if status.is_redirection() && status.as_u16() != 304 {
             return Err(IssueError::Denied);
         }

@@ -1890,11 +1890,7 @@ async fn open_pull_requests(
 ) -> Result<RepositoryDetails> {
     let read_token = crate::github_http::read_auth(owner, "gh-ci", token);
     let issue_token = crate::github_http::read_auth(owner, "github-ledger", token);
-    let key = if read_token.cache_principal() == "pat" && issue_token.cache_principal() == "pat" {
-        format!("{api_base} {locator}")
-    } else {
-        format!("{api_base} {locator} {} {}", read_token.cache_principal(), issue_token.cache_principal())
-    };
+    let key = format!("{api_base} {locator} {} {}", read_token.cache_identity(), issue_token.cache_identity());
     let previous = {
         let mut checks = pull_request_checks()
             .lock()
@@ -2265,7 +2261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pat_only_mixed_opaque_identities_keep_one_query_and_legacy_cache_identity() {
+    async fn pat_only_mixed_opaque_identities_keep_one_query_and_credential_cache_identity() {
         use crate::github_http::app_read::tests::server;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let recorded = calls.clone();
@@ -2286,7 +2282,7 @@ mod tests {
         assert_eq!(details.resolved.len(), 2);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert!(pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner)
-            .contains_key(&format!("{} pat-fixture/repo", fixture.base)));
+            .contains_key(&format!("{} pat-fixture/repo {identity} {identity}", fixture.base, identity = GithubAuth::test("fixture-pat").cache_identity())));
     }
 
     #[tokio::test]
@@ -2590,9 +2586,8 @@ mod tests {
             .filter(|first| *first > 5)
             .collect::<Vec<_>>();
         assert_eq!(refused, [20, 10, 9, 8, 7, 6]);
-        assert!(pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner).contains_key(
-            &format!("{base} github/acme/garden"),
-        ));
+        assert!(pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner).keys()
+            .any(|key| key.starts_with(&format!("{base} github/acme/garden "))));
     }
 
     #[tokio::test]
@@ -2610,9 +2605,8 @@ mod tests {
         assert_eq!(requests.len(), PULL_REQUEST_CALL_LIMIT);
         assert_eq!(requests.iter().filter(|request| request["variables"].get("ids").is_some()).count(), 10);
         assert_eq!(requests[199]["variables"]["after"], "page-188");
-        assert!(!pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner).contains_key(
-            &format!("{base} github/acme/garden"),
-        ));
+        assert!(!pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner).keys()
+            .any(|key| key.starts_with(&format!("{base} github/acme/garden "))));
     }
 
     #[tokio::test]
@@ -2630,9 +2624,8 @@ mod tests {
         assert_eq!(requests.iter().map(|request| request["variables"]["first"].as_u64().unwrap())
             .collect::<Vec<_>>(), [20, 20, 10, 5, 2, 1]);
         assert!(requests[1..].iter().all(|request| request["variables"]["after"] == "next"));
-        assert!(!pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner).contains_key(
-            &format!("{base} github/acme/garden"),
-        ));
+        assert!(!pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner).keys()
+            .any(|key| key.starts_with(&format!("{base} github/acme/garden "))));
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@
 //! evidence. This API observes only; it never stops a process or unloads a scope.
 
 mod environment;
+pub mod github_usage;
 pub mod host;
 pub mod host_envelope;
 mod isolate;

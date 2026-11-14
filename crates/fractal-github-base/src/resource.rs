@@ -11,6 +11,8 @@ use anyhow::{Context as _, Result, bail};
 pub mod github_gates;
 mod github_repository;
 mod github_poll;
+#[cfg(test)]
+mod github_cache_tests;
 pub use github_poll::{BudgetContinuation, completed_poll_cursor};
 pub mod github_workflows;
 pub use github_workflows::WorkflowRunLedger;
@@ -130,22 +132,26 @@ fn github_retry_at(headers: &reqwest::header::HeaderMap, now: u128) -> u128 {
                         .map(|date| date.timestamp_millis().max(0) as u128)
                 })
         });
-    let rate_reset = headers
-        .get("x-ratelimit-reset")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u128>().ok())
-        .map(|seconds| seconds.saturating_mul(1_000));
-    retry_after
-        .into_iter()
-        .chain(rate_reset)
-        .filter(|deadline| *deadline > now)
-        .max()
-        .unwrap_or_else(|| now.saturating_add(15 * 60_000))
+    let exhausted = headers.get("x-ratelimit-remaining")
+        .and_then(|value| value.to_str().ok()).is_some_and(|value| value.trim() == "0");
+    // Retry-After is authoritative for secondary limits; a primary reset belongs
+    // only to an exhausted primary budget, not an abuse refusal with budget left.
+    if let Some(deadline) = retry_after.filter(|deadline| *deadline > now) {
+        return deadline;
+    }
+    if exhausted {
+        return headers.get("x-ratelimit-reset")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u128>().ok())
+            .map(|seconds| seconds.saturating_mul(1_000))
+            .filter(|deadline| *deadline > now)
+            .unwrap_or_else(|| now.saturating_add(60_000));
+    }
+    now.saturating_add(60_000)
 }
 
-/// How GitHub refused a request. A 429, or a 403 that exhausted the primary budget
-/// (`x-ratelimit-remaining: 0`), names a retry time (`retry-after`) or says so in its message, is
-/// a rate limit. Any other 403 is a permission failure, and a 401 is a rejected token.
+/// GitHub's 403/429 refusals distinguish exhausted primary budgets from
+/// secondary limits with Retry-After or a nonzero remaining primary budget.
 enum GithubRefusal {
     RateLimit,
     Forbidden(String),
@@ -181,6 +187,8 @@ fn github_refusal(
         .unwrap_or_else(|| body.chars().take(200).collect());
     if exhausted
         || headers.contains_key(reqwest::header::RETRY_AFTER)
+        || headers.get("x-ratelimit-remaining").and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok()).is_some_and(|remaining| remaining > 0)
         || message.to_ascii_lowercase().contains("rate limit")
     {
         Some(GithubRefusal::RateLimit)
@@ -201,26 +209,30 @@ async fn github_response(response: reqwest::Response) -> Result<reqwest::Respons
     }
     let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
+    let details = crate::github_http::GithubResponseDetails::new(status, &headers);
     match github_refusal(status, &headers, &body) {
         Some(GithubRefusal::RateLimit) => {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            bail!(ProviderRateLimit {
+            Err(anyhow::anyhow!(ProviderRateLimit {
                 retry_at_unix_ms: github_retry_at(&headers, now),
                 status: status.as_u16(),
-            })
+            }))
         }
-        Some(GithubRefusal::Forbidden(message)) => bail!(ProviderForbidden {
+        Some(GithubRefusal::Forbidden(message)) => Err(anyhow::anyhow!(ProviderForbidden {
             status: status.as_u16(),
             message,
-        }),
-        Some(GithubRefusal::Unauthenticated) => bail!(ProviderUnauthenticated {
+        })),
+        Some(GithubRefusal::Unauthenticated) => Err(anyhow::anyhow!(ProviderUnauthenticated {
             status: status.as_u16()
-        }),
-        None => bail!("GitHub HTTP {status}"),
-    }
+        })),
+        None => Err(anyhow::anyhow!("GitHub HTTP {status}")),
+    }.map_err(|error| {
+        let reason = format!("{error}; {details}");
+        error.context(details).context(reason)
+    })
 }
 
 /// A hung connection must end, or its observer would never be polled again.
@@ -499,6 +511,8 @@ fn github_cache_for(request: &ObservationRequest) -> Duration {
 struct GithubPayload {
     value: Value,
     etag: Option<String>,
+    #[serde(default)]
+    last_modified: Option<String>,
     next: Option<String>,
     #[serde(skip, default = "Instant::now")]
     checked_at: Instant,
@@ -510,6 +524,42 @@ type GithubCache =
 fn github_cache() -> &'static GithubCache {
     static CACHE: OnceLock<GithubCache> = OnceLock::new();
     CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+fn github_cache_path(root: &Path, key: &str) -> PathBuf {
+    let (identity, url) = key.rsplit_once(' ').expect("cache key contains URL");
+    root.join("github-http-cache")
+        .join(hex::encode(Sha256::digest(url.as_bytes())))
+        .join(format!("{}.json", hex::encode(Sha256::digest(identity.as_bytes()))))
+}
+
+async fn load_github_payload(path: &Path) -> Result<Option<GithubPayload>> {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("read GitHub HTTP cache"),
+    };
+    let mut payload: GithubPayload = serde_json::from_slice(&bytes).context("decode GitHub HTTP cache")?;
+    // A restart always revalidates; the stored body exists only to interpret a 304.
+    payload.checked_at = Instant::now() - GITHUB_CACHE_FOR;
+    Ok(Some(payload))
+}
+
+async fn save_github_payload(path: PathBuf, payload: &GithubPayload) -> Result<()> {
+    let bytes = serde_json::to_vec(payload)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::DirBuilderExt as _;
+        let directory = path.parent().context("GitHub HTTP cache has no directory")?;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)?;
+        let mut file = tempfile::NamedTempFile::new_in(directory)?;
+        file.write_all(&bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(path)?;
+        std::fs::File::open(directory)?.sync_all()?;
+        Ok(())
+    }).await??;
+    Ok(())
 }
 
 pub use crate::github_http::{github_spender, spend_as};
@@ -767,6 +817,14 @@ async fn github_forget(url: &str) {
     github_cache().lock().await.retain(|key, _| {
         key.strip_suffix(url).is_none_or(|prefix| !prefix.ends_with(' '))
     });
+    if let Some(root) = crate::github_http::state_dir() {
+        let directory = root.join("github-http-cache").join(hex::encode(Sha256::digest(url.as_bytes())));
+        if let Err(error) = tokio::fs::remove_dir_all(directory).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "could not invalidate durable GitHub cache");
+        }
+    }
 }
 
 /// A URL is fetched at most once per cache interval on this host. A stale entry is revalidated
@@ -777,7 +835,7 @@ async fn github_json(
     token: &GithubAuth,
     cache_for: Duration,
 ) -> Result<GithubPayload> {
-    let key = format!("REST {} {url}", token.cache_principal());
+    let key = format!("REST {} {url}", token.cache_identity());
     github_poll::read(key, github_json_read(client, url, token, cache_for)).await
 }
 
@@ -787,19 +845,34 @@ async fn github_json_read(
     token: &GithubAuth,
     cache_for: Duration,
 ) -> Result<GithubPayload> {
+    github_json_read_at(client, url, token, cache_for, crate::github_http::state_dir()).await
+}
+
+async fn github_json_read_at(
+    client: &reqwest::Client,
+    url: String,
+    token: &GithubAuth,
+    cache_for: Duration,
+    state_dir: Option<&Path>,
+) -> Result<GithubPayload> {
     let selected = crate::github_http::read_auth_for_url(&url, token);
     let token = &selected;
+    let key = format!("{} {url}", token.cache_identity());
+    let disk = state_dir.map(|root| github_cache_path(root, &key));
     let entry = {
         let mut cache = github_cache().lock().await;
         if cache.len() > 4_096 {
             cache.clear();
         }
         cache
-            .entry(format!("{} {url}", token.cache_principal()))
+            .entry(key)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
             .clone()
     };
     let mut cached = entry.lock().await;
+    if cached.is_none() && let Some(path) = &disk {
+        *cached = load_github_payload(path).await?;
+    }
     if let Some(payload) = cached.as_ref()
         && payload.checked_at.elapsed() < cache_for
     {
@@ -812,6 +885,9 @@ async fn github_json_read(
     if let Some(etag) = cached.as_ref().and_then(|payload| payload.etag.as_deref()) {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
+    else if let Some(modified) = cached.as_ref().and_then(|payload| payload.last_modified.as_deref()) {
+        request = request.header(reqwest::header::IF_MODIFIED_SINCE, modified);
+    }
     let response = crate::github_http::send_read(request, token).await?;
     let response = github_response(response).await?;
     let cacheable = crate::github_http::read_response_cacheable(&response);
@@ -823,6 +899,8 @@ async fn github_json_read(
         return Ok(payload.clone());
     }
     let etag = response_etag(&response);
+    let last_modified = response.headers().get(reqwest::header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok()).map(str::to_owned);
     let next = response
         .headers()
         .get(reqwest::header::LINK)
@@ -831,12 +909,21 @@ async fn github_json_read(
     let payload = GithubPayload {
         value: response.json().await?,
         etag,
+        last_modified,
         next,
         checked_at: Instant::now(),
     };
     if !cacheable {
         *cached = None;
+        if let Some(path) = &disk {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error).context("invalidate GitHub HTTP cache"),
+            }
+        }
     } else {
+        if let Some(path) = disk { save_github_payload(path, &payload).await?; }
         *cached = Some(payload.clone());
     }
     Ok(payload)
@@ -944,7 +1031,7 @@ async fn github_graphql_with_cache_eligibility(
     query: &str,
     variables: Value,
 ) -> Result<(Value, bool)> {
-    let key = format!("GraphQL {} {api_base} {query} {variables}", token.cache_principal());
+    let key = format!("GraphQL {} {api_base} {query} {variables}", token.cache_identity());
     github_poll::read(key, github_graphql_read(client, api_base, token, query, variables)).await
 }
 
@@ -1454,9 +1541,9 @@ mod tests {
         assert!(requests[2..4].iter().all(|request| request.contains("authorization: bearer fixture-b")));
         assert!(requests[4].contains("authorization: bearer fixture-pat"));
         assert!(!auth.used_fallback(), "fallback state belongs to the request, not its enclosing batch");
-        let entry = github_cache().lock().await.get(&format!("{} {url}", auth.cache_principal())).unwrap().clone();
+        let entry = github_cache().lock().await.get(&format!("{} {url}", auth.cache_identity())).unwrap().clone();
         assert!(entry.lock().await.is_none(), "PAT response must not populate A's installation cache");
-        let entry = github_cache().lock().await.get(&format!("{} {unrelated}", auth.cache_principal())).unwrap().clone();
+        let entry = github_cache().lock().await.get(&format!("{} {unrelated}", auth.cache_identity())).unwrap().clone();
         assert!(entry.lock().await.is_some(), "one request's fallback must not disable another request's cache");
         assert_eq!(requests.len(), 6);
         assert!(requests[5].contains("authorization: bearer fixture-a"));
@@ -1664,9 +1751,9 @@ mod tests {
                 Some(GithubRefusal::RateLimit)
             ));
         }
-        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+        assert_eq!(github_retry_at(&headers, now), now + 60_000);
         headers.insert("x-ratelimit-reset", "2000".parse().unwrap());
-        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+        assert_eq!(github_retry_at(&headers, now), now + 60_000);
     }
 
     #[test]
@@ -1680,7 +1767,7 @@ mod tests {
         headers.insert(reqwest::header::RETRY_AFTER, "Thu, 01 Jan 1970 00:35:00 GMT".parse().unwrap());
         assert_eq!(github_retry_at(&headers, now), 2_100_000);
         headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
-        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+        assert_eq!(github_retry_at(&headers, now), now + 60_000);
     }
 
     /// A provider that accepts the connection and never answers must not hold its observer forever.
@@ -2002,10 +2089,10 @@ mod tests {
             refusal(StatusCode::TOO_MANY_REQUESTS, &[], ""),
             Some(GithubRefusal::RateLimit)
         ));
-        // A token without access, or an SSO policy, waits for a person instead.
+        // Without rate-limit headers or a rate-limit message, retain permission failures.
         match refusal(
             StatusCode::FORBIDDEN,
-            &[("x-ratelimit-remaining", "4999")],
+            &[],
             r#"{"message": "Resource protected by organization SAML enforcement."}"#,
         ) {
             Some(GithubRefusal::Forbidden(message)) => {

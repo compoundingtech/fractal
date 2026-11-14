@@ -2340,6 +2340,7 @@ dependencies = [
  "chrono",
  "fractal-resource-protocol",
  "fractal-resource-wasip2",
+ "fractal-runtime",
  "hickory-resolver",
  "libc",
  "parking_lot",
@@ -2370,10 +2371,12 @@ name = "fractal-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "libc",
  "portable-pty",
  "pty-client",
  "pty-core",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

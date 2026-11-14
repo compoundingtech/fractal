@@ -227,14 +227,13 @@ pub fn age_pull_request_check(base: &str, by: Duration) {
     let mut checks = pull_request_checks()
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let key = format!("{base} acme/garden");
-    let key = if checks.contains_key(&key) {
-        key
-    } else {
-        format!("{key} issues")
-    };
-    let check = checks.get_mut(&key).expect("GraphQL was read");
-    check.at = check.at.checked_sub(by).expect("the clock reaches back");
+    let prefix = format!("{base} acme/garden ");
+    let mut found = false;
+    for (_, check) in checks.iter_mut().filter(|(key, _)| key.starts_with(&prefix)) {
+        found = true;
+        check.at = check.at.checked_sub(by).expect("the clock reaches back");
+    }
+    assert!(found, "GraphQL was read");
 }
 
 pub fn pull_page(nodes: Value, after: Option<&str>, resolved: Value) -> Value {

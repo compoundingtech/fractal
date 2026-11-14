@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+reqwest = { version = "0.12", default-features = false }
 libc = "0.2"
 portable-pty = "0.9"
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "GitHub observer REST validators survive daemon restarts, isolate credentials, and log HTTP budget evidence; secondary limits honor Retry-After instead of waiting for the primary reset.",
+  "replay": { "status": "none", "detail": "Existing observations and polling intervals are unchanged. A 304 reuses the complete cached response without a new changed observation." },
+  "schema": { "status": "none", "detail": "No claim-store schema change. The configured state directory keeps private github-http-cache response bodies, ETags, Last-Modified values and pagination links, keyed by URL and credential identity." },
+  "rules": { "status": "changed", "detail": "A 403 or 429 with Retry-After or nonzero primary remaining budget is treated as a secondary limit. Retry-After is honored; otherwise secondary limits wait at least one minute. Only an exhausted primary budget uses x-ratelimit-reset." },
+  "compatibility": { "status": "none", "detail": "Observer refusal claims retain HTTP status, resource, remaining and retry-after in the existing reason field; the closed claim schema is unchanged. Rust GitHub HTTP calls append the agent gh wrapper JSONL envelope plus method, path, status, remaining, resource, retry_after and not_modified to AGENT_POLICY_STATE_DIR/gh-usage.jsonl, defaulting to HOME/.local/state/agent-policy/gh-usage.jsonl. Missing response fields are null; credentials and request bodies are never logged." },
+  "downtime": { "status": "none", "detail": "Restart revalidates stored bodies conditionally rather than trusting their freshness." },
+  "manual": { "status": "none", "detail": "No configuration changes are required." },
+  "recovery": { "status": "none", "detail": "Removing github-http-cache safely causes full authenticated reads on the next polls. Rollback ignores the cache and additional response evidence." }
+}

@@ -280,6 +280,64 @@ fn token_cache() -> &'static Arc<TokenCache> {
 
 static SOURCE: OnceLock<Arc<crate::config::Config>> = OnceLock::new();
 
+pub fn state_dir() -> Option<&'static Path> {
+    SOURCE.get().map(|config| config.state_dir.as_path())
+}
+
+/// Non-secret response evidence retained on observer refusal claims.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct GithubResponseDetails {
+    pub status: u16,
+    pub resource: Option<String>,
+    pub remaining: Option<u64>,
+    pub retry_after: Option<String>,
+}
+
+impl GithubResponseDetails {
+    pub fn new(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap) -> Self {
+        let header = |name| headers.get(name).and_then(|value| value.to_str().ok());
+        Self {
+            status: status.as_u16(),
+            resource: header("x-ratelimit-resource").map(str::to_owned),
+            remaining: header("x-ratelimit-remaining").and_then(|value| value.parse().ok()),
+            retry_after: header("retry-after").map(str::to_owned),
+        }
+    }
+}
+
+impl std::fmt::Display for GithubResponseDetails {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "GitHub HTTP {} (x-ratelimit-resource={:?}, x-ratelimit-remaining={:?}, retry-after={:?})",
+            self.status, self.resource, self.remaining, self.retry_after)
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_USAGE_LOG: std::path::PathBuf;
+}
+
+/// Append the agent gh wrapper's JSONL envelope, with HTTP response fields.
+/// Logging is best-effort and must not turn a successful GitHub mutation into a retry.
+pub fn log_github_call(
+    method: &reqwest::Method,
+    path: &str,
+    status: Option<reqwest::StatusCode>,
+    headers: &reqwest::header::HeaderMap,
+) {
+    #[cfg(test)]
+    let file = match TEST_USAGE_LOG.try_with(Clone::clone) {
+        Ok(file) => Some(file),
+        Err(_) => return,
+    };
+    #[cfg(not(test))]
+    let file: Option<std::path::PathBuf> = None;
+    fractal_runtime::github_usage::log_github_call(
+        method, path, status, headers, github_spender().as_deref(), file.as_deref(),
+    );
+}
+
+
 /// Observes every actual HTTP response, before replay or redirect handling.
 pub struct ResponseObserver(fn(reqwest::StatusCode, &reqwest::header::HeaderMap));
 
@@ -454,6 +512,15 @@ impl GithubAuth {
         match self { Self::Read { source, .. } => &source.principal, Self::Authorized { profile, .. } => profile, _ => "pat" }
     }
 
+    /// Cache representations by the actual local credential, never a shared PAT label.
+    pub fn cache_identity(&self) -> String {
+        match self {
+            Self::Local { token, .. } => format!("token:{}", hex::encode(Sha256::digest(token.as_bytes()))),
+            Self::Read { source, .. } => source.principal.clone(),
+            Self::Authorized { profile, .. } => format!("profile:{profile}"),
+        }
+    }
+
     pub fn used_fallback(&self) -> bool {
         matches!(self, Self::Read { source, .. } if source.used_fallback.load(std::sync::atomic::Ordering::Relaxed))
     }
@@ -594,6 +661,7 @@ async fn send_redirected(
         };
         if selected.cache_principal() != effective.cache_principal() {
             template.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+            template.headers_mut().remove(reqwest::header::IF_MODIFIED_SINCE);
             cache_ineligible = true;
         }
         let fallback = match &selected {
@@ -612,6 +680,7 @@ async fn send_redirected(
         effective = selected;
         if cache_ineligible {
             template.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+            template.headers_mut().remove(reqwest::header::IF_MODIFIED_SINCE);
             if let GithubAuth::Read { source, .. } = auth {
                 source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -637,6 +706,11 @@ async fn send_once(
     let observer = RESPONSE_OBSERVER
         .get()
         .context("GitHub response observer was not configured; no request was sent")?;
+    let (client, request) = request.build_split();
+    let request = request?;
+    let method = request.method().clone();
+    let path = request.url().path().to_owned();
+    let request = reqwest::RequestBuilder::from_parts(client, request);
     // Admission precedes both the credential-bearing local send and the
     // authorized RPC. A failed send remains spent; there is no HTTP retry.
     let reservation = if let Some(config) = SOURCE.get() {
@@ -676,6 +750,10 @@ async fn send_once(
     }}.await;
     if let Ok(response) = &result {
         observer.record(response.status(), response.headers());
+        log_github_call(&method, &path, Some(response.status()), response.headers());
+    }
+    else {
+        log_github_call(&method, &path, None, &reqwest::header::HeaderMap::new());
     }
     if let Some(reservation) = reservation {
         crate::github_admission::after_send(

@@ -9,6 +9,7 @@ publish = false
 autotests = false
 
 [dependencies]
+fractal-runtime = { path = "../fractal-runtime" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 libc = "0.2"
