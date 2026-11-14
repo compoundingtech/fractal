@@ -127,11 +127,13 @@
                   default = { };
                 };
                 home.homeDirectory = lib.mkOption { type = lib.types.str; default = "/home/example"; };
+                home.profileDirectory = lib.mkOption { type = lib.types.str; default = "/home/example/.nix-profile"; };
                 home.packages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 home.activation = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 home.file = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 assertions = lib.mkOption { type = lib.types.listOf lib.types.anything; default = [ ]; };
                 systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                systemd.user.timers = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
               config.home.file = extraConfig.homeFiles or { };
@@ -1973,6 +1975,23 @@
               ''
             ) [ "gui" "user" ] + "touch $out"
           );
+        checks.hm-evidence-gc-eval =
+          let
+            dry = (mkHmModuleEval { evidenceGc.enable = true; }).config;
+            apply = (mkHmModuleEval {
+              evidenceGc = { enable = true; dryRun = false; };
+            }).config;
+          in
+          assert !(hmModuleEval.config.systemd.user.timers ? evidence-gc);
+          assert !pkgs.stdenv.hostPlatform.isLinux || (
+            pkgs.lib.hasSuffix "--dry-run" dry.systemd.user.services.evidence-gc.Service.ExecStart
+            && dry.systemd.user.services.evidence-gc.Service.ExecStartPre == [ ]
+            && pkgs.lib.hasSuffix "--apply" apply.systemd.user.services.evidence-gc.Service.ExecStart
+            && builtins.length apply.systemd.user.services.evidence-gc.Service.ExecStartPre == 2
+            && dry.systemd.user.timers.evidence-gc.Timer.OnCalendar == "*-*-* 03:40:00 UTC"
+            && dry.systemd.user.timers.evidence-gc.Install.WantedBy == [ "timers.target" ]
+          );
+          pkgs.runCommand "hm-evidence-gc-eval" { } ''touch $out'';
         checks.fractal-aliases =
           let
             rendered = hmModuleEval.config;

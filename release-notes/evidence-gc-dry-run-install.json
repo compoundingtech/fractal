@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Home Manager can install the daily evidence-GC timer on a designated Linux host. New installations and the standalone wrapper default to a reviewable dry run; applying collection requires an explicit mode change.",
+  "replay": { "status": "none", "detail": "Evidence signatures, records and verification policy are unchanged." },
+  "schema": { "status": "none", "detail": "Adds services.smalltalk.evidenceGc.enable and dryRun Home Manager options." },
+  "rules": { "status": "none", "detail": "Existing liveness-aware retention is unchanged. The managed applying service requires the signed-log wrapper and signer configuration." },
+  "compatibility": { "status": "none", "detail": "Existing manual wrapper invocations must pass --apply to continue deleting. Without it they only write plans and summaries." },
+  "downtime": { "status": "none", "detail": "No daemon restart or data-format migration is required." },
+  "manual": { "status": "none", "detail": "Enable the timer on one designated host with dryRun = true, inspect its plan, and obtain approval before setting dryRun = false. Configure the existing signed-log publisher first so GC lines publish before deletion." },
+  "recovery": { "status": "none", "detail": "Stop any applying service, then restore dryRun = true or disable the timer. Preserve pending-plan.json and signed-log state. Mode rollback does not restore already deleted refs." }
+}
