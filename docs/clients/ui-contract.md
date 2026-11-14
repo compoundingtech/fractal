@@ -137,7 +137,8 @@ wrong until the host is repaired; exchanges cannot fix it.
 
 ## Navigation
 
-The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage.
+The terminal UI's sidebar and palette expose Now, Agents, Missions, Fleet, and Usage; its
+palette also opens Availability, the person's own availability and directive note.
 The phone tabs are Now, Resources, Fleet, and Spaces.
 
 Terminal workspace tabs derive presentation identity from their existing pane keys,
@@ -175,7 +176,11 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
   stopped on you. A footer counts missions that don't need you.
 - Each item: glyph and kind word, title, "who is waiting · waited N".
 - Every card shows links to its mission and agent, a **related** section (who raised it, when
-  Fractal says, and each target as a link), **Chat about this**, and **Go to** its mission or agent.
+  Fractal says, and each target as a link), **Chat about this**, **Go to** its mission or agent,
+  and **Remind me in 3h** (`attention.snooze`): Fractal keeps the snooze, so the item leaves Now
+  on every device of the person until then, and its deadline does not move. On an item already
+  put off (its `snoozed_until` still ahead) the same key brings it back (`until: null`). Home
+  counts what is put off in a note below the list.
 - Cards per kind:
   - **review** (human gate): question, because, what to look at, step; Approve, or Request
     changes with a text box the agent reads (sent as the reject reason).
@@ -191,7 +196,11 @@ hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace 
     suggested fix when Fractal gives one; Mark resolved.
   - **message** (demo only; a live unread message stays in its conversation and has no tier):
     the real message (load it by the item's source id: the attention item carries only a
-    generic title); Reply, Mark read, Remind me later (kept on the device only).
+    generic title); Reply, Mark read.
+- Dismissing a request (x, then y) sends `attention.dismiss`: its asker reads `dismissed`, with
+  each note on its answers (`label: note`, one per line) as the text. A request that offers its
+  own `dismiss` answer is answered with that answer instead (`work.done`), its note as the
+  reason and the other notes alongside, since Fractal refuses `attention.dismiss` there.
 - Confirm destructive or binding actions (approve, cancel, reject, resolve) with a second tap.
 - **Chat about this** sends a *new* Fractal message to the agent involved (or the chief of
   staff when no agent is), titled `About: <item title>`, with the item's id, title and mission
@@ -268,7 +277,7 @@ use Ctrl+A then t from the conversation, or Enter on an already detached termina
 Ctrl+L opens the next outstanding Inbox item in the focused split, replacing only that
 split's tab and adding the replaced content to place history. Agent-blocking questions
 come first, then decisions, failures, and other items; each class is oldest first.
-Closed and snoozed items are excluded. The flash gives `n/m · reason`; after the last item,
+Closed and snoozed (`snoozed_until` still ahead) items are excluded. The flash gives `n/m · reason`; after the last item,
 `all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
 goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
 While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
