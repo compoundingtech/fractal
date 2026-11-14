@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make cross-renderer localStorage writes observably committed before kit isolation audit reads",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "The isolation browser test awaits the localStorage write acknowledgment on the audit target's CDP session before capturing its stale-view fixture. The isolation worker and its existing storage-clear acknowledgment are unchanged. No product behavior or protocol changes."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "No user action is required."},
+  "recovery": {"status": "none", "detail": "Browser-test ordering only; residual storage detection semantics are unchanged."}
+}

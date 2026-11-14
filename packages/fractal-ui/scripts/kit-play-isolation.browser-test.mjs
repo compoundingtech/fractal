@@ -150,7 +150,22 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
 
   const staleWriter = await worker.newPage(pageOptions)
   await staleWriter.goto(base)
+  // localStorage is shared per origin, but Chromium propagates a write to
+  // another renderer's cached view asynchronously: the writing page applies it
+  // locally and the browser commits it before notifying the audit document's
+  // renderer. Await that commit's DOMStorage acknowledgment on the audit
+  // target's own session before reading it; no sleep or retry is involved.
+  const auditClient = await worker.context.newCDPSession(baseAudit)
+  await auditClient.send('DOMStorage.enable')
+  const writeAcknowledged = new Promise(resolve => {
+    const onWrite = ({ storageId, key }) => {
+      if (storageId.securityOrigin === base && storageId.isLocalStorage && key === 'prior-renderer-view') resolve()
+    }
+    for (const event of ['DOMStorage.domStorageItemAdded', 'DOMStorage.domStorageItemUpdated']) auditClient.on(event, onWrite)
+  })
   await staleWriter.evaluate(() => localStorage.setItem('prior-renderer-view', 'gone after clear'))
+  await writeAcknowledged
+  await auditClient.detach()
   const readAudit = baseAudit.evaluate.bind(baseAudit)
   const staleSnapshot = await readAudit(() => ({
     origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
