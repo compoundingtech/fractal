@@ -48,6 +48,24 @@ function observeLocalStorageClear(client, origin) {
   }
 }
 
+// A localStorage write from another renderer commits in the browser's per-origin
+// area before the retained probe's cached view receives the update. Chromium
+// reports every committed mutation as a DOMStorage event on each enabled
+// session, so counting them on the probe's own session gives an audit read a
+// commit acknowledgment for those writes.
+function observeLocalStorageMutations(client, origin) {
+  const events = ['DOMStorage.domStorageItemAdded', 'DOMStorage.domStorageItemsSet', 'DOMStorage.domStorageItemRemoved', 'DOMStorage.domStorageItemsCleared']
+  let mutations = 0
+  const onMutation = ({ storageId }) => {
+    if (storageId.securityOrigin === origin && storageId.isLocalStorage) mutations++
+  }
+  for (const event of events) client.on(event, onMutation)
+  return {
+    count: () => mutations,
+    detach() { for (const event of events) client.off(event, onMutation) },
+  }
+}
+
 // Chromium's HTTP resource cache is intentionally retained: the job's server and
 // bundle are immutable. Cache Storage and every other origin storage type are not.
 export async function createIsolatedKitWorker(browser, base, { workerId = null } = {}) {
@@ -81,6 +99,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
     // share a case's sessionStorage; fresh case documents audit that separately.
     const auditPages = new Map()
     const probeStorage = new WeakMap()
+    const probeMutations = new WeakMap()
     const inertAudit = (origin, page) => !page.isClosed() && page.url() === new URL(origin).href && page.frames().length === 1 && page.workers().length === 0
     const assertControl = () => {
       if (control.isClosed() || control.url() !== 'about:blank') {
@@ -108,6 +127,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
           await probe.goto(origin)
           await probeClient.send('DOMStorage.enable')
           probeStorage.set(probe, probeClient)
+          probeMutations.set(probe, observeLocalStorageMutations(probeClient, origin))
           auditPages.set(origin, probe)
         }
         if (!inertAudit(origin, probe)) {
@@ -116,7 +136,13 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
         const read = () => probe.evaluate(() => ({
           origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
         }))
+        const mutations = probeMutations.get(probe)
+        const before = mutations?.count() ?? 0
         let snapshot = await read()
+        // A cross-renderer write that committed while the read was in flight is
+        // not yet in the probe's cached view; read again once its mutation
+        // acknowledgment has arrived, exactly as the clear acknowledgment below.
+        if (mutations && mutations.count() !== before) snapshot = await read()
         if (snapshot.local.length && !snapshot.session.length && await clears.get(origin)?.wait()) snapshot = await read()
         residualStorage('reset', snapshot)
       }
