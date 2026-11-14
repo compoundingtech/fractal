@@ -14,6 +14,10 @@ fn at(store: &Store, now: u128) {
 fn fixture(policy: &str) -> (Clock, Arc<Store>, Reconciler<FakeRuntime>, MissionRunView, MissionSpec) {
     smallclaims::store::set_thread_clock(Some(START));
     let store = Arc::new(Store::open_memory("node").unwrap());
+    fixture_with_store(policy, store)
+}
+
+fn fixture_with_store(policy: &str, store: Arc<Store>) -> (Clock, Arc<Store>, Reconciler<FakeRuntime>, MissionRunView, MissionSpec) {
     at(&store, START);
     let hash = store.put_blob(b"export default {}").unwrap();
     apply_source(&store, &format!(r#"version 2
@@ -108,4 +112,55 @@ fn legacy_retry_keeps_any_failure_and_uniform_backoff() {
     assert!(!reconciler.failed_step_is_final(&run, &mission.steps["program"], &failed).unwrap());
     assert_eq!(mission.steps["program"].retry.delay_ms(1), 120_000);
     assert_eq!(mission.steps["program"].retry.delay_ms(2), 120_000);
+}
+
+fn delayed_retry_window(restart: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    smallclaims::store::set_thread_clock(Some(START));
+    let store = Arc::new(Store::open(&path, "node").unwrap());
+    let (_clock, store, reconciler, run, _) =
+        fixture_with_store("attempts 4; delays \"10m\"; within \"2m\"", store);
+    let subject = run.steps[0].subject.clone();
+    fail(&store, &subject, None);
+    let (view, mission) = store.mission_run_for_evaluation(&run.id).unwrap();
+    reconciler.evaluate_active_mission_run(&view, mission).unwrap();
+    let pending = store.step_run(&subject).unwrap().unwrap();
+    assert_eq!(pending.status, "pending");
+    assert_eq!(pending.not_before_unix_ms, Some(START + 600_000));
+    let (store, reconciler) = if restart {
+        drop(reconciler);
+        drop(store);
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
+        (store, reconciler)
+    } else {
+        (store, reconciler)
+    };
+    at(&store, START + 600_000);
+    let (view, mission) = store.mission_run_for_evaluation(&run.id).unwrap();
+    reconciler.evaluate_active_mission_run(&view, mission).unwrap();
+    let expired = store.step_run(&subject).unwrap().unwrap();
+    assert_eq!(expired.status, "failed");
+    assert_eq!(expired.attempt, 2);
+    assert_eq!(store.first_step_attempt_started_at(&subject).unwrap(), Some(START));
+    for _ in 0..3 {
+        let (view, mission) = store.mission_run_for_evaluation(&run.id).unwrap();
+        reconciler.evaluate_active_mission_run(&view, mission).unwrap();
+    }
+    assert_eq!(store.mission_run(&run.id).unwrap().unwrap().status, "failed");
+    assert_eq!(store.step_run(&subject).unwrap().unwrap().attempt, 2);
+    let states = store.claims_for(&subject, Some("step-run.state")).unwrap();
+    assert_eq!(states.iter().filter(|claim| claim.body["fields"]["status"] == "ready").count(), 1);
+    assert!(store.claims_for(&subject, Some("program.attempt.trace")).unwrap().is_empty());
+}
+
+#[test]
+fn delayed_retry_cannot_start_after_its_window_expires() {
+    delayed_retry_window(false);
+}
+
+#[test]
+fn delayed_retry_cannot_start_after_its_window_expires_across_restart() {
+    delayed_retry_window(true);
 }
