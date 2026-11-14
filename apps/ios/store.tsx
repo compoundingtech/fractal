@@ -1,3 +1,4 @@
+import { markdownSource } from '../../clients/typescript/fractal-client/markdown-text';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { AppState, unstable_batchedUpdates } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -1137,7 +1138,7 @@ function useAppStore(proof?: FabricProfile) {
     async messageBody(message: string): Promise<{ text: string; complete?: boolean }> {
       if (!client || status !== 'online') throw new Error(status === 'online' ? 'not connected' : 'offline');
       const answer = (await client.messageBodyGet(message)).value;
-      return { text: answer.text, complete: answer.complete };
+      return { text: markdownSource(answer.text), complete: answer.complete };
     },
     /** Send Fractal to an agent, as the Fractal terminal UI does: fenced to a fresh snapshot, once more if it moved. */
     async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {

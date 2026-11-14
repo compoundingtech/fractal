@@ -1,3 +1,4 @@
+import { markdownInline } from '@fractal/client/markdown'
 import { scenarioDomainFixture } from '../domain-fixture.ts'
 import type { TimelineEntry, Work } from '@fractal/client'
 
@@ -88,7 +89,7 @@ const build = (ctx: FactoryContext): AuthoredSlices => {
   }
   const work = (step: number, state: Work['state'], updatedMs: number, revision: string): Work => ({
     ...resources.work(ctx, { mission, step, state, updatedMs, claimant: builder, goals: ['No AbortError in 100 shuffled orders', 'Change only the test fixture, not production retry behavior'] }),
-    revision, constraints: ['Keep the patch to one line in the test fixture'],
+    revision, constraints: [markdownInline('Keep the patch to one line in the test fixture')],
   })
   const details: Slice<'details'> = {
     kind: 'details', variant: 'default', source, decode: 'strict', loading: false,

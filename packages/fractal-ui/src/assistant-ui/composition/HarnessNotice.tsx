@@ -1,10 +1,11 @@
+import { markdownBlock, markdownInline } from './markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import { backgroundJobGroupLead, backgroundJobStateLabel, harnessOutcomeTone, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessOutcomeTone, type HarnessWeight } from '../embrace-data/model.ts'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
-import { Markdown } from './Markdown'
+import { InlineMarkdown, Markdown } from './Markdown'
 
 const presentation: { readonly [Tag in HarnessNoticeData['_tag']]: { readonly icon: IconName; readonly kind: string; readonly noun: string } } = {
   SubagentResult: { icon: 'clock', kind: 'Subagent', noun: 'result' },
@@ -46,16 +47,16 @@ export function HarnessNotice({ item, weight = 'card', showTime = true }: { read
   const row = weight === 'row'
   return <Disclosure isExpanded={expanded} onExpandedChange={setExpanded} data-testid="harness-notice" data-harness-kind={item.kind} data-harness-weight={weight} data-item-id={item.id} {...stylex.props(styles.base, row ? styles.row : styles.card)}>
     <div {...stylex.props(styles.header)}><span {...stylex.props(styles.headerIcon)}><Icon name={(tone === undefined ? undefined : toneIcon[tone]) ?? shown.icon} size={headerIconSize} /></span><span data-testid="harness-title" {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{pillText(notice, shown.kind)}</span>{showTime && Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
-    <p data-testid="harness-excerpt" {...stylex.props(styles.excerpt, row && styles.rowIndent)}>{item.text}</p>
+    <p data-testid="harness-excerpt" {...stylex.props(styles.excerpt, row && styles.rowIndent)}><InlineMarkdown text={markdownInline(item.text)} clipped={item.text.length >= 200} /></p>
     <Button slot="trigger" data-testid="harness-trigger" {...stylex.props(styles.trigger, row && styles.rowIndent)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={headerIconSize} />{expanded ? `Hide ${noun}` : `Read ${noun}`}</Button>
     {/* The frame lives inside the panel: a collapsed hidden=until-found panel still keeps its own box in Chromium. */}
     <DisclosurePanel data-testid="harness-panel"><div data-testid="harness-panel-frame" {...stylex.props(styles.payload, row ? styles.rowPayload : styles.cardPayload)}>
-      <div data-testid={compacted ? 'compaction-summary' : 'harness-payload'}><Markdown text={payload} /></div>
-      {notice._tag === 'SubagentResult' && <dl {...stylex.props(styles.facts)}><dt>Agent</dt><dd>{notice.agent}</dd>{notice.lines !== undefined && <><dt>Output</dt><dd>{notice.lines} lines · {notice.size}</dd></>}{notice.fullOutput !== undefined && <><dt>Full output</dt><dd>{notice.fullOutput}</dd></>}{notice.abortReason !== undefined && <><dt>Stop reason</dt><dd>{notice.abortReason}</dd></>}{notice.error !== undefined && <><dt>Error</dt><dd>{notice.error}</dd></>}{notice.mergeSummary !== undefined && <><dt>Merge</dt><dd>{notice.mergeSummary}</dd></>}{notice.followUp !== undefined && <><dt>Follow-up</dt><dd>{notice.followUp}</dd></>}</dl>}
+      <div data-testid={compacted ? 'compaction-summary' : 'harness-payload'}><Markdown text={markdownBlock(payload)} /></div>
+      {notice._tag === 'SubagentResult' && <dl {...stylex.props(styles.facts)}><dt>Agent</dt><dd>{notice.agent}</dd>{notice.lines !== undefined && <><dt>Output</dt><dd>{notice.lines} lines · {notice.size}</dd></>}{notice.fullOutput !== undefined && <><dt>Full output</dt><dd>{notice.fullOutput}</dd></>}{notice.abortReason !== undefined && <><dt>Stop reason</dt><dd>{notice.abortReason}</dd></>}{notice.error !== undefined && <><dt>Error</dt><dd>{notice.error}</dd></>}{notice.mergeSummary !== undefined && <><dt>Merge</dt><dd><InlineMarkdown text={markdownInline(notice.mergeSummary)} /></dd></>}{notice.followUp !== undefined && <><dt>Follow-up</dt><dd><InlineMarkdown text={markdownInline(notice.followUp)} /></dd></>}</dl>}
       {notice._tag === 'Irc' && (notice.to !== undefined || notice.replyTo !== undefined) && <dl {...stylex.props(styles.facts)}>{notice.to !== undefined && <><dt>To</dt><dd>{notice.to}</dd></>}{notice.replyTo !== undefined && <><dt>Reply to</dt><dd>{notice.replyTo}</dd></>}</dl>}
       {notice._tag === 'Interjection' && <dl {...stylex.props(styles.facts)}><dt>From</dt><dd>{notice.from}</dd>{notice.to !== undefined && <><dt>To</dt><dd>{notice.to}</dd></>}</dl>}
       {notice._tag === 'SkillInvocation' && <dl {...stylex.props(styles.facts)}><dt>Skill</dt><dd>{notice.skill}</dd><dt>Requested by</dt><dd>{notice.by}</dd></dl>}
-      {notice._tag === 'Delivery' && <dl {...stylex.props(styles.facts)}><dt>From</dt><dd>{notice.from}</dd><dt>To</dt><dd>{notice.to}</dd>{notice.subject !== undefined && <><dt>Subject</dt><dd>{notice.subject}</dd></>}</dl>}
+      {notice._tag === 'Delivery' && <dl {...stylex.props(styles.facts)}><dt>From</dt><dd>{notice.from}</dd><dt>To</dt><dd>{notice.to}</dd>{notice.subject !== undefined && <><dt>Subject</dt><dd><InlineMarkdown text={markdownInline(notice.subject)} /></dd></>}</dl>}
     </div></DisclosurePanel>
   </Disclosure>
 }

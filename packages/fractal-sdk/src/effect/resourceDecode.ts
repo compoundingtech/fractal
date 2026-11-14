@@ -28,6 +28,7 @@ export interface UnrecognizedLeaf {
 /** Open literal leaves, preserving branded identities, rich values and union discriminators. */
 export type Open<T> = [T] extends [boolean] ? boolean extends T ? T : T | Unrecognized
   : T extends Brand.Brand<string> | DateTime.Utc | Duration.Duration ? T
+  : T extends { readonly '~fractal/markdown': 'block' | 'inline' } ? T
   : T extends { readonly _tag: 'Unknown'; readonly raw: string } ? Unrecognized
   : T extends string ? string extends T ? T : T extends `${string}/${string}` ? T : T | Unrecognized
   : T extends number ? number extends T ? T : T | Unrecognized

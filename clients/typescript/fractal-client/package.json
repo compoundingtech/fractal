@@ -16,6 +16,7 @@
     ".": "./index.ts",
     "./schema": "./Schema.generated.ts",
     "./schema/read": "./ReadSchema.generated.ts",
+    "./markdown": "./markdown-text.ts",
     "./fabric": "./fabric.mjs"
   },
   "peerDependencies": {

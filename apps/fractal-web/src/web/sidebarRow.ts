@@ -1,3 +1,5 @@
+import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
+import { markdownSource } from '@fractal/client/markdown'
 import type { SidebarAgentRowData, SidebarAgentStatus, SidebarMissionContext } from '@fractal/ui/assistant-ui'
 import { statuses, type SidebarMissionInfo, type SidebarOtherMission } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import type { Agent, DataSource, Feed } from '../data/source.ts'
@@ -109,7 +111,7 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
     ((work !== undefined && (card.step_run_id === work.id || card.blocked?.step_run_id === work.id || card.source_id === work.id)) ||
       card.conversation_id === agent.ref || card.conversation_ids?.some(id => id === agent.ref) ||
       card.requester_id === agent.ref || card.source_id === agent.ref) &&
-    (card.detail.trim().length > 0 || card.title.trim().length > 0))
+    (markdownSource(card.detail).trim().length > 0 || card.title.trim().length > 0))
   const current = new Set(others.map(other => other.missionId))
   const queued = new Map<string, { readonly id: string; readonly slug: string; readonly title: string }>()
   for (const upcoming of agent.upcomingWork ?? []) {
@@ -125,7 +127,7 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
     progress: run === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', ...run.progress },
     eta: run === undefined || ['completed', 'failed', 'cancelled'].includes(run.status) || Option.isSome(run.completed_at)
       ? undefined : Option.getOrUndefined(run.eta),
-    step: question !== undefined ? { _tag: 'Waiting', question: question.detail.trim() || question.title } :
+    step: question !== undefined ? { _tag: 'Waiting', question: markdownPlainText(markdownSource(question.detail)) || question.title } :
       work === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: workStepName(work) },
     queued: [...queued.values()],
   }

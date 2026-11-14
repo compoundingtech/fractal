@@ -1,3 +1,4 @@
+import { markdownBlock } from './markdown-text'
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
@@ -12,7 +13,7 @@ import { SyncLine } from '../sync-presentation/SyncLine'
 import { syncLine } from '../sync-presentation/sync-line'
 import type { SyncStatus } from '../sync-presentation/sync-status'
 import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
-import { HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
+import { completeStreamingTail, HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
 import { ThinkingRun } from './ThinkingEntry'
 import { SendStatus, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import type { ComposerAvailability } from '../embrace-composer/send'
@@ -135,8 +136,15 @@ function TranscriptMessage() {
   if (item._tag === 'Unsupported') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><UnsupportedRecord item={item} /></MessagePrimitive.Root>
   if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" showTime={false} /></MessagePrimitive.Root>
   if (item._tag === 'UnknownEvent' && item.mixedContent === true) return <MixedContentMessage item={item} />
+  if (item._tag === 'Text' || item._tag === 'Event') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic, styles.semanticProse)}><SemanticProse item={item} /></MessagePrimitive.Root>
   return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
 }
+/** Mail delivered to the seat and harness messages are written as Markdown; an event's title is a label. */
+function SemanticProse({ item }: { readonly item: Extract<ConversationItem, { _tag: 'Text' | 'Event' }> }) {
+  return <>{item._tag === 'Event' && <span {...stylex.props(styles.semanticText)}>{item.title}</span>}<Markdown text={markdownBlock(item.text)} tone="muted" /></>
+}
+/** A message's text parts are Markdown by the transcript's contract. */
+const MESSAGE_PARTS = { Text: ({ text }: { readonly text: string }) => <Markdown text={markdownBlock(text)} /> }
 const messageComponents = { Message: TranscriptMessage }
 /** Keep mixed bodies out of the collapsed DOM, using the same raw disclosure as tool inspection. */
 function MixedContentMessage({ item }: { readonly item: Extract<ConversationItem, { _tag: 'UnknownEvent' }> }) {
@@ -154,15 +162,17 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
   useRevealOpen(reveal => reveal.entryId === item.id, expanded, setExpanded)
   const active = React.useContext(TranscriptActiveContext)
   const [overflows, setOverflows] = React.useState(false)
-  const text = React.useRef<HTMLSpanElement>(null)
+  const text = React.useRef<HTMLDivElement>(null)
   const textId = React.useId()
   const long = item.text.length > 600 || item.text.split('\n').length > 8
+  // The cut can land inside a construct; close it so the collapsed prompt keeps its formatting.
+  const collapsed = React.useMemo(() => item.text.length > 600 ? completeStreamingTail(item.text.slice(0, 600)) : item.text, [item.text])
   React.useLayoutEffect(() => {
     const element = text.current
     if (element === null || expanded || !active) return
     return observeUserMessageOverflow(element, setOverflows)
   }, [item.text, expanded, active])
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={markdownBlock(expanded ? item.text : collapsed)} tone={item.sendState?._tag === 'Pending' ? 'muted' : 'foreground'} hardBreaks /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
 }
 /**
  * The callback must resolve only after the host has successfully copied the answer. Only a fulfilled copy sets
@@ -201,7 +211,7 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
       {!streaming && <span {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer visible={hovered} />{rowTimes && Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
-    {item._tag === 'Text' ? <><Markdown text={item.text} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
+    {item._tag === 'Text' ? <><Markdown text={markdownBlock(item.text)} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={MESSAGE_PARTS} />}
   </MessagePrimitive.Root>
 }
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. A host's semantic detail stands in for the summary line; the raw disclosure always remains. */
@@ -250,6 +260,7 @@ const strandedText = (item: ConversationItem): string | undefined => {
 function StrandedItem({ item }: { readonly item: ConversationItem }) {
   if (item._tag === 'Unsupported') return <UnsupportedRecord item={item} />
   if (item._tag === 'Event' && item.notice !== undefined) return <HarnessNotice item={{ ...item, notice: item.notice }} weight="row" />
+  if ((item._tag === 'Text' && item.role === 'system') || item._tag === 'Event') return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic, styles.semanticProse)}><SemanticProse item={item} /></div>
   const text = strandedText(item)
   return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{text === undefined || text.trim() === '' ? 'Couldn\u2019t display this entry' : text}</span></div>
 }
@@ -591,8 +602,9 @@ const styles = stylex.create({
   // The shared reading column keeps rows and a reading-column composer on the same bounds.
   content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
-  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
-  userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
+  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere' },
+  // Eight prose lines, as the disclosure contract promises; padding and its optional button are outside this box.
+  userClamp: { maxHeight: `calc(${t.bodyLeading} * 8)`, overflow: 'hidden' },
   userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
   // The outcome is what the reader came for: full contrast, never dimmer than the prompt.
   answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fg, flexShrink: 0 },
@@ -604,6 +616,7 @@ const styles = stylex.create({
   sender: { margin: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   semanticText: { minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  semanticProse: { flexDirection: 'column', gap: s.xs2, overflowWrap: 'anywhere' },
   mixed: { minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   mixedSummary: { display: 'flex', alignItems: 'center', gap: s.xs },
   mixedTrigger: { minHeight: g.toolRow, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: g.focusOffset } },
