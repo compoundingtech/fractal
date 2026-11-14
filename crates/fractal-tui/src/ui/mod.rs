@@ -6101,39 +6101,39 @@ impl Ui {
         if item.actions.iter().any(|a| a == "custom.reply") {
             return;
         }
-1:         let kind = item.kind.word();
-         if action == 'r' && kind == "request" {
-             // A request that offers its own `dismiss` answer is answered with it: that answer is
-             // the asker's, so st takes it as work.done, with its note and the other notes.
-             let own = self
-                 .structured_request_id(id.clone())
-                 .is_some_and(|(_, request)| request.answers.iter().any(|answer| answer.id == "dismiss"));
-             if own {
-                 let answer = "Dismissed without an answer.";
-                 if self.live {
-                     let reason = self
-                         .conversation_state
-                         .drafts
-                         .get(&format!("answer:{id}:dismiss"))
-                         .cloned()
-                         .unwrap_or_else(|| answer.into());
-                     let option_notes = self.option_notes(&id, Some("dismiss"));
-                     self.effects.push(Effect::Attention {
-                         id,
-                         action: "work.done".into(),
-                         reason: Some(reason),
-                         answer: Some("dismiss".into()),
-                         option_notes,
-                     });
-                     self.flash(format!("Answering “{answer}”…"));
-                 } else {
-                     self.flash(format!("Answered “{answer}” · demo: nothing was sent"));
-                 }
-                 return;
-             }
-             // Any other request is set aside with the person's own dismissal
-             // (`attention.dismiss`): its asker reads `dismissed`, and st resumes what waits on it.
-             let text = self.dismissal_text(&id);
+        let kind = item.kind.word();
+        if action == 'r' && kind == "request" {
+            // A request that offers its own `dismiss` answer is answered with it: that answer is
+            // the asker's, so st takes it as work.done, with its note and the other notes.
+            let own = self
+                .structured_request_id(id.clone())
+                .is_some_and(|(_, request)| request.answers.iter().any(|answer| answer.id == "dismiss"));
+            if own {
+                let answer = "Dismissed without an answer.";
+                if self.live {
+                    let reason = self
+                        .conversation_state
+                        .drafts
+                        .get(&format!("answer:{id}:dismiss"))
+                        .cloned()
+                        .unwrap_or_else(|| answer.into());
+                    let option_notes = self.option_notes(&id, Some("dismiss"));
+                    self.effects.push(Effect::Attention {
+                        id,
+                        action: "work.done".into(),
+                        reason: Some(reason),
+                        answer: Some("dismiss".into()),
+                        option_notes,
+                    });
+                    self.flash(format!("Answering “{answer}”…"));
+                } else {
+                    self.flash(format!("Answered “{answer}” · demo: nothing was sent"));
+                }
+                return;
+            }
+            // Any other request is set aside with the person's own dismissal
+            // (`attention.dismiss`): its asker reads `dismissed`, and st resumes what waits on it.
+            let text = self.dismissal_text(&id);
             if self.live {
                 self.effects.push(Effect::Dismiss { id, text });
                 self.flash("Dismissing…");
