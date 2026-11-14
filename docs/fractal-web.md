@@ -569,6 +569,21 @@ checks Retry reuses the key, and prints build revision, seat and timings. The ne
 removes the submit binding and proves the send criterion rejects it without issuing mail.
 Both commands skip all live activity when the one-minute `/proc/loadavg` value is 32 or higher.
 
+## Fixture-instance routing proof
+
+`pnpm --dir apps/fractal-web test:fixture-routing` starts the real Vite web app
+on dedicated ephemeral loopback origins with `WF_ST_GATEWAY` selecting a Unix
+client socket. It uses fresh nonpersistent Playwright contexts, not the
+`fixtureSource` embed or a normal paired browser profile.
+
+The proof checks that browser API traffic reaches only the configured fixture
+socket, privileged routes are excluded, and a fixture credential routed to the
+normal socket receives a refusal. Its Unix HTTP endpoints are transport test
+doubles: this is a real-web routing test, not evidence of live daemon
+authorization or Fabric peer grants. It creates no daemon instance, pairing,
+enrollment or exposure. Live fixture acceptance additionally needs independently
+reviewed Fabric allow/deny readbacks and the fixture store's own receipts.
+
 ## Fractal web alert strip live proof
 
 `node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]` proves the conversation
