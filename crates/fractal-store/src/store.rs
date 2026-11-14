@@ -247,6 +247,7 @@ pub mod declared_objectives;
 pub mod runtime_starts;
 pub use runtime_starts::RuntimeStartOperation;
 pub mod invocation_receipts;
+pub mod turn_invocations;
 pub mod roster_admission;
 
 pub mod adhoc_work;
@@ -12096,6 +12097,9 @@ pub fn append_receipt_claim_tx(
         step_executions::snapshot_claim(transaction, actor, &mut body)?;
     }
     smallclaims::store::idempotency::attach(&mut body, key)?;
+    let turn = if kind == "work.claimed" {
+        turn_invocations::bind_claim_tx(transaction, origin, subject, actor, &mut body)?
+    } else { None };
     let record = append_claim_tx(
         transaction,
         origin,
@@ -12107,6 +12111,10 @@ pub fn append_receipt_claim_tx(
         forced_batch,
     )?;
     register_operation_tx(transaction, &record)?;
+    if let Some(turn) = turn {
+        turn_invocations::record_claim_tx(transaction, origin, &record, turn)?;
+    }
+    turn_invocations::record_terminal_tx(transaction, origin, &record)?;
     Ok(record)
 }
 
