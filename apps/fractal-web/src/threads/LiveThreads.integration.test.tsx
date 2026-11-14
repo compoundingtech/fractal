@@ -151,6 +151,16 @@ it('offers Retry after a failed read and shows the threads it then observes', as
   } finally { silence.mockRestore(); await view.dispose() }
 })
 
+it('says a thread link names no thread instead of offering Retry', async () => {
+  const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const view = await mount(<LiveThreadPane threadId="thread/missing" />, { reply: () => refusal(404, 'not-found') })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Fractal has no thread at this link.'))
+    expect(view.host.querySelector('button')).toBeNull()
+    expect(view.host.textContent).not.toContain('Private server diagnostic')
+  } finally { silence.mockRestore(); await view.dispose() }
+})
+
 it('shows the pairing notice for a rejected credential without Start or Retry', async () => {
   const view = await mount(<LiveInboxThreads alert={ask} />, {
     actions: ['thread.start'],

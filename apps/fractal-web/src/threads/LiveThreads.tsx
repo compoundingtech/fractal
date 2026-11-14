@@ -279,9 +279,13 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
   const { read, upgradeRequired } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
   const paused = useUpdatesPaused(detail._tag === 'Observed' && detail.freshness === 'stale')
-  if (upgradeRequired) return <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="thread" />
-  if (!read) return <p>This connection does not support threads.</p>
-  if (detail._tag !== 'Observed') return <ReadStatus feed={detail} subject="thread" onRetry={source.reload} />
+  // A thread in its own tab keeps its status in the thread's measure, where its heading would be.
+  const status = (notice: React.ReactNode) => embedded ? notice : <div {...stylex.props(styles.dedicatedNotice)}>{notice}</div>
+  if (upgradeRequired) return status(<ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="thread" />)
+  if (!read) return status(<p>This connection does not support threads.</p>)
+  // Reading again cannot bring back a thread Fractal says does not exist.
+  if (detail._tag === 'Unavailable' && detail.code === 'not-found') return status(<SystemNotice kind="empty" scope="inline" title="Fractal has no thread at this link." />)
+  if (detail._tag !== 'Observed') return status(<ReadStatus feed={detail} subject="thread" onRetry={source.reload} />)
   return <>
     {/* Embedded threads share their section's one marker; a thread in its own tab carries it above its heading. */}
     {embedded || !paused ? null : <div data-threads-paused="" {...stylex.props(styles.dedicatedNotice)}>
