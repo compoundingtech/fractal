@@ -12057,6 +12057,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                             smallclaims::touched::note_due(not_before);
                             return Ok(changed);
                         }
+                        if view.attempt > 1 && self.step_retry_window_expired(step.spec, view)? {
+                            changed |= self.store.set_step_state(
+                                &view.subject,
+                                "failed",
+                                Some("the retry policy window expired before the attempt could start"),
+                            )?;
+                            return Ok(changed);
+                        }
                         if !self.step_dependencies_hold(run, &step, &views)? {
                             return Ok(changed);
                         }
@@ -12733,9 +12741,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
-    /// A failed step has no attempt left when it used its retries, or when it is a loop that
-    /// stopped: a loop that ends on a stop rule or at its exhaustion has said it is finished,
-    /// and another attempt would only run the rounds the rule just ended.
+    fn step_retry_window_expired(
+        &self,
+        spec: &StepSpec,
+        view: &crate::model::StepRunView,
+    ) -> Result<bool> {
+        let Some(window) = spec.retry.window_ms else { return Ok(false) };
+        Ok(self.store.first_step_attempt_started_at(&view.subject)?
+            .is_some_and(|anchor| now_ms() > anchor.saturating_add(u128::from(window))))
+    }
+
+    /// A failed step has no attempt left when its policy is exhausted, or its loop
+    /// stopped: another attempt would only run the rounds the rule just ended.
     fn failed_step_is_final(
         &self,
         run: &MissionRunView,
@@ -12748,10 +12765,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if view.attempt >= spec.retry.attempts {
             return Ok(true);
         }
-        if let Some(window) = spec.retry.window_ms
-            && let Some(anchor) = self.store.first_step_attempt_started_at(&view.subject)?
-            && now_ms() > anchor.saturating_add(u128::from(window))
-        {
+        if self.step_retry_window_expired(spec, view)? {
             return Ok(true);
         }
         if spec.program.is_some() && !spec.retry.on_error_tags.is_empty() {

@@ -182,7 +182,7 @@ The outer step's native `retry` policy has these KDL fields:
 | `attempts 4` | Total attempts, including the first; an integer from 1 through 100. Defaults to 1. |
 | `backoff "2m"` | Existing uniform retry delay; defaults to zero. |
 | `delays "2m" "10m" "30m"` | Positive per-retry durations, overriding `backoff`; the final entry repeats when more retries remain. |
-| `within "2h"` | Optional positive whole-policy window from the first attempt's start, not a per-attempt timeout. The window need not cover the sum of scheduled delays. |
+| `within "2h"` | Optional positive whole-policy window from the first attempt's start, not a per-attempt timeout. The window need not cover the sum of scheduled delays: a pending retry that becomes due after the window expires fails finally without starting another attempt, including after a daemon restart. |
 | `on "HostUnavailable" "SlotLost"` | Typed failure tags eligible for retry. An absent list preserves the legacy any-failure policy. |
 
 The stored `RetrySpec` names these fields `attempts`, `backoff_ms`, `schedule_ms`,
