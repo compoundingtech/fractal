@@ -510,7 +510,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "GET /v1/agent-invocations/{*invocation}",
-        "invocation receipts are read by exact invocation id, not claim-history scan; agent_invocations tests cover the lookup, artifact join and authorization, whose growth with unrelated agent history is not measured here",
+        "returns all receipts for an invocation and folds the owning agent's artifact claims before filtering; cost can grow with unrelated artifact history and is not bounded by this fixture; no cost-independence claim is made",
     ),
     (
         "GET /v1/client/invocation-artifacts/{id}",
