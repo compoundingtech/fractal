@@ -16,6 +16,7 @@ pub mod notice;
 pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
+pub mod invocation;
 pub mod provenance;
 pub mod read_positions;
 pub mod source_map;
@@ -798,6 +799,9 @@ impl Registry {
             source_map::validate_claim(subject, fields)?;
         }
         harness_questions::validate(kind, fields)?;
+        if kind == invocation::KIND {
+            invocation::validate(subject, fields)?;
+        }
         if kind == "harness.todo.observed" {
             validate_harness_todo(fields)?;
         }
@@ -2521,6 +2525,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "harness.invocation-artifact",
+            &["agent"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("harnesses"),
+            false,
+            &[],
+        ),
+        (
             "harness.session-file",
             &["agent"],
             WritePolicy::AuthorizedRequester,
@@ -2658,6 +2671,7 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ("client.js-error", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.native-crash", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         ("client.hang", &["client"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
+        (invocation::KIND, &["agent"], WritePolicy::SystemOnly, Cardinality::Append, None, false, &[]),
         (
             "harness.timeline",
             &["agent"],
@@ -3722,6 +3736,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("worker_reported", boolean()),
             ("claimant", reference()),
             ("claim_incarnation", string()),
+            ("invocation_id", string()),
             ("declared_model", string()),
             ("trace_id", string()),
             ("fallback", boolean()),
@@ -4291,8 +4306,19 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ),
             ("modified_at", string()),
         ],
+        "harness.invocation-artifact" => &[
+            ("invocation_id", required_string()),
+            ("kind", enumeration(&["input", "transcript"])),
+            ("status", enumeration(&["retained", "unavailable", "deleted"])),
+            ("artifact", object()),
+            ("sha256", string()),
+            ("deleted_at_unix_ms", integer()),
+            ("reason", string()),
+        ],
         "harness.diagnostic" => &[
             ("driver", string()),
+            ("producer_version", string()),
+            ("invocation_id", string()),
             ("severity", enumeration(&["warning", "error"])),
             ("status", string()),
             ("code", string()),
@@ -4340,6 +4366,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("pricing_provenance", array()),
             ("native_session_id", string()),
             ("execution_id", string()),
+            ("invocation_id", string()),
+            ("attempt", integer()),
             (
                 "semantics",
                 required_enum(&[
@@ -4465,6 +4493,19 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("unit", required_enum(&["hook"])),
             ("incarnation_id", required_string()),
             ("signals", required_object()),
+        ],
+        "harness.invocation" => &[
+            ("invocation_id", required_string()),
+            ("operation_id", required_string()),
+            ("agent", required_reference_to(&["agent"])),
+            ("phase", required_enum(&["admitted", "launch-inputs", "launch-accepted", "started",
+                "startup-failed", "revoked", "cancelled", "producer-closed", "ended", "observed"])),
+            ("event_key", any()), ("owner_run", any()), ("owner_step", any()),
+            ("owner_attempt", any()), ("parent_invocation_id", any()), ("incarnation", any()),
+            ("requested_model", any()), ("harness", any()), ("harness_version", any()),
+            ("launch_input_digest", any()), ("provider_binary_digest", any()),
+            ("prompt_digest", any()), ("transcript_ref", any()), ("trace_context", any()),
+            ("freshness", object()), ("fallback", any()), ("error", any()), ("evidence", any()),
         ],
         "harness.timeline" => &[
             (
@@ -5269,6 +5310,11 @@ mod tests {
         current.claims.remove("program.step").unwrap();
         current.claims.remove("mission.run.trace").unwrap();
         current.claims.remove("program.attempt.trace").unwrap();
+        current.claims.remove(invocation::KIND).unwrap();
+        current.claims.remove("harness.invocation-artifact").unwrap();
+        for field in ["producer_version", "invocation_id"] {
+            current.claims.get_mut("harness.diagnostic").unwrap().fields.remove(field).unwrap();
+        }
         current.claims.remove("mission-run.retry-linked").unwrap();
         current.claims.remove("mission-run.supersede-linked").unwrap();
         for field in ["phase", "admission_publication"] {
@@ -5294,11 +5340,11 @@ mod tests {
         }
         for kind in ["work.claimed", "work.renewed", "work.progress", "work.submitted",
             "work.failed", "work.released", "work.extended"] {
-            for field in ["declared_model", "trace_id", "fallback"] {
+            for field in ["declared_model", "trace_id", "fallback", "invocation_id"] {
                 current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
             }
         }
-        for field in ["execution_id", "unpriced_responses"] {
+        for field in ["execution_id", "unpriced_responses", "invocation_id", "attempt"] {
             current.claims.get_mut("harness.usage").unwrap().fields.remove(field).unwrap();
         }
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
