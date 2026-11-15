@@ -1737,7 +1737,7 @@ fn conversation_open_local_marked(
         native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
             .max(extent.native_latest()),
         source_generation,
-        semantic_revision: session.conversation_semantics.then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION),
+        semantic_revision: session.conversation_semantics.then_some(crate::transcript_semantics::PROJECTION_REVISION),
     });
     remember_cursor(&cursor, mark.transcript_seen);
     Ok((json!({"next_cursor":cursor}), page, mark))
@@ -4823,7 +4823,7 @@ fn fence_conversation_semantics(
     session_id: &str,
 ) -> Result<(), ApiError> {
     let revision = session.conversation_semantics
-        .then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION);
+        .then_some(crate::transcript_semantics::PROJECTION_REVISION);
     if position.semantic_revision != revision {
         return Err(conversation_replay_gap(
             session_id, "semantic-projection",
@@ -5295,7 +5295,7 @@ fn conversation_read_now_unbounded(
         stream_position: stream_latest,
         native_sequence: native_latest,
         source_generation,
-        semantic_revision: session.conversation_semantics.then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION),
+        semantic_revision: session.conversation_semantics.then_some(crate::transcript_semantics::PROJECTION_REVISION),
     });
     let mut value = json!({"kind":"conversation-changes", "session_id":session_id, "items":items, "next_cursor":next_cursor});
     if let Some(header) = page.get("header") {
@@ -5514,7 +5514,7 @@ async fn conversation_changes_local_marked(
             let mut value = json!({"kind":"conversation-changes", "session_id":session_id, "items":[], "next_cursor":cursor});
             if session.conversation_semantics {
                 value["header"] = json!({
-                    "projection_revision": fractal_kernel::transcript_semantics::PROJECTION_REVISION,
+                    "projection_revision": crate::transcript_semantics::PROJECTION_REVISION,
                 });
             }
             quiet = Some(value);
@@ -20036,7 +20036,7 @@ mission "example/zero-run" state="ready" {
             ).await.unwrap().0;
             if semantics {
                 assert_eq!(first["header"]["projection_revision"],
-                    json!(fractal_kernel::transcript_semantics::PROJECTION_REVISION));
+                    json!(crate::transcript_semantics::PROJECTION_REVISION));
             } else {
                 assert!(first["header"].get("projection_revision").is_none());
             }
@@ -20053,7 +20053,7 @@ mission "example/zero-run" state="ready" {
                 });
                 if semantics {
                     expected["header"] = json!({
-                        "projection_revision":fractal_kernel::transcript_semantics::PROJECTION_REVISION,
+                        "projection_revision":crate::transcript_semantics::PROJECTION_REVISION,
                     });
                 }
                 assert_eq!(quiet, expected);
@@ -20089,7 +20089,7 @@ mission "example/zero-run" state="ready" {
             let position = conversation_position(&state, &session_id, cursor).unwrap();
             if semantics {
                 assert_eq!(position.semantic_revision,
-                    Some(fractal_kernel::transcript_semantics::PROJECTION_REVISION));
+                    Some(crate::transcript_semantics::PROJECTION_REVISION));
             } else {
                 assert_eq!(cursor, format!(
                     "conversation-cursor/{}/{}/{}.{}.{}.{}.{}",
@@ -20114,7 +20114,7 @@ mission "example/zero-run" state="ready" {
             assert_eq!(error.details["full_resync"], json!(true));
             if semantics {
                 let stale = conversation_cursor(&state, &session_id, ConversationPosition {
-                    semantic_revision: Some(fractal_kernel::transcript_semantics::PROJECTION_REVISION - 1),
+                    semantic_revision: Some(crate::transcript_semantics::PROJECTION_REVISION - 1),
                     ..position
                 });
                 remember_cursor(&stale, issued_transcript(cursor).unwrap());

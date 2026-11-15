@@ -2318,7 +2318,7 @@ fn conversation_page_header(
         // Legacy cost sums the loaded window without response identity. Semantic
         // clients must aggregate only the explicitly scoped per-block usage facts.
         header.as_object_mut()?.remove("cost");
-        header["projection_revision"] = json!(fractal_kernel::transcript_semantics::PROJECTION_REVISION);
+        header["projection_revision"] = json!(crate::transcript_semantics::PROJECTION_REVISION);
     }
     (!header.as_object()?.is_empty()).then_some(header)
     })
@@ -2584,7 +2584,7 @@ fn decode_native_page_cursor(encoded: &str) -> Result<NativePagePosition, ApiErr
 }
 
 fn negotiated_semantic_revision(session: &ClientSession) -> Option<u32> {
-    session.conversation_semantics.then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION)
+    session.conversation_semantics.then_some(crate::transcript_semantics::PROJECTION_REVISION)
 }
 
 fn fence_semantic_revision(position: &NativePagePosition, session: &ClientSession) -> Result<(), ApiError> {
@@ -2604,7 +2604,7 @@ mod semantic_cursor_tests {
             "session_id": "session/test", "collection": "timeline/session/test", "order": "sequence",
             "boundary": {"timestamp": "", "sequence": 16, "rank": 0, "id": "native/stable"},
             "limit": 2, "filter_digest": "filter", "source_basis": "unchanged",
-            "source_generation": 1, "semantic_revision": fractal_kernel::transcript_semantics::PROJECTION_REVISION - 1,
+            "source_generation": 1, "semantic_revision": crate::transcript_semantics::PROJECTION_REVISION - 1,
             "expires_at_unix_ms": 9999999999999_u64,
             "snapshot": {"id": "snapshot/test", "host_id": "host/test", "store_index": 0,
                 "projection_version": "test", "created_at": ""}
