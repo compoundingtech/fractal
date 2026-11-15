@@ -106,6 +106,10 @@ preserve exact claim and proof identities. A reference/chunk conversion must
 retain these cost and refusal assertions. Empty maintenance queues are checked
 inside the readiness statement with lazy `CASE` guards; nonempty queues retain
 subject-outer indexed seeks and every existing authentication fence.
+The opt-in, test-support-only statement-work scope groups completed traced SQL
+by its prepared text across request and receipt threads. Summary fixtures report
+the top three statements' VM work at 1,000 and 10,000 retained subject claims;
+these measurements impose no history-scaling assertion.
 
 ### GitHub event observation fold inventory
 

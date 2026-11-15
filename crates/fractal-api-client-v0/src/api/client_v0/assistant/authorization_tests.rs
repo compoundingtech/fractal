@@ -106,7 +106,7 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
 #[tokio::test]
 async fn assistant_summary_nonempty_queue_work_by_grant_count() {
     use smallclaims::store::assistant_grant_authority as authority;
-    for grants in [2, 15, 50] {
+    for (grants, history) in [(2, 10_000), (15, 1_000), (15, 10_000), (50, 10_000)] {
         let fixture = fixture(SCOPES, true).await;
         let subject = subject(&fixture.grant).unwrap();
         let template = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
@@ -127,10 +127,10 @@ async fn assistant_summary_nonempty_queue_work_by_grant_count() {
             let connection = fixture.state.store.connection.write();
             connection.execute(
 
-                /* sqlite-large-value: allow-for-now lv-hdc5e142681af owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+                /* sqlite-large-value: allow-for-now lv-hce3f14ad0265 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?2)
                  INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
                  SELECT 'summary-history-'||x,batch_id,subject,'test.history',origin,actor,'{}','[]',accepted_at_unix_ms
-                 FROM n CROSS JOIN claims WHERE claims.id=?1", [&template.id],
+                 FROM n CROSS JOIN claims WHERE claims.id=?1", rusqlite::params![template.id, history],
             ).unwrap();
             // Unrelated dirty work stays queued throughout the GET, exercising
             // the nonempty-queue arm without fencing the request's grants.
@@ -140,16 +140,26 @@ async fn assistant_summary_nonempty_queue_work_by_grant_count() {
         }
         let payload = fixture.payload("summary", "");
         let header = fixture.header(&payload, &fixture.attestor);
+        let statement_scope = smallclaims::sqlite::work::SqliteStatementWorkScope::start();
         let before = smallclaims::sqlite::work::total();
         let started = std::time::Instant::now();
         let (status, value, _) = fixture.request("/v1/client/assistant/summary", Some(&header)).await;
         let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
         fixture.state.assistant_receipts.flush().await.unwrap();
         let work = smallclaims::sqlite::work::total() - before;
+        let mut statements = statement_scope.finish().into_iter().collect::<Vec<_>>();
+        statements.sort_by(|left, right| right.1.vm_steps.cmp(&left.1.vm_steps)
+            .then_with(|| left.0.cmp(&right.0)));
         assert_eq!(status, StatusCode::OK, "{value}");
         assert!(work.statements > 0, "SQL instrumentation must be enabled");
-        eprintln!("summary nonempty queue: grants={grants} history=10000 statements={} vm_steps={} wall_ms={wall_ms:.3} scope=process-global-through-receipt-flush",
+        eprintln!("summary nonempty queue: grants={grants} history={history} statements={} vm_steps={} wall_ms={wall_ms:.3} scope=process-global-through-receipt-flush",
             work.statements, work.vm_steps);
+        for (rank, (sql, work)) in statements.iter().take(3).enumerate() {
+            let prefix = sql.split_whitespace().collect::<Vec<_>>().join(" ")
+                .chars().take(200).collect::<String>();
+            eprintln!("summary top SQL: grants={grants} history={history} rank={} count={} vm_steps={} sql={prefix}",
+                rank + 1, work.statements, work.vm_steps);
+        }
     }
 }
 
