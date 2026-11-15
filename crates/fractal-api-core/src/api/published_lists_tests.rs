@@ -2447,11 +2447,13 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
         publish(&store, r#"version 2
 mission "garden/runtime" state="ready" {
   goal "Exercise runtime ownership"
-  agent "agent/${ST_MISSION_RUN}/worker" { command "true" }
+  agent "worker" { command "true" }
   step "plant" { assigned-to "agent/${ST_MISSION_RUN}/worker" }
 }"#, "runtime-mission");
         let run = start(&store, "garden/runtime", "runtime-1");
         let (_, owned) = step(&run, "plant");
+        assert_eq!(store.desired_subjects().unwrap().iter().find(|row| row.subject == owned)
+            .unwrap().owner_run.as_deref(), Some(run.subject.as_str()));
         let subjects = if reverse {
             vec![owned.as_str(), "agent/cedar.z", "agent/cedar.a"]
         } else {
