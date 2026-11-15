@@ -310,5 +310,11 @@ fn transaction_local_effect_operation_preserves_first_send_envelope_and_replay()
         assert_eq!(write_counts(tx), before);
         Ok(sent)
     }).unwrap().unwrap();
-    assert_eq!(store.operation_claim(key).unwrap().unwrap().id, sent.id);
+    // A secondary effect uses the local-request cache identity, not a claim-operation key.
+    let connection = store.readers.get();
+    let operation = smallclaims::store::operation_tx(&connection, effect_operation.0)
+        .unwrap().expect("the effect operation is durably registered");
+    assert_eq!(operation, (effect_operation.1.to_owned(), sent.id.clone(), "active".into()));
+    assert_eq!(smallclaims::store::idempotency::original_claim(&connection, key)
+        .unwrap().as_deref(), Some(sent.id.as_str()));
 }
