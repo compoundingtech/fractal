@@ -26,6 +26,7 @@ function production(dependencies: Record<string, unknown>) {
     between('function ContextThreadList', '\nexport function ThreadScreen'),
     between('function threadSummaryLine', '\nexport function InboxThread'),
     between('function useThreadSummary', '\nfunction threadTextIssue'),
+    between('function ThreadReadIssue', '\nfunction ThreadActionFeedback'),
   ].join('\n') + '\nexports.ContextThreadList = ContextThreadList;'
   const { outputText } = ts.transpileModule(input, { compilerOptions: {
     module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React,
@@ -102,6 +103,8 @@ function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) =>
     useTextAppearance: () => ({ palette: {}, color: (value: string) => value }),
     useTitleLines: () => 2, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 40, View, ScrollView: View, Pressable, T: Text,
     ThreadViewport: ({ children }: { children: React.ReactNode }) => children, ThreadBody: Body,
+    AccessibilityInfo: { announceForAccessibility: vi.fn(), setAccessibilityFocus: vi.fn() },
+    findNodeHandle: () => 1,
     theme: {}, errorText: String, ClientError: class extends Error {},
     Button: ({ label, onPress, disabled }: { label: string; onPress: () => void; disabled: boolean }) => <button disabled={disabled} onClick={onPress}>{label}</button>,
   })
