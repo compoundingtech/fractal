@@ -2493,13 +2493,8 @@ mission "garden/runtime" state="ready" {
         assert!(!base.rows.items.iter().any(|row| row["owner_id"] == owned));
         // Model old-peer history below today's reserved-kind write admission, just as
         // the native publication visibility fixtures do.
-        let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
-            let claim = crate::store::append_claim_tx(tx, store.origin(), "agent/cedar.a",
-                "runtime.observed", None, &json!({"fields":{"status":"running"}}), &[], None)?;
-            tx.execute("UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&claim.id])?;
-            Ok(claim)
-        }).unwrap().unwrap();
-        store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+        raw(&store, "agent/cedar.a", "custom.attention.notice-created",
+            json!({"fields":{"status":"running"}}));
         check(&store, &mut base);
         assert!(!base.rows.items.iter().any(|row| row["owner_id"] == "agent/cedar.a"));
     }

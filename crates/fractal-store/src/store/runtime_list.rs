@@ -19,8 +19,9 @@ impl Store {
     /// the subjects that have runtime observations.
     pub fn runtime_list_changes(&self, after: u64, through: u64) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let mut changed = connection.prepare_cached(published_list::CLAIMS_SINCE)?
-            .query_map(params![after, through, Option::<&str>::None], |row| row.get::<_, String>(0))?
+        let mut changed = connection.prepare_cached(
+            "SELECT subject FROM claims WHERE store_index>?1 AND store_index<=?2",
+        )?.query_map(params![after, through], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         // A conflicting operation changes the authority of its earlier subjects too,
         // even when the new claim names an unrelated subject.
@@ -50,15 +51,14 @@ impl Store {
         }
         let mut candidates = BTreeSet::new();
         for subject in &changed {
-            let query = if subject.starts_with("mission-run/") {
-                "SELECT subject FROM desired WHERE owner_run=?1"
+            let mut owned = if subject.starts_with("mission-run/") {
+                connection.prepare_cached("SELECT subject FROM desired WHERE owner_run=?1")?
             } else if subject.starts_with("run-generation/") {
-                "SELECT subject FROM desired WHERE owner_generation=?1"
+                connection.prepare_cached("SELECT subject FROM desired WHERE owner_generation=?1")?
             } else {
                 continue;
             };
-            for row in connection.prepare_cached(query)?
-                .query_map([subject], |row| row.get::<_, String>(0))? {
+            for row in owned.query_map([subject], |row| row.get::<_, String>(0))? {
                 candidates.insert(row?);
             }
         }
@@ -69,7 +69,7 @@ impl Store {
         )?;
         let mut affected = BTreeSet::new();
         for subject in candidates {
-            if observed.query_row(params![subject, through], |_| Ok(())).optional()?.is_some() {
+            if observed.exists(params![subject, through])? {
                 affected.insert(subject);
             }
         }
