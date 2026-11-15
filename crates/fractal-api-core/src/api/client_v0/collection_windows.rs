@@ -331,6 +331,8 @@ impl Windows {
             "scopes":session.scopes, "custom_forms":session.custom_forms,
             "model_drift_attention":session.model_drift_attention,
             "conversation_blocks":session.conversation_blocks,
+            "conversation_semantics":session.conversation_semantics,
+            "semantic_revision":if session.conversation_semantics { crate::transcript_semantics::PROJECTION_REVISION } else { 0 },
             "collection":request.collection, "limit":request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS),
             "since_ms":request.since_ms, "until_ms":request.until_ms,
             "person":request.person, "subject":request.subject, "filter_actor":request.actor,

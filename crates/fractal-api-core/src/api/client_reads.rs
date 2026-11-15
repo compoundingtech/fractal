@@ -889,6 +889,7 @@ pub async fn client_sessions_detail(
                                 session_id,
                                 limit: query.limit.unwrap_or(50).clamp(1, 200),
                                 cursor: query.cursor.clone(),
+                                conversation_semantics: session.conversation_semantics,
                             },
                         },
                     )

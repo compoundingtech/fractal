@@ -970,6 +970,8 @@ fn validate_surfaces(
         "LaneEntry",
         "LaneChange",
         "TimelineBlock",
+        "TimelineSemantic",
+        "TimelineSemanticUsage",
         "ConversationContentRef",
         "ConversationContentChunk",
         "TimelineEntry",

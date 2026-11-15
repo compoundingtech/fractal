@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
+mod semantics;
+
 
 pub const MAX_TIMELINE_LINES: usize = 4_096;
 pub const MAX_TIMELINE_BYTES: u64 = 32 * 1024 * 1024;
@@ -387,6 +389,7 @@ pub mod timeline_test_support {
 #[derive(Default)]
 pub struct LineTimelineFold {
     identity: Option<FileIdentity>,
+    projection_revision: u32,
     last_record: Option<(u64, usize, [u8; 32])>,
     generation: u64,
     consumed: u64,
@@ -646,6 +649,7 @@ impl LineTimelineFold {
             // refused as expired instead of applying their old boundary to a re-read fold.
             *self = Self {
                 identity: Some(identity),
+                projection_revision: fractal_kernel::transcript_semantics::PROJECTION_REVISION,
                 consumed: window_start,
                 generation: next_timeline_generation(),
                 ..Self::default()
@@ -837,6 +841,7 @@ impl LineTimelineFold {
         file: &mut File,
     ) -> bool {
         if self.identity.as_ref() != Some(identity)
+            || self.projection_revision != fractal_kernel::transcript_semantics::PROJECTION_REVISION
             || len < self.consumed
             || len < self.observed_len
             || self.consumed <= window_start
@@ -928,6 +933,7 @@ pub fn normalize_native_line(
             item["_delivery_correlation"] = correlation.clone();
         }
     }
+    semantics::annotate(driver, value, sequence, &mut items[first..]);
 }
 
 // Only typed native user envelopes can carry a delivery identity. This private hint is
@@ -1148,6 +1154,7 @@ pub fn normalize_native_bytes(
                 .as_array_mut()
                 .unwrap()
                 .insert(0, raw_bytes_block(sequence, driver.as_str(), kept));
+            semantics::annotate(driver, &Value::Null, sequence, std::slice::from_mut(&mut item));
             items.push(item);
             if let Some(value) = recovered {
                 normalize_native_line(driver, &value, sequence.saturating_add(1), timestamp, items);
@@ -2502,6 +2509,31 @@ pub use crate::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, ass
 #[allow(unused_imports)]
 pub use crate::external_sessions::shared_tests_seats::path_executable;
 use super::*;
+
+    #[test]
+    fn projection_revision_rebuilds_unchanged_source_without_changing_native_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projection.jsonl");
+        fs::write(&path, format!("{}\n", json!({
+            "type": "response_item", "timestamp": "2026-10-04T21:40:19Z",
+            "payload": {"type": "message", "role": "assistant", "id": "stable",
+                "content": [{"type": "output_text", "text": "hello"}]}
+        }))).unwrap();
+        let session = transcript_session(ExternalDriver::Codex, &path);
+        let mut fold = LineTimelineFold::default();
+        let original = fold.read(&session).unwrap();
+        assert!(!original.is_empty());
+        let original_generation = fold.generation;
+        // Simulate a retained process-local fold produced by an older projection.
+        fold.projection_revision = fractal_kernel::transcript_semantics::PROJECTION_REVISION - 1;
+        fold.lines.front_mut().unwrap().items[0]["body"]["stale_projection"] = json!(true);
+        let rebuilt = fold.read(&session).unwrap();
+        assert_ne!(fold.generation, original_generation);
+        assert_eq!(rebuilt, original);
+        let generation = fold.generation;
+        assert_eq!(fold.read(&session).unwrap(), original);
+        assert_eq!(fold.generation, generation);
+    }
 
     #[test]
     fn chronology_compares_numeric_instants_then_source_sequence_and_id() {
