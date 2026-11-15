@@ -2,11 +2,11 @@ import { actionReceiptCheck, sendBoundAction, resendBoundAction, type BoundActio
 import * as Native from '@fractal/client/schema/read'
 import type { ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { FollowEvent, ThreadWindow } from '@fractal/sdk/read'
-import { Option } from 'effect'
+import { Effect, Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
-import { unavailable, waiting, type Feed } from '../data/source.ts'
+import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
 
@@ -18,6 +18,9 @@ export type ThreadDraft = {
 export type ThreadSendResult =
   | { readonly _tag: 'Sent'; readonly threadId: string }
   | { readonly _tag: 'Refused'; readonly detail: string }
+
+/** A send that never reached Fractal: nothing changed, and the advice holds only until it reconnects. */
+export const unreachableSend = 'Fractal could not be reached, so nothing changed. Try again once it reconnects.'
 
 type ThreadStartIntent = Readonly<Omit<ThreadStartParameters, 'target_id' | 'signature' | 'origin'>> & {
   readonly origin: Readonly<ThreadStartParameters['origin']>
@@ -31,7 +34,17 @@ export interface RetainedThreadStart {
   readonly parameters: ThreadStartIntent
 }
 
-type ThreadAccess = { readonly read: boolean; readonly inboxOrigins?: boolean; readonly upgradeRequired?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
+type ThreadAccess = {
+  readonly read: boolean
+  readonly inboxOrigins?: boolean
+  readonly upgradeRequired?: boolean
+  readonly actions: ReadonlySet<string>
+  readonly actor?: string
+  /** Fractal has not answered which thread operations this connection holds, because the path to it is lost: `read: false` is a default, not a refusal. */
+  readonly unknown?: true
+  /** The capabilities read completed and failed: a refused credential, or a broken answer (an HTTP error or one that does not decode). */
+  readonly failure?: Feed<never>
+}
 
 export interface ThreadSource {
   readonly access: Atom.Atom<ThreadAccess>
@@ -49,10 +62,12 @@ export interface ThreadSource {
   readonly pendingChange?: (threadId: string) => Atom.Atom<string | undefined>
   readonly retryChange?: (threadId: string) => Promise<string | undefined>
   readonly markRead?: (thread: ThreadObservation, through: string, seen: readonly string[]) => Promise<string | undefined>
+  /** Read every mounted thread projection again, including one refused before. */
+  readonly reload?: () => void
 }
 
 type Watch<Row> = (receive: (event: FollowEvent<ThreadWindow<Row>>) => void) => () => void
-interface ThreadWatches {
+export interface ThreadWatches {
   readonly summaries: (query: ThreadListQuery) => Watch<ThreadSummary> | undefined
   readonly detail: (id: string) => Watch<ThreadSummary>
   readonly timeline: (id: string) => Watch<ThreadTimelineEvent>
@@ -65,13 +80,35 @@ const canSendUnsignedThread = (caps: Pick<Native.Capabilities, 'transport' | 'ca
   )
 
 const noAccess: ThreadAccess = { read: false, actions: new Set() }
-const refused = (error: unknown): Feed<never> => unavailable({
-  reason: error instanceof ClientError && (error.status === 401 || error.status === 403) ? 'ungranted' : 'failed',
-  detail: 'Fractal could not load this thread.',
-})
+const unknownAccess: ThreadAccess = { ...noAccess, unknown: true }
+// A revoked or expired browser credential needs pairing again; a missing grant does not.
+const refused = (error: unknown): Feed<never> => {
+  const reason = clientReadAuthorization(error) ?? 'failed'
+  return unavailable({
+    reason,
+    detail: reason === 'unauthorized' ? credentialExpiredMessage
+      : reason === 'ungranted' ? 'This connection has no access to threads.' : 'Fractal could not load threads.',
+    ...(reason === 'failed' && error instanceof ClientError ? { code: error.response.code } : {}),
+  })
+}
+// Only a lost path to Fractal (the network, or a gateway that cannot reach the daemon) leaves a read unanswered.
+const lostPath = (error: unknown): boolean =>
+  error instanceof TypeError || (error instanceof ClientError && (error.status === 502 || error.status === 503 || error.status === 504))
+const logReadFailure = (message: string, error: unknown) => Effect.runSync(Effect.logWarning(message, {
+  error: error instanceof ClientError ? `${error.status} ${error.response.code}` : error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+}))
+const sameAccess = (a: ThreadAccess, b: ThreadAccess) => a.failure === undefined && b.failure === undefined
+  && a.read === b.read && a.inboxOrigins === b.inboxOrigins && a.upgradeRequired === b.upgradeRequired
+  && a.unknown === b.unknown && a.actor === b.actor && a.actions.size === b.actions.size && [...b.actions].every(action => a.actions.has(action))
 
-export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches): ThreadSource {
+/** `transportLive`, when given, re-reads access each time the gateway connection is live again, as grants do. */
+export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches, transportLive?: Atom.Atom<boolean>): ThreadSource {
+  let observedAccess: ThreadAccess | undefined
   const access = Atom.make<ThreadAccess>(get => {
+    // Retry (`reload`) reads access again too, so a failed capabilities read can recover.
+    get(revision)
+    // While disconnected the last answer stands; a read that failed then is retried once the connection is live.
+    if (transportLive !== undefined && !get(transportLive) && observedAccess !== undefined) return observedAccess
     const abort = new AbortController()
     get.addFinalizer(() => abort.abort())
     void client.capabilities({ signal: abort.signal }).then(({ value }) => {
@@ -85,10 +122,28 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        get.setSelf({ read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor })
+        const answered = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor }
+        // An unchanged answer keeps its identity, so reading access again does not read every thread projection twice.
+        if (observedAccess === undefined || !sameAccess(observedAccess, answered)) observedAccess = answered
+        get.setSelf(observedAccess)
       }
-    }).catch(() => { if (!abort.signal.aborted) get.setSelf(noAccess) })
-    return noAccess
+    }).catch(error => {
+      if (abort.signal.aborted) return
+      if (clientReadAuthorization(error) !== undefined) {
+        get.setSelf(observedAccess = { ...noAccess, failure: refused(error) })
+        return
+      }
+      // Unanswered over a lost path: unknown until the connection is live again, which reads access anew.
+      // A lost path while the connection reports Live would never be retried that way, so it is a failure.
+      if (lostPath(error) && !(transportLive !== undefined && registry.get(transportLive))) {
+        get.setSelf(observedAccess ?? unknownAccess)
+        return
+      }
+      // A completed but broken read (an HTTP error, an answer that does not decode) is shown with Retry and recorded.
+      logReadFailure('Thread access read failed', error)
+      get.setSelf({ ...noAccess, failure: refused(error) })
+    })
+    return observedAccess ?? unknownAccess
   })
   const titles = Atom.keepAlive(Atom.make<ReadonlyMap<string, string>>(new Map()))
   const rememberTitles = (items: readonly ThreadSummary[]) => {
@@ -96,11 +151,30 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     const changed = items.filter(item => previous.get(item.id) !== item.title)
     if (changed.length > 0) registry.set(titles, new Map([...previous, ...changed.map(item => [item.id, item.title] as const)]))
   }
+  // Patch existing mounted pages, including continuation pages without their own feed.
+  // The pages remain the summary cache; this set only owns their live subscriptions.
+  const summaryListeners = new Set<(id: string, summary: ThreadSummary | undefined) => void>()
+  const observeSummary = (summary: ThreadSummary) => {
+    rememberTitles([summary])
+    for (const receive of summaryListeners) receive(summary.id, summary)
+  }
+  const forgetSummary = (id: string) => {
+    const previous = registry.get(titles)
+    if (previous.has(id)) {
+      const next = new Map(previous)
+      next.delete(id)
+      registry.set(titles, next)
+    }
+    for (const receive of summaryListeners) receive(id, undefined)
+  }
   const revision = Atom.make(0)
   function reader<T>(
     read: (signal: AbortSignal) => Promise<T>,
     settings?: {
       readonly follow?: (publish: (value: T) => void, reload: () => void, stale: () => void) => () => void
+      readonly onObserved?: (value: T) => void
+      readonly onFailure?: (error: unknown) => void
+      readonly updates?: (update: (change: (value: T) => T) => void) => () => void
     },
   ): Atom.Atom<Feed<T>> {
     let previous: Feed<T> = waiting
@@ -108,11 +182,24 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       const demand = get(access)
       get(revision)
       if (!demand.read) return previous = waiting
+      // A new read of a refused projection is loading again, not still refused.
+      if (previous._tag === 'Unavailable') previous = waiting
       let active = true
       let abort: AbortController | undefined
-      const publish = (value: T) => {
-        if (active) get.setSelf(previous = { _tag: 'Observed', value, freshness: 'live' })
+      const publish = (value: T, freshness: 'live' | 'stale' = 'live') => {
+        if (!active) return
+        settings?.onObserved?.(value)
+        get.setSelf(previous = { _tag: 'Observed', value, freshness })
       }
+      const stopUpdates = settings?.updates?.(change => {
+        if (!active || previous._tag !== 'Observed') return
+        const value = change(previous.value)
+        if (value === previous.value) return
+        const freshness = previous.freshness
+        // A page request started before this exact observation cannot restore its old row.
+        abort?.abort()
+        publish(value, freshness)
+      })
       const reload = () => {
         if (!active) return
         abort?.abort()
@@ -121,7 +208,17 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         void read(current.signal).then(value => {
           if (!current.signal.aborted) publish(value)
         }, error => {
-          if (!current.signal.aborted && active) get.setSelf(previous = refused(error))
+          if (!current.signal.aborted && active) {
+            // A revoked read cannot be revived by a later frame from this demand.
+            if (error instanceof ClientError && (error.status === 401 || error.status === 403)) active = false
+            settings?.onFailure?.(error)
+            const failure = refused(error)
+            // Only a lost path to Fractal keeps what was observed, marked paused. A decode, validation or other
+            // HTTP failure is shown and recorded instead.
+            const lost = failure._tag === 'Unavailable' && failure.reason === 'failed' && lostPath(error)
+            if (failure._tag === 'Unavailable' && failure.reason === 'failed' && !lost) logReadFailure('Thread read failed', error)
+            get.setSelf(previous = previous._tag === 'Observed' && lost ? { ...previous, freshness: 'stale' } : failure)
+          }
         })
       }
       const stop = settings?.follow?.(value => { abort?.abort(); publish(value) }, reload, () => {
@@ -132,13 +229,13 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         active = false
         abort?.abort()
         stop?.()
+        stopUpdates?.()
       })
       return previous
     })
   }
   function followPage<Row>(
     watch: Watch<Row> | undefined,
-    onWindow?: (window: ThreadWindow<Row>) => void,
   ): ((publish: (value: { readonly items: readonly Row[]; readonly next_cursor: Option.Option<string> }) => void, reload: () => void, stale: () => void) => () => void) | undefined {
     return watch === undefined ? undefined : (publish, reload, stale) => watch(event => {
       if (event._tag !== 'Observed') {
@@ -146,7 +243,6 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         else stale()
         return
       }
-      onWindow?.(event.value)
       // The stream has no cursor. Read the first HTTP page only when it must
       // supply one, so older pages keep the daemon's exact seek token.
       if (event.value.hasMore) reload()
@@ -167,30 +263,49 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           reload()
           return
         }
-        rememberTitles([summary])
         publish({ summary, snapshotId: event.value.snapshotId })
       })
     }
     return reader(async signal => {
       const { value, snapshot } = await client.threadGet(threadId, { signal })
       const summary = Native.decodeUnknownSync(Native.ThreadSummary)(value)
-      if (summary.id !== threadId) throw new TypeError('Mismatched thread observation')
+      // Not a TypeError: that class means the network failed, and this observation is wrong, not paused.
+      if (summary.id !== threadId) throw new Error('Mismatched thread observation')
       signal.throwIfAborted()
-      rememberTitles([summary])
       return { summary, snapshotId: snapshot.id }
-    }, { follow })
+    }, {
+      follow,
+      onObserved: ({ summary }) => observeSummary(summary),
+      onFailure: error => {
+        if (error instanceof ClientError && (error.status === 401 || error.status === 403)) forgetSummary(threadId)
+      },
+    })
   })
   const readList = Atom.family((key: string) => {
     const query = JSON.parse(key) as ThreadListQuery
-    const follow = followPage(query.cursor === undefined ? watches?.summaries(query) : undefined, window => rememberTitles(window.items))
+    const follow = followPage(query.cursor === undefined ? watches?.summaries(query) : undefined)
     return reader(async signal => {
       const { value } = await client.threadList({ limit: 40, ...query }, { signal })
       const page = Native.decodeUnknownSync(Native.ThreadSummaryPage)(value)
-      if ('agent_id' in query && page.items.some(item => item.agent_id !== query.agent_id)) throw new TypeError('Mismatched thread list')
+      if ('agent_id' in query && page.items.some(item => item.agent_id !== query.agent_id)) throw new Error('Mismatched thread list')
       signal.throwIfAborted()
-      rememberTitles(page.items)
       return page
-    }, follow === undefined ? undefined : { follow })
+    }, {
+      ...(follow === undefined ? {} : { follow }),
+      onObserved: page => rememberTitles(page.items),
+      updates: update => {
+        const receive = (id: string, summary: ThreadSummary | undefined) => update(page => {
+          if (!page.items.some(item => item.id === id)) return page
+          return {
+            ...page,
+            items: summary === undefined ? page.items.filter(item => item.id !== id)
+              : page.items.map(item => item.id === id ? summary : item),
+          }
+        })
+        summaryListeners.add(receive)
+        return () => { summaryListeners.delete(receive) }
+      },
+    })
   })
   const readTimeline = Atom.family((key: string) => {
     const [threadId, cursor] = key.split('\n') as [string, string | undefined]
@@ -277,9 +392,12 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           return reject('Fractal has not confirmed this action. Retry to check the same action.')
         }
         attempts.delete(destination)
-        return outcome.how === 'sent'
-          ? { _tag: 'Sent', threadId: attempt.target }
-          : reject(outcome.error instanceof ClientError ? outcome.error.response.message : outcome.error instanceof Error ? outcome.error.message : 'Fractal could not perform this action.')
+        if (outcome.how === 'sent') return { _tag: 'Sent', threadId: attempt.target }
+        // A failed outcome applied nothing. A gateway or network failure says so in words; a daemon refusal keeps its own reason.
+        const error = outcome.error
+        return reject(error instanceof ClientError && error.status < 500 ? error.response.message
+          : error instanceof ClientError || error instanceof TypeError ? unreachableSend
+            : error instanceof Error ? error.message : 'Fractal could not perform this action.')
       } finally {
         delete attempt.pending
         invalidate()
@@ -319,6 +437,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   return {
     access,
     titles,
+    reload: () => registry.set(revision, registry.get(revision) + 1),
     pendingStarts: Atom.family((sourceId?: string) => Atom.make(get => {
       get(deliveryRevision)
       const grant = get(access)

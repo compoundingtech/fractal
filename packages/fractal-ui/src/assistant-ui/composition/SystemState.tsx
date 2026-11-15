@@ -10,8 +10,8 @@ import { LiveRing } from './LiveRing'
 import { loadingGlyphDelayMs } from './loading-glyph-delay'
 
 export type SystemStateKind = 'loading' | 'empty' | 'offline' | 'stale' | 'error'
-/** `live` shows nothing. */
-export type ConnectionState = 'live' | 'reconnecting' | 'offline' | 'stale' | 'failed'
+/** `live` shows nothing. `revoked`: the gateway rejected this browser's credential; reconnecting cannot help. */
+export type ConnectionState = 'live' | 'reconnecting' | 'offline' | 'stale' | 'failed' | 'revoked'
 
 type DataAttributes = { readonly [key: `data-${string}`]: string | undefined }
 
@@ -21,8 +21,8 @@ export interface SystemNoticeProps extends DataAttributes {
   readonly title: string
   /** What it means for you, in one line: "Live updates pending". */
   readonly detail?: string
-  /** `pane` fills a pane body or side panel; `rail` sits in the sidebar. */
-  readonly scope?: 'pane' | 'rail'
+  /** `pane` fills a pane body or side panel; `rail` sits in the sidebar; `inline` is an in-flow row inside a content lane, with no inset. */
+  readonly scope?: 'pane' | 'rail' | 'inline'
   /** The state comes from the shared gateway connection, which the connection banner owns: the row names only what it still shows. */
   readonly connection?: boolean
   readonly onRetry?: () => void
@@ -38,12 +38,12 @@ function LoadingRing() {
   return <span data-system-loading-ring={shown ? 'shown' : 'pending'} {...stylex.props(!shown && styles.ringPending)}><LiveRing size="sm" /></span>
 }
 
-/** One quiet system-state row for a pane or the sidebar; `role="status"` sits on the statement. */
+/** One quiet system-state row for a pane or the sidebar; `role="status"` sits on the statement, which wraps rather than truncates. */
 export function SystemNotice({ kind, title, detail, scope = 'pane', connection = false, onRetry, ...data }: SystemNoticeProps) {
-  return <div data-system-state={kind} {...data} {...stylex.props(styles.quiet, scope === 'rail' ? styles.quietRail : styles.quietPane)}>
-    <span role="status" {...stylex.props(styles.quietStatus, kind === 'error' && !connection && styles.toneError)}>
+  return <div data-system-state={kind} {...data} {...stylex.props(styles.quiet, scope === 'rail' ? styles.quietRail : scope === 'inline' ? styles.quietInline : styles.quietPane)}>
+    <span role="status" {...stylex.props(styles.quietStatus, scope === 'inline' && styles.hug, kind === 'error' && !connection && styles.toneError)}>
       {kind === 'loading' && <LoadingRing />}
-      <span {...stylex.props(styles.lineText)}>{connection || detail === undefined ? title : `${title}. ${detail}`}</span>
+      <span {...stylex.props(styles.lineText, scope === 'inline' && styles.hug)}>{connection || detail === undefined ? title : `${title}. ${detail}`}</span>
     </span>
     {onRetry !== undefined && !connection && <Button aria-label={`Retry: ${title}`} onPress={onRetry} {...stylex.props(styles.lineButton, styles.focusable)}>Retry</Button>}
   </div>
@@ -53,13 +53,15 @@ export interface ConnectionStatusProps {
   readonly state: ConnectionState
   /**
    * The host's decoded detail. Reconnecting: the next try, e.g. "Next try in 2s · attempt 5". Failed: the safe reason,
-   * e.g. "No access to connection · ask an administrator". Other states show what is still on screen.
+   * e.g. "No access to connection · ask an administrator". Revoked: the host's fixed re-pairing sentence. Other states
+   * show what is still on screen.
    */
   readonly text?: string
+  /** Never offered for `revoked`: the same credential would be rejected again. */
   readonly onReconnect?: () => void
 }
 
-const connectionTitle: Readonly<Record<Exclude<ConnectionState, 'live'>, string>> = { offline: 'You are offline', reconnecting: 'Reconnecting', stale: 'Live updates paused', failed: 'Connection lost' }
+const connectionTitle: Readonly<Record<Exclude<ConnectionState, 'live'>, string>> = { offline: 'You are offline', reconnecting: 'Reconnecting', stale: 'Live updates paused', failed: 'Connection lost', revoked: 'Access revoked' }
 const connectionDetail = 'Showing what was last observed'
 
 /**
@@ -69,15 +71,15 @@ const connectionDetail = 'Showing what was last observed'
  */
 export function ConnectionStatus({ state, text, onReconnect }: ConnectionStatusProps) {
   if (state === 'live') return null
-  const detail = (state === 'reconnecting' || state === 'failed') && text !== undefined ? text : connectionDetail
+  const detail = (state === 'reconnecting' || state === 'failed' || state === 'revoked') && text !== undefined ? text : connectionDetail
   return <div data-connection-state={state} {...stylex.props(styles.banner)}>
     <span {...stylex.props(styles.bannerLine)}>
-      <span {...stylex.props(styles.bannerIcon, state === 'failed' ? styles.toneError : styles.toneWarning)}><Icon name="alert" size={14} /></span>
+      <span {...stylex.props(styles.bannerIcon, state === 'failed' || state === 'revoked' ? styles.toneError : styles.toneWarning)}><Icon name="alert" size={14} /></span>
       <strong role="status" {...stylex.props(styles.bannerTitle)}>{connectionTitle[state]}</strong>
       <span aria-hidden="true" {...stylex.props(styles.toneMuted)}>·</span>
       <span data-connection-detail {...stylex.props(styles.bannerDetail)}>{detail}</span>
     </span>
-    {onReconnect !== undefined && <Button onPress={onReconnect} {...stylex.props(styles.outlineButton, styles.focusable)}>Reconnect</Button>}
+    {onReconnect !== undefined && state !== 'revoked' && <Button onPress={onReconnect} {...stylex.props(styles.outlineButton, styles.focusable)}>Reconnect</Button>}
   </div>
 }
 
@@ -87,16 +89,19 @@ const styles = stylex.create({
   toneMuted: { color: ink.fgMuted },
   toneWarning: { color: tone.attention },
   toneError: { color: tone.dangerFg },
-  quiet: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, height: g.toolRow, flexShrink: 0, boxSizing: 'border-box', color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  quiet: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, minHeight: g.toolRow, flexShrink: 0, boxSizing: 'border-box', color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   quietPane: { paddingInline: s.lg, marginTop: s.md },
   quietRail: { paddingInline: s.lg },
+  quietInline: { paddingInline: 0 },
   quietStatus: { display: 'flex', alignItems: 'center', gap: s.sm, flex: '1 1 0', minWidth: 0 },
-  lineText: { display: 'block', flex: '1 1 0', minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
+  lineText: { display: 'block', flex: '1 1 0', minWidth: 0, overflowWrap: 'anywhere' },
+  /** Inline: Retry sits right after the statement instead of at the row's far edge. */
+  hug: { flex: '0 1 auto' },
   lineButton: { display: 'inline-flex', alignItems: 'center', height: g.toolRow, paddingInline: s.xs, flexShrink: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, whiteSpace: 'nowrap', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg } },
   outlineButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: g.controlSm, paddingInline: s.md, flexShrink: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, whiteSpace: 'nowrap', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover } },
   banner: { display: 'flex', alignItems: 'center', gap: s.md, minHeight: g.controlLg, paddingInline: s.lg, paddingBlock: s.xs, flexShrink: 0, boxSizing: 'border-box', borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border, backgroundColor: `color-mix(in srgb, ${tone.attention} 10%, ${surface.canvas})`, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   bannerLine: { display: 'flex', alignItems: 'center', gap: s.sm, flex: '1 1 0', minWidth: 0 },
   bannerIcon: { display: 'inline-flex', flexShrink: 0 },
   bannerTitle: { flexShrink: 0, fontWeight: t.weightMedium },
-  bannerDetail: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fgSoft },
+  bannerDetail: { minWidth: 0, overflowWrap: 'anywhere', color: ink.fgSoft },
 })

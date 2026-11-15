@@ -65,7 +65,7 @@ import { defaultFilters, fixtureSidebarState, sidebarState } from '../shell/side
 import { useMachineMemory, withRememberedMachines } from '../shell/sidebar/show.ts'
 import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
 import { SidebarToolbar, type SidebarToolbarProps } from '../shell/sidebar/Toolbar.tsx'
-import { credentialNotice, waiting, type Agent, type Feed } from '../data/source.ts'
+import { credentialExpiredMessage, credentialNotice, waiting, type Agent, type Feed } from '../data/source.ts'
 import type { TerminalScreen } from '@fractal/client/schema'
 import { sidebarAttention } from './sidebarAttention.ts'
 import { FolderAttentionSignal } from './AttentionControls.tsx'
@@ -690,6 +690,13 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // An alert's details are a passing view: reached by URL, never a tab.
   const tabPanes = panes.filter(row => !isTerminalRef(row.ref))
   const visiblePanes = chosen && !isAlertRef(chosen.ref) && !isMissionRef(chosen.ref) && !isTerminalRef(chosen.ref) && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...tabPanes, chosen] : tabPanes
+  // A thread tab never seen in a list or detail: its open pane's own read says whether it is loading or unavailable.
+  // Joined into one string so the tab model re-renders only when that verdict changes.
+  const threadSource = folderSource.threads
+  const untitledThreads = visiblePanes.filter(pane => pane.ref.startsWith('thread/') && !threadTitles.has(pane.ref)).map(pane => pane.ref).join(' ')
+  const unavailableThreads = useAtomValue(React.useMemo(() => Atom.make(get => untitledThreads === '' ? '' : untitledThreads.split(' ')
+    .filter(ref => threadSource === undefined || get(threadSource.detail(ref))._tag === 'Unavailable').join(' ')), [threadSource, untitledThreads]))
+  const tabLabel = React.useCallback((ref: string) => paneTabLabel(ref, threadTitles.get(ref) ?? byRef.get(ref)?.title, unavailableThreads.split(' ').includes(ref)), [threadTitles, byRef, unavailableThreads])
   const phoneTabs = React.useMemo(() => {
     const names = new Map(agents.map(agent => [agent.ref, agent.name]))
     return [
@@ -697,9 +704,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         .filter(ref => ref === current || names.has(ref))
         .map(ref => ({ id: ref, label: ref === current ? 'Thread' : names.get(ref)! })),
       { id: 'changes', label: 'Changes' },
-      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, threadTitles.get(pane.ref) ?? byRef.get(pane.ref)?.title) })),
+      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: tabLabel(pane.ref) })),
     ]
-  }, [agents, phoneAgents, current, visiblePanes, byRef, threadTitles])
+  }, [agents, phoneAgents, current, visiblePanes, tabLabel])
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
   const maxSidebar = Math.max(sidebarMinimumWidth, Math.min(440, viewport - 640))
   const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
@@ -818,7 +825,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                       const id = `${pane.ref}:${pane.presentation ?? 'detail'}`
                       return (
                         <Aria.Button key={id} aria-pressed={id === selectedPane} onPress={() => navigate(current, id)} {...stylex.props(styles.textButton)}>
-                          {paneTabLabel(pane.ref, threadTitles.get(pane.ref) ?? byRef.get(pane.ref)?.title)}
+                          {tabLabel(pane.ref)}
                         </Aria.Button>
                       )
                     })}
@@ -867,12 +874,16 @@ function ClockedThreadHeader({ agent, stale, ...props }: Omit<React.ComponentPro
 
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
+const neverRevoked = Atom.make(false)
 /** Decoded gateway sync, never the socket's raw lifecycle tag, as the one connection band under the thread header. */
 const GatewayConnectionStatus = () => {
   const source = useDataSource()
   const network = useAtomValue(source.network ?? assumedOnline)
+  const revoked = useAtomValue(source.credentialRevoked ?? neverRevoked)
   const observation = useGatewaySync()
   const now = useNow()
+  // A rejected credential is not a connection fault: reconnecting would be rejected again, so the band says how to recover.
+  if (revoked) return <ConnectionStatus state="revoked" text={credentialExpiredMessage} />
   if (observation === undefined) return null
   const line = syncLine({
     ...observation, label: 'connection', now,

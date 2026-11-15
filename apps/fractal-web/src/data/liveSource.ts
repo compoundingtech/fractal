@@ -1201,9 +1201,16 @@ export const liveSource = ({
     const current = get(transportSync)
     return get(networkLoss) ?? current
   })
+  const transportLive = Atom.make((get) => get(transportSync).status._tag === 'Live')
+  // Before the first capabilities answer every grant is a conservative default, not a refusal.
+  const unreadGrants: Grants = { ...noGrants, unread: true }
+  let observedGrants: Grants | undefined
   const grants = Atom.keepAlive(
     Atom.make((get): Grants => {
       if (readRejection !== undefined) return noGrants
+      // A read that failed while the browser was offline must not leave it read-only: each return
+      // to Live reads the capabilities again, and the last answer stays meanwhile.
+      if (!get(transportLive) && observedGrants !== undefined) return observedGrants
       const deny = () => get.setSelf(noGrants)
       deniedReaders.add(deny)
       const fiber = runtime.runFork(
@@ -1216,21 +1223,22 @@ export const liveSource = ({
               .map((capability) => capability.id),
           )
           if (readRejection !== undefined) return
-          get.setSelf({
+          observedGrants = {
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
             terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
-          })
+          }
+          get.setSelf(observedGrants)
         }),
       )
       get.addFinalizer(() => {
         deniedReaders.delete(deny)
         fiber.interruptUnsafe()
       })
-      return noGrants
+      return observedGrants ?? unreadGrants
     }),
   )
   return {
@@ -1268,7 +1276,7 @@ export const liveSource = ({
           }).pipe(Stream.runForEach(event => Effect.sync(() => receive(event))))))
           return () => { runtime.runFork(Fiber.interrupt(fiber)) }
         },
-      }),
+      }, transportLive),
       objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
@@ -1277,6 +1285,8 @@ export const liveSource = ({
       contentSearch: gatewayContentSearch(client),
       attachments: { ...attachments, send: (request) => retainConversation(request.parameters.to).send(request) },
       sessionTrace: (query) => runtime.runPromise(sessionTrace(query)),
+      // credentialExpired is set before readRefusal, so this derived read sees both together.
+      credentialRevoked: Atom.make((get) => get(readRefusal) !== undefined && credentialExpired),
       connection,
       network,
       reconnect: () => {

@@ -11,6 +11,7 @@ import { useAlertAnswersStore } from './alertAnswers.ts'
 import { alertFrom } from './alertChoices.ts'
 import { contextOf, useArmed } from './decisionText.ts'
 import type { PromptAnswerResult } from './prompt-answer-port.ts'
+import { ANSWERS_PAUSED } from './AnswerAlert.tsx'
 
 type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise<PromptAnswerResult>
 
@@ -19,9 +20,11 @@ type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise
  * beside `allow` (or a plan beside `approve`), a screen prompt's own answers, or a question's options, one question at
  * a time and sent together. Anything else is answered in the seat's terminal, and an answer there still wins.
  */
-export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'docked', pager, onFold, maxBlockSize, onBegin, focusRef, context }: {
+export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(), density = 'docked', pager, onFold, maxBlockSize, onBegin, focusRef, context }: {
   readonly alert: Native.Attention
   readonly onAnswer?: Answer
+  /** Answers wait for the connection: controls show disabled, never the read-only notice. */
+  readonly paused?: boolean
   readonly now?: number
   readonly density?: DecisionDensity
   readonly pager?: DecisionPosition
@@ -95,7 +98,7 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
     onSelect={main}
     {...(questions !== null && questions.length > 1 ? { stepper: { index: step, count: questions.length, onPrevious: () => store.setStep(asked, step - 1), onNext: () => store.setStep(asked, step + 1) } } : {})}
     {...(decline === undefined ? {} : { dismiss: { label: armed ? 'Confirm decline' : 'Decline', onPress: () => { if (armed) send(decline); else arm() } } })}
-    {...(incomplete !== undefined && offered.length === 0 ? { unavailable: incomplete } : !live ? { unavailable: <>This device is read-only, so it can't answer here. Answer it in the agent's terminal.</> } : {})}
+    {...(incomplete !== undefined && offered.length === 0 ? { unavailable: incomplete } : paused ? { unavailable: ANSWERS_PAUSED } : !live ? { unavailable: <>This device is read-only, so it can't answer here. Answer it in the agent's terminal.</> } : {})}
     {...(offered.length === 0 ? {} : {
       send: questions !== null
         ? { label: last ? 'Send' : 'Next', disabled: last ? sendable === null : selected.length === 0, onPress: () => { if (last) send('answer'); else store.setStep(asked, step + 1) } }

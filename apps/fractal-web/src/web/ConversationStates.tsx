@@ -1,11 +1,12 @@
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
+import type { AgentStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { accentVars as accent, borderVars as border, geometryVars, radiusVars as r, spaceVars, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { ObservedAge, useConversationLastObservedAt } from './lastObserved.tsx'
 import type { LastSeenActivity } from './conversationTranscript.ts'
 
-export { ThreadUnavailable, LastSeen }
+export { ThreadUnavailable, LastSeen, SeatAtRest }
 /**
  * The conversation read failed or was refused. Fixed copy only, inline in the reading lane: the reason (danger tone
  * only for a failure), its consequence on its own line, and Retry only where the source can re-acquire the follow.
@@ -35,6 +36,19 @@ function LastSeen({ agentRef, lastSeen }: { readonly agentRef: string; readonly 
       <span aria-hidden="true" {...stylex.props(styles.glyph)}><SidebarStatus status="stale" statusLabel="Last seen" freshness="stale" iconOnly /></span>
       <span>{observedAt === undefined ? sentence : <ObservedAge prefix={`${sentence} · `} at={observedAt} />}</span>
       {lastSeen.detail === undefined ? null : <><span aria-hidden="true">·</span><code {...stylex.props(styles.code)}>{lastSeen.detail}</code></>}
+    </p>
+  </div>
+}
+
+/**
+ * The seat reports no turn in progress while its transcript still holds an open run: the seat's own observed state,
+ * as its roster row names it, with no spinner and no elapsed counter.
+ */
+function SeatAtRest({ status, label }: { readonly status: AgentStatus; readonly label: string }) {
+  return <div {...stylex.props(styles.lane)}>
+    <p role="status" data-seat-at-rest={status} {...stylex.props(styles.lastSeen)}>
+      <span aria-hidden="true" {...stylex.props(styles.glyph)}><SidebarStatus status={status} statusLabel={label} freshness="live" iconOnly /></span>
+      <span>{label}</span>
     </p>
   </div>
 }
