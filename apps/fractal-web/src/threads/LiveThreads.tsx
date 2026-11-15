@@ -69,13 +69,14 @@ function useGatewayLive(): boolean | undefined {
 
 /**
  * "Threads 2 · Updates paused", named "Threads, 2, updates paused". The name is set on the heading or summary:
- * hidden separators between flex children are read with stray spaces ("Threads , 2").
+ * hidden separators between flex children are read with stray spaces ("Threads , 2"). The spaces between the parts
+ * render nothing in the flex row, but keep the text's words apart ("Threads 2", not "Threads2"), so it matches the name.
  */
 function CountedLabel({ label, count, paused }: { readonly label: string; readonly count: number | undefined; readonly paused: boolean }) {
   return <>
     <span {...stylex.props(styles.label)}>{label}</span>
-    {count === undefined || count === 0 ? null : <span {...stylex.props(styles.count)}>{count}</span>}
-    {paused ? <span data-threads-paused="" {...stylex.props(styles.paused)}>· Updates paused</span> : null}
+    {count === undefined || count === 0 ? null : <>{' '}<span {...stylex.props(styles.count)}>{count}</span></>}
+    {paused ? <>{' '}<span data-threads-paused="" {...stylex.props(styles.paused)}>· Updates paused</span></> : null}
   </>
 }
 const countedName = (label: string, count: number | undefined, paused: boolean) =>

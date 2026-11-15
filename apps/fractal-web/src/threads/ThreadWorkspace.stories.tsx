@@ -334,7 +334,7 @@ export const UpdatesPaused: Story = {
     await AllStates.play?.(context)
     const details = await alertDetails(context.canvasElement)
     const heading = await details.findByRole('heading', { name: 'Threads, 2, updates paused' })
-    await expect(heading.textContent).toBe('Threads2· Updates paused')
+    await expect(heading.textContent).toBe('Threads 2 · Updates paused')
     await expect(heading.querySelector('[data-threads-paused]')).not.toBeNull()
     const markers = () => context.canvasElement.querySelectorAll('[data-testid="alert-details"] [data-threads-paused]')
     await expect(markers()).toHaveLength(1)

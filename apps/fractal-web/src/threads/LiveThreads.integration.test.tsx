@@ -105,7 +105,7 @@ it('pins agent threads as one collapsed summary whose rows open the thread in it
   })
   try {
     await vi.waitFor(() => expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 2'))
-    expect(view.host.querySelector('summary')?.textContent).toBe('Threads2')
+    expect(view.host.querySelector('summary')?.textContent).toBe('Threads 2')
     const details = view.host.querySelector('details')
     expect(details?.open).toBe(false)
     expect(details?.getAttribute('aria-label')).toBe('Threads')
