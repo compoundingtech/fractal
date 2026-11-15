@@ -236,6 +236,9 @@ then property batches of at most 128 actually enumerated units. Request traffic
 and historical scope count do not add manager calls. Completed execution scopes
 retain their generation-bound terminal evidence for the lifetime of the process;
 they are never queried again.
+Local user-unit search paths also establish installation, including unloaded or
+masked aliases, so loaded-only observation does not hide service conflicts.
+A failed optional removal remains an error when an installed unit file exists.
 
 Actual scope creation or service control invalidates the snapshot, without
 bypassing refresh admission. Missing, stale or incomplete observations fail

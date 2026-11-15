@@ -268,6 +268,7 @@ PY
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_DATA_HOME", self.root.join("data"))
             .env("XDG_RUNTIME_DIR", self.root.join("run"))
+            .env("SYSTEMD_UNIT_PATH", self.root.join("config/systemd/user"))
             .env("ST3_WORKER_INTERVAL_MS", "300")
             .env("ST3_DAEMON_WAIT", "0");
         // The Nix check account has no passwd login shell. Preserve the shell supplied by

@@ -770,11 +770,11 @@ fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
         fractal_runtime::systemd::invalidate();
         return Ok(());
     }
-    // A unit file may be gone while its service remains loaded. Only the manager can
-    // establish that a failed stop/disable addressed an absent, inactive unit.
+    // Absence requires both no installed unit file and no active loaded unit.
+    // A failed mutation of an installed-but-unloaded unit is still an error.
     let snapshot = fractal_runtime::systemd::snapshot_after_admission()?;
     anyhow::ensure!(
-        snapshot.units.get(name).is_none_or(|unit| {
+        !lookup::systemd_installed(name) && snapshot.units.get(name).is_none_or(|unit| {
             unit.load == "not-found" && unit.active == "inactive"
         }),
         "systemctl {} failed with {}: {}",

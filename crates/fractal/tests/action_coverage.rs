@@ -4908,6 +4908,7 @@ PY
             .env("XDG_STATE_HOME", root.path().join("state"))
             .env("XDG_DATA_HOME", root.path().join("data"))
             .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .env("SYSTEMD_UNIT_PATH", root.path().join("config/systemd/user"))
             .env("ST3_COVERAGE_ROOT", root.path())
             .env("ST3_COVERAGE_BINARY", test_bin!("fractal-fixture"))
             .args(args);
