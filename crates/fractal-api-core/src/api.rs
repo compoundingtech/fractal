@@ -11865,6 +11865,7 @@ pub fn prepare_inline_thread_message(
             idempotency_key: key.clone(), from: draft.from.into(), to: draft.to.into(),
             content: draft.content.into(), title: draft.title.map(str::to_owned),
             in_reply_to: None, tags: vec![], attachments: vec![],
+            owner: None,
         };
         check_device_signature(state, signature, &request, &subject, draft.from, &fields, &expected, true)?;
     }
