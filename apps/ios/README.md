@@ -193,11 +193,14 @@ inputs before checking its frozen-install cache. A missing `nix` or a failed
 member/publisher command fails closed as `build_failed` with reason
 `source_inputs_preparation_failed`; the build log contains the failing command.
 
-Delivery passes `--cache-only` to workspace preparation and resolves the native
-Rust toolchain with local, remote and external Nix builders disabled. Both
-closures must already exist in the store or configured binary caches; a miss
-stops delivery with an actionable build-log message instead of compiling Nix
-dependencies. Cargo and Xcode app compilation still run as before.
+Delivery passes `--cache-only` to workspace preparation and explicitly sets
+`FRACTAL_NIX_CACHE_ONLY=1` only for the native builder invocation. Both toolchain
+closures must already exist in the store or configured binary caches; local,
+remote and external Nix builders are disabled during delivery. Workspace
+preparation realizes its pinned CLI separately before applying members, so a
+realization failure reports cache unavailability while apply errors retain their
+real diagnostics. Manual developer builds keep build-on-miss behavior when the
+native builder's opt-in is absent. Cargo and Xcode compilation are unchanged.
 
 The main-push-only ARM macOS cache publisher realizes `.#ios-rust-toolchain`
 and uploads its full closure, including substituted paths, to Cachix. The

@@ -17,18 +17,22 @@ def prepare(repo, operation, publisher=None, cache_only=False):
             raise ValueError("flake.lock effect-utils revision must be a full commit SHA")
         nix_options = (["--max-jobs", "0", "--option", "builders", "",
                         "--option", "external-builders", "[]"] if cache_only else [])
-        try:
-            subprocess.run([
-                "nix", "run", *nix_options, f"github:overengineeringstudio/effect-utils/{revision}#megarepo",
-                "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
-                "--lock-sync", "off",
-            ], cwd=repo, check=True)
-        except subprocess.CalledProcessError:
-            if cache_only:
+        package = f"github:overengineeringstudio/effect-utils/{revision}#megarepo"
+        if cache_only:
+            try:
+                subprocess.run(["nix", "build", *nix_options, "--no-link", package],
+                               cwd=repo, check=True)
+            except subprocess.CalledProcessError:
                 raise ValueError("The workspace toolchain closure is not available in the binary cache; "
                                  "delivery refuses to build it locally or remotely. "
                                  "Publish the closure and configure the cache substituter before retrying.") from None
-            raise
+        # Realization succeeded separately; errors here belong to member apply,
+        # not to a cache miss. Keep cache-only flags on the run as well.
+        subprocess.run([
+            "nix", "run", *nix_options, package,
+            "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
+            "--lock-sync", "off",
+        ], cwd=repo, check=True)
     if operation in ("publish", "prepare"):
         paths = json.loads((repo / "pnpm-source-inputs.json").read_text())["sourceInputPaths"]
         subprocess.run([

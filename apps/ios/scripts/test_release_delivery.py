@@ -58,12 +58,18 @@ if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
 if name == "nix":
+    if args[0] == "build":
+        assert args == ["build", "--max-jobs", "0", "--option", "builders", "",
+                        "--option", "external-builders", "[]", "--no-link",
+                        "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo"], args
+        sys.exit(control.get("toolchain_exit", 0))
     assert args == ["run", "--max-jobs", "0", "--option", "builders", "",
                     "--option", "external-builders", "[]",
                     "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
                     "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
                     "--lock-sync", "off"], args
     if control.get("member_exit"):
+        print("member apply failed", file=sys.stderr)
         sys.exit(control["member_exit"])
     publisher = Path.cwd() / "repos/effect-utils/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs"
     publisher.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +86,7 @@ if name == "node":
     sys.exit(0)
 if name == "fabric-build":
     assert os.environ["FRACTAL_FABRIC"] == os.environ["ST3_FABRIC"] == "1"
+    assert os.environ["FRACTAL_NIX_CACHE_ONLY"] == "1"
     framework = Path.cwd() / "modules/fractal-fabric/ios/build/FractalFabricRust.xcframework"
     if control.get("missing_framework"):
         import shutil
@@ -216,7 +223,7 @@ raise AssertionError((name, args))
 
 
 class IosEnvironmentTests(unittest.TestCase):
-    def test_fabric_cache_miss_refuses_build_before_cargo_or_xcode(self):
+    def test_fabric_cache_only_is_opted_in_and_manual_builds_still_realize(self):
         script = SCRIPT.parents[1] / "modules/fractal-fabric/build.sh"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -226,15 +233,56 @@ class IosEnvironmentTests(unittest.TestCase):
                            "exit 1\n")
             nix.chmod(0o755)
             arguments = root / "arguments"
-            result = subprocess.run(["sh", str(script)], capture_output=True, text=True,
-                                    env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
-                                         "NIX_ARGUMENTS": str(arguments)})
-            self.assertEqual(result.returncode, 1)
-            self.assertEqual(arguments.read_text().splitlines()[:9],
-                             ["build", "--max-jobs", "0", "--option", "builders", "",
-                              "--option", "external-builders", "[]"])
-            self.assertIn("closure is not available in the binary cache", result.stderr)
-            self.assertIn("delivery refuses to build it locally or remotely", result.stderr)
+            for cache_only in ("1", ""):
+                with self.subTest(cache_only=cache_only):
+                    result = subprocess.run(
+                        ["sh", str(script)], capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_ARGUMENTS": str(arguments), "FRACTAL_NIX_CACHE_ONLY": cache_only})
+                    self.assertEqual(result.returncode, 1)
+                    actual = arguments.read_text().splitlines()
+                    if cache_only:
+                        self.assertEqual(actual[:9],
+                                         ["build", "--max-jobs", "0", "--option", "builders", "",
+                                          "--option", "external-builders", "[]"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build it locally or remotely", result.stderr)
+                    else:
+                        self.assertEqual(actual[:3], ["build", "--no-link", "--print-out-paths"])
+                        self.assertEqual(len(actual), 4)
+                        self.assertNotIn("binary cache", result.stderr)
+
+    def test_workspace_cache_miss_and_apply_failure_have_distinct_messages(self):
+        script = SCRIPT.parents[3] / "scripts/prepare-pnpm-source-inputs.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "flake.lock").write_text(json.dumps({
+                "nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}}))
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$1\" >> \"$NIX_COMMANDS\"\n"
+                           "if [ \"$1\" = build ]; then exit \"$REALIZE_EXIT\"; fi\n"
+                           "echo 'member apply failed' >&2\n"
+                           "exit 42\n")
+            nix.chmod(0o755)
+            commands = root / "commands"
+            for realize_exit in ("7", "0"):
+                with self.subTest(realize_exit=realize_exit):
+                    commands.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [sys.executable, str(script), "apply", "--cache-only"],
+                        cwd=root, capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_COMMANDS": str(commands), "REALIZE_EXIT": realize_exit})
+                    self.assertNotEqual(result.returncode, 0)
+                    if realize_exit != "0":
+                        self.assertEqual(commands.read_text().splitlines(), ["build"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build", result.stderr)
+                    else:
+                        self.assertEqual(commands.read_text().splitlines(), ["build", "run"])
+                        self.assertIn("member apply failed", result.stderr)
+                        self.assertNotIn("binary cache", result.stderr)
 
     def test_normal_identity_and_state_are_unchanged(self):
         state = Path("/lane")
@@ -1771,8 +1819,17 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         events = [json.loads(line) for line in (self.state / "outcomes.jsonl").read_text().splitlines()]
         self.assertEqual(events[-1]["reason"], "source_inputs_preparation_failed")
         log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("member apply failed", log.read_text())
+        self.assertNotIn("binary cache", log.read_text())
+
+    def test_workspace_toolchain_cache_miss_never_applies_or_builds(self):
+        self.configure(toolchain_exit=7)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual([entry["args"][0] for entry in self.commands("nix")], ["build"])
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
         self.assertIn("closure is not available in the binary cache", log.read_text())
-        self.assertIn("delivery refuses to build it locally or remotely", log.read_text())
 
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
