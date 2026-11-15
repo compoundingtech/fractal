@@ -445,32 +445,28 @@ fn collection_delivery_was_requested_tx(
     Ok(false)
 }
 
-/// The latest handled change is the durable frontier, not the latest resource
-/// observation: an attribution-pending observation must not advance it.
+/// Seek the stable mission/scope/resource frontier, including finished requests and
+/// earlier subscription incarnations. The covering ordering index bounds this read
+/// independently of lifetime delivery history.
+pub(super) const LATEST_RELEVANT_DELIVERY_SQL: &str =
+    "SELECT json_extract(claims.body, '$.fields.delivery_key'),
+            json_extract(claims.body, '$.fields.change_identity')
+     FROM local_subscription_request_frontier AS frontier
+     JOIN claims ON claims.id=frontier.claim_id
+     WHERE frontier.mission=?1 AND frontier.scope=?2 AND frontier.resource=?3
+     ORDER BY frontier.head_key DESC LIMIT 1";
+
 fn latest_relevant_delivery_tx(
     transaction: &rusqlite::Transaction<'_>,
     mission: &str,
     scope: &str,
     resource: &str,
 ) -> rusqlite::Result<Option<(String, String)>> {
-    let mut statement = transaction.prepare(format!(
-        "SELECT claims.subject,
-                json_extract(claims.body, '$.fields.delivery_key'),
-                json_extract(claims.body, '$.fields.change_identity')
-         FROM claims WHERE claims.kind='subscription.mission-requested'
-           AND json_extract(claims.body, '$.fields.mission')=?1
-           AND json_extract(claims.body, '$.fields.resource')=?2
-           AND json_extract(claims.body, '$.fields.admission')='relevant-changes'
-         ORDER BY {CANONICAL_ORDER_DESC}",
-    ).as_str())?;
-    let mut rows = statement.query(params![format!("mission/{mission}"), resource])?;
-    while let Some(row) = rows.next()? {
-        let subject: String = row.get(0)?;
-        if subject.rsplit('/').next() == Some(scope) {
-            return Ok(Some((row.get(1)?, row.get(2)?)));
-        }
-    }
-    Ok(None)
+    transaction.query_row(
+        LATEST_RELEVANT_DELIVERY_SQL,
+        params![format!("mission/{mission}"), scope, resource],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()
 }
 
 /// The seat that registered a comment or review, by its GitHub ID, never by login.

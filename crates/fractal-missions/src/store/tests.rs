@@ -13385,3 +13385,54 @@ mission "wake-history" state="ready" {
         assert_eq!(created.wake, read.wake);
     }
 }
+
+#[test]
+fn relevant_admission_frontier_lookup_is_bounded_across_history_and_subscription_incarnations() {
+    let store = Store::open_memory("node").unwrap();
+    let mut count = 0;
+    let mut costs = Vec::new();
+    for history in [8, 128, 1024] {
+        while count < history {
+            let subject = format!("subscription/incarnation-{}/review-scope", count / 2);
+            let request = store.append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "subscription.mission-requested".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("mission".into(), json!("mission/review")),
+                    ("resource".into(), json!("resource/repo/pull-request/1")),
+                    ("discovery".into(), json!(format!("snapshot-{count}"))),
+                    ("resource_input".into(), json!("source")),
+                    ("workspace".into(), json!(".")),
+                    ("admission".into(), json!("relevant-changes")),
+                    ("delivery_key".into(), json!(format!("delivery-{count}"))),
+                    ("change_identity".into(), json!(format!("change-{count}"))),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.append_claim(&ClaimInput {
+                subject,
+                kind: "subscription.mission-request-cancelled".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([
+                    ("request".into(), json!(request.id)),
+                    ("reason".into(), json!("finished fixture")),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            count += 1;
+        }
+        let connection = store.readers.get();
+        let mut query = connection.prepare(super::missions::LATEST_RELEVANT_DELIVERY_SQL).unwrap();
+        let found = query.query_row(
+            ["mission/review", "review-scope", "resource/repo/pull-request/1"],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).unwrap();
+        assert_eq!(found, (format!("delivery-{}", count - 1), format!("change-{}", count - 1)));
+        costs.push(query.get_status(rusqlite::StatementStatus::VmStep));
+    }
+    for cost in &costs {
+        assert!(*cost < 100, "frontier seek must stay bounded: {costs:?}");
+        assert!((cost - costs[0]).abs() < 20, "frontier seek grew with history: {costs:?}");
+    }
+}

@@ -9,9 +9,12 @@ const RELEVANT: &str = "kind='subscription.mission-requested' AND json_extract(b
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("
 CREATE TABLE IF NOT EXISTS local_subscription_request_frontier (
- subject TEXT NOT NULL, resource TEXT NOT NULL, claim_id TEXT NOT NULL, head_key BLOB NOT NULL,
+ subject TEXT NOT NULL, resource TEXT NOT NULL, mission TEXT NOT NULL, scope TEXT NOT NULL,
+ claim_id TEXT NOT NULL, head_key BLOB NOT NULL,
  PRIMARY KEY(subject,resource)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS subscription_request_stable_frontier
+ ON local_subscription_request_frontier(mission,scope,resource,head_key DESC);
 CREATE TABLE IF NOT EXISTS local_subscription_request_pending (claim_id TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_subscription_request_dirty (
  subject TEXT NOT NULL, resource TEXT NOT NULL, PRIMARY KEY(subject,resource)
@@ -74,17 +77,20 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         tx.execute(&format!("INSERT OR IGNORE INTO local_subscription_request_pending
             SELECT id FROM claims WHERE subject=?1 AND json_extract(body,'$.fields.resource')=?2 AND {RELEVANT}"), params![subject,resource])?;
     }
-    let pending = tx.prepare("SELECT claims.id,claims.subject,json_extract(claims.body,'$.fields.resource')
+    let pending = tx.prepare("SELECT claims.id,claims.subject,json_extract(claims.body,'$.fields.resource'),
+            json_extract(claims.body,'$.fields.mission')
         FROM local_subscription_request_pending pending JOIN claims ON claims.id=pending.claim_id
         WHERE claims.kind='subscription.mission-requested' AND json_extract(claims.body,'$.fields.admission')='relevant-changes'")?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?)))?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, String>(2)?,row.get::<_, String>(3)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, subject, resource) in pending {
+    for (id, subject, resource, mission) in pending {
         let key = canonical::sortable_key(&canonical::claim_key(tx, &id)?);
-        tx.execute("INSERT INTO local_subscription_request_frontier(subject,resource,claim_id,head_key)
-            VALUES(?1,?2,?3,?4) ON CONFLICT(subject,resource) DO UPDATE SET
+        let scope = subject.rsplit('/').next().unwrap_or(&subject);
+        tx.execute("INSERT INTO local_subscription_request_frontier(subject,resource,mission,scope,claim_id,head_key)
+            VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(subject,resource) DO UPDATE SET
+            mission=excluded.mission,scope=excluded.scope,
             claim_id=excluded.claim_id,head_key=excluded.head_key WHERE excluded.head_key>head_key",
-            params![subject,resource,id,key])?;
+            params![subject,resource,mission,scope,id,key])?;
     }
     tx.execute_batch("DELETE FROM local_subscription_request_dirty; DELETE FROM local_subscription_request_pending;")?;
     Ok(())

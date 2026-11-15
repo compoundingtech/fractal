@@ -593,6 +593,9 @@ the same snapshot again is a no-op, while a genuine state cycle such as close â†
 is a new change each time. Replicated requests choose the same canonical pending frontier.
 Before comparing a poll with its local mirror, the observer overlays replicated admission facts
 from the graph. A stale mirror therefore cannot hide a genuine return to a previously seen state.
+Admission seeks an indexed stable mission/scope/resource frontier, including completed work and
+earlier subscription incarnations. Pending selection uses the same rebuildable all-status frontier;
+neither hot read ranks the subscription's lifetime request history.
 
 Repeated `author` entries form a case-insensitive GitHub login allowlist. They do not refer to
 `opened_by`, ownership, or authority. Omit them to leave authors unrestricted. A known nonmatching
