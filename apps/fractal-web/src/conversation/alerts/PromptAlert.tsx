@@ -86,7 +86,7 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
     density={density}
     label={context === undefined ? alert.title : `${context}: ${alert.title}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
-    meta={[alertFrom(alert), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
+    meta={[...[alertFrom(alert)].filter((name) => name !== undefined), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
     heading={heading}
     headingText={heading}
     {...(line === '' || line === alert.title ? {} : { context: line })}

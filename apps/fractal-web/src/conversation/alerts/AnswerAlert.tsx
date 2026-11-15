@@ -213,7 +213,7 @@ export const AnswerAlert = ({
     density={density}
     label={context === undefined ? alert.title : `${context}: ${alert.title}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
-    meta={[from, KIND_WORDS[alert.attention_kind] ?? 'Alert', ...(step ? [`step ${step}`] : []), `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`, ...(deadline ? [deadline] : [])]}
+    meta={[...(from === undefined ? [] : [from]), KIND_WORDS[alert.attention_kind] ?? 'Alert', ...(step ? [`step ${step}`] : []), `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`, ...(deadline ? [deadline] : [])]}
     heading={plain ? <InlineCode text={question} /> : headingText}
     headingText={plain ? firstLine(question) : headingText}
     {...(line === '' ? {} : { context: line })}
@@ -232,7 +232,7 @@ export const AnswerAlert = ({
     {...(choices === null ? {} : {
       words: {
         value: words,
-        label: `Your answer to ${from}`,
+        label: from === undefined ? 'Your answer' : `Your answer to ${from}`,
         placeholder: answer?.words === 'required' ? 'What should it do instead?' : parts.words !== undefined ? 'Or tell it something else…' : choices.some((choice) => choice.words === 'optional') ? 'Add a note (optional)…' : 'Or tell it something else…',
         onChange: (value: string) => store.setWords(alert.id, value),
       },

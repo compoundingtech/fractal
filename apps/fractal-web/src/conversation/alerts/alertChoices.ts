@@ -118,11 +118,24 @@ export const webLink = (url: string | undefined): string | undefined => {
   }
 }
 
-/** Who an alert is from, by name: the served name of whoever raised it, else an agent's short name; never its raw id. */
-export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id' | 'presentation'>): string => {
-  const id = alert.requester_id ?? alert.source_id
+/** A name read from an id when none is served: an agent's or a person's short name. Step, mission and custom ids are addresses. */
+const actorName = (id: string): string | undefined =>
+  id.startsWith('agent/') ? agentDisplayName({ id })
+    : id.startsWith('person/') ? id.slice('person/'.length).split('/')[0] || undefined
+      : undefined
+
+/**
+ * Who an alert is from, by name, or undefined when nothing names it. Fractal's served `raised_by` is the attribution:
+ * the requester, else the agent behind its conversation or step, else its mission; an agent's label goes through the
+ * shared formatter against that agent's id. Without it, the requester, else the source, names the alert only when it
+ * is an agent or a person: a step, mission or custom source id is an address, and the card shows the step already.
+ */
+export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id' | 'presentation'>): string | undefined => {
   const raisedBy = Option.getOrUndefined(alert.presentation?.raised_by ?? Option.none())
-  return id.startsWith('agent/') ? agentDisplayName({ id, name: raisedBy?.id === id ? raisedBy.label : undefined }) : id
+  if (raisedBy === undefined) return actorName(alert.requester_id ?? alert.source_id)
+  if (raisedBy.id.startsWith('agent/')) return agentDisplayName({ id: raisedBy.id, name: raisedBy.label })
+  const label = raisedBy.label.trim()
+  return label === '' || label === raisedBy.id ? actorName(raisedBy.id) : label
 }
 
 export const KIND_WORDS: Record<string, string> = {

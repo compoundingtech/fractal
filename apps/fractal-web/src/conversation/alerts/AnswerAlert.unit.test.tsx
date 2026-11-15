@@ -222,6 +222,27 @@ describe('AnswerAlert', () => {
     }
   })
 
+  it('takes who raised a step ask from the served attribution, and names no one rather than show an address', () => {
+    const source = 'step-run/example/build'
+    const stepAsk = (raised_by: { id: string; label: string } | undefined) => renderToStaticMarkup(<AnswerAlert alert={item({
+      requester_id: undefined, source_id: source, blocked: { step: 'build', step_run_id: source, goal: 'Build it', attempt: 1 },
+      ...(raised_by === undefined ? {} : { presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: Option.some(raised_by), waiting: null } }),
+    })} onAct={sent} now={now} />)
+    expect(stepAsk({ id: seat, label: 'Atlas' })).toContain('>Atlas · Request · step build')
+    expect(stepAsk({ id: 'person/avery', label: 'Avery' })).toContain('>Avery · Request · step build')
+    const pathLabel = stepAsk({ id: seat, label: 'example/atlas' })
+    expect(pathLabel).toContain('>atlas · Request · step build')
+    expect(pathLabel).toContain('aria-label="Your answer to atlas"')
+    // Nothing served names it: the step is already in the meta, so no attribution beats the step's address.
+    const unnamed = stepAsk(undefined)
+    expect(unnamed).toContain('>Request · step build')
+    expect(unnamed).toContain('aria-label="Your answer"')
+    for (const html of [pathLabel, unnamed]) {
+      expect(html).not.toContain('example/atlas')
+      expect(html).not.toContain(source)
+    }
+  })
+
   it('says how long is left before an ask resolves by itself and what then applies', () => {
     const deadline = DateTime.makeUnsafe(Date.parse(at) + 3 * 3_600_000 + 5 * 60_000)
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ request: decision, deadline_at: deadline, default_answer: { id: 'hold', label: 'Hold' } })} onAct={sent} now={now} />))
