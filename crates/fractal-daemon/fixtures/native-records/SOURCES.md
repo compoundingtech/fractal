@@ -21,3 +21,12 @@ and native `part` objects from the installed OpenCode 1.18.34 admission capture 
 `crates/fractal-drivers/tests/fixtures/harness-admission/opencode-1.18.34.json`.
 Those objects are the data stored in OpenCode's message/part rows, not its outer
 SSE notification envelope. Unknown future types are separate constructed probes.
+
+`semantic-vectors.jsonl` is a constructed, language-neutral classification contract:
+each row supplies a harness, native record, optional independently identified part,
+expected semantic category and default disposition. It includes deliberately future
+types/roles/parts and literal event-looking prose; none are additional live captures.
+The kernel's `semantic_projection_*` tests execute these vectors and separately
+reject unclassified discriminators in the existing OMP, Claude and Codex inventory.
+This classifier does not advertise a new wire capability; negotiation, usage
+aggregation, scoped counts and cache/cursor revisioning are separate consumers.

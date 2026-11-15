@@ -117,6 +117,12 @@ text dumped into prose. Errors and unanswered permissions MUST NOT disappear
 under a blanket telemetry/internal filter. A source `display:false` hint remains
 available and cannot promote hidden native content into the reading lane.
 Source records and inspection references are not extra conversation rows.
+Pi/OMP `custom_message` has explicit native display intent (`CustomMessageEntry.display`:
+OMP `packages/coding-agent/src/session/session-entries.ts:323-332`). An otherwise
+unknown, valid `customType` is Conversation only with `display: true`; false or absent
+display leaves it counted, inspectable Unknown. Known tool/notice subtypes retain their
+explicit categories. Missing, null or non-string required type/subtype/role discriminators
+are Source diagnostic, not the future-string fallback.
 
 One source record may yield several semantically distinct parts, or no reading-lane
 rows. Each part MUST have stable identity, source linkage and its own display
