@@ -1,0 +1,5 @@
+{
+  "legacy_page": {"kind": "timeline-page", "session_id": "session/example", "items": [], "page": {"limit": 50, "has_more": false}},
+  "semantic_page": {"kind": "timeline-page", "session_id": "session/example", "items": [], "page": {"limit": 50, "has_more": false}, "header": {"projection_revision": 1}},
+  "semantic_changes": {"kind": "conversation-changes", "session_id": "session/example", "items": [], "next_cursor": "cursor/semantic-empty", "header": {"projection_revision": 1}}
+}

@@ -499,6 +499,7 @@ fn refresh(
                                 session_id: id.clone(),
                                 limit: 200,
                                 cursor: query.cursor.clone(),
+                                conversation_semantics: session.conversation_semantics,
                             },
                         },
                     ))
