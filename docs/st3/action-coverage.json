@@ -3248,14 +3248,6 @@
       "verification": "live UI adapter across daemon restart"
     },
     {
-      "effect": "Discuss",
-      "tests": [
-        "crates/fractal-tui/src/ui/live.rs::live_sends_retries_discussions_and_creation_survive_daemon_restarts",
-        "crates/fractal/tests/action_coverage.rs::messages_survive_stale_fences_and_restarts"
-      ],
-      "verification": "live UI adapter plus daemon restart"
-    },
-    {
       "effect": "EditArrangement",
       "tests": [
         "crates/fractal-tui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
