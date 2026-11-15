@@ -1002,7 +1002,7 @@ mod tests {
             }
             let declaration = crate::graph::parse_internal_intent(
                 "version 2\nagent \"ada/outside\" { workspace \"/tmp\"; command \"true\"; }\n",
-                "core-continuation").unwrap();
+                &state.store.origin).unwrap();
             state.store.apply_internal(&declaration, "declare-outside").unwrap();
             edit(&state, &session, &request(&state, "folder", json!([
                 {"op":"folder.create","id":FOLDER,"name":"Folder","parent":null,"key":"a0"}
@@ -1026,7 +1026,7 @@ mod tests {
                 }
                 "retirement" => {
                     let stop = crate::graph::parse_internal_intent(
-                        "version 2\nstop \"agent/ada/outside\"\n", "core-continuation").unwrap();
+                        "version 2\nstop \"agent/ada/outside\"\n", &state.store.origin).unwrap();
                     state.store.apply_internal(&stop, "stop-outside").unwrap();
                     let token = state.store.selected_desired_token("agent/ada/outside").unwrap().unwrap();
                     state.store.retire_agent("agent/ada/outside", "person/ada", "Finished",
