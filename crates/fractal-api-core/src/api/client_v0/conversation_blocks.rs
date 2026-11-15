@@ -7,6 +7,9 @@ use ring::aead;
 
 use std::sync::LazyLock;
 
+#[path = "semantic_projection.rs"]
+mod semantic_projection;
+
 // Bound expensive reads without a queued backlog or a second content cache.
 #[cfg(not(any(test, feature = "test-support")))]
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
@@ -847,7 +850,7 @@ pub fn prepare_one(
     if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
         for (index, block) in blocks.iter_mut().enumerate() {
             let pixels = block["kind"] == "image" && block.get("continuation").is_some();
-            for key in ["metadata", "view"] {
+            for key in ["metadata", "view", "semantic"] {
                 if let Some(value) = block.get_mut(key)
                     && (bound_open_value(value)
                         || (preview && (!pixels || has_preview_marker(value))))
@@ -1009,6 +1012,7 @@ pub fn prepare_one(
             });
         }
     }
+    semantic_projection::prepare(item, session.conversation_semantics);
     if !session.conversation_blocks {
         item["body"]
             .as_object_mut()
@@ -1021,7 +1025,10 @@ pub fn prepare_one(
 /// Keep negotiated data out of legacy relayed clients without changing their known enum.
 pub fn legacy(value: &mut Value, session: &ClientSession) {
     if let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) {
-        for item in items { conversation_participants::legacy_item(item, session); }
+        for item in items {
+            conversation_participants::legacy_item(item, session);
+            semantic_projection::prepare(item, session.conversation_semantics);
+        }
     }
     if !session.conversation_delivery_links
         && let Some(items) = value.get_mut("items").and_then(Value::as_array_mut)

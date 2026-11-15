@@ -144,11 +144,15 @@ pub enum ClientReadOperation {
         session_id: String,
         after: Option<String>,
         wait_ms: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        conversation_semantics: bool,
     },
     Timeline {
         session_id: String,
         limit: usize,
         cursor: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        conversation_semantics: bool,
     },
     SessionDetail {
         session_id: String,
@@ -829,6 +833,9 @@ impl ClientRelay {
         request: &ClientReadRequest,
     ) -> Result<serde_json::Value> {
         let required = match &request.request {
+            ClientReadOperation::Timeline { conversation_semantics: true, .. }
+            | ClientReadOperation::ConversationChanges { conversation_semantics: true, .. } =>
+                Some(("conversation-semantics", 1)),
             ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
             ClientReadOperation::Timeline { session_id, .. }
             | ClientReadOperation::ConversationContent { session_id, .. }
@@ -1328,6 +1335,16 @@ async fn forward_client_read(
 }
 
 fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejected {
+    if matches!(operation, ClientReadOperation::Timeline { conversation_semantics: true, .. }
+        | ClientReadOperation::ConversationChanges { conversation_semantics: true, .. }) {
+        let mut rejected = ClientReadRejected::new(
+            "unsupported-capability", StatusCode::UNPROCESSABLE_ENTITY,
+            "The owner does not support conversation-semantics.v1.",
+        );
+        rejected.details.insert("capability".into(), "conversation-semantics".into());
+        rejected.details.insert("version".into(), 1.into());
+        return rejected;
+    }
     if matches!(operation, ClientReadOperation::Messages { .. }) {
         return messages_paging_unsupported();
     }
@@ -1352,6 +1369,34 @@ fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejecte
     rejected
 }
 
+#[cfg(test)]
+mod semantic_relay_contract_tests {
+    use super::*;
+
+    #[test]
+    fn semantic_relay_negotiation_preserves_legacy_operation_shape() {
+        for legacy in [
+            serde_json::json!({"operation":"timeline", "session_id":"session/test", "limit":2, "cursor":null}),
+            serde_json::json!({"operation":"conversation-changes", "session_id":"session/test", "after":null, "wait_ms":0}),
+        ] {
+            let mut operation: ClientReadOperation = serde_json::from_value(legacy.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&operation).unwrap(), legacy);
+            match &mut operation {
+                ClientReadOperation::Timeline { conversation_semantics, .. }
+                | ClientReadOperation::ConversationChanges { conversation_semantics, .. } =>
+                    *conversation_semantics = true,
+                _ => unreachable!(),
+            }
+            let wire = serde_json::to_value(&operation).unwrap();
+            assert_eq!(wire["conversation_semantics"], true);
+            let restored: ClientReadOperation = serde_json::from_value(wire).unwrap();
+            let rejected = client_read_unsupported(&restored);
+            assert_eq!(rejected.code, "unsupported-capability");
+            assert_eq!(rejected.details["capability"], "conversation-semantics");
+        }
+    }
+}
+
 fn messages_paging_unsupported() -> ClientReadRejected {
     ClientReadRejected::new(
         "unsupported-capability",
@@ -1374,6 +1419,7 @@ async fn client_read_capabilities(
         &state, CLIENT_READ_PATH, &FleetAuth::body_digest(&[]), 0,
         serde_json::json!({"capabilities":[
             {"id":"messages-paging","version":2,"state":"granted"},
+            {"id":"conversation-semantics","version":1,"state":"granted"},
             {"id":"session-detail-child-id","version":1,"state":"granted"},
             {"id":"github-plugin","version":1,"state":"granted"},
             {"id":"github-plugin","version":2,"state":"granted"}
@@ -1433,6 +1479,15 @@ async fn receive_client_read(
             }
         }
         let client = fractal_client::Client::unix_as(state.backend().socket(), &request.authority_actor);
+        if matches!(&request.request, ClientReadOperation::Timeline { conversation_semantics: true, .. }
+            | ClientReadOperation::ConversationChanges { conversation_semantics: true, .. }) {
+            let advertised = client.capabilities().await?;
+            if !advertised.value.capabilities.iter().any(|capability|
+                capability.id == "conversation-semantics" && capability.version == 1
+                    && capability.state == fractal_client::CapabilityState::Granted) {
+                return Err(client_read_unsupported(&request.request).into());
+            }
+        }
         match request.request {
             ClientReadOperation::ConversationContent {
                 session_id,
@@ -1445,6 +1500,7 @@ async fn receive_client_read(
                 session_id,
                 after,
                 wait_ms,
+                conversation_semantics,
             } => {
                 anyhow::ensure!(
                     wait_ms <= CLIENT_READ_MAX_WAIT_MS,
@@ -1452,6 +1508,7 @@ async fn receive_client_read(
                 );
                 Ok(serde_json::to_value(
                     client
+                        .with_conversation_semantics(conversation_semantics)
                         .conversation_changes(&session_id, after.as_deref(), wait_ms)
                         .await?
                         .value,
@@ -1461,12 +1518,14 @@ async fn receive_client_read(
                 session_id,
                 limit,
                 cursor,
+                conversation_semantics,
             } => {
                 anyhow::ensure!((1..=200).contains(&limit), "the timeline limit is invalid");
                 // A cursor carries its own page size. The relayed limit is a required field
                 // that a gateway fills with its default, so it only sizes a first page.
                 let answer = relay_trace::future(Phase::OwnerCall,
-                    client.timeline(&session_id, cursor.as_deref(), cursor.is_none().then_some(limit))).await;
+                    client.with_conversation_semantics(conversation_semantics)
+                        .timeline(&session_id, cursor.as_deref(), cursor.is_none().then_some(limit))).await;
                 if let Some(trace) = relay_trace::current() {
                     match &answer {
                         Ok(envelope) => trace.response(&envelope.request_id),
@@ -2327,6 +2386,7 @@ mod tests {
                     session_id: "session/example".into(),
                     limit: 1,
                     cursor: None,
+                    conversation_semantics: false,
                 },
             };
             let result = if path == SEAT_FRESHNESS_PATH {
@@ -2486,6 +2546,7 @@ mod tests {
                 session_id: "session/example".into(),
                 limit: 1,
                 cursor: None,
+                conversation_semantics: false,
             },
         };
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));

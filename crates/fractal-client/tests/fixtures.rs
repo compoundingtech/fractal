@@ -60,6 +60,110 @@ fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
     assert_eq!(serde_json::to_value(&clear).unwrap(), serde_json::json!({"text": null}));
 }
 
+#[test]
+fn timeline_semantic_empty_responses_preserve_projection_revision() {
+    let cases: serde_json::Value = decode("timeline-semantic-empty.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    for (case, definition) in [
+        ("legacy_page", "TimelinePage"), ("semantic_page", "TimelinePage"),
+        ("semantic_changes", "ConversationChanges"),
+    ] {
+        let validator = jsonschema::validator_for(&serde_json::json!({
+            "$defs": schema["$defs"], "$ref": format!("#/$defs/{definition}")
+        })).unwrap();
+        assert!(validator.is_valid(&cases[case]));
+        let encoded = if definition == "TimelinePage" {
+            let page: TimelinePage = serde_json::from_value(cases[case].clone()).unwrap();
+            assert!(page.items.is_empty());
+            serde_json::to_value(page).unwrap()
+        } else {
+            let changes: ConversationChanges = serde_json::from_value(cases[case].clone()).unwrap();
+            assert!(changes.items.is_empty());
+            serde_json::to_value(changes).unwrap()
+        };
+        assert_eq!(encoded["items"], cases[case]["items"]);
+        if case != "legacy_page" {
+            assert_eq!(encoded["header"]["projection_revision"], 1);
+            for revision in [serde_json::json!(0), serde_json::json!(1.5), serde_json::json!(4_294_967_296_u64)] {
+                let mut invalid = cases[case].clone();
+                invalid["header"]["projection_revision"] = revision;
+                assert!(!validator.is_valid(&invalid));
+            }
+        } else {
+            assert!(encoded.get("header").is_none());
+        }
+    }
+}
+
+#[test]
+fn timeline_semantics_preserves_open_words_and_missing_usage_facts() {
+    let blocks: Vec<serde_json::Value> = decode("timeline-semantics.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/TimelineBlock"
+    })).unwrap();
+    for raw in &blocks {
+        assert!(validator.is_valid(raw), "{raw}");
+        let block: TimelineBlock = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&block).unwrap(), *raw);
+    }
+    let old: TimelineBlock = serde_json::from_value(blocks[0].clone()).unwrap();
+    assert!(old.semantic.is_none());
+    let cumulative: TimelineBlock = serde_json::from_value(blocks[2].clone()).unwrap();
+    let usage = cumulative.semantic.unwrap().usage.unwrap();
+    assert_eq!(usage.semantics, "session_cumulative");
+    assert_eq!(usage.counter_id.as_deref(), Some("codex/session_usage"));
+    let future: TimelineBlock = serde_json::from_value(blocks[3].clone()).unwrap();
+    let semantic = future.semantic.unwrap();
+    assert_eq!(semantic.category, "future_category");
+    assert_eq!(semantic.disposition, "future_disposition");
+    let usage = semantic.usage.unwrap();
+    assert_eq!(usage.semantics, "unclassified");
+    assert_eq!(usage.output_tokens, Some(4));
+    assert!(usage.input_tokens.is_none() && usage.total_tokens.is_none() && usage.cost.is_none());
+    let mut future_usage = blocks[3].clone();
+    future_usage["semantic"]["usage"]["semantics"] = serde_json::json!("future_usage");
+    assert!(validator.is_valid(&future_usage));
+    let block: TimelineBlock = serde_json::from_value(future_usage.clone()).unwrap();
+    assert_eq!(serde_json::to_value(block).unwrap(), future_usage);
+}
+
+#[test]
+fn timeline_semantics_schema_rejects_unsafe_facts_and_missing_identity() {
+    let blocks: Vec<serde_json::Value> = decode("timeline-semantics.json");
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&serde_json::json!({
+        "$defs": schema["$defs"], "$ref": "#/$defs/TimelineBlock"
+    })).unwrap();
+    for field in ["revision", "category", "disposition", "source_record_id", "source_part_id"] {
+        let mut invalid = blocks[1].clone();
+        invalid["semantic"].as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&invalid), "{field}");
+    }
+    for value in [serde_json::json!(0), serde_json::json!(1.5)] {
+        let mut invalid = blocks[1].clone();
+        invalid["semantic"]["revision"] = value;
+        assert!(!validator.is_valid(&invalid));
+    }
+    for field in ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "cost"] {
+        let mut invalid = blocks[1].clone();
+        invalid["semantic"]["usage"][field] = serde_json::json!(-1);
+        assert!(!validator.is_valid(&invalid), "{field}");
+        invalid["semantic"]["usage"][field] = serde_json::json!(0);
+        assert!(validator.is_valid(&invalid), "reported zero: {field}");
+        if field != "cost" {
+            invalid["semantic"]["usage"][field] = serde_json::json!(1.5);
+            assert!(!validator.is_valid(&invalid), "fractional tokens: {field}");
+        }
+    }
+    let mut invalid = blocks[1].clone();
+    invalid["semantic"]["usage"].as_object_mut().unwrap().remove("semantics");
+    assert!(!validator.is_valid(&invalid));
+}
+
 
 #[test]
 fn response_evidence_schema_and_typed_models_preserve_observations() {

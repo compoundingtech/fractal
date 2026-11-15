@@ -1736,6 +1736,8 @@ export const ConversationHeader = /*#__PURE__*/ (() => Schema.Struct({
   "jobs": optionalKey(ConversationHeaderField),
   /** value: model id string */
   "model": optionalKey(ConversationHeaderField),
+  /** Selected owner-local semantic projection revision when conversation-semantics.v1 is negotiated, including empty responses. Absent for legacy clients. This is not a whole-session completeness claim. */
+  "projection_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(4294967295))).annotate({ description: "Selected owner-local semantic projection revision when conversation-semantics.v1 is negotiated, including empty responses. Absent for legacy clients. This is not a whole-session completeness claim." }),
   /** value: [SubagentSummary], task outputs whose status is not terminal */
   "subagents": optionalKey(ConversationHeaderField),
   /** value: [{phase, items: [TimelineTodoItem]}] */
@@ -3285,6 +3287,41 @@ export const ConversationContentRef = /*#__PURE__*/ (() => Schema.Struct({
 export type ConversationContentRef = typeof ConversationContentRef.Type
 export type ConversationContentRefEncoded = typeof ConversationContentRef.Encoded
 
+/** Explicit source-reported facts only. Missing fields are unavailable, never fabricated zeros. Keep response facts separate from session-cumulative observations; unclassified usage must not be summed as response deltas. */
+export const TimelineSemanticUsage = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_read_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "cache_write_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "cost": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Stable counter identity within the outer conversation. Repeated session-cumulative observations of the same counter are not independent response deltas. Loaded-window aggregation does not establish source completeness or a whole-session total. */
+  "counter_id": optionalKey(Schema.String).annotate({ description: "Stable counter identity within the outer conversation. Repeated session-cumulative observations of the same counter are not independent response deltas. Loaded-window aggregation does not establish source completeness or a whole-session total." }),
+  "currency": optionalKey(Schema.String),
+  "input_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "model": optionalKey(Schema.String),
+  "output_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "provider": optionalKey(Schema.String),
+  "response_id": optionalKey(Schema.String),
+  /** Open vocabulary: response, session_cumulative, unclassified; future strings remain readable. */
+  "semantics": Schema.String.annotate({ description: "Open vocabulary: response, session_cumulative, unclassified; future strings remain readable." }),
+  "total_tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "TimelineSemanticUsage", description: "Explicit source-reported facts only. Missing fields are unavailable, never fabricated zeros. Keep response facts separate from session-cumulative observations; unclassified usage must not be summed as response deltas." }))()
+export type TimelineSemanticUsage = typeof TimelineSemanticUsage.Type
+export type TimelineSemanticUsageEncoded = typeof TimelineSemanticUsage.Encoded
+
+/** Owner-local projection negotiated with conversation-semantics.v1, which requires conversation-blocks.v1. Source and part IDs are stable only within the outer conversation. Deduplicate loaded-window category counts by these IDs; a page count is never a whole-session total. Older blocks omit semantic. */
+export const TimelineSemantic = /*#__PURE__*/ (() => Schema.Struct({
+  /** Open vocabulary: conversation, tool_activity, actionable_notice, usage, internal_activity, source_diagnostic, unknown; future strings remain readable. */
+  "category": Schema.String.annotate({ description: "Open vocabulary: conversation, tool_activity, actionable_notice, usage, internal_activity, source_diagnostic, unknown; future strings remain readable." }),
+  /** Open presentation hint: reading_lane, indicator, inspector; future strings remain readable. Never an access restriction. */
+  "disposition": Schema.String.annotate({ description: "Open presentation hint: reading_lane, indicator, inspector; future strings remain readable. Never an access restriction." }),
+  "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "source_part_id": Schema.String,
+  "source_record_id": Schema.String,
+  "text": optionalKey(Schema.String),
+  "usage": optionalKey(TimelineSemanticUsage)
+}).annotate({ identifier: "TimelineSemantic", description: "Owner-local projection negotiated with conversation-semantics.v1, which requires conversation-blocks.v1. Source and part IDs are stable only within the outer conversation. Deduplicate loaded-window category counts by these IDs; a page count is never a whole-session total. Older blocks omit semantic." }))()
+export type TimelineSemantic = typeof TimelineSemantic.Type
+export type TimelineSemanticEncoded = typeof TimelineSemantic.Encoded
+
 export const TimelineAskAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "custom": optionalKey(Schema.String),
   "note": optionalKey(Schema.String),
@@ -3701,6 +3738,7 @@ export const TimelineBlock = /*#__PURE__*/ (() => Schema.Struct({
   "metadata": optionalKey(Schema.Record(Schema.String, Schema.Unknown)).annotate({ description: "Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); assistant text/reasoning blocks may carry model, provider, usage {input, output, cache_read, cache_write, total, cost_usd}, context_tokens, stop_reason, ttft_ms and duration_ms; preserve names, units, values and future fields" }),
   /** Native JSON; {body_ref:true} refers to the containing known fallback body without duplication */
   "payload": Schema.Unknown.annotate({ description: "Native JSON; {body_ref:true} refers to the containing known fallback body without duplication" }),
+  "semantic": optionalKey(TimelineSemantic),
   "source_type": Schema.String,
   /** Parsed typed projection of the block; a renderer that does not know the view type renders the block as without a view. The full native data stays in payload */
   "view": optionalKey(TimelineView),

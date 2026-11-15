@@ -3399,6 +3399,7 @@ async fn signed_client_read_returns_an_owner_local_native_timeline() {
             session_id: session.id,
             limit: 20,
             cursor: None,
+            conversation_semantics: false,
         },
     })
     .unwrap();

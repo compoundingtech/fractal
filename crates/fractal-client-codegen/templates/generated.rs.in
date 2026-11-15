@@ -3370,6 +3370,7 @@ pub struct ConversationChanges {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub next_cursor: String,
+    /// Open header JSON, including negotiated projection_revision on empty responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<Value>,
 }
@@ -3380,6 +3381,7 @@ pub struct TimelinePage {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub page: PageInfo,
+    /// Open header JSON, including negotiated projection_revision on empty responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<Value>,
 }
@@ -5563,9 +5565,53 @@ pub struct TimelineBlock {
     pub metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<TimelineSemantic>,
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ConversationContentRef>,
+}
+
+/// Source IDs are scoped by the outer conversation; counts describe only the loaded window.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TimelineSemantic {
+    pub revision: u32,
+    pub category: String,
+    pub disposition: String,
+    pub source_record_id: String,
+    pub source_part_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TimelineSemanticUsage>,
+}
+
+/// Missing source-reported facts remain unavailable, not zero.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TimelineSemanticUsage {
+    pub semantics: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ConversationContentRef {

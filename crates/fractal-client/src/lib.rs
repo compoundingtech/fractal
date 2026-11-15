@@ -324,6 +324,7 @@ pub struct Client {
     signing_device: Option<Arc<device::Device>>,
     device_http_policy: Option<bool>,
     messages_paging: bool,
+    conversation_semantics: bool,
     http: reqwest::Client,
     max_response_bytes: Arc<AtomicUsize>,
     outage_wait: Duration,
@@ -1431,11 +1432,27 @@ impl Client {
         self
     }
 
+    /// Negotiate owner-local semantic block metadata. Disabled by default.
+    /// Conversation blocks are always negotiated by this client.
+    pub fn with_conversation_semantics(mut self, enabled: bool) -> Self {
+        self.conversation_semantics = enabled;
+        self
+    }
+
     fn features(&self) -> &'static str {
-        if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2"
-        } else {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1"
+        match (self.messages_paging, self.conversation_semantics) {
+            (false, false) => {
+                "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1"
+            }
+            (true, false) => {
+                "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2"
+            }
+            (false, true) => {
+                "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, conversation-semantics.v1"
+            }
+            (true, true) => {
+                "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2, conversation-semantics.v1"
+            }
         }
     }
 
@@ -1445,10 +1462,12 @@ impl Client {
         match &self.endpoint {
             Endpoint::Unix(path) if self.credential.is_none() => Self::unix(path)
                 .with_messages_paging(self.messages_paging)
+                .with_conversation_semantics(self.conversation_semantics)
                 .with_outage_wait(self.outage_wait, self.announce_outage_wait),
             Endpoint::DiscoveredUnix(identity) if self.credential.is_none() => {
                 Self::discovered_unix(identity.clone())
                     .with_messages_paging(self.messages_paging)
+                    .with_conversation_semantics(self.conversation_semantics)
                     .with_outage_wait(self.outage_wait, self.announce_outage_wait)
             }
             _ => self.clone(),
@@ -1522,6 +1541,7 @@ impl Client {
             signing_device: None,
             device_http_policy: None,
             messages_paging: false,
+            conversation_semantics: false,
             http: reqwest::Client::new(),
             max_response_bytes: Arc::new(AtomicUsize::new(HARD_MAX_RESPONSE_BYTES)),
             outage_wait: Duration::ZERO,
@@ -1537,6 +1557,7 @@ impl Client {
             signing_device: None,
             device_http_policy: None,
             messages_paging: false,
+            conversation_semantics: false,
             http: reqwest::Client::new(),
             max_response_bytes: Arc::new(AtomicUsize::new(HARD_MAX_RESPONSE_BYTES)),
             outage_wait: Duration::ZERO,
@@ -1555,6 +1576,7 @@ impl Client {
             signing_device: None,
             device_http_policy: None,
             messages_paging: false,
+            conversation_semantics: false,
             http: reqwest::Client::new(),
             max_response_bytes: Arc::new(AtomicUsize::new(HARD_MAX_RESPONSE_BYTES)),
             outage_wait: Duration::ZERO,
@@ -1572,6 +1594,7 @@ impl Client {
             signing_device: None,
             device_http_policy: None,
             messages_paging: false,
+            conversation_semantics: false,
             http: reqwest::Client::new(),
             max_response_bytes: Arc::new(AtomicUsize::new(HARD_MAX_RESPONSE_BYTES)),
             outage_wait: Duration::ZERO,
@@ -1587,6 +1610,7 @@ impl Client {
             signing_device: None,
             device_http_policy: None,
             messages_paging: false,
+            conversation_semantics: false,
             http: reqwest::Client::new(),
             max_response_bytes: Arc::new(AtomicUsize::new(HARD_MAX_RESPONSE_BYTES)),
             outage_wait: Duration::ZERO,
@@ -6038,6 +6062,40 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(request.headers()["x-st3-features"], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn conversation_semantics_is_explicit_and_preserved_for_reads_and_websockets() {
+        for client in [
+            Client::unix("/unused"),
+            Client::unix_as("/unused", "person/test"),
+            Client::unix_gateway("/unused", "credential"),
+            Client::fabric_pairing("https://example.test"),
+            Client::fabric_loopback("https://example.test", "credential"),
+        ] {
+            for paging in [false, true] {
+                let client = client.clone().with_messages_paging(paging);
+                let legacy = client.features();
+                assert!(!legacy.contains("conversation-semantics.v1"));
+                let enabled = client.with_conversation_semantics(true);
+                let expected = format!("{legacy}, conversation-semantics.v1");
+                assert_eq!(enabled.features(), expected);
+                assert_eq!(enabled.trusted_unscoped_read().features(), expected);
+                let request = websocket_request(
+                    "wss://example.test/v1/client/collections/stream",
+                    None,
+                    None,
+                    None,
+                    enabled.features(),
+                )
+                .unwrap();
+                assert_eq!(request.headers()["x-st3-features"], expected);
+                assert_eq!(
+                    enabled.with_conversation_semantics(false).features(),
+                    legacy
+                );
             }
         }
     }

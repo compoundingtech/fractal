@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add explicit negotiated semantic transcript projection, native source-linked categories and usage facts, relay support and projection-revision fencing. Existing UI clients remain on their current capability by default.",
+  "replay": { "status": "changed", "detail": "Derived native timeline folds rebuild when normalization revision changes and obsolete semantic cursors require resync. Native transcript bytes, identities and durable claim history are not rewritten." },
+  "schema": { "status": "none", "detail": "No database or storage version change. Optional wire fields are described under compatibility." },
+  "rules": { "status": "none", "detail": "No checkpoint rules or fleet coordination changes." },
+  "compatibility": { "status": "changed", "detail": "conversation-semantics.v1 requires conversation-blocks.v1 and compatible owner/relay support. Unsupported semantic versions are refused. Opted-in responses carry source-linked semantic blocks and header projection revision, omit raw-as-prose fallbacks and legacy summed header cost. Unnegotiated clients retain their existing wire bodies and cursor shape; no first-party UI automatically opts in." },
+  "downtime": { "status": "none", "detail": "No additional service interruption or data migration is required beyond ordinary binary rollout; no timing measurement is claimed." },
+  "manual": { "status": "none", "detail": "Existing clients require no manual action. Explicit semantic consumers must support the negotiated revision and resync expired cursors." },
+  "recovery": { "status": "changed", "detail": "Native records remain authoritative. Older owners reject semantic opt-in; supported legacy-capability clients remain usable after rollback, and semantic cursors may require resync." }
+}

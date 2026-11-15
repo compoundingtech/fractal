@@ -4,6 +4,47 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('empty semantic response headers preserve selected projection revision', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const cases = require('../../../docs/st3/client-v0/fixtures/timeline-semantic-empty.json');
+    for (const [name, wire] of Object.entries(cases)) {
+        const model = name === 'semantic_changes' ? Rich.ConversationChanges : Rich.TimelinePage;
+        const encoded = Schema.encodeSync(model)(Rich.decodeUnknownSync(model, 'strict')(wire));
+        const normalized = JSON.parse(JSON.stringify(encoded));
+        assert.deepEqual(normalized.items, []);
+        assert.deepEqual(normalized.header, wire.header);
+    }
+    const decodeHeader = Rich.decodeUnknownSync(Rich.ConversationHeader, 'strict');
+    for (const revision of [0, 1.5, 4294967296]) {
+        assert.throws(() => decodeHeader({ projection_revision: revision }));
+    }
+});
+
+test('semantic blocks preserve future words and absent usage facts', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const blocks = require('../../../docs/st3/client-v0/fixtures/timeline-semantics.json');
+    for (const mode of ['strict', 'tolerant']) {
+        const decode = Rich.decodeUnknownSync(Rich.TimelineBlock, mode);
+        const encode = Schema.encodeSync(Rich.TimelineBlock);
+        for (const block of blocks) {
+            const encoded = encode(decode(block));
+            // Optional rich fields may encode as undefined; JSON omits them.
+            assert.deepEqual(JSON.parse(JSON.stringify(encoded)), block);
+        }
+        const future = structuredClone(blocks[3]);
+        future.semantic.usage.semantics = 'future_usage';
+        assert.equal(encode(decode(future)).semantic.usage.semantics, 'future_usage');
+        for (const field of ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'total_tokens', 'cost']) {
+            const invalid = structuredClone(blocks[1]);
+            invalid.semantic.usage[field] = -1;
+            assert.throws(() => decode(invalid), field);
+        }
+        const invalid = structuredClone(blocks[1]);
+        invalid.semantic.revision = 0;
+        assert.throws(() => decode(invalid));
+    }
+});
+
 test('read entrypoint loads no mutation or PTY validators, even without tree shaking', () => {
     const { spawnSync } = require('node:child_process');
     const result = spawnSync(process.execPath, ['--input-type=module', '-e', String.raw`

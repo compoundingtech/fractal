@@ -6,6 +6,51 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testEmptySemanticResponsesPreserveProjectionRevision() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/timeline-semantic-empty.json"))
+        let cases = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for name in ["legacy_page", "semantic_page", "semantic_changes"] {
+            let raw = try JSONSerialization.data(withJSONObject: XCTUnwrap(cases[name]))
+            let encoded: Data
+            if name == "semantic_changes" {
+                let changes = try JSONDecoder().decode(ConversationChanges.self, from: raw)
+                XCTAssertTrue(changes.items.isEmpty)
+                encoded = try JSONEncoder().encode(changes)
+            } else {
+                let page = try JSONDecoder().decode(TimelinePage.self, from: raw)
+                XCTAssertTrue(page.items.isEmpty)
+                encoded = try JSONEncoder().encode(page)
+            }
+            XCTAssertEqual(try JSONSerialization.jsonObject(with: encoded) as? NSDictionary, cases[name] as? NSDictionary)
+        }
+    }
+
+    func testTimelineSemanticsPreservesOpenWordsAndMissingFacts() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/timeline-semantics.json"))
+        let blocks = try JSONDecoder().decode([TimelineBlock].self, from: data)
+        XCTAssertNil(blocks[0].semantic)
+        let response = try XCTUnwrap(blocks[1].semantic?.usage)
+        XCTAssertEqual(response.responseID, "response-7")
+        XCTAssertEqual(response.cost, 0.0125)
+        XCTAssertEqual(blocks[2].semantic?.usage?.semantics, "session_cumulative")
+        XCTAssertEqual(blocks[2].semantic?.usage?.counterID, "codex/session_usage")
+        let future = try XCTUnwrap(blocks[3].semantic)
+        XCTAssertEqual(future.category, "future_category")
+        XCTAssertEqual(future.disposition, "future_disposition")
+        XCTAssertEqual(future.usage?.semantics, "unclassified")
+        XCTAssertEqual(future.usage?.outputTokens, 4)
+        XCTAssertNil(future.usage?.inputTokens)
+        XCTAssertNil(future.usage?.totalTokens)
+        XCTAssertNil(future.usage?.cost)
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(blocks)) as? NSArray,
+            try JSONSerialization.jsonObject(with: data) as? NSArray)
+    }
+
     func testMissionRunSupersessionLineageAndLegacyOmission() throws {
         let legacy = Data(#"{"id":"mission-run/example/current","requester":"person/operator","status":"running","phase":"normal","must_act":"system","state_since":"2026-11-12T12:00:00Z","progress":{"done":0,"total":1},"current_steps":[]}"#.utf8)
         let decoded = try JSONDecoder().decode(MissionRunSummary.self, from: legacy)

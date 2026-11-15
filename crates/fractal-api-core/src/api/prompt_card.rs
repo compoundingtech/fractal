@@ -181,6 +181,7 @@ impl RemoteConversation {
                 session_id: self.session_id.clone(),
                 limit: TAIL,
                 cursor: None,
+                conversation_semantics: false,
             })
             .await?;
         Ok((after, pending_calls(page["items"].as_array().map(Vec::as_slice).unwrap_or_default())))
@@ -194,6 +195,7 @@ impl RemoteConversation {
                 session_id: self.session_id.clone(),
                 after: after.clone(),
                 wait_ms,
+                conversation_semantics: false,
             })
             .await?;
         let changed = changes["items"].as_array().is_some_and(|items| !items.is_empty());
