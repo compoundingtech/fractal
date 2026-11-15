@@ -21,13 +21,19 @@ const server = await createServer({
 after(() => server.close())
 const { completeStreamingTail, Markdown, InlineMarkdown, markdownNeedsFallback } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
 const { splitMarkdownBlocks, limitNesting } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+// MARKDOWN_PARSER=pulldown runs the whole suite on the WebAssembly parser: the policy, the block cuts and every
+// regression must hold for both parsers.
+const pulldown = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+const usePulldown = process.env.MARKDOWN_PARSER === 'pulldown'
+if (usePulldown) await pulldown.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
 const { markdownBlock, markdownInline } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
 const htmlPolicy = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
 const fallbackCorpus = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-security.json', import.meta.url), 'utf8')).payloads
 const fallbackBoundaries = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-fallback-close-boundaries.json', import.meta.url), 'utf8')).cases
 function policyTree(source) {
   const capture = {}
-  ReactMarkdown({ children: source, remarkPlugins: [remarkGfm, htmlPolicy.remarkHtmlPolicy, [htmlPolicy.remarkCaptureTree, capture]] })
+  // Disclosure is relative to this suite's normal view, not another parser's HTML-block boundaries.
+  ReactMarkdown({ children: source, remarkPlugins: [usePulldown ? pulldown.remarkPulldown : remarkGfm, htmlPolicy.remarkHtmlPolicy, [htmlPolicy.remarkCaptureTree, capture]] })
   return capture.tree
 }
 
@@ -140,9 +146,13 @@ test('the CPU-time budget still catches a scan that restarts at every bracket', 
   assert.ok(milliseconds >= 50, `a quadratic scan of 50k brackets took only ${milliseconds}ms of CPU`)
 })
 
-const parsed = source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [remarkGfm], skipHtml: false }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
-const prompt = (text, props = {}) => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props }))
-const block = text => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) }))
+const parsed = source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: usePulldown ? [pulldown.remarkPulldown] : [remarkGfm], skipHtml: false }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
+const assertParser = html => {
+  assert.match(html, new RegExp(`data-parser="${usePulldown ? 'pulldown' : 'remark'}"`))
+  return html
+}
+const prompt = (text, props = {}) => assertParser(renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props })))
+const block = text => assertParser(renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) })))
 
 const FRAGMENTS = [
   'A paragraph with `code` and *emphasis*.', 'Two lines\nof one paragraph.', '# Heading', 'Setext\n---', '---',
@@ -151,6 +161,27 @@ const FRAGMENTS = [
   '| a | b |\n|---|---|\n| 1 | 2 |', '<!-- comment\n\nstill comment -->', '<details>\n<summary>More</summary>\n\nHidden *body*.\n\n</details>', '<pre>\nraw\n\nstill raw\n</pre>', '<div>html</div>',
   'Text with [ref][r] link.', '[r]: https://example.test/r', 'Note[^1].', '[^1]: A footnote.', '* star\n\n+ plus', '![image](https://example.test/i.png)', 'Trailing spaces   \n  indented', '   ```\n   three\n\nunindented\n   ```',
 ]
+
+test('switched off, the parser module is never requested', async () => {
+  // Runs before any load, so a request here could not be answered from the cached attempt.
+  const original = globalThis.fetch
+  let requests = 0
+  globalThis.fetch = (...args) => { requests++; return original(...args) }
+  pulldown.setPulldownEnabled(false)
+  try {
+    assert.equal(await pulldown.loadPulldown(), false)
+    assert.equal(requests, 0)
+  } finally {
+    pulldown.setPulldownEnabled(true)
+    globalThis.fetch = original
+  }
+})
+
+test('a parser module that cannot load leaves Markdown on the JavaScript parser', async () => {
+  // Node's fetch cannot read the module's file URL, so the load fails here the way a blocked or missing asset would.
+  assert.equal(await pulldown.loadPulldown(), false)
+  assert.match(block('**still renders**'), /<strong[^>]*>still renders<\/strong>/)
+})
 
 test('parsing the blocks one by one equals parsing the document', () => {
   let seed = 1234
@@ -537,4 +568,387 @@ test('policy final pass: fake fences, nested images, raw pre blocks and commente
   assert.match(block('<div><pre>ordinary code</pre></div>'), /markdown-code-block[\s\S]*ordinary code/)
   assert.match(block('<pre>\nordinary code\n</pre>'), /ordinary code/)
   assert.doesNotMatch(block('<svg>\n<!-- </svg> -->\n\nLEAK\n\n</svg>'), /LEAK/)
+})
+
+test('the WebAssembly parser builds the tree remark builds without changing the suite parser', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const html = plugins => source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
+    const remark = html([remarkGfm])
+    const wasm = html([parity.remarkPulldown])
+    for (const source of FRAGMENTS.filter(fragment => !fragment.includes('[^1]')).concat([
+      '- [x] done\n- [ ] open', 'See https://example.test/a_b and www.example.test.', '1. one\n2. two\n\n   nested para', '| a | b |\n|:-|-:|\n| 1 | 2 |',
+      'https://example.test/a(b)', 'https://example.test/a(b)).', 'https://example.test/a((b))',
+    ])) assert.equal(wasm(source), remark(source), source)
+    for (const [source, expected] of [
+      ['https://example.test/a(b)', 'https://example.test/a(b)'],
+      ['https://example.test/a(b)).', 'https://example.test/a(b)'],
+      ['https://example.test/a((b))', 'https://example.test/a((b))'],
+    ]) assert.equal(/href="([^"]+)"/.exec(wasm(source))?.[1], expected)
+  } finally { await isolated.close() }
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+  assertParser(block('**x**'))
+})
+
+test('HTML closing-tag whitespace has identical raw and policy-filtered mdast on both parsers', async () => {
+  const parse = (source, plugins) => {
+    let tree
+    const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+    ReactMarkdown({ children: source, remarkPlugins: [...plugins, capture] })
+    return tree
+  }
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    // This covers type-1 block lines as well as inline closers: only the latter are HTML grammar tokens.
+    for (const tag of ['script', 'style', 'iframe']) for (const whitespace of ['', '\t', '\n', '\r', ' ', '\f', '\v', '\u00a0']) {
+      for (const prefix of ['', 'Visible ', 'src/x.ts Visible\nVisible ']) {
+        const source = `${prefix}<${tag}>SECRET</${tag}${whitespace}>SECRET`
+        for (const policy of [[], [htmlPolicy.remarkHtmlPolicy]]) {
+          assert.deepEqual(parse(source, [parity.remarkPulldown, ...policy]), parse(source, [remarkGfm, ...policy]), JSON.stringify({ source, filtered: policy.length !== 0 }))
+        }
+      }
+    }
+  } finally { await isolated.close() }
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+})
+
+test('NUL in tag names, text and code matches original GFM replacement characters', async () => {
+  const parse = (source, plugins) => {
+    let tree
+    const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+    const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+    return { tree, html }
+  }
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    for (const source of [
+      '<scr\0ipt>visible</scr\0ipt>',
+      'before\0after',
+      '`before\0after`',
+      '```\nbefore\0after\n```',
+      'before\0 https://example.test/a*b*c',
+      'https://example.test/a\0b*c*d',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      assert.ok(JSON.stringify(expected.tree).includes('\uFFFD'), JSON.stringify(source))
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        assert.deepEqual(parse(source, plugins), expected, JSON.stringify(source))
+      }
+    }
+  } finally { await isolated.close() }
+})
+
+test('literal URL precedence matches original remark-gfm, including exact destinations and visible text', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const parse = (source, plugins) => {
+      let tree
+      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => key === 'position' ? undefined : field)) }
+      const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+      return { tree, html }
+    }
+    for (const prefix of ['https://example.test/', 'http://example.test/', 'www.example.test/']) {
+      for (const suffix of ['a*b*c', 'a**b**c', 'a_b_c', 'a__b__c', 'a~b~c', 'a~~b~~c', 'a`b`c', 'a[b]c', 'a(b)', 'a(b)).', 'a((b))', 'a(b', 'a?!.,:;', 'a&amp;', 'a&b;c']) {
+        const literal = prefix + suffix
+        const expected = parse(literal, [remarkGfm])
+        for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+          const actual = parse(literal, plugins)
+          assert.deepEqual(actual, expected, literal)
+        }
+        if (/^a(?:\*|_|~|`|\[)/.test(suffix)) {
+          const link = expected.tree.children[0].children[0]
+          assert.equal(link.url, prefix.startsWith('www') ? `http://${literal}` : literal)
+          assert.deepEqual(link.children, [{ type: 'text', value: literal }])
+        }
+      }
+    }
+    for (const source of [
+      '*https://example.test/a*b*c*', '**www.example.test/a_b_c**', '~~https://example.test/a~b~c~~',
+      '😀 https://example.test/a*b*c', '`https://example.test/a*b*c`',
+      '[https://example.test/a*b*c](https://target.test/)', '![https://example.test/a*b*c](https://image.test/)',
+      '<https://example.test/a*b*c>', 'https://example.test/a*b*c **after**',
+      '!https://example.test/a*b*c', '\\https://example.test/a*b*c', '\\!https://example.test/a*b*c',
+      'HTTPS://example.test/a*b*c', '(WWW.example.test/a*b*c)', 'https://example.test/a&amp;.',
+      'https://example_.test/a*b*c', 'https://example.test_/a*b*c', 'www._www.example.test/a*b*c',
+      'https://example.test/a)b(c', 'www.example.test/a) b', 'https://example.test/a>b',
+      'Contact me@example.test or a.b+c@example.test.', 'a.'.repeat(128) + 'x', '.'.repeat(256) + 'x',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        assert.deepEqual(parse(source, plugins), expected, source)
+      }
+    }
+  } finally { await isolated.close() }
+})
+
+test('literal URLs stay inside original inline containers on both parser paths', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const parse = (source, plugins) => {
+      let tree
+      // Compare semantic nodes; list looseness bookkeeping is also covered by exact rendered-HTML equality.
+      const capture = () => value => { tree = JSON.parse(JSON.stringify(value, (key, field) => ['position', 'implicit', 'spread'].includes(key) ? undefined : field)) }
+      const html = renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [...plugins, capture] }, source))
+      return { tree, html }
+    }
+    const differences = []
+    const compare = (actual, expected, source) => {
+      try { assert.deepEqual(actual, expected, source) }
+      catch (error) { differences.push({ source, message: error.message }) }
+    }
+    const protocols = ['https://example.test/', 'www.example.test/']
+    for (const prefix of protocols) {
+      for (const suffix of ['a', 'a*b*c', 'a_b_c', 'a~~b~~c', 'a`b`c', 'a\\|b', 'a(b)).']) {
+        for (const source of [
+          `|link|other|\n|---|---|\n|${prefix}${suffix}|b|`,
+          `|${prefix}${suffix}|other|\n|---|---|\n|a|b|`,
+          `|${prefix}${suffix}|${prefix}next|\n|---|---|\n|${prefix}${suffix}|${prefix}last|`,
+          `link|other\n---|---\n${prefix}${suffix}|b`,
+        ]) {
+          const expected = parse(source, [remarkGfm])
+          for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+            const actual = parse(source, plugins)
+            compare(actual, expected, source)
+            if (actual.tree.children[0].type === 'table' && expected.tree.children[0].type === 'table') {
+              compare(actual.tree.children[0].children.map(row => row.children.length), expected.tree.children[0].children.map(row => row.children.length), source)
+            }
+          }
+        }
+      }
+    }
+    const table = '|link|other|\n|---|---|\n|https://example.test/a\\|b|next|'
+    for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+      const cells = parse(table, plugins).tree.children[0].children[1].children
+      assert.equal(cells.length, 2)
+      assert.equal(cells[0].children[0].url, 'https://example.test/a\\|b')
+      assert.deepEqual(cells[0].children[0].children, [{ type: 'text', value: 'https://example.test/a\\|b' }])
+      assert.deepEqual(cells[1].children, [{ type: 'text', value: 'next' }])
+    }
+    for (const source of [
+      '> https://example.test/a*b*c\n> www.example.test/d_e_f',
+      '> https://example.test/a*b*c\nwww.example.test/d_e_f',
+      '- https://example.test/a*b*c\n  www.example.test/d_e_f',
+      '- https://example.test/a*b*c\n\n  www.example.test/d_e_f\n\n- next',
+      '- outer\n  - https://example.test/a*b*c\n    www.example.test/d_e_f\n- next',
+      '# https://example.test/a*b*c\nwww.example.test/d_e_f',
+      '# https://example.test/a*b*c ###\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\n===\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\nwww.example.test/d_e_f',
+      'https://example.test/a*b*c  \nwww.example.test/d_e_f',
+      'https://example.test/a*b*c\\\nwww.example.test/d_e_f',
+      '> https://example.test/a*b*c  \n> www.example.test/d_e_f',
+      '- https://example.test/a*b*c\\\n  www.example.test/d_e_f',
+      '[https://example.test/a*b*c](https://target.test/) www.example.test/after',
+      '![https://example.test/a*b*c](https://image.test/) www.example.test/after',
+      '|[https://example.test/a*b*c](https://target.test/)|www.example.test/after|\n|---|---|\n|![https://example.test/a*b*c](https://image.test/)|next|',
+      'https://example.test/a|b\n---|---|---',
+      'www.example.test/a|b\n---|---|---',
+      '|www.example.test/a|b\n---|---|---|---',
+      '`a\\\\|b` and `` a\\\\|b ``',
+      '```\na\\\\|b\n```\n\n    a\\\\|b',
+      '<span title="a\\\\|b">body</span>',
+      '<https://example.test/a\\\\|b>',
+      '[label](https://example.test/a\\\\|b) ![alt](https://example.test/a\\\\|b)',
+    ]) {
+      const expected = parse(source, [remarkGfm])
+      for (const plugins of [[remarkGfm, parity.remarkLinearAutolinks], [parity.remarkPulldown]]) {
+        compare(parse(source, plugins), expected, source)
+      }
+    }
+    assert.deepEqual(differences, [], 'all inline-container cases match the original remark-gfm oracle')
+  } finally { await isolated.close() }
+})
+
+test('pulldown intentionally matches GitHub GFM pipe escaping while remark-gfm differs', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parity = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    await parity.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+    const render = (source, plugins) => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source))
+    const anchor = (value, text = value) => h('a', { href: encodeURI(value.startsWith('www.') ? `http://${value}` : value) }, text)
+    const table = (head, row) => renderToStaticMarkup(h('table', null,
+      h('thead', null, h('tr', null, ...head.map(cell => h('th', null, cell)))),
+      h('tbody', null, h('tr', null, ...row.map(cell => h('td', null, cell)))),
+    ))
+    for (const prefix of ['https://example.test/', 'www.example.test/']) {
+      const raw = `${prefix}a\\\\|b`
+      const nativeLink = () => anchor(raw, `${prefix}a\\|b`)
+      const gfmLink = () => anchor(`${prefix}a\\\\`)
+      const gfmParagraphValue = suffix => `${prefix}a${prefix.startsWith('www.') ? '\\' : '\\\\'}|b|${suffix}`
+      const knownDivergences = [
+        // pulldown-cmark 0.13.5 matches GitHub's GFM: \| takes precedence over other backslash escapes (upstream PR #699).
+        { name: 'compact data row', source: `|link|other|\n|---|---|\n|${raw}|b|`,
+          pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
+        // The same intentional GFM precedence applies in headers; remark-gfm instead ends this table cell.
+        { name: 'compact header', source: `|${raw}|other|\n|---|---|\n|a|b|`,
+          pulldown: table([nativeLink(), 'other'], ['a', 'b']),
+          gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue('other|')), '\n|---|---|\n|a|b|')) },
+        // Preserve GitHub/pulldown pipe ownership in both rows and headers, alongside remark-gfm's distinct output.
+        { name: 'compact header and row', source: `|${raw}|${prefix}next|\n|---|---|\n|${raw}|${prefix}last|`,
+          pulldown: table([nativeLink(), anchor(`${prefix}next`)], [nativeLink(), anchor(`${prefix}last`)]),
+          gfm: renderToStaticMarkup(h('p', null, '|', anchor(gfmParagraphValue(`${prefix}next|`)), '\n|---|---|\n|', anchor(gfmParagraphValue(`${prefix}last|`)))) },
+        // Outer pipes do not change the intentional GitHub/pulldown precedence; remark-gfm still differs.
+        { name: 'row without outer pipes', source: `link|other\n---|---\n${raw}|b`,
+          pulldown: table(['link', 'other'], [nativeLink(), 'b']), gfm: table(['link', 'other'], [gfmLink(), 'b']) },
+      ]
+      for (const known of knownDivergences) {
+        assert.notEqual(known.pulldown, known.gfm, known.name)
+        assert.equal(render(known.source, [remarkGfm]), known.gfm, `original GFM: ${prefix} ${known.name}`)
+        assert.equal(render(known.source, [remarkGfm, parity.remarkLinearAutolinks]), known.gfm, `bounded remark fallback: ${prefix} ${known.name}`)
+        assert.equal(render(known.source, [parity.remarkPulldown]), known.pulldown, `pinned upstream divergence: ${prefix} ${known.name}`)
+      }
+    }
+  } finally { await isolated.close() }
+})
+
+test('the suite runs on the parser it names after parity', () => {
+  assert.equal(pulldown.pulldownReady(), usePulldown)
+  assert.match(block('**x**'), /<strong/)
+})
+
+test('deferred and failed WebAssembly loads keep the HTML-filtered JavaScript parser', async () => {
+  const isolated = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], server: { middlewareMode: true }, logLevel: 'error' })
+  try {
+    const parser = await isolated.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+    const { Markdown: DeferredMarkdown } = await isolated.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+    // Node cannot fetch the local file URL. This exercises the real loader's failed-load path without a fake transport.
+    const loading = parser.loadPulldown()
+    const source = '<script>SECRET</script>\n\n<img src=x onerror=alert(1)>\n\n<a href="javascript:x">safe</a><details onclick="evil"><summary>More</summary>Visible</details>'
+    const render = () => {
+      const html = renderToStaticMarkup(h(DeferredMarkdown, { text: markdownBlock(source) }))
+      assert.match(html, /data-parser="remark"/)
+      assert.doesNotMatch(html, /<script|<img|SECRET|onerror=|onclick=|href="javascript:/)
+      assert.match(html, /Visible/)
+    }
+    render()
+    assert.equal(await loading, false)
+    render()
+  } finally { await isolated.close() }
+})
+
+test('plain labels keep the entire long source, including formatted suffixes', async () => {
+  const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+  const prefix = 'ordinary words '.repeat(1000)
+  assert.equal(markdownPlainText(prefix + '**TAIL** [last](https://example.test) `literal **code**`'), prefix + 'TAIL last literal **code**')
+  assert.equal(markdownPlainText('[IPv6](https://[::1]/path)'), 'IPv6')
+  const hostile = markdownPlainText(prefix + '<img src=x onerror=alert(1)><script>SECRET</script>')
+  assert.doesNotMatch(renderToStaticMarkup(h('span', null, hostile)), /<img|<script/)
+})
+
+test('short references remain actionable inside long prose, with bounded path scanning', () => {
+  const path = 'src/model.ts'
+  const html = prompt('ordinary words '.repeat(1000) + path + ' <script>SECRET</script><!-- HIDDEN --> <img src=x onerror=alert(1)>', { resources: [{ path, added: 0, removed: 0 }] })
+  assert.match(html, /<button\b/)
+  assert.match(html, /src\/model\.ts/)
+  assert.doesNotMatch(html, /<script|<img|SECRET|HIDDEN|onerror=/)
+  for (const source of ['a/'.repeat(32000) + 'x', 'a.'.repeat(32000) + 'x']) {
+    let calls = 0
+    const { milliseconds } = cpuMilliseconds(() => prompt(source, { renderInlineReference: () => { calls++; return undefined } }))
+    assert.equal(calls, 0)
+    assert.ok(milliseconds < 1000, `reference scan took ${milliseconds}ms`)
+  }
+  for (const source of ['src/model.ts-like', 'src/model.ts/next']) {
+    const found = []
+    prompt(source, { renderInlineReference: candidate => { found.push(candidate); return undefined } })
+    assert.deepEqual(found, ['src/model.ts'])
+  }
+})
+
+test('both parser paths scan email-like dot runs linearly without changing literal links', t => {
+  for (const source of ['a.'.repeat(32000) + 'x', '.'.repeat(64000) + 'x', 'https://example.test/' + 'a*b*'.repeat(16000) + 'c']) {
+    const { milliseconds } = cpuMilliseconds(() => block(source))
+    assert.ok(milliseconds < 1000, `literal autolinks took ${milliseconds}ms`)
+    t.diagnostic(`literal autolinks ${source.slice(0, 20)}: ${milliseconds}ms CPU; unchanged budget 1000ms`)
+  }
+  const html = block('Contact me@example.test or https://example.test/a(b).')
+  assert.match(html, /me@example.test/)
+  assert.doesNotMatch(html, /mailto:/)
+  assert.match(html, /href="https:\/\/example.test\/a\(b\)"/)
+})
+
+// fixtures/clients/markdown-cases.json: the cases and HTML policy every client shares (write-markdown-fixtures.mjs).
+test('shared client fixtures: the policy matches and every case renders as specified', async () => {
+  const shared = JSON.parse(await readFile(new URL('../../../../../fixtures/clients/markdown-cases.json', import.meta.url), 'utf8'))
+  const { HTML_POLICY } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
+  assert.deepEqual(shared.policy, JSON.parse(JSON.stringify(HTML_POLICY)), 'regenerate with packages/fractal-ui/scripts/write-markdown-fixtures.mjs')
+  const visible = html => html.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, '&')
+  const escape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  for (const spec of shared.cases) {
+    const html = spec.kind === 'inline' ? renderToStaticMarkup(h(InlineMarkdown, { text: markdownInline(spec.markdown) })) : spec.kind === 'prompt' ? prompt(spec.markdown) : block(spec.markdown)
+    const words = visible(html)
+    for (const code of spec.code ?? []) assert.match(html, new RegExp(`<code[^>]*>${escape(code)}</code>`), `${spec.name}: code ${code}`)
+    for (const text of spec.text ?? []) assert.ok(words.includes(text), `${spec.name}: shows ${text}`)
+    for (const text of spec.absent ?? []) assert.ok(!words.includes(text), `${spec.name}: hides ${text}`)
+    if (spec.links !== undefined) assert.deepEqual([...html.matchAll(/<a\b[^>]*href="([^"]*)"/g)].map(match => match[1]), spec.links, `${spec.name}: links`)
+    if (spec.lineBreaks !== undefined) assert.equal((html.match(/<br/g) ?? []).length, spec.lineBreaks, `${spec.name}: line breaks`)
+    if (spec.disclosure !== undefined) assert.match(html, new RegExp(`<details[^>]*><summary[^>]*>${escape(spec.disclosure)}</summary>`), `${spec.name}: disclosure`)
+    if (spec.remoteImages !== undefined) assert.equal((html.match(/<img/g) ?? []).length, spec.remoteImages, `${spec.name}: images`)
+    if (spec.maxQuoteDepth !== undefined) assert.ok((html.match(/<blockquote/g) ?? []).length <= spec.maxQuoteDepth, `${spec.name}: depth`)
+  }
+})
+
+test('policy fourth pass: long paths, image alt formatting, quoted closes, task boxes and long labels', async () => {
+  for (const source of ['a/'.repeat(32000) + 'x', 'a.'.repeat(32000) + 'x']) {
+    const { milliseconds } = cpuMilliseconds(() => block(source))
+    assert.ok(milliseconds < 1000, `${source.slice(0, 4)}: ${milliseconds}ms`)
+  }
+  assert.match(block('![*hello* `x`](https://example.test/a)'), /hello/)
+  assert.doesNotMatch(block('<svg title="x > </svg>">\n\nLEAK\n\n</svg>'), /LEAK/)
+  assert.match(block('<div title="a > </div>">\n\nBODY\n\n</div>'), /<div[^>]*>(?:(?!<\/div>)[\s\S])*BODY/)
+  assert.match(block('- [x] done'), /<input[^>]*type="checkbox"[^>]*disabled/)
+  const { markdownPlainText } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+  for (const label of ['x ' + '`'.repeat(64000) + ' x', '['.repeat(64000), '[x]('.repeat(16000), ' '.repeat(64000) + 'suffix']) {
+    const { result, milliseconds } = cpuMilliseconds(() => markdownPlainText(label))
+    assert.equal(result, label.trim())
+    assert.ok(milliseconds < 200, `${milliseconds}ms`)
+  }
+})
+
+test('a link calls its hooks before any early return, and an unsafe href never reaches the preview', async () => {
+  const source = await readFile(new URL('./Markdown.tsx', import.meta.url), 'utf8')
+  const body = source.slice(source.indexOf('function MarkdownLink('), source.indexOf('\nfunction ', source.indexOf('function MarkdownLink(') + 1))
+  assert.ok(body.lastIndexOf('React.useContext(') < body.indexOf('return '), 'MarkdownLink must call every hook before it can return')
+  const { MarkdownLinkPreviewContext } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+  const seen = []
+  const html = renderToStaticMarkup(h(MarkdownLinkPreviewContext.Provider, { value: href => { seen.push(href); return undefined } }, h(Markdown, { text: markdownBlock('[bad](javascript:alert(1)) and [good](https://example.test/a)') })))
+  assert.deepEqual(seen, ['https://example.test/a'])
+  assert.match(html, /bad/)
+})
+
+// R8: code block header (path, language, diff counts, one menu) and nested lists without a rail.
+test('a code fence names its file from the fence title or a path as its info', async () => {
+  const { codeFenceLabel, diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-code.ts')
+  assert.deepEqual(codeFenceLabel('ts', 'title=src/x.ts'), { language: 'ts', path: 'src/x.ts' })
+  assert.deepEqual(codeFenceLabel('ts', 'title="src/a b.ts"'), { language: 'ts', path: 'src/a b.ts' })
+  assert.deepEqual(codeFenceLabel('src/model.rs', null), { language: 'rs', path: 'src/model.rs' })
+  assert.deepEqual(codeFenceLabel('python', null), { language: 'python' })
+  assert.deepEqual(codeFenceLabel('', null), { language: 'text' })
+  assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n-old\n+new\n+more\n context'), { added: 2, removed: 1 })
+})
+
+test('diff stats distinguish file headers from repeated plus and minus hunk content', async () => {
+  const { diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-code.ts')
+  assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n---counter\n+++counter\n-plain\n+plain\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n---x\n+++x'), { added: 3, removed: 3 })
+})
+
+test('the code header shows path, language and diff counts, with Wrap, Copy and Open in one menu', () => {
+  const html = block('```diff title=src/model.ts\n--- a/src/model.ts\n+++ b/src/model.ts\n@@ -1 +1,2 @@\n-old\n+new\n+next\n```')
+  assert.match(html, /data-testid="markdown-code-path"[^>]*>src\/model\.ts</)
+  assert.match(html, /data-testid="markdown-code-language"[^>]*>diff</)
+  assert.match(html, /data-testid="markdown-code-diffstat"[^>]*>[\s\S]*\+2[\s\S]*−1/)
+  assert.match(html, /aria-label="Copy path"/)
+  assert.match(html, /aria-label="Code actions"/)
+  assert.match(html, /aria-label="Copy code"/)
+  assert.doesNotMatch(html, />Wrap</)
+  assert.doesNotMatch(block('```ts\nconst a = 1\n```'), /markdown-code-path|markdown-code-diffstat/)
 })

@@ -153,6 +153,8 @@ stream_kit() {
       lane "UI kit story play helpers" node --test --test-force-exit packages/fractal-ui/src/story-play.unit.test.mjs
       lane "UI kit Markdown streaming tail" node --test --test-force-exit packages/fractal-ui/src/assistant-ui/composition/Markdown.unit.test.mjs
       lane "Markdown template splices" node packages/fractal-ui/scripts/check-markdown-templates.mjs
+      lane "Markdown on the WebAssembly parser" env MARKDOWN_PARSER=pulldown node --test --test-force-exit packages/fractal-ui/src/assistant-ui/composition/Markdown.unit.test.mjs
+      lane "Markdown WebAssembly module manifest" node --test packages/fractal-ui/scripts/markdown-wasm.node-test.mjs
       lane "Markdown template guard contracts" node --test packages/fractal-ui/scripts/check-markdown-templates.node-test.mjs
       ;;
     false)

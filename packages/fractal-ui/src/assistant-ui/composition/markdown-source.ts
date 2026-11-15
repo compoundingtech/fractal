@@ -1,4 +1,4 @@
-import { HTML_POLICY } from './markdown-html-policy'
+import { HTML_POLICY, tagEnd } from './markdown-html-policy'
 /**
  * Source-level helpers for the kit's Markdown: where a document may be cut into independently parsed blocks, and the
  * remark steps every surface shares. Nothing here imports a parser, so a later parser swap keeps the block contract.
@@ -11,6 +11,18 @@ const DEFINITION = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[(?:\\[\s\S]|[^\[\]
 const RAW_HTML_OPEN = /^ {0,3}<(script|style|pre|textarea)(?=[\s>]|$)/i
 const RAW_DECLARATION = /^ {0,3}<(?:\?|![A-Za-z]|!\[CDATA\[)/
 const CONTINUATION = /^(?: {2,}|\t)/
+/** The tags on a line with their quoted attribute values emptied, found by the policy's own bounded tag scan. */
+function tagHeads(line: string): string {
+  let heads = ''
+  for (let at = line.indexOf('<'); at !== -1; at = line.indexOf('<', at + 1)) {
+    const closed = tagEnd(line, at)
+    // A tag whose `>` is on a later line (`<details\n>`) still opens here.
+    const end = closed !== -1 ? closed : (line.indexOf('<', at + 1) + 1 || line.length + 1) - 2
+    heads += line.slice(at, end + 1).replace(/"[^"]*"|'[^']*'/g, '""') + ' '
+    at = end
+  }
+  return heads
+}
 const CONTAINERS = 'blockquote|dd|details|div|dl|dt|h[1-6]|li|ol|p|pre|summary|table|tbody|td|tfoot|th|thead|tr|ul'
 /** HTML that holds blank lines inside it: containers, and the elements the policy drops with their content. */
 const HOLDING = new RegExp(`<(/?)(${CONTAINERS}|${HTML_POLICY.dropWithContent.join('|')})(?=[\\s>/]|$)`, 'gi')
@@ -74,7 +86,7 @@ export function splitMarkdownBlocks(text: string): readonly string[] {
     // An HTML container left open (a disclosure, a quote, a table) holds the blank lines inside it.
     // Per name, so a stray close of one element cannot end another; quoted attribute values are not tags.
     // Comments and quoted attribute values hold no tags.
-    for (const [, slash, tag] of line.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^<>]*>/g, inner => inner.replace(/"[^"]*"|'[^']*'/g, '""')).matchAll(HOLDING)) {
+    for (const [, slash, tag] of tagHeads(line.replace(/<!--[\s\S]*?-->/g, '')).matchAll(HOLDING)) {
       const name = tag!.toLowerCase()
       const open = holding.get(name) ?? 0
       if (slash === '') { holding.set(name, open + 1); held += 1 } else if (open > 0) { holding.set(name, open - 1); held -= 1 }
@@ -104,18 +116,83 @@ export function remarkHardBreaks() {
  */
 export function markdownPlainText(markdown: string): string {
   const code: string[] = []
-  return markdown
-    .replace(/\s*\n\s*/g, ' ')
-    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)/, '')
-    .replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, _fence: string, text: string) => `\u0000${code.push(text.trim()) - 1}\u0001`)
-    .replace(/\\([\\`*_{}[\]()#+\-.!|<>~])/g, (_, character: string) => `\u0000${code.push(character) - 1}\u0001`)
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
-    .replace(/(^|[^\w*])([*_])(?=\S)([^*_]*?\S)\2(?![\w*])/g, '$1$3')
-    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '$1')
-    .replace(/\u0000(\d+)\u0001/g, (_, index: string) => code[Number(index)] ?? '')
-    .trim()
+  const protect = (value: string): string => `\u0000${code.push(value) - 1}\u0001`
+  const source = markdown.split('\n').map(line => line.trim()).join(' ')
+    .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)/, '')
+  const runs = [...source.matchAll(/`+/g)]
+  const next = new Map<number, number>()
+  const closing = new Map<number, number>()
+  for (let index = runs.length - 1; index >= 0; index--) {
+    const run = runs[index]!
+    const end = next.get(run[0].length)
+    if (end !== undefined) closing.set(run.index, end)
+    next.set(run[0].length, run.index)
+  }
+  const pieces: string[] = []
+  let at = 0
+  for (const match of source.matchAll(/\\[\\`*_{}[\]()#+\-.!|<>~&]|`+/g)) {
+    if (match.index < at) continue
+    pieces.push(source.slice(at, match.index))
+    const token = match[0]
+    const end = token[0] === '`' ? closing.get(match.index) : undefined
+    if (token[0] === '\\') { pieces.push(protect(token[1]!)); at = match.index + 2 }
+    else if (end !== undefined) { pieces.push(protect(source.slice(match.index + token.length, end).trim())); at = end + token.length }
+    else { pieces.push(token); at = match.index + token.length }
+  }
+  pieces.push(source.slice(at))
+  let text = pieces.join('')
+  // Destinations may contain '[' (IPv6, for example). Index the next ')' instead of retrying a destination scan at
+  // every opening label when the document has no closing parenthesis.
+  const closeParen = new Int32Array(text.length + 1)
+  let end = -1
+  for (let index = text.length; index >= 0; index--) {
+    if (text[index] === ')') end = index
+    closeParen[index] = end
+  }
+  const links: string[] = []
+  at = 0
+  for (const match of text.matchAll(/!?\[([^[\]]*)\]\(/g)) {
+    if (match.index < at || (match[1] === '' && match[0][0] !== '!')) continue
+    const close = closeParen[match.index + match[0].length]!
+    if (close === -1) continue
+    links.push(text.slice(at, match.index), match[1]!)
+    at = close + 1
+  }
+  links.push(text.slice(at))
+  text = stripPairs(links.join(''), /\*\*|__/g, false)
+  text = stripPairs(text, /[*_]/g, true)
+  text = stripPairs(text, /~~/g, false)
+  return text.replace(/\u0000(\d+)\u0001/g, (_, index: string) => code[Number(index)] ?? '').trim()
+}
+
+/** Three bounded passes replace the old backtracking emphasis expressions; unmatched syntax remains literal. */
+function stripPairs(text: string, pattern: RegExp, single: boolean): string {
+  const pending = new Map<string, number>()
+  const removed = new Uint8Array(text.length)
+  for (const match of text.matchAll(pattern)) {
+    const token = match[0]
+    const index = match.index
+    const before = text[index - 1] ?? ''
+    const after = text[index + token.length] ?? ''
+    const opening = pending.get(token)
+    if (opening !== undefined && index > opening + token.length && /\S/.test(before) && (!single || !/[\w*]/.test(after))) {
+      removed[opening] = token.length
+      removed[index] = token.length
+      pending.delete(token)
+      continue
+    }
+    if (single) pending.clear()
+    if (/\S/.test(after) && (!single || !/[\w*]/.test(before)) && (single || opening === undefined)) pending.set(token, index)
+  }
+  const pieces: string[] = []
+  let at = 0
+  for (let index = 0; index < removed.length; index++) {
+    if (removed[index] === 0) continue
+    pieces.push(text.slice(at, index))
+    at = index + removed[index]!
+  }
+  pieces.push(text.slice(at))
+  return pieces.join('')
 }
 
 const MAX_CONTAINER_MARKERS = 32

@@ -1366,7 +1366,7 @@ export const SemanticItems: Story = { tags: ['critical'], render: args => <main 
   await expect(code).toHaveAttribute('tabindex', '0')
   await expect(code).toHaveAccessibleName('Code, ts')
   await expect(code.scrollWidth).toBeGreaterThan(code.clientWidth)
-  within(code.closest<HTMLElement>('[data-testid="markdown-code-block"]')!).getByRole('button', { name: 'Copy code' }).focus()
+  within(code.closest<HTMLElement>('[data-testid="markdown-code-block"]')!).getByRole('button', { name: 'Code actions' }).focus()
   await userEvent.tab()
   await expect(code).toHaveFocus()
   const focus = getComputedStyle(code)
