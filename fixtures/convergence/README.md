@@ -428,3 +428,9 @@ added. Versions 1 through 32 remain byte-identical. Generate it with
 do not hand-edit it. The simulation and audit reports select v33. Ordinary effect
 draws retain their explicit immutable binding and confirmation-evidence mapping;
 human resolution is exercised by focused effect API and reconciliation tests.
+
+`claims-v34.json` adds opt-in pull-request admission and author policy to subscription requests
+and run lineage, with durable attribution-pending and scope-excluded receipts. Versions 1
+through 33 remain frozen. Generate it with
+`cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v34.json`;
+do not hand-edit it. The simulation and audit reports select v34.

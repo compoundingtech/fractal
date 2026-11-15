@@ -3194,6 +3194,9 @@
         "stopped": { "type": "boolean" }
       }
     },
+    "SubscriptionAdmission": {
+      "enum": ["ready-heads", "relevant-changes"]
+    },
     "SubscriptionSpec": {
       "type": "object", "additionalProperties": false,
       "required": ["observer", "to", "fields", "delivery", "stopped"],
@@ -3203,6 +3206,8 @@
         "fields": { "type": "array", "items": { "type": "string" } },
         "condition": { "type": ["object", "null"] },
         "delivery": { "type": "string" },
+        "admission": { "$ref": "#/$defs/SubscriptionAdmission" },
+        "authors": { "type": "array", "items": { "type": "string" } },
         "mission": { "type": ["string", "null"] },
         "revision": { "type": ["string", "null"] },
         "resource_input": { "type": ["string", "null"] },

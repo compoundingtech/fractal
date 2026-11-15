@@ -2879,7 +2879,13 @@ export const Session = /*#__PURE__*/ (() => Schema.Struct({
 export type Session = typeof Session.Type
 export type SessionEncoded = typeof Session.Encoded
 
+export const SubscriptionAdmission = /*#__PURE__*/ (() => Schema.Literals(["ready-heads","relevant-changes"]).annotate({ identifier: "SubscriptionAdmission" }))()
+export type SubscriptionAdmission = typeof SubscriptionAdmission.Type
+export type SubscriptionAdmissionEncoded = typeof SubscriptionAdmission.Encoded
+
 export const SubscriptionSpec = /*#__PURE__*/ (() => Schema.Struct({
+  "admission": optionalKey(SubscriptionAdmission),
+  "authors": optionalKey(Schema.Array(Schema.String)),
   "condition": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE),
   "delivery": Schema.String,
   "fields": Schema.Array(Schema.String),

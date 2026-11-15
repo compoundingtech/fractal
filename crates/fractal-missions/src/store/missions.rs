@@ -444,6 +444,34 @@ fn collection_delivery_was_requested_tx(
     Ok(false)
 }
 
+/// The latest handled change is the durable frontier, not the latest resource
+/// observation: an attribution-pending observation must not advance it.
+fn latest_relevant_delivery_tx(
+    transaction: &rusqlite::Transaction<'_>,
+    mission: &str,
+    scope: &str,
+    resource: &str,
+) -> rusqlite::Result<Option<(String, String)>> {
+    let mut statement = transaction.prepare(&canonical_sql(
+        "SELECT request.subject,
+                json_extract(request.body, '$.fields.delivery_key'),
+                json_extract(request.body, '$.fields.change_identity')
+         FROM claims AS request WHERE request.kind='subscription.mission-requested'
+           AND json_extract(request.body, '$.fields.mission')=?1
+           AND json_extract(request.body, '$.fields.resource')=?2
+           AND json_extract(request.body, '$.fields.admission')='relevant-changes'
+         ORDER BY CANONICAL_DESC(request)",
+    ))?;
+    let mut rows = statement.query(params![format!("mission/{mission}"), resource])?;
+    while let Some(row) = rows.next()? {
+        let subject: String = row.get(0)?;
+        if subject.rsplit('/').next() == Some(scope) {
+            return Ok(Some((row.get(1)?, row.get(2)?)));
+        }
+    }
+    Ok(None)
+}
+
 /// The seat that registered a comment or review, by its GitHub ID, never by login.
 pub fn github_posted_by_tx(
     connection: &Connection,
@@ -7559,12 +7587,24 @@ impl MissionsStore for Store {
                         if baseline || !target_exists || subscription.watch.is_some() {
                             return None;
                         }
-                        let selected = changed_fields
+                        let mut selected = changed_fields
                             .iter()
                             .filter(|field| field.as_str() != crate::resource::github_workflows::PERFORMANCE_FAILURES_FIELD)
                             .filter(|field| subscription.fields.contains(field))
                             .cloned()
                             .collect::<Vec<_>>();
+                        if subscription.admission == Some(crate::model::SubscriptionAdmission::RelevantChanges)
+                            && !selected.iter().any(|field| field == "pull_requests")
+                            && discovered.iter().any(|(field, item)| {
+                                *field == "pull_requests" && pull_request_has_relevant_change(
+                                    recorded_items.get(&item.subject).and_then(Option::as_ref)
+                                        .map(|(facts, _)| facts),
+                                    &item.facts,
+                                )
+                            })
+                        {
+                            selected.push("pull_requests".into());
+                        }
                         if selected.is_empty() {
                             return None;
                         }
@@ -7697,8 +7737,17 @@ impl MissionsStore for Store {
                             .and_then(|(prior, _)| prior.as_object()),
                         item_facts.as_object().expect("item facts are an object"),
                     );
+                    let policy_snapshot_needed = field == "pull_requests"
+                        && active_subscriptions.iter().any(|(_, subscription)| {
+                            subscription.admission == Some(crate::model::SubscriptionAdmission::RelevantChanges)
+                                || subscription.authors.is_some()
+                        })
+                        && pull_request_has_relevant_change(
+                            recorded_items.get(&subject).and_then(Option::as_ref).map(|(prior, _)| prior),
+                            &item_facts,
+                        );
                     let claim = match &compact_state {
-                        Some(state) if compact && !delivery_changed => {
+                        Some(state) if compact && !delivery_changed && !policy_snapshot_needed => {
                             match &newest_state {
                                 // An unchanged state is pinned as it is, unless a plain message
                                 // delivers the item: then the message gets a claim of its own.
@@ -8139,7 +8188,22 @@ impl MissionsStore for Store {
                             let uses_collection = selected
                                 .iter()
                                 .any(|field| matches!(field.as_str(), "pull_requests" | "issues"));
-                            let discoveries = if uses_collection {
+                            let relevant_changes = subscription.admission
+                                == Some(crate::model::SubscriptionAdmission::RelevantChanges);
+                            let mut discoveries = if relevant_changes {
+                                item_claims.iter()
+                                    .filter(|(_, subject, _, facts)| {
+                                        subject.contains("/pull-request/")
+                                            && pull_request_has_relevant_change(
+                                                recorded_items.get(subject.as_str())
+                                                    .and_then(Option::as_ref)
+                                                    .map(|(facts, _)| facts),
+                                                facts,
+                                            )
+                                    })
+                                    .map(|(_, subject, claim, _)| (subject.clone(), claim.clone()))
+                                    .collect::<Vec<_>>()
+                            } else if uses_collection {
                                 selected
                                     .iter()
                                     .flat_map(|field| {
@@ -8156,6 +8220,19 @@ impl MissionsStore for Store {
                                     .map(|claim| vec![(resource.to_owned(), claim.id.clone())])
                                     .unwrap_or_default()
                             };
+                            if !relevant_changes && subscription.authors.is_some() && uses_collection {
+                                for (_, subject, claim, facts) in &selected_items {
+                                    let prior = recorded_items.get(subject.as_str())
+                                        .and_then(Option::as_ref).map(|(prior, _)| prior);
+                                    if subject.contains("/pull-request/")
+                                        && prior.and_then(|prior| prior.get("author")) != facts.get("author")
+                                        && pull_request_needs_review(None, facts)
+                                        && !discoveries.iter().any(|(known, _)| known == subject)
+                                    {
+                                        discoveries.push((subject.clone(), claim.clone()));
+                                    }
+                                }
+                            }
                             for (delivery_resource, discovery) in discoveries {
                                 let (discovery_kind, discovery_subject, discovery_body) = transaction
                                     .query_row("SELECT kind, subject, body FROM claims WHERE id=?1", [&discovery], |row| {
@@ -8186,7 +8263,37 @@ impl MissionsStore for Store {
                                     .rsplit('/')
                                     .next()
                                     .expect("a subscription subject has a local name");
-                                let delivery_key = if uses_collection {
+                                let change_identity = if relevant_changes {
+                                    Some(canonical_hash(&pull_request_change_facts(
+                                        &discovery_body["fields"]["facts"],
+                                    )).map_err(internal)?)
+                                } else {
+                                    None
+                                };
+                                let previous_delivery = if relevant_changes {
+                                    latest_relevant_delivery_tx(
+                                        transaction, mission, delivery_scope, &delivery_resource,
+                                    ).map_err(internal)?
+                                } else {
+                                    None
+                                };
+                                if change_identity.as_deref().is_some_and(|identity| {
+                                    previous_delivery.as_ref().is_some_and(|(_, prior)| prior == identity)
+                                }) {
+                                    continue;
+                                }
+                                let delivery_key = if relevant_changes {
+                                    canonical_hash(&(
+                                        "relevant-changes",
+                                        mission,
+                                        delivery_scope,
+                                        &repository_identity,
+                                        kind,
+                                        number,
+                                        previous_delivery.as_ref().map(|(key, _)| key),
+                                        &change_identity,
+                                    ))
+                                } else if uses_collection {
                                     canonical_hash(&(
                                         mission,
                                         delivery_scope,
@@ -8199,23 +8306,94 @@ impl MissionsStore for Store {
                                     canonical_hash(&(subscription_subject, &discovery))
                                 }
                                 .map_err(internal)?;
-                                if uses_collection
-                                    && (collection_delivery_was_requested_tx(
-                                        transaction,
-                                        mission,
-                                        delivery_scope,
-                                        &delivery_resource,
-                                        head,
-                                        &delivery_key,
-                                    )
-                                    .map_err(internal)?
+                                let already_requested = if relevant_changes {
+                                    transaction.query_row(
+                                        "SELECT 1 FROM claims WHERE kind='subscription.mission-requested'
+                                         AND json_extract(body, '$.fields.delivery_key')=?1 LIMIT 1",
+                                        [&delivery_key], |_| Ok(()),
+                                    ).optional().map_err(internal)?.is_some()
+                                } else {
+                                    uses_collection && (collection_delivery_was_requested_tx(
+                                        transaction, mission, delivery_scope, &delivery_resource,
+                                        head, &delivery_key,
+                                    ).map_err(internal)?
                                         || routed_to_owner_tx(transaction, &delivery_key)?)
+                                };
+                                if already_requested
                                 {
                                     continue;
                                 }
                                 // An item that a live agent owns goes to that agent, and no
                                 // review, triage, or person sees it.
                                 let item_facts = &discovery_body["fields"]["facts"];
+                                if let Some(authors) = subscription.authors.as_ref() {
+                                    let author = item_facts.get("author").and_then(Value::as_str)
+                                        .filter(|author| !author.trim().is_empty());
+                                    let status = match author {
+                                        None => Some("attribution-pending"),
+                                        Some(author) if !authors.iter().any(|login| login.eq_ignore_ascii_case(author)) =>
+                                            Some("scope-excluded"),
+                                        Some(_) => None,
+                                    };
+                                    if let Some(status) = status {
+                                        append_first_receipt_claim_tx(
+                                            transaction,
+                                            &self.origin,
+                                            subscription_subject,
+                                            "subscription.attribution",
+                                            None,
+                                            &json!({"fields": {
+                                                "resource": delivery_resource,
+                                                "discovery": discovery,
+                                                "status": status,
+                                                "authors": authors,
+                                                "reason": if author.is_none() {
+                                                    "GitHub author metadata is missing; awaiting native detail refresh"
+                                                } else {
+                                                    "GitHub author is outside the subscription allowlist"
+                                                },
+                                            }, "evidence": [discovery]}),
+                                            &[],
+                                            Some(&batches.with_observation(transaction, &self.origin)?),
+                                            &mut receipt_key,
+                                        ).map_err(claim_append_error)?;
+                                        if author.is_none()
+                                            && fractal_store::store::observer_refresh::pending_attempt(transaction, observer)
+                                                .map_err(internal)?.is_none()
+                                        {
+                                            let revision = transaction.query_row(
+                                                "SELECT revision FROM desired WHERE subject=?1 AND kind='observer'",
+                                                [observer], |row| row.get::<_, String>(0),
+                                            ).optional().map_err(internal)?;
+                                            if let Some(revision) = revision {
+                                                append_first_receipt_claim_tx(
+                                                    transaction, &self.origin, observer,
+                                                    "observer.refresh-requested", None,
+                                                    &json!({"fields": {
+                                                        "revision": revision,
+                                                        "attempt": format!("attribution-{delivery_key}"),
+                                                    }}), &[],
+                                                    Some(&batches.with_observation(transaction, &self.origin)?),
+                                                    &mut receipt_key,
+                                                ).map_err(claim_append_error)?;
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    append_first_receipt_claim_tx(
+                                        transaction, &self.origin, subscription_subject,
+                                        "subscription.attribution", None,
+                                        &json!({"fields": {
+                                            "resource": delivery_resource,
+                                            "discovery": discovery,
+                                            "status": "matched",
+                                            "authors": authors,
+                                            "reason": "GitHub author matches the subscription allowlist",
+                                        }, "evidence": [discovery]}), &[],
+                                        Some(&batches.with_observation(transaction, &self.origin)?),
+                                        &mut receipt_key,
+                                    ).map_err(claim_append_error)?;
+                                }
                                 if uses_collection
                                     && subscription.owner_message
                                     && let Some((owner, why)) =
@@ -8245,6 +8423,17 @@ impl MissionsStore for Store {
                                     "discovery": discovery,
                                     "delivery_key": delivery_key,
                                 });
+                                if relevant_changes {
+                                    request_fields["admission"] = json!("relevant-changes");
+                                    request_fields["change_identity"] = json!(change_identity.as_deref()
+                                        .expect("relevant changes have an identity"));
+                                    if let Some((key, _)) = &previous_delivery {
+                                        request_fields["previous_delivery_key"] = json!(key);
+                                    }
+                                }
+                                if let Some(authors) = &subscription.authors {
+                                    request_fields["authors"] = json!(authors);
+                                }
                                 if let Some(revision) = subscription.revision.as_deref() {
                                     request_fields
                                         .as_object_mut()

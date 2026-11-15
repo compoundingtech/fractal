@@ -384,6 +384,120 @@ fn render_desired_value(value: &Value) -> Result<KdlValue, FractalError> {
 mod tests {
     use super::*;
 
+    fn admission_source(provider: &str, fields: &str, options: &str) -> String {
+        format!(
+            r#"version 2
+resource "repo" {{ kind "vcs.repository" }}
+observer "github" {{ resource "resource/repo"; provider "{provider}"; locator "example/repo"; field "pull_requests" }}
+subscription "hygiene" {{
+  observer "observer/github"
+  {fields}
+  delivery "mission" {{ mission "example/evaluate"; resource "pull-request"; workspace "/srv/hygiene"; {options} }}
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn subscription_admission_round_trips_canonical_render_and_json() {
+        use crate::model::SubscriptionAdmission;
+
+        let source = admission_source(
+            "github.repository",
+            r#"on "pull_requests"; on "comments""#,
+            r#"admission "relevant-changes"; author "Orchid-bot"; author "fern""#,
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let desired = &intent.subjects["subscription/hygiene"].desired;
+        let spec = subscription_spec(desired).unwrap();
+        assert_eq!(spec.admission, Some(SubscriptionAdmission::RelevantChanges));
+        assert_eq!(spec.authors, Some(vec!["Orchid-bot".into(), "fern".into()]));
+        let encoded = serde_json::to_value(&spec).unwrap();
+        assert_eq!(encoded["admission"], "relevant-changes");
+        assert_eq!(serde_json::from_value::<SubscriptionSpec>(encoded).unwrap(), spec);
+        let rendered = format!("version 2\n{}", render_desired_node(desired).unwrap());
+        let reparsed = parse_intent(&rendered, "node").unwrap();
+        assert_eq!(&reparsed.subjects["subscription/hygiene"].desired, desired);
+        assert_eq!(
+            subscription_spec(&reparsed.subjects["subscription/hygiene"].desired),
+            Some(spec),
+        );
+    }
+
+    #[test]
+    fn subscription_admission_omission_preserves_legacy_wire_and_canonical_hash() {
+        use crate::model::SubscriptionAdmission;
+
+        let source = admission_source("github.repository", r#"on "pull_requests""#, "");
+        let intent = parse_intent(&source, "node").unwrap();
+        let desired = &intent.subjects["subscription/hygiene"].desired;
+        let spec = subscription_spec(desired).unwrap();
+        assert_eq!(spec.admission, None);
+        assert_eq!(spec.admission.unwrap_or_default(), SubscriptionAdmission::ReadyHeads);
+        assert_eq!(spec.authors, None);
+        let encoded = serde_json::to_value(&spec).unwrap();
+        assert!(encoded.get("admission").is_none());
+        assert!(encoded.get("authors").is_none());
+        assert_eq!(serde_json::from_value::<SubscriptionSpec>(encoded).unwrap(), spec);
+        let document: KdlDocument = source.parse().unwrap();
+        let declarations = document.nodes().iter()
+            .filter(|node| node.name().value() != "version")
+            .map(crate::declaration_kdl::canonical_node)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let legacy_normalized = json!({ "version": 2, "declarations": declarations });
+        assert_eq!(intent.normalized, legacy_normalized);
+        assert_eq!(
+            intent.source_hash,
+            hex::encode(Sha256::digest(serde_json::to_vec(&legacy_normalized).unwrap())),
+        );
+        let stopped = parse_intent("version 2\nsubscription \"hygiene\" { stop; }\n", "node").unwrap();
+        let stopped = subscription_spec(&stopped.subjects["subscription/hygiene"].desired).unwrap();
+        assert_eq!(stopped.admission, None);
+        assert_eq!(stopped.authors, None);
+    }
+
+    #[test]
+    fn subscription_admission_accepts_explicit_ready_heads_and_author_scope() {
+        let source = admission_source(
+            "github.repository",
+            r#"on "pull_requests""#,
+            r#"admission "ready-heads"; author "orchid-bot""#,
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let spec = subscription_spec(&intent.subjects["subscription/hygiene"].desired).unwrap();
+        assert_eq!(spec.admission, Some(crate::model::SubscriptionAdmission::ReadyHeads));
+        assert_eq!(spec.authors, Some(vec!["orchid-bot".into()]));
+    }
+
+    #[test]
+    fn subscription_admission_rejects_incompatible_delivery_and_invalid_scope() {
+        for (provider, fields, options, code) in [
+            ("github.repository", r#"on "pull_requests""#, r#"admission "unknown""#, "invalid-subscription-admission"),
+            ("github.repository", r#"on "pull_requests""#, r#"admission "relevant-changes"; text "items""#, "invalid-subscription-admission"),
+            ("github.repository", r#"on "pull_requests""#, r#"admission "relevant-changes"; owner "message""#, "invalid-subscription-admission"),
+            ("github.repository", r#"on "mentions"; mention "orchid""#, r#"admission "relevant-changes""#, "invalid-subscription-admission"),
+            ("github.repository", r#"on "issues""#, r#"admission "relevant-changes""#, "invalid-subscription-admission"),
+            ("example.queue", r#"on "pull_requests""#, r#"admission "relevant-changes""#, "invalid-subscription-admission"),
+            ("github.pull-request", r#"on "pull_requests""#, r#"admission "relevant-changes""#, "invalid-subscription-admission"),
+            ("github.repository", r#"on "pull_requests""#, r#"author " ""#, "invalid-subscription-author"),
+            ("github.repository", r#"on "pull_requests""#, r#"author "orchid"; author "Orchid""#, "duplicate-subscription-author"),
+        ] {
+            let source = admission_source(provider, fields, options);
+            assert_eq!(parse_intent(&source, "node").unwrap_err().code, code, "{source}");
+        }
+        for source in [
+            r#"version 2
+subscription "s" { observer "observer/github"; on "pull_requests"; to "agent/example"; delivery "message" { every "30m"; admission "relevant-changes"; } }
+"#,
+            r#"version 2
+subscription "s" { observer "observer/github"; on "pull_requests"; admission "relevant-changes"; delivery "mission" { mission "example/evaluate"; resource "pull-request"; workspace "/srv/hygiene"; } }
+"#,
+        ] {
+            assert!(parse_intent(source, "node").is_err(), "{source}");
+        }
+    }
+
     #[test]
     fn revision_tokens_resolve_to_the_revision_the_same_bundle_stores() {
         // `weekly` nests a schedule pinning `cycle`, and `daily` pins `weekly`: the chain settles
