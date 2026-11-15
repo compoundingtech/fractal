@@ -4530,6 +4530,106 @@ mod tests {
         assert!(gate.card().await.is_some(), "a refused dismissal leaves the gate asking");
     }
 
+    /// o reaches st through the dispatch every action uses: the answer chosen replaces the default
+    /// an ask resolved with, so the ask leaves what st lists as resolved by itself, and another
+    /// person's answer to it is refused.
+    #[tokio::test]
+    async fn an_override_reaches_st_and_the_ask_leaves_the_auto_resolved_list() {
+        use fractal_daemon::{PersonWorkStore as _, SeatsStoreCore as _};
+        use std::sync::Arc;
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-override").unwrap());
+        store.set_ask_deadlines(true);
+        let asked_at = fractal_daemon::api::client_now_ms().saturating_sub(120_000);
+        smallclaims::store::set_thread_clock(Some(asked_at));
+        store.graph.set_write_clock_at(asked_at).unwrap();
+        let intent = fractal_daemon::graph::parse_intent(
+            "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+            store.origin(),
+        )
+        .unwrap();
+        store.apply_internal(&intent, "ui-override-agent").unwrap();
+        store
+            .ask_person(&fractal_daemon::model::PersonAskRequest {
+                priority: None,
+                deadline_ms: Some(60_000),
+                default_answer: Some("hold".into()),
+                legacy_request: None,
+                person: "person/avery".into(),
+                title: "Ship?".into(),
+                reason: "Release choice".into(),
+                actor: format!("agent/{}.asker", store.origin()),
+                step: None,
+                new_run: Some("ui-override".into()),
+                incarnation: None,
+                idempotency_key: "ui-override-ask".into(),
+                request: Some(serde_json::json!({"version": 1, "type": "choice", "question": "Ship?",
+                    "why_person": "Release choice", "answers": [
+                        {"id": "hold", "label": "Hold", "consequence": "The release waits."},
+                        {"id": "ship", "label": "Ship", "consequence": "The release ships."}]})),
+            })
+            .unwrap();
+        store.reconcile_person_asks_at(asked_at).unwrap();
+        smallclaims::store::set_thread_clock(Some(asked_at + 60_001));
+        store.graph.set_write_clock_at(asked_at + 60_001).unwrap();
+        assert!(store.reconcile_person_asks_at(asked_at + 60_001).unwrap().changed);
+        smallclaims::store::set_thread_clock(None);
+        store.graph.set_write_clock_at(fractal_daemon::api::client_now_ms()).unwrap();
+        let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "ui-override".into(),
+            api_socket: root.path().join("api.sock"),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
+        let socket = root.path().join("daemon.sock");
+        let path = socket.clone();
+        let server = tokio::spawn(async move {
+            fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap();
+        });
+        for _ in 0..200 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let client = Client::unix_as(&socket, "person/avery");
+        let listed = client.auto_resolved_list().await.unwrap().value;
+        let [ask] = listed.items.as_slice() else { panic!("{:?}", listed.items) };
+        let target = &ask.action_parameters.as_ref().expect("the window is open")["work.override"];
+        let effect = Effect::Override {
+            target_id: target.target_id.clone(),
+            episode: target.episode.clone(),
+            answer: "ship".into(),
+            text: None,
+            label: "Ship".into(),
+        };
+        let model = Model::default();
+        let other = Client::unix_as(&socket, "person/blair");
+        perform(&other, "person/blair", &model, effect.clone(), None)
+            .await
+            .expect_err("only the person asked may answer instead");
+        assert_eq!(client.auto_resolved_list().await.unwrap().value.items.len(), 1);
+        let (notice, _) = perform(&client, "person/avery", &model, effect, None).await.unwrap();
+        assert_eq!(notice, "Answered “Ship” instead of the default");
+        assert!(client.auto_resolved_list().await.unwrap().value.items.is_empty());
+        server.abort();
+    }
+
     #[tokio::test]
     async fn live_sends_retries_discussions_and_creation_survive_daemon_restarts() {
         use std::sync::Arc;
