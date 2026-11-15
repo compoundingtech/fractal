@@ -2862,6 +2862,27 @@ export const Runtime = /*#__PURE__*/ (() => Schema.Struct({
 export type Runtime = typeof Runtime.Type
 export type RuntimeEncoded = typeof Runtime.Encoded
 
+export const ScheduledMessage = /*#__PURE__*/ (() => Schema.Struct({
+  "at": Timestamp,
+  "at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "blocker": optionalKey(Schema.String),
+  "cancel_reason": optionalKey(Schema.String),
+  "content": Schema.String,
+  "from": Id,
+  "id": Id,
+  "key": Schema.String,
+  "kind": Schema.Literal("scheduled-message"),
+  "message_id": optionalKey(Id),
+  "operational": optionalKey(Operational),
+  "owner": optionalKey(Schema.String),
+  "revision": Revision,
+  "state": Schema.Literals(["pending","delivered","cancelled"]),
+  "to": Id,
+  "updated_at": Timestamp
+}).annotate({ identifier: "ScheduledMessage" }))()
+export type ScheduledMessage = typeof ScheduledMessage.Type
+export type ScheduledMessageEncoded = typeof ScheduledMessage.Encoded
+
 export const Session = /*#__PURE__*/ (() => Schema.Struct({
   "ended_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "id": Id,
@@ -2941,7 +2962,7 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","device-command","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage","harness-question"]),
+  "kind": unknownCase(["attention","message","scheduled-message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","device-command","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage","harness-question"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -3198,6 +3219,7 @@ export type Work = typeof Work.Type
 export type WorkEncoded = typeof Work.Encoded
 
 export const Resource = /*#__PURE__*/ (() => Schema.Union([
+  ScheduledMessage,
   ConnectedClient,
   Usage,
   Summary,
@@ -4912,6 +4934,7 @@ export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "kind": openEnum([
   "attention",
   "message",
+  "scheduled-message",
   "launch",
   "launch-variant",
   "launch-decision",

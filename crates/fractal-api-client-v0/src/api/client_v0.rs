@@ -169,6 +169,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
         .route("/v1/client/harness-questions", get(harness_questions::list))
         .route("/v1/client/harness-questions/{*id}", get(harness_questions::get))
+        .route("/v1/client/scheduled-messages", get(scheduled_messages_list))
+        .route("/v1/client/scheduled-messages/{*id}", get(scheduled_messages_detail))
         .route("/v1/client/lanes", get(lanes))
         .route("/v1/client/lanes/{*id}", get(lane_detail))
         .route(
@@ -8247,6 +8249,54 @@ async fn create_terminal(
     Ok(vec![format!("terminal/{subject}")])
 }
 
+fn scheduled_message_resource(
+    state: &AppState,
+    scheduled: crate::model::ScheduledMessageView,
+) -> Result<Value, ApiError> {
+    let latest = state.store.claims_for(&scheduled.id, None).map_err(ApiError::internal)?
+        .into_iter()
+        .filter(|claim| fractal_schema::scheduled_messages::KINDS.contains(&claim.kind.as_str()))
+        .max_by_key(|claim| (claim.accepted_at_unix_ms, claim.store_index))
+        .ok_or_else(|| ApiError::internal("a scheduled message has no durable request"))?;
+    let mut value = serde_json::to_value(scheduled).map_err(ApiError::internal)?;
+    value["kind"] = json!("scheduled-message");
+    value["revision"] = json!(latest.id);
+    value["updated_at"] = json!(client_timestamp(latest.accepted_at_unix_ms));
+    Ok(value)
+}
+
+pub async fn scheduled_messages_list(
+    State(state): State<AppState>,
+    Extension(snapshot): Extension<ClientSnapshot>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<ClientListQuery>,
+) -> Result<ClientPageResponse, ApiError> {
+    require_scope(&session, "read.projections")?;
+    blocking_api(move || {
+        let items = if query.cursor.is_none() {
+            state.store.scheduled_messages().map_err(ApiError::internal)?
+                .into_iter().map(|scheduled| scheduled_message_resource(&state, scheduled))
+                .collect::<Result<Vec<_>, _>>()?
+        } else { Vec::new() };
+        let page = client_page(&state, &snapshot, "scheduled-messages", items, &query)?;
+        Ok((Extension(snapshot), Json(page)))
+    }).await
+}
+
+pub async fn scheduled_messages_detail(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    blocking_api(move || {
+        let id = client_detail_id("message-schedule", &id);
+        let scheduled = state.store.scheduled_message(&id).map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found(format!("scheduled message `{id}` does not exist")))?;
+        scheduled_message_resource(&state, scheduled).map(Json)
+    }).await
+}
+
 async fn dispatch_action(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -8479,9 +8529,10 @@ async fn dispatch_action(
             if let Some(session_id) = session_id.as_deref() {
                 validate_message_session(state, snapshot, &to, session_id)?;
             }
-            let result = accept_message_receipt_with_upload_owner(
+            let result = accept_message_response_authorized(
                 state,
                 MessageSendRequest {
+                at: p.get("at").map(|_| parameter_string(p, "at")).transpose()?,
                 owner: None,
                 idempotency_key: request.idempotency_key.clone(),
                 // Owner authority permits the operation, but is never the assistant's sender.
@@ -8511,8 +8562,7 @@ async fn dispatch_action(
                     .map_err(|_| {
                         validation("attachments are `{blob, media_type, name?}` records")
                     })?
-                    .unwrap_or_default(),
-                },
+                    .unwrap_or_default(), },
                 session_id,
                 p.get("signature")
                     .map(|signature| {
@@ -8523,9 +8573,25 @@ async fn dispatch_action(
                     .transpose()?,
                 None,
                 session.assistant_write.as_ref(),
-            )?
-            .message;
-            Ok(vec![result.subject])
+                None,
+            )?;
+            Ok(vec![match result {
+                crate::model::MessageSendResponse::Sent(receipt) => receipt.message.subject,
+                crate::model::MessageSendResponse::Scheduled { scheduled } => scheduled.id,
+            }])
+        }
+        "message.cancel-scheduled" => {
+            if session.assistant_write.is_some() || !acting_party(session) {
+                return Err(forbidden("scheduled cancellation requires its authenticated sender or target"));
+            }
+            let parameters: fractal_client::ScheduledMessageCancelParameters =
+                serde_json::from_value(p.clone()).map_err(|error| validation(error.to_string()))?;
+            let store = state.store.clone();
+            let actor = authority_actor.clone();
+            let scheduled = blocking_action(move || store.cancel_scheduled_message(
+                &parameters.target_id, &actor, &parameters.reason)).await?;
+            signal_changed(state);
+            Ok(vec![scheduled.id])
         }
         "message.read" | "message.close" => {
             let target = parameter_string(p, "target_id")?;
@@ -13596,6 +13662,71 @@ mission "differential" state="ready" {
         assert_eq!(child.entries()[0].value(), &kdl::KdlValue::Null);
     }
 
+    fn scheduled_fixture(state: &AppState) -> crate::model::ScheduledMessageView {
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"example/timed-target\" { command \"true\"; workspace \"/tmp\"; }",
+            "terminal-test",
+        ).unwrap();
+        let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+        state.store.apply_as(&intent, &expected, "example-timed-target", Some("person/example")).unwrap();
+        let request: MessageSendRequest = serde_json::from_value(json!({
+            "idempotency_key": "example-client-timed-message",
+            "from": "person/example", "to": "agent/example/timed-target",
+            "content": "Review the example report", "at": "2030-01-02T03:04:05Z",
+        })).unwrap();
+        match accept_message_response_authorized(state, request, None, None, None, None, None).unwrap() {
+            crate::model::MessageSendResponse::Scheduled { scheduled } => scheduled,
+            crate::model::MessageSendResponse::Sent(_) => panic!("timed request inserted mail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_client_reads_expose_pending_identity_and_require_projection_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let scheduled = scheduled_fixture(&state);
+        let reader = ClientSession::for_tests_scoped("person/example", "person/example", &["read.projections"]);
+        let (_, Json(page)) = scheduled_messages_list(State(state.clone()),
+            Extension(new_client_snapshot(&state)), Extension(reader.clone()),
+            Query(ClientListQuery::default())).await.unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0]["kind"], "scheduled-message");
+        assert_eq!(page.items[0]["id"], scheduled.id);
+        assert_eq!(page.items[0]["state"], "pending");
+        assert_eq!(page.items[0]["at"], scheduled.at);
+        assert!(page.items[0]["blocker"].is_string());
+        assert!(page.items[0].get("message_id").is_none());
+        let Json(detail) = scheduled_messages_detail(State(state.clone()), Extension(reader),
+            AxumPath(scheduled.id.clone())).await.unwrap();
+        assert_eq!(detail, page.items[0]);
+        let denied = ClientSession::for_tests_scoped("person/example", "person/example", &[]);
+        assert_eq!(scheduled_messages_detail(State(state), Extension(denied),
+            AxumPath(scheduled.id)).await.unwrap_err().status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn scheduled_client_cancel_uses_session_actor_and_refuses_claimed_actor() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let scheduled = scheduled_fixture(&state);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let snapshot = new_client_snapshot(&state);
+        let request: ActionRequest = serde_json::from_value(json!({
+            "api_version": CLIENT_API_VERSION, "id": "action/example-cancel-timed",
+            "type": "message.cancel-scheduled", "idempotency_key": "example-cancel-timed",
+            "fence": { "snapshot_id": snapshot.id, "subject_revisions": {} },
+            "parameters": { "target_id": scheduled.id, "reason": "No longer needed" },
+        })).unwrap();
+        assert_eq!(action_scope("message.cancel-scheduled"), Some("control.messages"));
+        let error = dispatch_action(&state, &snapshot, &session, &request).await.unwrap_err();
+        assert_eq!(error.code, "scheduled-message-forbidden");
+        let mut spoofed = request.clone();
+        spoofed.parameters["actor"] = json!("person/example");
+        let error = dispatch_action(&state, &snapshot, &session, &spoofed).await.unwrap_err();
+        assert_eq!(error.code, "validation-failed");
+        assert_eq!(state.store.scheduled_message(&scheduled.id).unwrap().unwrap().state, "pending");
+    }
+
     fn test_state(root: &Path) -> AppState {
         test_state_named(root, "terminal-test")
     }
@@ -13824,8 +13955,7 @@ mission "differential" state="ready" {
             .unwrap();
         let sent = accept_message(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: "timeline-attachment".into(),
             from: "person/alex".into(),
             to: "agent/terminal-test.seat".into(),
@@ -13837,8 +13967,7 @@ mission "differential" state="ready" {
                 blob: format!("blob/{hash}"),
                 media_type: "image/png".into(),
                 name: Some("paste.png".into()),
-            }],
-            },
+            }], },
             None,
             None,
         )
@@ -13862,8 +13991,7 @@ mission "differential" state="ready" {
         // A message without attachments has no such key.
         let plain = accept_message(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: "timeline-plain".into(),
             from: "person/alex".into(),
             to: "agent/terminal-test.seat".into(),
@@ -13871,8 +13999,7 @@ mission "differential" state="ready" {
             title: None,
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
             None,
             None,
         )
@@ -20463,8 +20590,7 @@ mission "example/zero-run" state="ready" {
 
         let _ = accept_message(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: "session-message-older".into(),
             from: client_session.authority_actor.clone(),
             to: subject.into(),
@@ -20472,8 +20598,7 @@ mission "example/zero-run" state="ready" {
             title: None,
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
             Some("session/older-incarnation".into()),
             None,
         )
@@ -20522,8 +20647,7 @@ mission "example/zero-run" state="ready" {
         // The agent's own Fractal joins its conversation, saying who wrote to whom.
         let _ = accept_message(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: "session-message-outgoing".into(),
             from: subject.into(),
             to: "agent/session-message-peer".into(),
@@ -20531,8 +20655,7 @@ mission "example/zero-run" state="ready" {
             title: Some("A question".into()),
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
             None,
             None,
         )

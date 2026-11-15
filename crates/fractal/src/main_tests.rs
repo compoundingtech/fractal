@@ -5100,6 +5100,7 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         wake: MessageWakeArgs::default(),
         print_kdl: false,
         idempotency_key: Some("refuse-a-person".into()),
+        at: None,
         allow_undeclared_recipient: false,
     };
     for to in ["person/ada", "requester"] {
@@ -6305,6 +6306,42 @@ fn fyi_is_the_silent_kind_on_send_and_reply() {
 }
 
 #[test]
+fn timed_message_send_parses_absolute_at_and_key_alias() {
+    let cli = Cli::try_parse_from([
+        "fractal", "messages", "send", "agent/example/reader", "--from", "agent/example/writer",
+        "--body", "Review the current facts.", "--at", "2027-01-02T14:00:00+02:00", "--key", "review-once",
+    ]).unwrap();
+    let Command::Conversations { command: MessageCommand::Send(args) } = cli.command else {
+        panic!("timed send did not parse");
+    };
+    assert_eq!(args.at.as_deref(), Some("2027-01-02T12:00:00Z"));
+    assert_eq!(args.idempotency_key.as_deref(), Some("review-once"));
+}
+
+#[test]
+fn timed_message_send_rejects_malformed_or_relative_at_before_network_access() {
+    for at in ["tomorrow", "10m", "2027-01-02", "2027-01-02T12:00:00", "not-a-time", "1960-01-01T00:00:00Z"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "messages", "send", "agent/example/reader", "--from", "agent/example/writer",
+            "--body", "Reminder", "--at", at,
+        ]).is_err(), "{at}");
+    }
+}
+
+#[test]
+fn scheduled_message_commands_parse_and_cancel_requires_a_reason() {
+    for args in [
+        vec!["fractal", "messages", "scheduled", "ls"],
+        vec!["fractal", "messages", "scheduled", "show", "scheduled-message/example"],
+        vec!["fractal", "messages", "scheduled", "cancel", "scheduled-message/example", "--reason", "No longer needed"],
+    ] {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(cli.command, Command::Conversations { command: MessageCommand::Scheduled { .. } }));
+    }
+    assert!(Cli::try_parse_from(["fractal", "messages", "scheduled", "cancel", "scheduled-message/example"]).is_err());
+}
+
+#[test]
 fn message_send_and_reply_accept_a_key_for_unconfirmed_retries() {
     let send = Cli::try_parse_from([
         "st3",
@@ -6379,8 +6416,7 @@ fn message_send_and_reply_accept_a_key_for_unconfirmed_retries() {
 
 #[test]
 fn a_derived_message_key_names_one_message_in_one_hour() {
-    let request = MessageSendRequest {
-    owner: None,
+    let request = MessageSendRequest { at: None, owner: None,
     idempotency_key: String::new(),
     from: "person/avery".into(),
     to: "agent/example/worker".into(),
@@ -6388,8 +6424,7 @@ fn a_derived_message_key_names_one_message_in_one_hour() {
     title: Some("Merge train".into()),
     in_reply_to: None,
     tags: Vec::new(),
-    attachments: Vec::new(),
-    };
+    attachments: Vec::new(), };
     let key = derived_message_key(&request, None, 490_000);
     // The key never changes between builds: a retry after an upgrade finds the first send.
     assert_eq!(key, "st3-message:v1:31bd263335cbfc5fa34d30ccafe56f43");
@@ -6652,8 +6687,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let first: MessageView = client
         .post(
             "/v1/messages",
-            &MessageSendRequest {
-            owner: None,
+            &MessageSendRequest { at: None, owner: None,
             idempotency_key: "message-read-final-state".into(),
             from: "agent/sender".into(),
             to: "agent/sup".into(),
@@ -6661,8 +6695,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
             title: None,
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
         )
         .await
         .unwrap();
@@ -6674,8 +6707,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let second: MessageView = client
         .post(
             "/v1/messages",
-            &MessageSendRequest {
-            owner: None,
+            &MessageSendRequest { at: None, owner: None,
             idempotency_key: "message-read-archive-final-state".into(),
             from: "agent/sender".into(),
             to: "agent/sup".into(),
@@ -6683,8 +6715,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
             title: None,
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
         )
         .await
         .unwrap();

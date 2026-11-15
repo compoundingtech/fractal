@@ -3294,17 +3294,15 @@ async fn send_message(
     sent: Option<&Mutex<Option<Sent>>>,
     snapshot_hint: Option<String>,
 ) -> Result<Option<String>> {
-    let parameters = MessageSendParameters {
-        to: to.to_owned(),
-        content,
-        title,
-        in_reply_to,
-        session_id,
-        tags,
-        kind: fractal_client::MessageKind::Wake,
-        attachments,
-        signature: None,
-    };
+    let parameters = MessageSendParameters { at: None, to: to.to_owned(),
+    content,
+    title,
+    in_reply_to,
+    session_id,
+    tags,
+    kind: fractal_client::MessageKind::Wake,
+    attachments,
+    signature: None, };
     let message_id = |result: fractal_client::Envelope<fractal_client::ActionResult>| {
         // The new message's id, so the pending copy can give way to the real one.
         result

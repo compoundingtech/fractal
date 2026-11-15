@@ -366,6 +366,8 @@ public actor FractalClient {
     public func attentionGet(id: String) async throws -> Envelope<Resource> { try await resource("attention", id: id) }
     public func messagesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("messages", cursor: cursor, limit: limit, history: history) }
     public func messagesGet(id: String) async throws -> Envelope<Resource> { try await resource("messages", id: id) }
+    public func scheduledMessagesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("scheduled-messages", cursor: cursor, limit: limit, history: history) }
+    public func scheduledMessagesGet(id: String) async throws -> Envelope<Resource> { try await resource("scheduled-messages", id: id) }
     public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> { try await get("v1/client/message-bodies/\(id)") }
     public func launchesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("launches", cursor: cursor, limit: limit, history: history) }
     public func launchesGet(id: String) async throws -> Envelope<Resource> { try await resource("launches", id: id) }
@@ -446,6 +448,7 @@ public actor FractalClient {
     public func launchCreate(id: String, idempotencyKey: String, fence: Fence, parameters: LaunchCreateParameters) async throws -> Envelope<ActionResult> { try await submit(try .launchCreate(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func launchPreview(id: String, idempotencyKey: String, fence: Fence, parameters: LaunchVariantParameters) async throws -> Envelope<ActionResult> { try await submit(try .launchPreview(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func launchRevise(id: String, idempotencyKey: String, fence: Fence, parameters: LaunchReviseParameters) async throws -> Envelope<ActionResult> { try await submit(try .launchRevise(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func messageCancelScheduled(id: String, idempotencyKey: String, fence: Fence, parameters: ScheduledMessageCancelParameters) async throws -> Envelope<ActionResult> { try await submit(try .messageCancelScheduled(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func messageClose(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .messageClose(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func messageRead(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .messageRead(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func messageSend(id: String, idempotencyKey: String, fence: Fence, parameters: MessageSendParameters) async throws -> Envelope<ActionResult> { try await submit(try .messageSend(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }

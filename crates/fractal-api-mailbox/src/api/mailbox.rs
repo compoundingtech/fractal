@@ -3006,8 +3006,7 @@ mod tests {
         let send = |key: &str, from: &str, tags: &[&str], in_reply_to: Option<&str>| {
             super::super::accept_message(
                 &state,
-                MessageSendRequest {
-                owner: None,
+                MessageSendRequest { at: None, owner: None,
                 idempotency_key: key.into(),
                 from: from.into(),
                 to: fence.subject.clone(),
@@ -3015,8 +3014,7 @@ mod tests {
                 title: Some(key.into()),
                 in_reply_to: in_reply_to.map(str::to_owned),
                 tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-                attachments: Vec::new(),
-                },
+                attachments: Vec::new(), },
                 None,
                 None,
             )
@@ -3105,8 +3103,7 @@ mod tests {
         // A reply defaults to wake even when its parent was silent.
         let asked = super::super::accept_message(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: "asked".into(),
             from: fence.subject.clone(),
             to: "agent/eval.peer".into(),
@@ -3114,8 +3111,7 @@ mod tests {
             title: None,
             in_reply_to: None,
             tags: vec![crate::silent::SILENT_TAG.into()],
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
             None,
             None,
         )

@@ -532,6 +532,7 @@ mission "example/report" state="ready" {
     mod helper_launcher;
     mod bounded_loop_reads;
     mod incremental_deadlines;
+    mod scheduled_messages;
     mod resume_harness_end;
     #[cfg(test)]
     mod schedule_standby_parent;

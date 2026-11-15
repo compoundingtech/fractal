@@ -855,6 +855,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/recipient", get(messages::recipient))
+        .route("/v1/messages/scheduled", get(messages::scheduled_messages))
+        .route("/v1/messages/scheduled/{*id}", get(messages::scheduled_message))
+        .route("/v1/messages/scheduled-cancel/{*id}", post(messages::cancel_scheduled_message))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/harness-events", post(harness_events::publish))
@@ -11840,13 +11843,47 @@ pub fn accept_message_receipt_with_upload_owner(
 #[allow(clippy::too_many_arguments)]
 fn accept_message_receipt_authorized(
     state: &AppState,
-    mut request: MessageSendRequest,
+    request: MessageSendRequest,
     session_id: Option<String>,
     device_signature: Option<smallclaims::principal::ClaimSignature>,
     upload_owner: Option<&str>,
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
     effect_caller: Option<&str>,
 ) -> Result<MessageSendReceipt, ApiError> {
+    if request.at.is_some() {
+        return Err(ApiError::bad(FractalError::new("scheduled-message-route-required",
+            "use the timed message endpoint to schedule a message")));
+    }
+    match accept_message_response_authorized(state, request, session_id, device_signature,
+        upload_owner, assistant_authorization, effect_caller)? {
+        crate::model::MessageSendResponse::Sent(receipt) => Ok(receipt),
+        crate::model::MessageSendResponse::Scheduled { .. } => unreachable!("immediate request"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn accept_message_response_authorized(
+    state: &AppState,
+    mut request: MessageSendRequest,
+    session_id: Option<String>,
+    device_signature: Option<smallclaims::principal::ClaimSignature>,
+    upload_owner: Option<&str>,
+    assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
+    effect_caller: Option<&str>,
+) -> Result<crate::model::MessageSendResponse, ApiError> {
+    let at = request.at.as_deref().map(|at| {
+        chrono::DateTime::parse_from_rfc3339(at)
+            .ok().and_then(|time| u128::try_from(time.timestamp_millis()).ok())
+            .ok_or_else(|| ApiError::bad(FractalError::new("invalid-scheduled-message-time",
+                "at must be an absolute RFC 3339 timestamp on or after the Unix epoch")))
+    }).transpose()?;
+    if at.is_some() && (request.owner.is_some() || device_signature.is_some()
+        || assistant_authorization.is_some() || request.from.starts_with("mission-run/")
+        || request.from.starts_with("external/"))
+    {
+        return Err(ApiError::bad(FractalError::new("scheduled-message-authority-refused",
+            "deferred sends cannot retain run, effect, device-signature or external authority")));
+    }
     let effect_digest = if let Some(owner) = request.owner.as_ref() {
         if effect_caller.is_none() || device_signature.is_some() || assistant_authorization.is_some() {
             return Err(ApiError::bad(FractalError::new("effect-caller-refused",
@@ -12157,6 +12194,18 @@ fn accept_message_receipt_authorized(
         expected_subject: None,
         idempotency_key: Some(request.idempotency_key.clone()),
     };
+    if let Some(at) = at {
+        let scheduled = state.store.schedule_message(&input, at, &request.idempotency_key)
+            .map_err(|error| {
+                if let Some(staged) = staged.as_ref() { staged.discard(); }
+                ApiError::bad(error)
+            })?;
+        if let Some(staged) = staged {
+            staged.commit().map_err(ApiError::internal)?;
+        }
+        signal_changed(state);
+        return Ok(crate::model::MessageSendResponse::Scheduled { scheduled });
+    }
     // A repeated key returns the first claim and says it appended nothing.
     let sent = if let Some(record) = recovered {
         let operation = smallclaims::store::claim_operation(&input).map_err(ApiError::bad)?;
@@ -12246,7 +12295,7 @@ fn accept_message_receipt_authorized(
     } else {
         "wake"
     };
-    Ok(MessageSendReceipt {
+    Ok(crate::model::MessageSendResponse::Sent(MessageSendReceipt {
         requested_recipient,
         recipient,
         recipient_identity,
@@ -12277,7 +12326,7 @@ fn accept_message_receipt_authorized(
         idempotency_key: request.idempotency_key,
         already_sent: !appended,
         sent_at: Some(client_timestamp(record.accepted_at_unix_ms)),
-    })
+    }))
 }
 
 fn receipt_recipient(store: &Store, requested: &str) -> Result<(String, String), ApiError> {

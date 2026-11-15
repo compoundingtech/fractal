@@ -31,6 +31,67 @@ conversation endpoint remains available. Reserved daemon event tags are a cooper
 filter, not authentication: the raw endpoint trusts its `from` identity. Generic agent `launch`
 tags remain allowed and do not bypass silence; daemon planning `launch` notices always wake.
 
+## Timed delivery to an existing seat
+
+`messages` is an alias of `conversations`. Schedule a normal native message without
+creating a mission, calendar schedule or program wait:
+
+```sh
+fractal messages send agent/example/builder --from agent/example/reviewer \
+  --body 'Reread the current release facts.' --at 2027-01-02T12:00:00Z --key release-review
+fractal messages scheduled ls
+fractal messages scheduled show message-schedule/HANDLE
+fractal messages scheduled cancel message-schedule/HANDLE --reason 'Release cancelled'
+```
+
+`--at` requires an absolute RFC3339 timestamp with an explicit offset; the daemon
+stores the due instant in UTC. Relative durations, dates without a time or offset,
+and malformed timestamps are rejected. Delivery is never before that instant.
+After downtime an overdue eligible request is delivered when its owner is healthy;
+the due instant is not reset by restart. `--at` cannot be combined with `--print-kdl`.
+`--kind silent` still means normal silent mail at the due instant, not a forced wake.
+
+The returned scheduled handle acknowledges a durable request, **not an already sent
+message**. Until due there is no ordinary unread mailbox message. List/show expose
+the handle, sender, recipient, original content, UTC due time, immutable key, state,
+current owner, optional mailbox message ID, owner blocker and cancellation reason. A delivered state means durable
+mailbox insertion through native message delivery, not that a model read or acted
+on the content. Inspect the resulting message with `messages status`/`read`.
+
+`--key` aliases the existing `--idempotency-key`. For timed delivery a key names one
+immutable request: an identical retry returns the same handle; changing its time,
+recipient or payload under that key is refused. Supply a stable key when retrying
+across CLI invocations. If omitted, the CLI generates a fresh key and prints it in
+the scheduled receipt; it does not use immediate send's hourly content heuristic.
+To change an existing reminder, cancel it and create a new request with a new key.
+
+The authenticated sender or target can cancel; an unrelated seat cannot.
+Cancellation and due delivery serialize in the writer. Cancellation committed
+first prevents mailbox insertion; insertion committed first refuses cancellation
+as already delivered. Cancellation cannot retract an offered turn.
+Pending cancellation must reach the selected owner's daemon so it shares that writer
+with delivery; a nonowner or unproven owner refuses it rather than claiming cancellation.
+At due time, retirement
+cancels pending delivery, and a different declaration reusing the seat name does
+not inherit the old reminder. Ordinary seat restarts preserve it. Stopped and
+suspended seats receive normal queued mailbox mail under existing lifecycle and
+wake policy; a timer does not override suspension or grant execution permission.
+
+Delivery reuses the fleet's `notice-owner` declaration and its admitted member-key
+incarnation fence; it does not elect a separate delivery owner. A missing, conflicting
+or ended binding leaves a visible pending blocker rather than delivering independently
+on replicas. Restore a valid owner binding to resume overdue mail without polling.
+Local idempotency is not a promise of globally exactly-once physical notification
+during partitions. Scheduling and cancellation use the authenticated caller's
+authority; naming an unrelated sender does not grant scheduling or cancellation rights.
+
+Pending requests retain their request and declaration evidence. Immutable keys,
+delivery receipts and cancellation tombstones remain durable graph audit under
+graph checkpoint retention, without an automatic handle expiry or a TTL permitting
+key reuse. Terminal entries leave the pending index, not the audit history.
+This feature consumes no program execution-wait budget and adds no run-owned
+change-or-deadline wait primitive.
+
 ## How it works
 
 The daemon decides once at acceptance, without a recipient-policy query or question-thread state.

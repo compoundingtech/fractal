@@ -309,6 +309,9 @@ pub mod message_marks;
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
+pub mod scheduled_messages;
+#[cfg(test)]
+mod scheduled_messages_tests;
 #[cfg(test)]
 mod message_routing_tests;
 pub mod message_sent;
@@ -2908,6 +2911,7 @@ impl Store {
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        scheduled_messages::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2938,6 +2942,7 @@ impl Store {
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        scheduled_messages::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2973,6 +2978,7 @@ impl Store {
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
         ask_digest_cache::create_schema(&graph.connection.write())?;
+        scheduled_messages::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
@@ -11908,6 +11914,7 @@ fn append_claim_tx_admitted(
     }
     // Daemon notifications already inside a larger transaction use the same admission seam
     // as API sends. Replication inserts authenticated history through its separate import path.
+    scheduled_messages::reserved(kind).map_err(anyhow::Error::new)?;
     if kind == message_expiry::KIND {
         return Err(anyhow::Error::new(FractalError::new(
             "invalid-message-expiry", "expiry requires runtime receipt admission")));
@@ -16692,6 +16699,7 @@ pub fn classify_replicated_claim_with_registry(
     }
     message_expiry::validate_actor(&claim.kind, claim.actor.as_deref())?;
     identities::validate_replicated(claim)?;
+    scheduled_messages::validate_replicated(claim)?;
     if claim.kind == retirements::KIND
         && (fields.get("owner_host").and_then(Value::as_str) != Some(claim.origin.as_str())
             || fields.get("retired_by").and_then(Value::as_str) != claim.actor.as_deref())
@@ -24162,6 +24170,8 @@ pub fn append_claim_with_commit_context(
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let admission = |connection: &Connection| {
+        scheduled_messages::reserved(&input.kind)?;
+        scheduled_messages::refuse_immediate_key(connection, input)?;
         message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
         if input.kind == message_expiry::KIND && !context.expiry_writer {
             return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));

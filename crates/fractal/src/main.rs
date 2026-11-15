@@ -4872,6 +4872,11 @@ enum MessageCommand {
     ///   EOF
     #[command(verbatim_doc_comment)]
     Send(MessageSendArgs),
+    /// Inspect or cancel durable timed deliveries (not yet mailbox messages).
+    Scheduled {
+        #[command(subcommand)]
+        command: ScheduledMessageCommand,
+    },
     /// List the current mailbox for one explicit identity.
     Ls(MessageListArgs),
     /// Show delivery and read progress without changing the message lifecycle, or whether an
@@ -4951,6 +4956,29 @@ enum MessageCommand {
     Export { directory: PathBuf },
 }
 
+#[derive(Subcommand)]
+enum ScheduledMessageCommand {
+    /// List durable scheduled deliveries and their current blockers.
+    Ls,
+    /// Show one scheduled delivery handle.
+    Show { handle: String },
+    /// Cancel a pending delivery; a delivered message cannot be retracted.
+    Cancel {
+        handle: String,
+        #[arg(long)]
+        reason: String,
+    },
+}
+
+fn parse_message_at(value: &str) -> std::result::Result<String, String> {
+    let at = chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|error| format!("expected an absolute RFC3339 timestamp: {error}"))?;
+    if at.timestamp_millis() < 0 {
+        return Err("delivery time must be at or after the Unix epoch".into());
+    }
+    Ok(at.to_utc().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+}
+
 #[derive(Args)]
 struct MessageSendArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
@@ -4983,10 +5011,13 @@ struct MessageSendArgs {
     /// Print the generated message mission KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
-    /// Name this message for retries. Without it the key comes from the sender, recipient, words
-    /// and attachments, so running the same command again within the hour (or the next) reports
-    /// the message already sent instead of sending it twice.
-    #[arg(long)]
+    /// Deliver no earlier than this absolute RFC3339 instant (normalized to UTC).
+    #[arg(long, value_name = "RFC3339", value_parser = parse_message_at, conflicts_with = "print_kdl")]
+    at: Option<String>,
+    /// Name this message for retries (--key is an alias). Timed requests bind the key
+    /// immutably; without one they get a fresh key. Immediate sends without a key deduplicate
+    /// the same sender, recipient, words and attachments within this hour or the previous one.
+    #[arg(long, alias = "key")]
     idempotency_key: Option<String>,
     /// Send even if this daemon has not yet learned the recipient through fleet replication.
     #[arg(long)]
@@ -16308,7 +16339,7 @@ async fn send_message(
     client: &Client,
     args: MessageSendArgs,
     attachments: Vec<fractal_daemon::model::AttachmentInput>,
-) -> Result<Option<MessageSendReceipt>> {
+) -> Result<Option<fractal_daemon::model::MessageSendResponse>> {
     let id = uuid::Uuid::now_v7().simple().to_string();
     let mission_id = format!("message/{id}");
     // Before anything else: an agent that sends to a person needs this answer, not another.
@@ -16357,8 +16388,7 @@ async fn send_message(
         print!("{kdl}");
         return Ok(None);
     }
-    let mut request = MessageSendRequest {
-    owner: None,
+    let mut request = MessageSendRequest { at: args.at, owner: None,
     idempotency_key: String::new(),
     from,
     to,
@@ -16366,8 +16396,15 @@ async fn send_message(
     title: args.subject,
     in_reply_to: args.in_reply_to,
     tags: args.tags,
-    attachments,
-    };
+    attachments, };
+    if request.at.is_some() {
+        request.idempotency_key = args.idempotency_key
+            .unwrap_or_else(|| format!("scheduled-message:{}", uuid::Uuid::now_v7()));
+        let scheduled = client.schedule_message(&request).await.with_context(|| {
+            format!("timed message request key {}; retain this key and identical parameters when recovering an unanswered request", request.idempotency_key)
+        })?;
+        return Ok(Some(fractal_daemon::model::MessageSendResponse::Scheduled { scheduled }));
+    }
     request.idempotency_key = match args.idempotency_key {
         Some(key) => key,
         None => {
@@ -16382,7 +16419,7 @@ async fn send_message(
                 match client.sent_message(&previous).await {
                     Ok(Some(receipt)) => {
                         warn_unconfirmed_silent(&request, &receipt);
-                        return Ok(Some(receipt));
+                        return Ok(Some(fractal_daemon::model::MessageSendResponse::Sent(receipt)));
                     }
                     Ok(None) => {}
                     // A daemon from before the lookup has no such route. Its sends still repeat
@@ -16399,7 +16436,7 @@ async fn send_message(
     match client.send_message(&request).await {
         Ok(receipt) => {
             warn_unconfirmed_silent(&request, &receipt);
-            Ok(Some(receipt))
+            Ok(Some(fractal_daemon::model::MessageSendResponse::Sent(receipt)))
         }
         Err(error) => Err(message_send_error(error, &request.idempotency_key)),
     }

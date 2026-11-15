@@ -27,8 +27,7 @@ fn send(state: &AppState, key: &str, content: &str) -> Result<MessageSendReceipt
 fn send_to(state: &AppState, to: &str, key: &str, content: &str) -> Result<MessageSendReceipt, ApiError> {
     accept_message_receipt(
         state,
-        MessageSendRequest {
-        owner: None,
+        MessageSendRequest { at: None, owner: None,
         idempotency_key: key.into(),
         from: "person/alex".into(),
         to: to.into(),
@@ -36,8 +35,7 @@ fn send_to(state: &AppState, to: &str, key: &str, content: &str) -> Result<Messa
         title: Some("notes".into()),
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        },
+        attachments: Vec::new(), },
         None,
         None,
     )
@@ -464,8 +462,7 @@ async fn a_refused_or_failed_send_leaves_no_file_and_a_repeat_heals_a_lost_one()
     };
     let error = accept_message_receipt(
         &state,
-        MessageSendRequest {
-        owner: None,
+        MessageSendRequest { at: None, owner: None,
         idempotency_key: "signed-whole".into(),
         from: "person/alex".into(),
         to: "agent/worker".into(),
@@ -473,8 +470,7 @@ async fn a_refused_or_failed_send_leaves_no_file_and_a_repeat_heals_a_lost_one()
         title: None,
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        },
+        attachments: Vec::new(), },
         None,
         Some(legacy),
     )

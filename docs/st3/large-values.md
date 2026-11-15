@@ -98,6 +98,25 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Timed seat-message delivery
+
+`fractal_store::store::scheduled_messages` owns `lv-h16d5941a8dee`: the pending
+fold stores only a SHA-256-derived schedule subject and integer UTC deadline,
+with `(at, subject)` seek ordering. It does not index arbitrary caller keys or
+copy message payloads into the pending table. Terminal delivery/cancellation
+removes that keyed row through `lv-h07d713865c5e`, `lv-h3c75a80d12d3`,
+`lv-h97c8c83ad46e`, and `lv-he85a4a926d8f`; immutable request/key tombstones
+remain in the existing durable claim representation.
+The single-request and terminal-proof readers (`lv-h3a21258307de` and
+`lv-h9ee4cb9d5884`) bind one schedule identity and read existing claim bodies,
+predecessors, and batch ordering. Native message body staging still handles
+large content; the request preserves those same message fields and references.
+These are representation debts, not a size proof. The module maintainer owns
+reference conversion and keyed reclamation, which must preserve immutable-key
+comparison, owner/declaration evidence, cancellation serialization, and the
+transactional native message insertion plus delivered receipt.
+
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds

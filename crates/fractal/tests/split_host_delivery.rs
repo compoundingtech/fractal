@@ -164,8 +164,7 @@ async fn split_host_report_and_handoff_documents_known_limitation_3104() {
         alder.store.apply_internal(&intent, "fixture-seats").unwrap();
         replicate(&alder, "alder", &birch);
 
-        let report = MessageSendRequest {
-        owner: None,
+        let report = MessageSendRequest { at: None, owner: None,
         idempotency_key: "split-host-report".into(),
         from: ALDER.into(),
         to: BIRCH.into(),
@@ -173,8 +172,7 @@ async fn split_host_report_and_handoff_documents_known_limitation_3104() {
         title: Some("Delivery report".into()),
         in_reply_to: None,
         tags: vec![],
-        attachments: vec![],
-        };
+        attachments: vec![], };
         let front = root.path().join("lossy.sock");
         let proxy = lose_both_send_answers(&front, alder.socket.clone()).await;
         let error = Client::unix(&front).send_message(&report).await.unwrap_err();

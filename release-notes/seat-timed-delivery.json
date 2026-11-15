@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add durable timed native messages for existing seats. Part of #3850.",
+  "replay": {
+    "status": "changed",
+    "detail": "Pending timed requests survive daemon restart and re-arm their original absolute UTC deadline. Overdue eligible requests use normal native message delivery. No historical immediate message is rescheduled."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds durable timed-message request, cancellation and delivery records with a pending deadline index. Immutable keys and terminal receipts remain graph audit; terminal requests leave the pending index."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Timed requests insert no ordinary mailbox message before due. Due delivery and pending cancellation serialize at the notice-owner's writer and require its current admitted member-key fence. Nonowners refuse cancellation rather than promising it raced delivery. Retirement cancels at due time. Ownership blockers are visible; delivered means mailbox insertion, not proof of reading."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Native messages send accepts optional absolute RFC3339 at, omitted for immediate requests. Scheduled responses contain a scheduled handle, not an immediate delivery receipt. CLI adds messages send --at [--key] and messages scheduled ls/show/cancel --reason. Existing --idempotency-key remains available. No ScheduledWork extension or program wait primitive."
+  },
+  "downtime": {
+    "status": "unknown",
+    "detail": "Deployment uses the normal daemon rollout; restart duration is not measured. Requests preserve their UTC due instant through downtime."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Delivery and pending cancellation require a valid existing fleet notice-owner declaration. Missing or conflicted ownership leaves requests pending. No mission schedule activation is required. Use a stable immutable key to recover an unanswered timed send."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Inspect the durable scheduled handle and blockers before retrying. An identical key and request adopt the original handle; changed parameters are refused. Cancellation cannot retract an already inserted message. No automatic handle expiry permits key reuse."
+  }
+}

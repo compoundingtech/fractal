@@ -3206,6 +3206,28 @@ pub struct HarnessNotAnswerableDetails {
     pub reason: HarnessNotAnswerableReason,
 }
 
+/// Durable timed mail. `delivered` confirms insertion, not that the recipient read it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ScheduledMessage {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub from: String,
+    pub to: String,
+    pub content: String,
+    pub at: String,
+    pub at_unix_ms: u128,
+    pub key: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Resource {
@@ -3215,6 +3237,7 @@ pub enum Resource {
     Summary(Summary),
     Attention(Attention),
     Message(Message),
+    ScheduledMessage(ScheduledMessage),
     Launch(Launch),
     LaunchVariant(LaunchVariant),
     LaunchDecision(LaunchDecision),
@@ -3250,6 +3273,7 @@ pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
     "summary",
     "attention",
     "message",
+    "scheduled-message",
     "launch",
     "launch-variant",
     "launch-decision",
@@ -3319,6 +3343,7 @@ impl Resource {
             Self::Summary(v) => &v.header,
             Self::Attention(v) => &v.header,
             Self::Message(v) => &v.header,
+            Self::ScheduledMessage(v) => &v.header,
             Self::Launch(v) => &v.header,
             Self::LaunchVariant(v) => &v.header,
             Self::LaunchDecision(v) => &v.header,
@@ -3950,6 +3975,8 @@ pub enum ActionType {
     MessageRead,
     #[serde(rename = "message.close")]
     MessageClose,
+    #[serde(rename = "message.cancel-scheduled")]
+    MessageCancelScheduled,
     #[serde(rename = "launch.create")]
     LaunchCreate,
     #[serde(rename = "launch.revise")]
@@ -4421,6 +4448,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::LaunchRevise,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn message_cancel_scheduled(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ScheduledMessageCancelParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::MessageCancelScheduled,
             idempotency_key,
             fence,
             &parameters,
@@ -5181,6 +5222,13 @@ pub struct WorkRetryParameters {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledMessageCancelParameters {
+    pub target_id: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AttentionResolveParameters {
     pub attention_id: String,
     pub outcome: String,
@@ -5200,6 +5248,9 @@ pub enum MessageKind {
 pub struct MessageSendParameters {
     pub to: String,
     pub content: String,
+    /// Absolute RFC 3339 delivery time; omitted for immediate delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

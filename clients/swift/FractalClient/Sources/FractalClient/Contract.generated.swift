@@ -28,6 +28,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case launchCreate = "launch.create"
     case launchPreview = "launch.preview"
     case launchRevise = "launch.revise"
+    case messageCancelScheduled = "message.cancel-scheduled"
     case messageClose = "message.close"
     case messageRead = "message.read"
     case messageSend = "message.send"
@@ -110,6 +111,8 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case attentionGet = "attention.get"
     case messagesList = "messages.list"
     case messagesGet = "messages.get"
+    case scheduledMessagesList = "scheduled-messages.list"
+    case scheduledMessagesGet = "scheduled-messages.get"
     case messageBodyGet = "message-body.get"
     case launchesList = "launches.list"
     case launchesGet = "launches.get"
@@ -212,6 +215,8 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .attentionGet: "/v1/client/attention/{id}",
     .messagesList: "/v1/client/messages",
     .messagesGet: "/v1/client/messages/{id}",
+    .scheduledMessagesList: "/v1/client/scheduled-messages",
+    .scheduledMessagesGet: "/v1/client/scheduled-messages/{id}",
     .messageBodyGet: "/v1/client/message-bodies/{id}",
     .launchesList: "/v1/client/launches",
     .launchesGet: "/v1/client/launches/{id}",

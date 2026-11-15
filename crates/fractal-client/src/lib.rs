@@ -2621,6 +2621,21 @@ impl Client {
     pub async fn messages_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("messages", id).await
     }
+    pub async fn scheduled_messages_list(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+    ) -> Result<Envelope<Page>, ClientError> {
+        self.list_internal("scheduled-messages", cursor, limit, history)
+            .await
+    }
+    pub async fn scheduled_messages_get(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<Resource>, ClientError> {
+        self.resource_internal("scheduled-messages", id).await
+    }
     pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {
         self.get(&format!("/v1/client/message-bodies/{}", percent_encode(id)))
             .await
@@ -3447,6 +3462,18 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn message_cancel_scheduled(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ScheduledMessageCancelParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request =
+            ActionRequest::message_cancel_scheduled(id, idempotency_key, fence, parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn message_close(
         &self,
         id: impl Into<String>,
@@ -3477,7 +3504,8 @@ impl Client {
         mut parameters: MessageSendParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let idempotency_key = idempotency_key.into();
-        if parameters.signature.is_none()
+        if parameters.at.is_none()
+            && parameters.signature.is_none()
             && let Some(device) = &self.signing_device
         {
             parameters.signature = Some(
