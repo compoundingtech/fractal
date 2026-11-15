@@ -5912,7 +5912,7 @@ impl Ui {
             .iter()
             .find(|candidate| candidate.id == agent)
             .map(|candidate| candidate.name.clone())
-            .unwrap_or_else(|| agent.trim_start_matches("agent/").to_owned());
+            .unwrap_or_else(|| "an agent".to_owned());
         let control = match key {
             'r' => Some(AgentControl::Restart),
             'p' => Some(AgentControl::Suspend),
@@ -5970,7 +5970,14 @@ impl Ui {
     fn act(&mut self, action: char) {
         if action == 'A' {
             if let Some((agent, control)) = self.pending_control.take() {
-                let name = agent.trim_start_matches("agent/").to_owned();
+                let name = self
+                    .world
+                    .agents
+                    .items()
+                    .iter()
+                    .find(|candidate| candidate.id == agent)
+                    .map(|candidate| candidate.name.clone())
+                    .unwrap_or_else(|| "an agent".to_owned());
                 self.control_agent(agent, control, &name);
             }
             return;

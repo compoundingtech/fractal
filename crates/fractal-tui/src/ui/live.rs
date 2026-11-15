@@ -3005,7 +3005,10 @@ async fn perform(
                 format!(
                     "{} {}: asked Fractal",
                     control.verb(),
-                    agent.trim_start_matches("agent/")
+                    model
+                        .agents()
+                        .find(|candidate| candidate.header.id == agent)
+                        .map_or("an agent", |candidate| candidate.name.as_str())
                 ),
                 None,
             ))

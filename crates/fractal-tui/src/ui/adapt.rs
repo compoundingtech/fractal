@@ -105,15 +105,10 @@ fn label_text(model: &Model, label: &WorkLabel) -> String {
         .missions()
         .find(|mission| mission.header.id == label.mission_id)
         .map(crate::mission_display_label)
-        .unwrap_or_else(|| short(&label.mission_id));
+        .unwrap_or_else(|| "a mission".into());
     format!("{mission} › {}", label.path)
 }
 
-fn short(id: &str) -> String {
-    id.trim_start_matches("mission/")
-        .trim_start_matches("agent/")
-        .to_owned()
-}
 
 fn missions(model: &Model, person: &str, now: &str) -> Vec<Mission> {
     fractal_ui_model::missions::adapt(
@@ -471,19 +466,18 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                             step: path.clone().unwrap_or_default(),
                             feedback: kind == "feedback",
                         },
-                        "launch" => AttentionKind::Launch {
-                            planner: "The planner".into(),
-                            name: mission
-                                .as_deref()
-                                .map(short)
-                                .unwrap_or_else(|| item.title.clone()),
-                            preview: launch_preview(
-                                presentation.launch.as_ref(),
-                                mission
-                                    .as_deref()
-                                    .unwrap_or(&item.title)
-                                    .trim_start_matches("mission/"),
-                            ),
+                        "launch" => {
+                            let name = mission.as_deref().map_or_else(|| item.title.clone(), |id| {
+                                model.missions().find(|candidate| candidate.header.id == id)
+                                    .map(crate::mission_display_label)
+                                    .unwrap_or_else(|| "a mission".into())
+                            });
+                            let preview = launch_preview(presentation.launch.as_ref(), &name);
+                            AttentionKind::Launch {
+                                planner: "The planner".into(),
+                                name,
+                                preview,
+                            }
                         },
                         "revision" => AttentionKind::Revision {
                             reason: item.detail.clone(),
@@ -541,7 +535,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                                 .agent
                                 .as_ref()
                                 .map(|agent| agent.label.clone())
-                                .unwrap_or_else(|| short(&item.source_id)),
+                                .unwrap_or_else(|| "an agent".into()),
                             seat_id: item.source_id.clone(),
                             text: clean_message_text(&item.detail),
                             question: question_agents.contains(item.source_id.as_str()),
@@ -861,7 +855,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
                             .agents()
                             .find(|parent| parent.header.id == relation.agent_id)
                             .map(crate::agent_label)
-                            .unwrap_or_else(|| short(&relation.agent_id))
+                            .unwrap_or_else(|| "an agent".into())
                     }),
                 },
                 subagents: agent
@@ -2623,7 +2617,7 @@ mod tests {
             matches!(&items[0].kind, AttentionKind::Request { question, .. } if question.contains("Source: step-run/example/ask"))
         );
         assert!(
-            matches!(&items[1].kind, AttentionKind::Launch { name, .. } if name == "example/ship")
+            matches!(&items[1].kind, AttentionKind::Launch { name, .. } if name == "a mission")
         );
     }
 
