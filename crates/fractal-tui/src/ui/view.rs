@@ -92,6 +92,10 @@ pub struct World {
     #[serde(skip)]
     pub inbox_alerts: Option<usize>,
     pub attention: Load<Vec<Attention>>,
+    /// The person's asks that resolved by themselves, for Now's Auto-resolved group. Not part of
+    /// the shared contract.
+    #[serde(skip)]
+    pub auto_resolved: Load<AutoResolvedList>,
     pub agents: Load<Vec<Agent>>,
     pub missions: Load<Vec<Mission>>,
     pub machines: Load<Vec<Machine>>,
@@ -225,6 +229,10 @@ pub struct Attention {
     /// theirs. It stays open meanwhile, and its deadline does not move.
     #[serde(skip)]
     pub snoozed_until: Option<chrono::DateTime<chrono::FixedOffset>>,
+    /// The asking claim of an ask (st's `episode`): a closed row is matched by it to the
+    /// auto-resolved row it became. None where st names none.
+    #[serde(skip)]
+    pub episode: Option<String>,
 }
 
 impl Attention {
@@ -246,6 +254,45 @@ impl Attention {
     /// Whether its person put it off past `now`: it stays off Home and out of triage until then.
     pub fn snoozed(&self, now: chrono::DateTime<chrono::FixedOffset>) -> bool {
         self.snoozed_until.is_some_and(|until| until > now)
+    }
+}
+
+/// The person's asks that resolved by themselves at their deadline in the last seven days, as
+/// st's `auto-resolved.list` read serves them, newest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AutoResolvedList {
+    pub items: Vec<AutoResolved>,
+    /// Whether st read every candidate: false when its bounded scan stopped short.
+    pub complete: bool,
+}
+
+/// An ask of the person that resolved by itself at its deadline: what was asked, who asked, the
+/// default that applied and when, and the answers the person may give instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AutoResolved {
+    /// Its row on Now: `auto-resolved/` and st's resolution id.
+    pub id: String,
+    pub title: String,
+    /// Who asked, by name when Fractal knows it, else by id.
+    pub asker: String,
+    /// The default answer that applied; none when the ask timed out without one.
+    pub default: Option<String>,
+    /// How long ago it resolved, e.g. `3h`.
+    pub resolved: String,
+    pub target_id: String,
+    /// The asking claim: the fence of an override, and what a closed row on Now is matched by.
+    pub episode: String,
+    /// Whether st still takes the person's own answer (`action_parameters["work.override"]`):
+    /// a default applied and the seven days are not over.
+    pub open: bool,
+    /// The request's named answers other than the default, as (id, label), in its order.
+    pub alternatives: Vec<(String, String)>,
+}
+
+impl AutoResolved {
+    /// Whether Now offers "use my answer instead": st takes it and there is another answer.
+    pub fn overridable(&self) -> bool {
+        self.open && !self.alternatives.is_empty()
     }
 }
 

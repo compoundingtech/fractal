@@ -153,6 +153,15 @@ their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps
 selected card in a regular, closable tab. Opening it again focuses the existing tab in this
 space. Move it into a split with the tab menu or by dragging; Esc does not close it.
 
+Below what is open, Inbox lists your asks that resolved by themselves at their deadline in the
+last seven days under `Auto-resolved` (`↻`): the title, who asked, the default that applied and
+when. `o` on one (or on a `Recently closed` row of the same ask) uses your answer instead: digits
+choose one of its other answers, Enter sends it as `work.override`, Esc cancels. The chooser says
+what that does: "Your answer replaces the default. Work already done on the default is not
+undone; <asker> is told." `o` is not offered once Fractal no longer takes an override or the ask
+has no other answer. The list is read when Inbox opens, when the alerts change and after an
+override is accepted, never on a timer.
+
 On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
 `✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends
 every note on the other named answers (a custom answer or a dismissal carries them too), and the
