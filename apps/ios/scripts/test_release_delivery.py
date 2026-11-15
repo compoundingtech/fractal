@@ -58,7 +58,9 @@ if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
 if name == "nix":
-    assert args == ["run", "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
+    assert args == ["run", "--max-jobs", "0", "--option", "builders", "",
+                    "--option", "external-builders", "[]",
+                    "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
                     "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
                     "--lock-sync", "off"], args
     if control.get("member_exit"):
@@ -214,6 +216,26 @@ raise AssertionError((name, args))
 
 
 class IosEnvironmentTests(unittest.TestCase):
+    def test_fabric_cache_miss_refuses_build_before_cargo_or_xcode(self):
+        script = SCRIPT.parents[1] / "modules/fractal-fabric/build.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$@\" > \"$NIX_ARGUMENTS\"\n"
+                           "exit 1\n")
+            nix.chmod(0o755)
+            arguments = root / "arguments"
+            result = subprocess.run(["sh", str(script)], capture_output=True, text=True,
+                                    env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                                         "NIX_ARGUMENTS": str(arguments)})
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(arguments.read_text().splitlines()[:9],
+                             ["build", "--max-jobs", "0", "--option", "builders", "",
+                              "--option", "external-builders", "[]"])
+            self.assertIn("closure is not available in the binary cache", result.stderr)
+            self.assertIn("delivery refuses to build it locally or remotely", result.stderr)
+
     def test_normal_identity_and_state_are_unchanged(self):
         state = Path("/lane")
         self.assertEqual(bundle_id("normal"), BUNDLE_ID)
@@ -1748,6 +1770,9 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state().get("pending"), None)
         events = [json.loads(line) for line in (self.state / "outcomes.jsonl").read_text().splitlines()]
         self.assertEqual(events[-1]["reason"], "source_inputs_preparation_failed")
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("closure is not available in the binary cache", log.read_text())
+        self.assertIn("delivery refuses to build it locally or remotely", log.read_text())
 
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")

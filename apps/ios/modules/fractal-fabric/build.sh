@@ -3,7 +3,10 @@ set -eu
 cd "$(dirname "$0")"
 repo_root=$(cd ../../../.. && pwd)
 # Resolve once; launchd's fixed PATH needs Nix, not a mutable rustup installation.
-toolchain=$(nix build --no-link --print-out-paths "$repo_root#ios-rust-toolchain")
+if ! toolchain=$(nix build --max-jobs 0 --option builders '' --option external-builders '[]' --no-link --print-out-paths "$repo_root#ios-rust-toolchain"); then
+  echo "The iOS Rust toolchain closure is not available in the binary cache; delivery refuses to build it locally or remotely. Publish the closure and configure the cache substituter before retrying." >&2
+  exit 1
+fi
 export PATH="$toolchain/bin:$PATH"
 export RUSTC="$toolchain/bin/rustc"
 # Both Rust linking and cc-rs C/assembly compilation require Apple's compiler.

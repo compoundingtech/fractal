@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "iOS release delivery refuses to compile missing Nix toolchains: workspace preparation and the Rust toolchain must already be available locally or from configured binary caches.",
+  "replay": { "status": "none", "detail": "No graph or storage change." },
+  "schema": { "status": "none", "detail": "No schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rule change." },
+  "compatibility": { "status": "none", "detail": "Cargo and Xcode app compilation are unchanged. Nix realization now disables local, remote and external builders during delivery." },
+  "downtime": { "status": "none", "detail": "No service restart required; a missing toolchain closure stops delivery before app compilation." },
+  "manual": { "status": "required", "detail": "Publish the required toolchain closures and configure the delivery environment's binary cache substituters before retrying a cache miss." },
+  "recovery": { "status": "none", "detail": "Populate the cache and retry delivery; revert the change to restore build-on-miss behavior." }
+}
