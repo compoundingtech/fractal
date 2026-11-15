@@ -437,9 +437,9 @@ another recipient, or a channel process's history query does not count. Claude's
 watches inbox files; the outer `driver claude` process supplies the mailbox poll.
 
 
-The Home Manager module installs a real executable at `services.smalltalk.stateDir/bin/st3`
-and provides `st` as a relative symlink there. Activation copies a changed build to a temporary
-file in that directory and atomically renames it over `st3` before Home Manager restarts the
+The Home Manager module installs a real executable at `services.fractal.stateDir/bin/fractal`
+and provides `st` and `st3` as relative symlinks there. Activation copies a changed build to a temporary
+file in that directory and atomically renames it over `fractal` before Home Manager restarts the
 daemon. Identical contents leave the file's inode and modification time unchanged, so a no-op
 activation does not make seats re-exec. Both the daemon and declaration-apply service use this
 stable executable, and the service PATH puts its directory first; `pty` still comes from the

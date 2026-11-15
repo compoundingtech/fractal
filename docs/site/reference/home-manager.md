@@ -10,6 +10,17 @@ Fractal exports `homeManagerModules.default` from its Nix flake. Import it from 
 
 Use the exported module's [option definitions](https://github.com/compoundingtech/fractal/blob/main/nix/hm-module.nix) for the exact configuration keys supported by your selected revision. Read that revision's release upgrade impact before changing a populated installation.
 
+Configure the module under `services.fractal`, for example
+`services.fractal.enable = true;` and `services.fractal.person = "person/ada";`.
+The former `services.smalltalk` option namespace has been removed, without an
+alias. Rename every option assignment when upgrading the module; this option
+rename does not itself migrate state or change service labels.
+
+Keep `services.fractal.fractalMigration.phase` at its existing phase while
+renaming options. A populated installation must still stage, run
+`fractal migrate host`, and retain its successful receipts before activating
+the `"completed"` phase. See [the host cutover procedure](../guides/upgrading.md#1-prepare-and-stage-through-the-service-owner).
+
 ## Ownership
 
 The module installs the tools, writes user configuration, and manages a systemd user service on Linux or a launchd agent on macOS. Do not install a second archive-owned service over it. Native harness login, workspace trust, macOS permissions, and Linux lingering remain host prerequisites.
