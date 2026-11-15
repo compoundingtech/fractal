@@ -5,7 +5,9 @@
 import { ago, type KeptAttention } from '@fractal/views';
 import { ClientError, notApplied, outcomeUnknown, plainError, type AutoResolvedAsk, type RequestAnswerOption } from '../../clients/typescript/fractal-client';
 
-export type OverrideChoice = Pick<RequestAnswerOption, 'id' | 'label'>;
+export type OverrideChoice = Pick<RequestAnswerOption, 'id' | 'label' | 'outcome'>;
+/** What `work.override` sends as the answer: the named answer's ID, with the person's words when it asks for changes. */
+export type OverrideAnswer = { id: string; text?: string };
 export type AutoResolvedRow = {
   key: string;
   ask: AutoResolvedAsk;
@@ -18,6 +20,8 @@ export type AutoResolvedRow = {
 
 export const AUTO_RESOLVED_TITLE = 'Auto-resolved';
 export const OVERRIDE_TITLE = 'Use my answer instead';
+/** Fractal stopped its scan at the cap: asks may be missing, also when none are listed. */
+export const INCOMPLETE_AUTO_RESOLVED = 'Fractal could not check every recent ask, so some auto-resolved asks may be missing here.';
 
 /** The words every client shows before an override, verbatim. */
 export function overrideCopy(asker: string): string {
@@ -27,7 +31,36 @@ export function overrideCopy(asker: string): string {
 /** The answers that may replace the default: the ask's named answers other than the default, only while Fractal offers the override. */
 export function overrideChoices(ask: AutoResolvedAsk): OverrideChoice[] {
   if (!ask.action_parameters?.['work.override']) return [];
-  return (ask.request?.answers ?? []).filter(answer => answer.id !== ask.default_answer?.id).map(({ id, label }) => ({ id, label }));
+  return (ask.request?.answers ?? []).filter(answer => answer.id !== ask.default_answer?.id).map(({ id, label, outcome }) => ({ id, label, ...(outcome ? { outcome } : {}) }));
+}
+
+/** Whether the chosen answer needs the person's words: requesting changes says what should change. */
+export function needsWords(choice: OverrideChoice): boolean {
+  return choice.outcome === 'request_changes';
+}
+
+export const WORDS_REQUIRED = 'Say what should change; an empty answer is not sent.';
+
+/** The answer to send for a choice: its ID, plus the trimmed words when it requests changes. Empty words are refused with `WORDS_REQUIRED`. */
+export function overrideAnswer(choice: OverrideChoice, words?: string): OverrideAnswer | string {
+  if (!needsWords(choice)) return { id: choice.id };
+  const text = words?.trim() ?? '';
+  return text ? { id: choice.id, text } : WORDS_REQUIRED;
+}
+
+/** The section shows while there are rows, a read failed, or Fractal's list is incomplete (even with no rows yet). */
+export function autoResolvedVisible(rows: readonly AutoResolvedRow[], read: { issue: string; complete: boolean }): boolean {
+  return rows.length > 0 || !!read.issue || !read.complete;
+}
+
+/**
+ * One override in flight per ask: a second send for the same episode is refused until the first settles,
+ * accepted or refused. `run` resolves to whether the override was sent; a refused start resolves false.
+ */
+export async function singleOverride(pending: Set<string>, episode: string, run: () => Promise<boolean>, changed: () => void = () => {}): Promise<boolean> {
+  if (pending.has(episode)) return false;
+  pending.add(episode); changed();
+  try { return await run(); } finally { pending.delete(episode); changed(); }
 }
 
 /** One row per ask, newest resolution first as Fractal lists them; `asker` names the requester, falling back to the ID. */
@@ -57,11 +90,11 @@ export function overrideKey(episode: string, answerId: string): string {
 }
 
 /** `work.override`: the action ID and key are stable across retries, so a repeat returns Fractal's first answer. */
-export function overrideRequest(ask: AutoResolvedAsk, answerId: string, fence: { snapshot_id: string; subject_revisions: Record<string, string> }) {
+export function overrideRequest(ask: AutoResolvedAsk, answer: OverrideAnswer, fence: { snapshot_id: string; subject_revisions: Record<string, string> }) {
   const parameters = ask.action_parameters?.['work.override'];
   if (!parameters) throw new Error('This ask can no longer be overridden.');
-  const key = overrideKey(parameters.episode, answerId);
-  return { id: `action/${key}`, idempotency_key: key, fence, parameters: { target_id: parameters.target_id, episode: parameters.episode, answer: { id: answerId } } };
+  const key = overrideKey(parameters.episode, answer.id);
+  return { id: `action/${key}`, idempotency_key: key, fence, parameters: { target_id: parameters.target_id, episode: parameters.episode, answer: answer.text ? { id: answer.id, text: answer.text } : { id: answer.id } } };
 }
 
 /**
