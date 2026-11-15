@@ -418,6 +418,8 @@ input tool, not a transcript search and not a recorder of unsent drafts.
   not itself unknown eligibility. Future redaction/deletion features must add
   their canonical fact to this eligibility fold. Never reconstruct excluded text
   from a transcript, attachment or older cache.
+  History adds no secret detection and does not change sent-message retention;
+  an input sent without a canonical exclusion fact stays recallable.
 - Recalling text does not restore old attachments, execute commands or send a
   message. Attachment references in text remain text. The current unsent draft,
   its subject, attachment identities, selection and cursor remain recoverable.

@@ -5,28 +5,33 @@ use super::*;
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
         "CREATE INDEX IF NOT EXISTS input_history_author_agent ON claims(
-         actor,json_extract(body,'$.fields.to'),store_index DESC)
+         actor,json_extract(body,'$.fields.to'),printf('%039s',accepted_at_unix_ms) DESC,subject DESC,id DESC)
          WHERE kind='message.sent' AND json_extract(body,'$.fields.from')=actor;
          CREATE INDEX IF NOT EXISTS input_history_author_conversation ON claims(
-         actor,json_extract(body,'$.fields.to'),json_extract(body,'$.fields.session_id'),store_index DESC)
+         actor,json_extract(body,'$.fields.to'),json_extract(body,'$.fields.session_id'),
+         printf('%039s',accepted_at_unix_ms) DESC,subject DESC,id DESC)
          WHERE kind='message.sent' AND json_extract(body,'$.fields.from')=actor;",
     )?;
     Ok(())
 }
 static SQL: std::sync::LazyLock<[String; 2]> = std::sync::LazyLock::new(|| {
-    [("input_history_author_agent", "AND ?5 IS NULL"),
-     ("input_history_author_conversation", "AND json_extract(claims.body,'$.fields.session_id')=?5")]
-        .map(|(index, filter)| format!(
+    [("input_history_author_agent", "AND ?7 IS NULL"),
+     ("input_history_author_conversation", "AND json_extract(claims.body,'$.fields.session_id')=?7")]
+        .map(|(index, filter)| canonical_sql(&format!(
             "SELECT claims.subject,claims.id,claims.actor,
              json_extract(claims.body,'$.fields.to'),
-             json_extract(claims.body,'$.fields.session_id'),claims.store_index,
-             ({UNREPAIRED_CLAIM})
+             json_extract(claims.body,'$.fields.session_id'),printf('%039s',claims.accepted_at_unix_ms),
+             ({UNREPAIRED_CLAIM} AND claims.store_index<=?3 AND claims.id=(
+                SELECT winner.id FROM claims AS winner INDEXED BY claims_subject_kind_accepted_index
+                WHERE winner.subject=claims.subject AND winner.kind='message.sent'
+                ORDER BY CANONICAL_ASC(winner) LIMIT 1))
              FROM claims INDEXED BY {index}
              WHERE claims.kind='message.sent' AND claims.actor=?1
              AND json_extract(claims.body,'$.fields.to')=?2
              AND json_extract(claims.body,'$.fields.from')=claims.actor
-             AND claims.store_index<=?3 AND claims.store_index<?4
-             {filter} ORDER BY claims.store_index DESC LIMIT ?6"))
+             AND (printf('%039s',claims.accepted_at_unix_ms),claims.subject,claims.id)<(?4,?5,?6)
+             {filter} ORDER BY printf('%039s',claims.accepted_at_unix_ms) DESC,
+             claims.subject DESC,claims.id DESC LIMIT ?8")))
 });
 
 
@@ -37,7 +42,15 @@ pub struct Candidate {
     pub author: String,
     pub agent: String,
     pub conversation: Option<String>,
-    pub accepted_order: u64,
+    pub accepted_order: String,
+}
+
+/// The extra claim ID advances past noncanonical duplicate source rows.
+#[derive(Clone, Debug)]
+pub struct Cursor {
+    pub accepted_order: String,
+    pub message_id: String,
+    pub claim_id: String,
 }
 
 /// `through` freezes insert membership; current repairs/deletions still win.
@@ -46,7 +59,7 @@ pub struct Query<'a> {
     pub agent: &'a str,
     pub conversation: Option<&'a str>,
     pub through: u64,
-    pub before: Option<u64>,
+    pub before: Option<&'a Cursor>,
     pub limit: usize,
 }
 
@@ -55,7 +68,7 @@ pub struct Query<'a> {
 #[derive(Debug)]
 pub struct Page {
     pub entries: Vec<Candidate>,
-    pub examined_through: Option<u64>,
+    pub examined_through: Option<Cursor>,
     pub has_more_candidates: bool,
 }
 
@@ -77,14 +90,18 @@ impl Store {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(&SQL[usize::from(query.conversation.is_some())])?;
         let candidates = statement.query_map(params![query.person,query.agent,query.through,
-            query.before.unwrap_or(i64::MAX as u64),query.conversation,query.limit + 1], |row| {
+            query.before.map_or("\u{10ffff}", |c|c.accepted_order.as_str()),
+            query.before.map_or("", |c|c.message_id.as_str()),
+            query.before.map_or("", |c|c.claim_id.as_str()),query.conversation,query.limit + 1], |row| {
             Ok((Candidate { message_id:row.get(0)?,claim_id:row.get(1)?,author:row.get(2)?,
                 agent:row.get(3)?,conversation:row.get(4)?,accepted_order:row.get(5)? }, row.get::<_,bool>(6)?))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         let has_more_candidates = candidates.len() > query.limit;
-        let mut page = Page { entries: Vec::new(), examined_through: None, has_more_candidates };
+        let examined_through = candidates.iter().take(query.limit).last().map(|(c,_)| Cursor {
+            accepted_order:c.accepted_order.clone(),message_id:c.message_id.clone(),claim_id:c.claim_id.clone()
+        });
+        let mut page = Page { entries: Vec::new(), examined_through, has_more_candidates };
         for (candidate, current) in candidates.into_iter().take(query.limit) {
-            page.examined_through = Some(candidate.accepted_order);
             if current && authorized(&candidate)? { page.entries.push(candidate); }
         }
         Ok(page)
