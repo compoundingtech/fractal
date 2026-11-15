@@ -181,6 +181,17 @@ fn may_originate_tx(tx: &Connection, origin: &str, step: &str, caller: &str,
     Ok(claimed.as_deref() == Some(origin))
 }
 
+fn operation_conflicted_tx(tx: &Connection, operation: &str) -> Result<bool, FractalError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+         WHERE json_extract(body,'$._operation.id')=?1
+         AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims p WHERE p.id=claims.id)
+         GROUP BY json_extract(body,'$._operation.id') HAVING COUNT(DISTINCT origin)>1)
+         OR EXISTS(SELECT 1 FROM operations WHERE id=?1 AND state='conflict')",
+        [operation], |row| row.get(0),
+    ).map_err(internal)
+}
+
 impl Store {
     /// Effective wire state, including causal human resolution, not arrival order.
     pub fn effect_state(&self, subject: &str) -> Result<Option<(String, EffectRecord)>, FractalError> {
@@ -302,14 +313,7 @@ impl Store {
         for subject in subjects {
             let Some((state, record)) = self.effect_state(&subject)? else { continue };
             if state == "unresolved" || record.resolution.as_deref() == Some("human") { continue; }
-            let conflict = {
-                let connection = self.readers.get();
-                let writers: bool = connection.query_row(
-                    "SELECT COUNT(DISTINCT origin)>1 FROM claims WHERE subject=?1 AND kind='effect.intended'",
-                    [&record.effect_id], |row| row.get(0)).map_err(internal)?;
-                writers || operation_tx(&connection, &record.operation_id).map_err(internal)?
-                    .is_some_and(|(_, _, state)| state == "conflict")
-            };
+            let conflict = operation_conflicted_tx(&self.readers.get(), &record.operation_id)?;
             if conflict {
                 self.with_run_fence(&record.bound_step_run, |tx|
                     park_tx(tx, self.origin(), &record, &record.bound_step_run, "idempotency-conflict", "daemon/runtime"))?;
@@ -402,15 +406,20 @@ impl Store {
                     }
                     return Ok(EffectAdmission::Recover(resolved));
                 }
-                if original.bound_step_run != owner.step {
-                    return Err(FractalError::new("effect-work-binding-mismatch",
-                        "recovery requires the current live attempt of the effect's original step-run"));
+                if operation_conflicted_tx(tx, &operation_id)? {
+                    park_tx(tx, self.origin(), &original, &owner.step, "idempotency-conflict", caller)?;
+                    return Ok(EffectAdmission::Blocked(FractalError::new("idempotency-conflict",
+                        "multiple writers admitted the same effect operation")));
                 }
                 // The immutable operation digest uses the original binding, not its replacement.
                 let input = intended_input(&original, &key)?;
                 if let Err(error) = replicated_operation_outcome_tx(tx, &input) {
                     park_tx(tx, self.origin(), &original, &owner.step, error.code, caller)?;
                     return Ok(EffectAdmission::Blocked(error));
+                }
+                if original.bound_step_run != owner.step {
+                    return Err(FractalError::new("effect-work-binding-mismatch",
+                        "recovery requires the current live attempt of the effect's original step-run"));
                 }
                 if original.payload_digest != payload_digest || original.target != target
                     || original.provider != provider || original.class != class
@@ -477,14 +486,16 @@ impl Store {
             if kind != KIND_INTENDED {
                 return Err(FractalError::new("effect-not-intended", "the effect has already entered execution or resolution"));
             }
+            if operation_conflicted_tx(tx, &record.operation_id)?
+            {
+                park_tx(tx, self.origin(), record, &record.bound_step_run,
+                    "idempotency-conflict", &record.lease_owner)?;
+                return Ok(Err(FractalError::new("idempotency-conflict",
+                    "the effect operation has conflicting requests")));
+            }
             let original = intended_tx(tx, &record.effect_id)?.ok_or_else(|| internal("the intended effect is missing"))?;
             if &original != record {
                 return Err(FractalError::new("idempotency-mismatch", "the admitted effect changed"));
-            }
-            if let Some((_, _, state)) = operation_tx(tx, &record.operation_id).map_err(internal)?
-                && state == "conflict"
-            {
-                return Err(FractalError::new("idempotency-conflict", "the effect operation has conflicting requests"));
             }
             // Recheck the originating lease at the final durable boundary before send.
             let mission: String = tx.query_row("SELECT m.mission_id FROM step_runs s JOIN mission_runs m ON m.id=s.run_id WHERE s.subject=?1",
@@ -497,8 +508,9 @@ impl Store {
                 return Err(FractalError::new("effect-origin-unavailable",
                     "only the creation-anchor host with a local work claim may send"));
             }
-            append_effect_tx(tx, self.origin(), KIND_IN_FLIGHT, &current)
-        })
+            append_effect_tx(tx, self.origin(), KIND_IN_FLIGHT, &current)?;
+            Ok(Ok(()))
+        })?
     }
 
     pub fn confirm_message_effect(&self, record: &EffectRecord, message: &ClaimRecord, recovering_actor: &str) -> Result<(), FractalError> {
