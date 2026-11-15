@@ -4315,7 +4315,11 @@ export type Subscription = ResourceHeader & {
   state: string;
 };
 
+export type SubscriptionAdmission = "ready-heads" | "relevant-changes";
+
 export type SubscriptionSpec = {
+  admission?: SubscriptionAdmission;
+  authors?: Array<string>;
   condition?: {
 
 } | null;

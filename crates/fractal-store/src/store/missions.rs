@@ -1,6 +1,10 @@
 use super::*;
 use super::identities;
 use crate::model::MissionRunRetryRequest;
+use smallclaims::store::canonical::CANONICAL_ORDER_DESC;
+
+type SubscriptionStartContext<'a> =
+    (&'a str, &'a str, Option<&'a Value>, Option<(&'a str, &'a str)>);
 
 enum RunCreationLineage<'a> {
     Retry(&'a MissionRunView, &'a MissionRunRetryRequest),
@@ -263,7 +267,7 @@ impl Store {
         request: &MissionRunRequest,
         child: Option<ChildMissionContext>,
         occurrence_subject: Option<&str>,
-        latest_ref: Option<(&str, &str)>,
+        latest_ref: Option<SubscriptionStartContext<'_>>,
     ) -> Result<MissionRunView, FractalError> {
         self.create_mission_run_context(request, child, occurrence_subject, latest_ref, None, None)
     }
@@ -368,7 +372,7 @@ impl Store {
         request: &MissionRunRequest,
         child: Option<ChildMissionContext>,
         occurrence_subject: Option<&str>,
-        latest_ref: Option<(&str, &str)>,
+        latest_ref: Option<SubscriptionStartContext<'_>>,
         lineage: Option<RunCreationLineage<'_>>,
         provided_transaction: Option<&Transaction<'_>>,
     ) -> Result<MissionRunView, FractalError> {
@@ -411,6 +415,12 @@ impl Store {
                 "default_selector": child.default_selector,
             })),
         });
+        let subscription_policy = latest_ref.and_then(|(_, _, fields, _)| fields);
+        for name in ["admission", "authors"] {
+            if let Some(value) = subscription_policy.and_then(|fields| fields.get(name)) {
+                request_identity[name] = value.clone();
+            }
+        }
         if let Some((source, options)) = retry {
             request_identity["retry"] = json!((&source.subject, options));
         }
@@ -461,6 +471,28 @@ impl Store {
             let view = serde_json::from_str(&response).map_err(internal)?;
             return Ok(view);
         }
+        // The queue read is not a writer fence: another same-head delivery may
+        // supersede its selected request before this transaction starts. Keep
+        // this check after cached replay so already-created runs remain idempotent.
+        if subscription_policy.and_then(|fields| fields.get("admission")).and_then(Value::as_str)
+            == Some("relevant-changes")
+            && let Some((resource, _, _, Some((subscription, request_id)))) = latest_ref
+        {
+            let latest: Option<String> = transaction.query_row(
+                format!("SELECT id FROM claims
+                 WHERE subject=?1 AND kind='subscription.mission-requested'
+                   AND json_extract(body, '$.fields.admission')='relevant-changes'
+                   AND json_extract(body, '$.fields.resource')=?2
+                 ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1").as_str(),
+                params![subscription, resource], |row| row.get(0),
+            ).optional().map_err(internal)?;
+            if let Some(latest) = latest
+                && latest != request_id
+            {
+                return Err(FractalError::new("stale-pull-request",
+                    format!("newer relevant delivery {latest} supersedes this queued request")));
+            }
+        }
         stages.enter("admission");
         owned_sets::guard_mission_start(transaction, mission_id)?;
         // Recheck naming availability under the writer lock; a conflicting replicated
@@ -496,7 +528,7 @@ impl Store {
         }
         let after = supersession.and_then(|(source, _)| source.after.as_deref());
         let mission = crate::mission::run_mission(mission, after)?;
-        if let Some((resource, discovery)) = latest_ref
+        if let Some((resource, discovery, _, _)) = latest_ref
             && let Some(reason) = stale_ref_request_tx(transaction, resource, discovery).map_err(internal)? {
             return Err(FractalError::new("stale-ref-head", reason));
         }
@@ -532,9 +564,11 @@ impl Store {
             }
         }
         let inputs = resolve_mission_run_inputs(transaction, &mission, &request.inputs).map_err(incompatible)?;
-        if let Some((resource, discovery)) = latest_ref {
-            if let Some(reason) = stale_pull_request_request_tx(transaction, resource, discovery)
-                .map_err(internal)?
+        if let Some((resource, discovery, fields, _)) = latest_ref {
+            if let Some(reason) = stale_pull_request_request_tx(
+                transaction, resource, discovery,
+                fields.and_then(|fields| fields.get("admission")).and_then(Value::as_str),
+            ).map_err(internal)?
             {
                 return Err(FractalError::new("stale-pull-request", reason));
             }
@@ -727,6 +761,11 @@ impl Store {
             }
         });
         let mut body = body;
+        for name in ["admission", "authors"] {
+            if let Some(value) = subscription_policy.and_then(|fields| fields.get(name)) {
+                body["fields"][name] = value.clone();
+            }
+        }
         add_run_report_fields(&mut body, &mission, None, false);
         append_receipt_claim_tx(
             transaction,

@@ -1465,6 +1465,15 @@ pub struct ObserverSpec {
     pub stopped: bool,
 }
 
+/// The collection changes that may admit a subscription's mission.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubscriptionAdmission {
+    #[default]
+    ReadyHeads,
+    RelevantChanges,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SubscriptionSpec {
     pub observer: String,
@@ -1484,6 +1493,12 @@ pub struct SubscriptionSpec {
     pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
+    /// Omission preserves the existing ready-head admission policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<SubscriptionAdmission>,
+    /// A case-insensitive GitHub login allowlist, independent of ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<Vec<String>>,
     /// An item that a live agent owns goes to that agent as one message instead (`owner
     /// "message"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

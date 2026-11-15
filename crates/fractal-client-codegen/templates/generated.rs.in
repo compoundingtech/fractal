@@ -2758,12 +2758,22 @@ pub struct ObserverSpec {
     pub stopped: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubscriptionAdmission {
+    ReadyHeads,
+    RelevantChanges,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SubscriptionSpec {
     pub observer: String,
     pub to: String,
     pub fields: Vec<String>,
     pub condition: Option<Value>,
     pub delivery: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<SubscriptionAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<Vec<String>>,
     pub mission: Option<String>,
     pub revision: Option<String>,
     pub resource_input: Option<String>,

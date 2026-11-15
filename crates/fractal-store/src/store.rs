@@ -2532,6 +2532,7 @@ pub fn stale_pull_request_request_tx(
     connection: &Connection,
     resource: &str,
     discovery: &str,
+    admission: Option<&str>,
 ) -> Result<Option<String>> {
     smallclaims::touched::note_read(|| resource.to_owned());
     // A compact item state, as a poller in compact mode pins, reads as its observation.
@@ -2551,15 +2552,17 @@ pub fn stale_pull_request_request_tx(
         .get("number")
         .and_then(Value::as_u64)
         .map_or_else(|| resource.to_owned(), |number| format!("#{number}"));
-    if let Some(state) = current
-        .get("state")
-        .and_then(Value::as_str)
-        .filter(|state| *state != "open")
-    {
-        return Ok(Some(format!("pull request {number} is {state}")));
-    }
-    if current.get("draft").and_then(Value::as_bool) == Some(true) {
-        return Ok(Some(format!("pull request {number} is a draft again")));
+    if admission != Some("relevant-changes") {
+        if let Some(state) = current
+            .get("state")
+            .and_then(Value::as_str)
+            .filter(|state| *state != "open")
+        {
+            return Ok(Some(format!("pull request {number} is {state}")));
+        }
+        if current.get("draft").and_then(Value::as_bool) == Some(true) {
+            return Ok(Some(format!("pull request {number} is a draft again")));
+        }
     }
     let short = |head: &str| head.chars().take(12).collect::<String>();
     let requested_head = match requested
@@ -3680,6 +3683,25 @@ impl Store {
                     };
                     if spec.stopped || spec.delivery != "mission" {
                         continue;
+                    }
+                    if spec.admission == Some(crate::model::SubscriptionAdmission::RelevantChanges) {
+                        let observer = match intent.subjects.get(&spec.observer) {
+                            Some(observer) => crate::graph::observer_spec(&observer.desired),
+                            None => current_desired_row_tx(transaction, &spec.observer)
+                                .map_err(internal)?
+                                .map(|row| serde_json::from_str::<Value>(&row.body).map_err(internal))
+                                .transpose()?
+                                .as_ref()
+                                .and_then(crate::graph::observer_spec),
+                        };
+                        if observer.is_none_or(|observer| {
+                            observer.stopped || observer.provider != "github.repository"
+                        }) {
+                            return Err(FractalError::new(
+                                "invalid-subscription-admission",
+                                "relevant-changes admission requires a declared github.repository observer",
+                            ));
+                        }
                     }
                     let (Some(mission_id), Some(revision), Some(input)) = (
                         spec.mission.as_deref(),

@@ -4,6 +4,7 @@ use crate::message_desired_recipient_match;
 use crate::message_sent_recipient_match;
 use super::*;
 pub use fractal_store::store::delivery::*;
+use smallclaims::store::canonical::CANONICAL_ORDER_DESC;
 
 fn subscription_request_view(
     request: &ClaimRecord,
@@ -110,8 +111,14 @@ fn mailbox_owner_key(
 }
 
 pub trait DeliveryStore {
+    /// Start with the delivery's immutable policy snapshot. Durable queue callers
+    /// also pass the original request claim ID so the writer fences supersession;
+    /// direct callers without a durable request pass `None`.
+    #[allow(clippy::too_many_arguments)] // Preserve the delivery snapshot and its original queue identity.
     fn create_subscription_mission_run(&self, request: &MissionRunRequest,
             parent: Option<&MissionRunView>, subscription: &str, resource: &str, discovery: &str,
+            request_fields: Option<&Value>,
+            request_id: Option<&str>,
         ) -> Result<MissionRunView, FractalError>;
     fn next_subscription_mission_retry_deadline(&self) -> Result<Option<u128>>;
     fn populate_work_wake_for_reconcile(
@@ -293,15 +300,19 @@ pub trait DeliveryStore {
 
 impl DeliveryStore for Store {
 
+    #[allow(clippy::too_many_arguments)] // Mirrors the delivery admission contract above.
     fn create_subscription_mission_run(&self, request: &MissionRunRequest,
             parent: Option<&MissionRunView>, subscription: &str, resource: &str, discovery: &str,
+            request_fields: Option<&Value>,
+            request_id: Option<&str>,
         ) -> Result<MissionRunView, FractalError> {
         let child = parent.map(|parent| ChildMissionContext {
             root_revision: parent.root_revision.clone(),
             root_run_id: parent.root_mission_run.trim_start_matches("mission-run/").into(),
             parent_step_run: normalize_step_run(subscription), default_selector: None, started_by: None,
         });
-        self.create_mission_run_inner(request, child, None, Some((resource, discovery)))
+        self.create_mission_run_inner(request, child, None,
+            Some((resource, discovery, request_fields, request_id.map(|id| (subscription, id)))))
     }
 
     fn next_subscription_mission_retry_deadline(&self) -> Result<Option<u128>> {
@@ -805,10 +816,21 @@ impl DeliveryStore for Store {
         ] {
             decisions.extend(self.claims_for(subscription, Some(kind))?);
         }
+        let pending = self.pending_subscription_mission_requests(subscription)?
+            .into_iter().map(|claim| claim.id).collect::<BTreeSet<_>>();
         Ok(self
             .claims_for(subscription, Some("subscription.mission-requested"))?
             .into_iter()
-            .map(|request| subscription_request_view(&request, &decisions))
+            .map(|request| {
+                let mut view = subscription_request_view(&request, &decisions);
+                if request.body.pointer("/fields/admission").and_then(Value::as_str) == Some("relevant-changes")
+                    && matches!(view.status.as_str(), "pending" | "held")
+                    && !pending.contains(&request.id)
+                {
+                    view.status = "cancelled".into();
+                }
+                view
+            })
             .collect())
     }
 
@@ -911,10 +933,34 @@ impl DeliveryStore for Store {
                )
              ORDER BY CANONICAL_ASC(request)",
         ))?;
-        statement
+        let mut requests = statement
             .query_map([subject], claim_from_row)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .collect::<Result<Vec<_>, _>>()?;
+        let relevant = |request: &ClaimRecord| {
+            request.body.pointer("/fields/admission").and_then(Value::as_str)
+                == Some("relevant-changes")
+        };
+        if requests.iter().any(relevant) {
+            // Rank all relevant deliveries, including finished ones: completing the latest
+            // delivery must not revive an older request for the same resource.
+            let mut latest = connection.prepare(format!(
+                "SELECT id FROM (
+                   SELECT claims.id,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY json_extract(claims.body, '$.fields.resource')
+                            ORDER BY {CANONICAL_ORDER_DESC}
+                          ) AS ordinal
+                   FROM claims WHERE claims.subject=?1
+                     AND claims.kind='subscription.mission-requested'
+                     AND json_extract(claims.body, '$.fields.admission')='relevant-changes'
+                 ) WHERE ordinal=1"
+            ).as_str())?;
+            let latest = latest
+                .query_map([subject], |row| row.get::<_, String>(0))?
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            requests.retain(|request| !relevant(request) || latest.contains(&request.id));
+        }
+        Ok(requests)
     }
 
     fn subscription_mission_deferral(

@@ -277,6 +277,21 @@ pub fn parse_intent_with_owner(
         parse_desired_node(node, None, &mut context)?;
         collect_mission_resources(node, &mut context)?;
     }
+    for subject in context.subjects.values().filter(|subject| subject.kind == "subscription") {
+        let Some(subscription) = subscription_spec(&subject.desired) else {
+            continue;
+        };
+        if subscription.admission == Some(crate::model::SubscriptionAdmission::RelevantChanges)
+            && let Some(observer) = context.subjects.get(&subscription.observer)
+            && let Some(observer) = observer_spec(&observer.desired)
+            && observer.provider != "github.repository"
+        {
+            return Err(FractalError::new(
+                "invalid-subscription-admission",
+                "relevant-changes admission requires a github.repository observer",
+            ));
+        }
+    }
     for node in document.nodes() {
         collect_document_refs(node, &mut context.document_refs)?;
     }
@@ -3442,6 +3457,8 @@ fn validate_subscription(node: &KdlNode) -> Result<(), FractalError> {
                     "requester",
                     "owner",
                     "text",
+                    "admission",
+                    "author",
                 ],
                 "mission delivery",
                 "delivery",
@@ -3453,10 +3470,45 @@ fn validate_subscription(node: &KdlNode) -> Result<(), FractalError> {
                 "requester",
                 "owner",
                 "text",
+                "admission",
             ] {
                 unique_child(delivery_body, name)?;
             }
             validate_owner_route(delivery_body)?;
+            let admission = child_string(delivery_body, "admission")?;
+            if admission.as_deref().is_some_and(|mode| {
+                !matches!(mode, "ready-heads" | "relevant-changes")
+            }) {
+                return Err(FractalError::new(
+                    "invalid-subscription-admission",
+                    "subscription admission must be ready-heads or relevant-changes",
+                ));
+            }
+            let mut authors = BTreeSet::new();
+            for author in repeated_child_strings(delivery_body, "author")? {
+                if author.trim().is_empty() {
+                    return Err(FractalError::new(
+                        "invalid-subscription-author",
+                        "a subscription author names one nonempty GitHub login",
+                    ));
+                }
+                if !authors.insert(author.to_ascii_lowercase()) {
+                    return Err(FractalError::new(
+                        "duplicate-subscription-author",
+                        format!("the author `{author}` repeats"),
+                    ));
+                }
+            }
+            if admission.as_deref() == Some("relevant-changes")
+                && (child_string(delivery_body, "text")?.is_some()
+                    || child_string(delivery_body, "owner")?.is_some()
+                    || !fields.iter().any(|field| field == "pull_requests"))
+            {
+                return Err(FractalError::new(
+                    "invalid-subscription-admission",
+                    "relevant-changes requires per-PR mission delivery without text batching or owner diversion",
+                ));
+            }
             // `text` batches: one run per observation receives every new item and mention as a
             // text input, so its agent sees a burst together. Mentions arrive only that way.
             let text = child_string(delivery_body, "text")?;
@@ -4143,6 +4195,8 @@ pub fn subscription_spec(value: &Value) -> Option<SubscriptionSpec> {
             resource_input: None,
             workspace: None,
             requester: None,
+            admission: None,
+            authors: None,
             owner_message: false,
             mentions: Vec::new(),
             text_input: None,
@@ -4203,6 +4257,16 @@ pub fn subscription_spec(value: &Value) -> Option<SubscriptionSpec> {
         requester: canonical_child_value(delivery_node, "requester")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        admission: match canonical_child_value(delivery_node, "admission").and_then(Value::as_str) {
+            Some("ready-heads") => Some(crate::model::SubscriptionAdmission::ReadyHeads),
+            Some("relevant-changes") => Some(crate::model::SubscriptionAdmission::RelevantChanges),
+            None => None,
+            Some(_) => return None,
+        },
+        authors: {
+            let authors = canonical_child_values(delivery_node, "author");
+            (!authors.is_empty()).then_some(authors)
+        },
         owner_message: canonical_child_value(delivery_node, "owner").and_then(Value::as_str)
             == Some("message"),
         mentions: children
