@@ -20,6 +20,15 @@ appId: com.compoundingtech.fractal.starter
 - { "runFlow": { "file": "threads-preview-thread.yaml", "env": { "THREAD_TITLE": "Rejected changes — fixture" } } }
 - { "tapOn": "^Close thread$" }
 - { "extendedWaitUntil": { "visible": ".*This fixture intentionally rejects thread changes.*", "timeout": 30000 } }
+# Capture the rejected mutation only after rollback and its error are visible.
+- { "assertVisible": "^Rejected changes — fixture$" }
+- { "assertVisible": { "id": "^BackButton$" } }
+- { "assertNotVisible": "^Open thread$" }
+- { "assertVisible": ".*1 message.*open.*" }
+- { "assertVisible": "^Close thread$" }
+- { "assertNotVisible": '^Closed "Rejected changes — fixture".*' }
+- { "assertNotVisible": "^Reopen thread$" }
+- { "takeScreenshot": "actions-rejected-close" }
 # PREVIEW_FINAL_ASSERTIONS
 - { "assertVisible": "^Rejected changes — fixture$" }
 - { "assertVisible": ".*1 message.*open.*" }

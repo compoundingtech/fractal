@@ -27,7 +27,18 @@ appId: com.compoundingtech.fractal.starter
       text: "^Open thread$"
     direction: DOWN
     timeout: 30000
+# The expanded Threads group scrolls within y=272..709 on the preview phone.
+# Screen visibility alone admits a clipped footer whose center is outside that
+# viewport. Start and end this upward gesture inside the group, not the page.
+- swipe:
+    start: 85%, 70%
+    end: 85%, 45%
+    duration: 600
+- assertVisible: "^Open thread$"
 - tapOn: "^Open thread$"
 - extendedWaitUntil:
     visible: "^${THREAD_TITLE}$"
     timeout: 30000
+- assertVisible:
+    id: "^BackButton$"
+- assertNotVisible: "^Open thread$"

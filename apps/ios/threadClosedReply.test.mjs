@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ThreadEdits } from './threadEdits.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 
 const React = { createElement: (type, props, ...children) => ({ type, props, children: children.flat() }) };
 const find = (node, type) => findBy(node, candidate => candidate.type === type);
@@ -204,6 +205,7 @@ test('a closed thread explains that replying keeps it closed, and a missing repl
     useNavigation: () => ({}), useThreadViewports: () => [], agentName: () => 'Reviewer', ago: () => '2d', eventLine: event => event.kind,
     View: 'View', T: 'T', Button: 'Button', Markdown: 'Markdown', Pressable: 'Pressable', ContextMenu: 'ContextMenu',
     ThreadComposer: 'ThreadComposer', ThreadActionFeedback: 'ThreadActionFeedback',
+    theme: {},
   });
   const thread = { id: 'thread/closed', title: 'Review', state: 'closed', unread: false };
   const render = () => { state.reset(); return body({ client: {}, thread }); };
@@ -235,6 +237,14 @@ test('a closed thread explains that replying keeps it closed, and a missing repl
   assert.equal(find(tree, 'ThreadComposer'), undefined);
   assert.ok(findBy(tree, node => node.type === 'T' && node.children?.includes("Replies aren't available on this connection.")));
   assert.ok(button(tree, 'Refresh history'), 'an HTTP-only timeline keeps manual refresh');
+  page.issue = 'Temporary timeline read failure';
+  let retries = 0;
+  page.reload = () => { retries++; page.issue = undefined; };
+  const retry = button(render(), 'Retry');
+  assert.ok(retry, 'timeline errors have an in-place Retry control');
+  retry.props.onPress();
+  assert.equal(retries, 1);
+  assert.equal(button(render(), 'Retry'), undefined, 'successful recovery clears the error control');
 });
 
 test('the standalone thread names its navigation bar, follows renames and drops the duplicate title line', () => {
@@ -736,4 +746,37 @@ test('exact-detail replacements retain snapshot provenance and cannot stamp an o
   assert.equal(page.items[0], newer);
   assert.equal(page.snapshots.get(newer.id), newerSnapshot, 'accepted exact replacements retain per-item snapshot provenance');
   assert.equal(edits.project(newer), newer, 'only the authoritative exact snapshot at 14 retires the overlay');
+});
+
+test('Retry re-reads an inline thread page and clears its live error only after a successful read', async () => {
+  const state = hooks();
+  let focus = [], watcher, reads = 0, failing = true;
+  const thread = { id: 'thread/one', title: 'Review', state: 'open' };
+  const read = async () => {
+    reads++;
+    if (failing) throw new Error('Temporary read failure');
+    return { value: { items: [thread], next_cursor: null } };
+  };
+  const follow = handlers => { watcher = handlers; return { close() {} }; };
+  const pageHook = compile('useThreadPage', 'type ThreadClient', {
+    ...state, useRef: current => ({ current }), useCallback: fn => fn, useMemo: compute => compute(),
+    useFocusEffect: effect => focus.push(effect), ClientError, errorText: error => error.message,
+    sameHead: (left, right) => left.length === right.length && left.every((item, index) => item.id === right[index]?.id),
+  });
+  const render = () => { state.reset(); focus = []; return pageHook(read, 0, follow); };
+  render();
+  focus[0]();
+  focus[1]();
+  await new Promise(resolve => setImmediate(resolve));
+  watcher.onIssue('Updates paused', false);
+  assert.equal(render().issue, 'Updates paused');
+  render().reload();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(render().issue, 'Updates paused', 'a failed retry does not dismiss the issue');
+  failing = false;
+  render().reload();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 3);
+  assert.equal(render().issue, undefined);
+  assert.deepEqual(render().items, [thread]);
 });

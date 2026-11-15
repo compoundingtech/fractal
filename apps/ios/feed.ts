@@ -1,3 +1,4 @@
+import { threadRefusalMessage } from './threadEdits';
 import type { MembershipEffect, MembershipEvent, MembershipPage, MembershipToken } from './sidebarMemberships';
 import { applyWindow, isResourceCollectionFrame, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry, type ThreadSummary, type ThreadTimelineEvent, type ThreadTimelineFrame, type ThreadSummaryFrame, type ThreadCollectionContext } from '../../clients/typescript/fractal-client';
 import type { InventoryName } from '@fractal/views';
@@ -302,7 +303,8 @@ export class Feed {
         if (frame.kind === 'error' || frame.kind === 'resync') {
           window = undefined;
           const refused = frame.kind === 'error' && !frame.retryable && !transient(frame.code);
-          handlers.onIssue(plainMessage(frame.code, frame.message ?? 'Fractal could not update this thread window.'), refused);
+          const reason = frame.message ?? 'Fractal could not update this thread window.';
+          handlers.onIssue(frame.code === 'forbidden' ? threadRefusalMessage(reason) : plainMessage(frame.code, reason), refused);
           if (!refused) retry();
           return;
         }

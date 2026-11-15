@@ -13,7 +13,7 @@ import { rememberBounded } from '../boundedCache';
 import { agentName } from '../agentsView';
 import { ContextMenu } from '../menu';
 import type { RootScreen } from '../navigation';
-import { errorText, threadEditScope, threadDraftKey, threadStartScope, useStore, type ThreadStartOrigin } from '../store';
+import { threadErrorText as errorText, threadEditScope, threadDraftKey, threadStartScope, useStore, type ThreadStartOrigin } from '../store';
 import type { ThreadEditResult } from '../threadEdits';
 import { visibleThreadMessages } from '../threadVisibility';
 import { measureThreadBounds, measureThreadViewport, ThreadViewport, useThreadViewports } from '../threadViewport';
@@ -49,6 +49,7 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
         const snapshots = new Map(prior?.snapshots);
         if (snapshot) for (const item of value.items) snapshots.set(item.id, snapshot);
         setResult({ read, head: prior?.head ?? value.items, page, snapshots });
+        setLive(previous => previous?.read === read ? { ...previous, issue: undefined, refused: false } : previous);
       }
     } catch (error) {
       if (!request.signal.aborted) {
@@ -242,7 +243,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
           : <ContextThreadHeader key={thread.id} thread={thread} open={false} toggle={toggle} />;
       })}
       </ThreadViewport>
-      {page.issue ? <T color={theme.waiting}>{page.issue}</T> : null}
+      {page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Retry" onPress={page.reload} disabled={page.loading} /></> : null}
       {!page.live || page.more && !page.issue ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
         {!page.live ? <Button label="Refresh threads" onPress={page.reload} disabled={page.loading} /> : null}
         {page.more && !page.issue ? <Button label="More threads" onPress={page.more} disabled={page.loading} /> : null}
@@ -268,7 +269,7 @@ function ExpandedContextThread({ client, initial, refresh, onSummary, toggle, on
   return <View>
     <ContextThreadHeader thread={thread ?? initial} open toggle={toggle} />
     {thread ? <ThreadBody client={client} thread={thread} onOpen={onOpen} revealComposer={revealComposer} />
-      : page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Refresh thread" onPress={page.reload} disabled={page.loading} /></>
+      : page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Retry" onPress={page.reload} disabled={page.loading} /></>
       : <T dim>Loading thread…</T>}
   </View>;
 }
@@ -615,7 +616,7 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
         { id: 'markRead', title: 'Mark visible replies read', run: markVisibleRead },
       ] : []}>{row}</ContextMenu>];
   });
-  const history = page.issue ? <T color={theme.waiting}>{page.issue}</T> : !start && !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null;
+  const history = page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Retry" onPress={page.reload} disabled={page.loading} /></> : !start && !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null;
   const markRead = readCandidates.length ? <Button label="Mark visible replies read" disabled={!editable} onPress={markVisibleRead} /> : null;
   const closedHint = closed ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
     <View accessible accessibilityRole="text" accessibilityLabel={canReply ? 'Closed, replying keeps it closed' : 'Closed'} style={{ flex: 1 }}>

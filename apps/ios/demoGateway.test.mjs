@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
@@ -10,6 +11,8 @@ import { CollectionFrame, Envelope, ErrorEnvelope, ThreadSummary, ThreadSummaryP
 import { ANCHOR_MS } from '../../clients/typescript/fractal-scenarios/src/index.ts';
 import { Feed } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
+import { verifyPairing } from './pairingProof.ts';
+import { signedBytes, signatureParameter, threadMessageSubject } from '../../clients/typescript/fractal-views/deviceSigning.ts';
 
 import { ThreadEdits } from './threadEdits.ts';
 
@@ -361,6 +364,8 @@ test('fixture state controls expose empty, retryable error, offline, revoked gra
   let socket = new WebSocket(`${baseUrl.replace('http:', 'ws:')}/v1/client/collections`);
   t.after(() => socket.terminate());
   await once(socket, 'open');
+  const snapshots = [];
+  socket.on('message', data => { const frame = JSON.parse(String(data)); if (frame.kind === 'snapshot') snapshots.push(frame); });
   const initial = nextThreadFrame(socket, frame => frame.id === 'fixture-state');
   socket.send(JSON.stringify({ kind: 'subscribe', id: 'fixture-state', collection: 'threads', thread_context: context, limit: 25 }));
   await initial;
@@ -374,8 +379,11 @@ test('fixture state controls expose empty, retryable error, offline, revoked gra
   const readError = await errorLive;
   assert.equal(readError.retryable, true);
   await assert.rejects(client.threadList(context), error => error instanceof ClientError && error.status === 503 && error.response.retryable);
-  await controlThreads(baseUrl, { state: 'ready' });
+  const beforeRecovery = snapshots.length;
+  await controlThreads(baseUrl, { state: 'ready', broadcast: false });
   assert.ok((await client.threadList(context)).value.items.length, 'the same read succeeds when retried after recovery');
+  await delay(10);
+  assert.equal(snapshots.length, beforeRecovery, 'silent recovery leaves the inline error available for an explicit Retry');
 
   const disconnected = once(socket, 'close');
   await controlThreads(baseUrl, { state: 'offline' });
@@ -521,4 +529,46 @@ test('fixture reset restores mutations, receipts, scenarios and live windows wit
     assert.ok((await client.threadList({ agent_id: initial.value.agent_id })).value.items.length > 1);
     assert.ok((await client.capabilities()).value.capabilities.some(item => item.id === 'thread.reply' && item.state === 'granted'));
   }
+});
+
+test('mutable demo pairing binds the phone signing key and sends a verifiably signed quoted reply', { timeout: 15000 }, async t => {
+  const baseUrl = await startGateway(t, { capture: true, scenario: 'thread-actions' });
+  const client = new FractalClient({ baseUrl, credential: async () => 'demo-credential' });
+  const phone = generateKeyPairSync('ed25519');
+  const key = phone.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64url');
+  const session = (await client.completePairing('demo', { code: 'demo', device_public_key: key, key_storage: 'software' })).value;
+  const crypto = {
+    hash: async bytes => new Uint8Array(createHash('sha256').update(bytes).digest()),
+    verify: async (publicKey, text, signature) => verify(null, Buffer.from(text), createPublicKey({
+      key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(publicKey, 'base64url')]),
+      format: 'der', type: 'spki',
+    }), Buffer.from(signature, 'base64url')),
+  };
+  assert.ok(session.scopes.includes('control.messages'));
+  await verifyPairing(session, key, undefined, crypto);
+  await assert.rejects(verifyPairing(session, 'wrong-phone-key', undefined, crypto), /does not bind/);
+  const corrupted = structuredClone(session);
+  corrupted.device_key_proofs[0].signature.signature = 'invalid';
+  await assert.rejects(verifyPairing(corrupted, key, undefined, crypto), /signature does not verify/);
+  const thread = await client.threadGet('thread/quoted-preview');
+  const id = 'action/signed-fixture-reply';
+  const fields = {
+    content: 'A signed fixture reply', from: session.person_id, to: thread.value.agent_id,
+    thread_id: thread.value.id, thread_quote_id: 'message/quoted-original',
+  };
+  const message = {
+    subject: await threadMessageSubject(fields, id, crypto.hash), signer: session.person_id, fields,
+    key, chain: session.device_key_chain, nonce: Buffer.alloc(16, 1).toString('base64url'), signedAt: Date.now(),
+  };
+  const bytes = signedBytes(message);
+  const signature = signatureParameter(message, sign(null, Buffer.from(bytes), phone.privateKey).toString('base64url'));
+  assert.ok(await crypto.verify(key, bytes, signature.signature), 'the enrolled phone key verifies the canonical reply signature');
+  const receipt = await client.threadReply({
+    id, idempotency_key: 'fixture-signed-reply-0001', fence: { snapshot_id: thread.snapshot.id, subject_revisions: {} },
+    parameters: { target_id: thread.value.id, content: fields.content, thread_quote_id: fields.thread_quote_id, signature },
+  });
+  assert.ok(receipt.value.affected_ids.includes(message.subject));
+  const reply = (await client.threadTimeline(thread.value.id)).value.items[0];
+  assert.equal(reply.id, message.subject);
+  assert.equal(reply.thread_quote_id, fields.thread_quote_id);
 });

@@ -3,7 +3,8 @@
 // node --experimental-transform-types demoGateway.mjs [port] [clock-skew|thread-actions]
 // clock-skew stays read-only. thread-actions is mutable, disposable fixture authority only.
 // In thread-actions, GET /__fixture/threads lists controls. POST {"state":"empty"} then
-// error, offline, revoked, quoted (or ready); {"update":"older-rest"|"older-live"} changes the older page.
+// error, offline, revoked, quoted (or ready); ready with broadcast:false waits for a manual retry.
+// {"update":"older-rest"|"older-live"} changes the older page; {"reset":true} restores fixture data.
 import { createHash, generateKeyPairSync, randomBytes, sign as ed25519Sign } from 'node:crypto';
 import http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -209,6 +210,18 @@ const rootProof = () => {
   signGrant(grant, hostPair.privateKey);
   return grant;
 };
+// Mutable demo phones enroll their submitted key; no real authority is involved.
+const deviceProof = (key, root) => {
+  const grant = {
+    id: '', batch_id: `batch/demo/${randomBytes(16).toString('hex')}`, subject: person, kind: 'principal.key-granted', origin: 'demo-gateway', actor: person,
+    body: { evidence: [], fields: { issuer: person, issuer_key: personRootKey, key, role: 'device' } },
+    predecessors: [],
+    signature: { signer: person, key: personRootKey, chain: [root.id], nonce: randomBytes(16).toString('hex'), signed_at_unix_ms: Date.now(), signature: '' },
+  };
+  grant.id = grantId(grant);
+  signGrant(grant, personRootPair.privateKey);
+  return grant;
+};
 // Pairing and phone observations are demo adapters. Opt-in thread fixtures are
 // disposable; clock-skew stays read-only and all non-thread traffic stays kit replay.
 const server = http.createServer(async (request, response) => {
@@ -243,7 +256,7 @@ const server = http.createServer(async (request, response) => {
           fixtureState = command.state;
           fixtureRevision++;
           if (fixtureState === 'offline') for (const ws of fixtureConnections.keys()) ws.terminate();
-          else await broadcastFixture();
+          else if (command.broadcast !== false) await broadcastFixture();
         } else if (['older-rest', 'older-live'].includes(command.update) && command.state === undefined && command.reset === undefined) {
           fixtureRevision++;
           const index = summaries.findIndex(item => item.id === 'thread/older-page');
@@ -334,9 +347,18 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (/^\/v1\/client\/pairings\/[^/]+\/complete$/.test(url.pathname)) {
-      // Real invented-key proofs: the phone still performs its own read-only verification.
+      // Nonmutable modes retain read-only enrollment; mutable fixtures grant real demo signing.
+      let key;
+      if (mutableThreads) {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        key = JSON.parse(Buffer.concat(chunks).toString('utf8')).device_public_key;
+        if (typeof key !== 'string' || !key.length) { fail(400, 'validation-failed', 'Mutable thread pairing requires a device public key.'); return; }
+      }
       const envelope = await (await replay.fetch('http://demo/v1/client/capabilities')).json();
-      send({ ...envelope, value: { kind: 'paired-session', credential: 'demo-credential-0123456789abcdef0123456789abcdef', device_id: 'device/' + '0'.repeat(23) + '1', expires_at: '2099-12-31T00:00:00Z', person_id: person, scopes: ['read.projections', 'attention', 'message.send', 'terminal.input'], session_actor: person, device_key_chain: [], device_key_proofs: [], person_root_key_proof: rootProof() } });
+      const root = rootProof();
+      const device = mutableThreads ? deviceProof(key, root) : undefined;
+      send({ ...envelope, value: { kind: 'paired-session', credential: 'demo-credential-0123456789abcdef0123456789abcdef', device_id: 'device/' + '0'.repeat(23) + '1', expires_at: '2099-12-31T00:00:00Z', person_id: person, scopes: ['read.projections', 'attention', mutableThreads ? 'control.messages' : 'message.send', 'terminal.input'], session_actor: person, device_key_chain: device ? [device.id, root.id] : [], device_key_proofs: device ? [device, root] : [], person_root_key_proof: root } });
       return;
     }
     if (url.pathname === '/v1/client/observations') {

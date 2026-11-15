@@ -1,5 +1,9 @@
 import type { Snapshot, ThreadSummary } from "../../clients/typescript/fractal-client";
 
+export function threadRefusalMessage(reason: string): string {
+  return `You no longer have access to this thread.${reason ? ` ${reason}${/[.!?]$/.test(reason) ? "" : "."}` : ""}`;
+}
+
 export type ThreadEdit = { kind: "rename"; title: string } | { kind: "close" | "reopen" };
 export type ThreadEditResult =
   | { how: "sent"; snapshot?: Snapshot }

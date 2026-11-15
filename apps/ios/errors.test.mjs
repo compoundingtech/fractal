@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { test } from 'node:test';
+import ts from 'typescript';
 import { ClientError, appliedAnswer, isTransient, isTransientCode, notApplied, outcomeUnknown, plainError, plainMessage, promptGone, retryTransient } from '../../clients/typescript/fractal-client/index.ts';
+import { threadRefusalMessage } from './threadEdits.ts';
 
 // Fractal's errors read as sentences, as in the Rust client: no codes reach a person.
 assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way, so it was not applied');
@@ -64,3 +68,18 @@ for (const [code, variant] of [['recipient-retired', 'Retired'], ['lifecycle-una
   await assert.rejects(retryTransient(3, async () => { attempts++; throw error; }));
   assert.equal(attempts, 1);
 }
+
+test('native HTTP thread refusals show an access sentence and server reason without changing retry semantics', () => {
+  const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
+  const a = source.indexOf('export function threadErrorText(');
+  const b = source.indexOf('\nasync function readPhoneSigning', a);
+  const { outputText } = ts.transpileModule(source.slice(a, b), { compilerOptions: { module: ts.ModuleKind.CommonJS } });
+  const exports = {};
+  new Function('exports', 'ClientError', 'threadRefusalMessage', 'errorText', outputText)(exports, ClientError, threadRefusalMessage, plainError);
+  const error = refused('forbidden');
+  assert.equal(exports.threadErrorText(error), 'You no longer have access to this thread. m.');
+  assert.equal(exports.threadErrorText(refused('not-found')), plainError(refused('not-found')));
+  assert.equal(error.response.code, 'forbidden');
+  assert.equal(error.response.retryable, false);
+  assert.equal(isTransient(error), false);
+});

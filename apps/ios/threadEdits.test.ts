@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { ThreadEdits, type ThreadEdit, type ThreadEditResult } from "./threadEdits.ts";
+import { ThreadEdits, threadRefusalMessage, type ThreadEdit, type ThreadEditResult } from "./threadEdits.ts";
 import type { Snapshot } from "../../clients/typescript/fractal-client";
+
+test("thread access refusals retain the server reason as a second sentence", () => {
+  assert.equal(
+    threadRefusalMessage("Fixture thread grant was revoked."),
+    "You no longer have access to this thread. Fixture thread grant was revoked.",
+  );
+  assert.equal(threadRefusalMessage("Grant expired"), "You no longer have access to this thread. Grant expired.");
+  assert.equal(threadRefusalMessage(""), "You no longer have access to this thread.");
+});
 
 const cases: readonly {
   edit: ThreadEdit;

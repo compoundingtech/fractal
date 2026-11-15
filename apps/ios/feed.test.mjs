@@ -610,7 +610,7 @@ test('thread windows share the paired socket, apply exact order, and follow agai
     socket.frame({ kind: 'snapshot', collection: 'threads', id: list.id, snapshot: snapshot(3), items: [thread], order: [thread.id], has_more: false });
     assert.equal(rows.length, 2, 'a late frame from the old socket cannot restore its state');
     sockets[1].frame({ kind: 'error', id: list.id, code: 'forbidden', message: 'grant expired', retryable: false });
-    assert.deepEqual(issues, [['not allowed: grant expired', true]]);
+    assert.deepEqual(issues, [['You no longer have access to this thread. grant expired.', true]], 'human refusal copy preserves the definitive nonretryable result');
     summary.close();
     detail.close();
     timeline.close();
