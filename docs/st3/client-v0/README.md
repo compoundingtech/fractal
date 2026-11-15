@@ -1385,8 +1385,9 @@ their answer lets go on, and link the mission.
 and a person session. It accepts no query parameters and returns only that person's
 deadline-resolved asks from the last seven days, excluding person answers,
 cancellations and overrides. Agents receive 403. `AutoResolvedAsks` contains
-`items` (at most 128, newest resolution first) and `complete`; a bounded scan of
-512 recent asks can make `complete` false.
+`items` (at most 128, newest resolution first) and `complete`. `complete` is false
+when the read returns 128 rows or its bounded scan of 512 recent asks fills, so
+an empty read can still be incomplete.
 
 Each row names `resolution_id`, `title`, `requester_id`, `resolved_at`, `target_id`
 and `episode`. Optional `default_answer`, client-view `request` and
