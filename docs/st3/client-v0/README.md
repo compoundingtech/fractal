@@ -288,6 +288,28 @@ routes. See the [read fixture](fixtures/person-availability.json), the
 harness agent or the configured person. The CLI refuses an agent's write before any request.
 See the [attention guide](../../site/concepts/attention.md#availability).
 
+`GET /v1/client/availability/history` (`availability.history`, scope `read.projections`) answers
+an `AvailabilityHistory`: one person's availability over `[from, to)` in buckets of
+`bucket_seconds`, the first starting at `from`. `from` and `to` are UTC RFC 3339; the range is
+at most 31 days and at most 2016 buckets. The answer's `to` is the earlier of the requested `to`
+and when the daemon answered, so no bucket covers the future and the last bucket may be short;
+a range that starts in the future has no buckets. Each bucket names its `covered_ms` and, as
+integer milliseconds that sum to it, how long each `status`, `status_source`, `presence`,
+`interruptions` and `deadline_clock` value held. The daemon folds the same claims by the same
+rules as `availability.list` at every instant, sweeping from one change to the next (a write,
+an `until`, an active device turning idle, a report ceasing to count after 24 hours), so the
+history is what the current read said then. Before a person's first claim they read as
+unreported, which is available. Readers are as for `availability.list`: a person reads
+themselves by default, an agent names `person`, and only the person's own read carries
+`presence` (`null` for anyone else). The claims are the record, so history reaches back to the
+person's first availability claim: the three axes are durable, and `person.presence-observed`
+has no checkpoint rule yet, so every recorded presence transition is kept. A checkpoint rule
+that keeps only each device's newest report would end presence history at the checkpoint. An
+older daemon answers the route with an empty `404`; the generated Rust
+`availability_history`, Swift `availabilityHistory(person:from:to:bucketSeconds:)` and
+TypeScript `availabilityHistory({from, to, bucket_seconds, person})` report it as
+`unsupported-capability`. See the [history fixture](fixtures/availability-history.json).
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with

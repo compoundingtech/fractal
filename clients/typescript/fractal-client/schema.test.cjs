@@ -607,6 +607,19 @@ test('availability decodes the coarse view, the full view and a status clear', a
     assert.equal(Schema.encodeSync(Rich.PresenceReportResult)(reportResult(reported)).report_again_at, '2026-11-12T10:07:30.000Z');
 });
 
+test('availability history decodes milliseconds per axis and presence only for the person', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const history = Rich.decodeUnknownSync(Rich.AvailabilityHistory, 'strict');
+    const wire = require('../../../docs/st3/client-v0/fixtures/availability-history.json').value;
+    const result = Schema.encodeSync(Rich.AvailabilityHistory)(history(wire));
+    assert.equal(result.buckets[1].deadline_clock['hold-routine'], 1200000);
+    assert.equal(result.buckets[1].status_source.override, 1200000);
+    const coarse = { ...wire, buckets: wire.buckets.map(bucket => ({ ...bucket, presence: null })) };
+    assert.equal(Schema.encodeSync(Rich.AvailabilityHistory)(history(coarse)).buckets[0].presence, null);
+    const { presence, ...missing } = wire.buckets[0];
+    assert.throws(() => history({ ...wire, buckets: [missing] }));
+});
+
 test('a note write requires text, clears with null and never names the person', async () => {
     const [{ Schema }, Rich] = await modules;
     const set = Rich.decodeUnknownSync(Rich.DirectiveNoteSet, 'strict');

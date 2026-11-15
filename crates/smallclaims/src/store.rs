@@ -6512,6 +6512,29 @@ impl Store {
         )
     }
 
+    /// Visit claims accepted strictly before `end`, newest first, seeking through the
+    /// subject/kind acceptance index rather than visiting newer claims. Canonical tie order
+    /// and the callback's stopping rule are the same as [`Self::claims_in_order`].
+    /// `visit` must not read the store while the statement is open.
+    pub fn claims_in_order_before(
+        &self,
+        subject: &str,
+        kind: &str,
+        end: u128,
+        mut visit: impl FnMut(&ClaimRecord) -> bool,
+    ) -> Result<()> {
+        crate::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(&claims_in_order_before_query())?;
+        let mut rows = statement.query(params![subject, kind, end.to_string()])?;
+        while let Some(row) = rows.next()? {
+            if !visit(&claim_from_row(row)?) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// The newest of `subject`'s claims of `kind` that `matches` accepts, reading back from the
     /// newest only until one does: `claims_for(..).into_iter().rev().find(matches)`, bounded.
     #[track_caller]
@@ -10515,6 +10538,20 @@ pub fn claims_in_order_query(newest_first: bool) -> String {
         "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind=?2 ORDER BY {order}"
+    )
+}
+
+/// Newest-first canonical claims before `?3` (a decimal millisecond string). The tuple
+/// comparison seeks the existing numeric-text acceptance index, including across digit
+/// lengths, without casting its indexed columns.
+pub fn claims_in_order_before_query() -> String {
+    format!(
+        "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_accepted_index
+         JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND claims.kind=?2
+           AND (length(claims.accepted_at_unix_ms), claims.accepted_at_unix_ms)
+             < (length(?3), ?3)
+         ORDER BY {CANONICAL_ORDER_DESC}"
     )
 }
 
