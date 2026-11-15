@@ -24,3 +24,14 @@
 {"harness":"omp","record":{"type":"message","message":{"role":"future_role"}},"part":{"type":"text","text":"Not attributed conversation"},"category":"unknown","disposition":"inspector"}
 {"harness":"claude","record":{"type":"assistant","message":{"role":"assistant"}},"part":{"type":"toolCall"},"category":"unknown","disposition":"inspector"}
 {"harness":"pi","record":{"type":"model_usage","usage":{"totalTokens":0}},"category":"usage","disposition":"indicator"}
+{"harness":"omp","record":{"type":"message","message":{"role":"developer"}},"part":{"type":"text","text":"Fixture reminder"},"category":"actionable_notice","disposition":"reading_lane"}
+{"harness":"pi","record":{"type":"message","message":{"role":"system"}},"part":{"type":"text","text":"Fixture notice"},"category":"actionable_notice","disposition":"reading_lane"}
+{"harness":"omp","record":{"type":"custom_message","customType":"skill-prompt"},"part":{"type":"text","text":"Fixture skill"},"category":"actionable_notice","disposition":"reading_lane"}
+{"harness":"omp","record":{"type":"message","message":{"role":"assistant","stopReason":"error"}},"part":{"type":"text","text":"Actual assistant prose"},"category":"conversation","disposition":"reading_lane"}
+{"harness":"omp","record":{"type":"message"},"category":"source_diagnostic","disposition":"reading_lane"}
+{"harness":"omp","record":{"type":"message","message":{"role":null}},"category":"source_diagnostic","disposition":"reading_lane"}
+{"harness":"claude","record":{"type":"assistant","message":{"role":42}},"category":"source_diagnostic","disposition":"reading_lane"}
+{"harness":"codex","record":{"type":"response_item"},"category":"source_diagnostic","disposition":"reading_lane"}
+{"harness":"codex","record":{"type":"response_item","payload":{"type":null}},"category":"source_diagnostic","disposition":"reading_lane"}
+{"harness":"codex","record":{"type":"response_item","payload":{"type":"message"}},"category":"source_diagnostic","disposition":"reading_lane"}
+{"harness":"codex","record":{"type":"response_item","payload":{"type":"message","role":"future_role"}},"category":"unknown","disposition":"inspector"}

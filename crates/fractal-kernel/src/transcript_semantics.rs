@@ -54,7 +54,10 @@ pub fn classify(harness: &str, record: &Value, part: Option<&Value>) -> Category
             (_, "") => Diagnostic,
             _ => Unknown,
         };
-        return if parent == Tool && category == Chat { Tool } else { category };
+        let notice_text = parent == Notice && (
+            matches!(word(&record["message"], "role"), "system" | "developer") ||
+            (word(record, "type") == "custom_message" && word(record, "customType") == "skill-prompt"));
+        return if category == Chat && (parent == Tool || notice_text) { parent } else { category };
     }
     match (harness, word(record, "type")) {
         (_, "") => Diagnostic,
@@ -77,15 +80,18 @@ pub fn classify(harness: &str, record: &Value, part: Option<&Value>) -> Category
             "user" | "assistant" => Chat,
             "toolResult" => Tool,
             "system" | "developer" => Notice,
+            "" => Diagnostic,
             _ => Unknown,
         },
         ("claude", "user" | "assistant") => match word(&record["message"], "role") {
             "user" | "assistant" => Chat,
+            "" => Diagnostic,
             _ => Unknown,
         },
         ("claude", "attachment") => match word(&record["attachment"], "type") {
             "queued_command" => Chat,
             "directory" => Internal,
+            "" => Diagnostic,
             _ => Unknown,
         },
         ("claude", "system") => match word(record, "subtype") {
@@ -101,17 +107,20 @@ pub fn classify(harness: &str, record: &Value, part: Option<&Value>) -> Category
         ("codex", "token_usage_record") => Usage,
         ("codex", "event_msg") => match word(&record["payload"], "type") {
             "token_count" => Usage,
+            "" => Diagnostic,
             _ => Unknown, // Do not duplicate event mirrors whose semantics are unproven.
         },
         ("codex", "response_item") => match word(&record["payload"], "type") {
             "message" => match word(&record["payload"], "role") {
                 "user" | "assistant" => Chat,
                 "system" | "developer" => Internal,
+                "" => Diagnostic,
                 _ => Unknown,
             },
             "function_call" | "function_call_output" | "custom_tool_call" | "custom_tool_call_output" => Tool,
             "reasoning" => Chat,
             "ghost_snapshot" => Internal,
+            "" => Diagnostic,
             _ => Unknown,
         },
         // OpenCode SQLite message/part records use their own row shape, not JSONL envelopes.
