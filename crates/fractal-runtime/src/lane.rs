@@ -278,16 +278,16 @@ pub(crate) fn prepare_finite(name: &str, capacity: Option<Capacity>) -> Result<L
         anyhow::ensure!(capacity.cores > 0 && capacity.memory > 0, "finite lane capacity is empty");
     }
     let slice = seat_slice(&format!("finite:{name}"));
-    let output = crate::isolate::systemctl()
+    let output = crate::systemd::output(crate::isolate::systemctl()
         .args(["--user", "set-property", "--runtime", &slice])
         .args(capacity.map_or_else(
             || vec!["CPUAccounting=yes".to_owned(), "MemoryAccounting=yes".to_owned(), "TasksAccounting=yes".to_owned()],
             |capacity| capacity.slice_properties(),
         ))
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(std::process::Stdio::null()))
         .with_context(|| format!("cap finite lane {slice}"))?;
     anyhow::ensure!(output.status.success(), "cap finite lane {slice}: {}", String::from_utf8_lossy(&output.stderr));
+    crate::systemd::invalidate();
     Ok(Lane { slice })
 }
 
@@ -384,11 +384,10 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
         // An end asked before this launch no longer applies to the slice.
         slot.launches += 1;
         slot.end_at = None;
-        let output = crate::isolate::systemctl()
+        let output = crate::systemd::output(crate::isolate::systemctl()
             .args(["--user", "set-property", "--runtime", &slice])
             .args(capacity.slice_properties())
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null()))
             .with_context(|| format!("cap the lane {slice}"))?;
         if !output.status.success() {
             bail!(
@@ -396,6 +395,7 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
+        crate::systemd::invalidate();
         return Ok(Some(Lane { slice }));
     }
 }
@@ -412,15 +412,15 @@ pub fn resize(capacity: Capacity, runtime_id: &str) -> Result<bool> {
     if !slice_cgroup(&slice).is_some_and(|cgroup| cgroup.is_dir()) {
         return Ok(false);
     }
-    let output = crate::isolate::systemctl()
+    let output = crate::systemd::output(crate::isolate::systemctl()
         .args(["--user", "set-property", "--runtime", &slice])
         .args(capacity.slice_properties())
-        .stdin(std::process::Stdio::null())
-        .output()
+        .stdin(std::process::Stdio::null()))
         .with_context(|| format!("resize the lane {slice}"))?;
     if !output.status.success() {
         bail!("resize the lane {slice}: {}", String::from_utf8_lossy(&output.stderr).trim());
     }
+    crate::systemd::invalidate();
     Ok(true)
 }
 
@@ -525,30 +525,22 @@ fn end_requested(slice: &str) -> Result<()> {
 }
 
 fn stop_slice(slice: &str) -> Result<()> {
-    let loaded = crate::isolate::systemctl()
-        .args(["--user", "show", "--property=LoadState", "--value", slice])
-        .output()
-        .with_context(|| format!("read the state of the lane {slice}"))?;
-    anyhow::ensure!(
-        loaded.status.success(),
-        "read the state of the lane {slice}: {}",
-        String::from_utf8_lossy(&loaded.stderr).trim()
-    );
-    // A slice that is not loaded has nothing left to end.
-    if String::from_utf8_lossy(&loaded.stdout).trim() != "loaded" {
+    let snapshot = crate::systemd::snapshot()?;
+    // A complete loaded-only snapshot proves an absent slice has nothing left to end.
+    if !snapshot.units.contains_key(slice) {
         return Ok(());
     }
     for verb in ["stop", "revert"] {
-        let output = crate::isolate::systemctl()
+        let output = crate::systemd::output(crate::isolate::systemctl()
             .args(["--user", verb, slice])
-            .stdin(std::process::Stdio::null())
-            .output()
+            .stdin(std::process::Stdio::null()))
             .with_context(|| format!("{verb} the lane {slice}"))?;
         anyhow::ensure!(
             output.status.success(),
             "{verb} the lane {slice}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+        crate::systemd::invalidate();
     }
     Ok(())
 }

@@ -889,6 +889,12 @@ impl ExecRuntime {
         let unit = generation.scope_unit.as_deref().context(
             "logical-only containment cannot prove whole-tree retirement; custody retained",
         )?;
+        // This exact launcher has exited, so it cannot still join a scope in the future.
+        // Removing a pending join invalidates once, never on subsequent reconciliation reads.
+        crate::isolate::finish_scope_join(unit);
+        if generation.group_exited && crate::isolate::has_ended(unit) {
+            return Ok(true);
+        }
         let Some(proof) = proof(unit)? else { return Ok(false); };
         proof.validate(unit)?;
         // PID reuse proves leader identity loss, not process-group emptiness. The exact scope
@@ -902,6 +908,7 @@ impl ExecRuntime {
             generation.group_exited = true;
             self.write_generation(id, &generation)?;
         }
+        crate::isolate::mark_ended(unit);
         Ok(true)
     }
 
@@ -1509,6 +1516,11 @@ mod tests {
         }).unwrap());
         assert!(runtime.read_generation_path(&runtime.record_path("reused")).unwrap().unwrap().group_exited);
         assert!(matches!(runtime.observe("reused").unwrap(), Some(ExecObservation::Exited(_))));
+        for _ in 0..100 {
+            assert!(runtime.retired_with_scope_proof("reused", "old-generation", &|_| {
+                panic!("terminal generations must not query the manager")
+            }).unwrap());
+        }
         assert!(runtime.retired_with_scope_proof("reused", "replacement", &|_| Ok(Some(proof.clone()))).is_err());
     }
 

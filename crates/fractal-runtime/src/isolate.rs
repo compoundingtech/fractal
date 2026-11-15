@@ -81,30 +81,25 @@ fn host_runtime_dir(environment: &std::collections::BTreeMap<String, String>) ->
 fn systemd_scope_in(environment: &std::collections::BTreeMap<String, String>) -> Option<bool> {
     let runtime_dir = host_runtime_dir(environment)?;
     let systemd_run = crate::resolve_executable("systemd-run", environment).ok()?;
-    let output = Command::new(systemd_run)
+    let output = crate::systemd::output(Command::new(systemd_run)
         .arg("--version")
         .env_clear()
         .envs(environment)
         .env("XDG_RUNTIME_DIR", runtime_dir)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::null())).ok()?;
     if !output.status.success() {
         return None;
     }
     let expansion_flag = scope_expansion_flag(&output.stdout)?;
     let systemctl = crate::resolve_executable("systemctl", environment).ok()?;
-    Command::new(systemctl)
+    crate::systemd::output(Command::new(systemctl)
         .args(["--user", "show-environment"])
         .env_clear()
         .envs(environment)
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?
-        .success()
-        .then_some(expansion_flag)
+        .stderr(Stdio::null()))
+        .ok()?.status.success().then_some(expansion_flag)
 }
 
 pub fn warn_if_degraded(product: &str) {
@@ -216,6 +211,7 @@ fn wrap_for_mode(
 ) -> Command {
     match isolation {
         Isolation::Scope => {
+            begin_scope_join(unit);
             let mut command = Command::new("systemd-run");
             command
                 .args([
@@ -303,11 +299,45 @@ pub(crate) fn systemctl() -> Command {
 pub const SCOPE_GRACE: Duration = Duration::from_secs(2);
 /// How long a scope gets to empty after SIGKILL.
 const SCOPE_KILL_WAIT: Duration = Duration::from_secs(2);
-const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Work scopes this process has seen empty. A scope holds only what started in it, so an empty
 /// one stays empty, and systemd collects it.
 static ENDED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+// Keep the freshness boundary after joining: an observer may still hold an older Arc snapshot.
+struct ScopeCreation {
+    joining: bool,
+    observed_after: Instant,
+}
+
+static CREATIONS: Mutex<std::collections::BTreeMap<String, ScopeCreation>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+fn begin_scope_join(unit: &str) {
+    CREATIONS.lock().unwrap_or_else(PoisonError::into_inner).insert(unit.into(),
+        ScopeCreation { joining: true, observed_after: Instant::now() });
+    crate::systemd::invalidate();
+}
+
+pub(crate) fn verify_scope_absence(unit: &str, captured_at: Instant) -> Result<()> {
+    if let Some(creation) = CREATIONS.lock().unwrap_or_else(PoisonError::into_inner).get(unit) {
+        anyhow::ensure!(!creation.joining, "work scope creation has not completed");
+        anyhow::ensure!(captured_at > creation.observed_after,
+            "work scope absence predates its creation or join");
+    }
+    Ok(())
+}
+
+pub(crate) fn finish_scope_join(unit: &str) {
+    let mut creations = CREATIONS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(creation) = creations.get_mut(unit)
+        && creation.joining
+    {
+        creation.observed_after = Instant::now();
+        creation.joining = false;
+        crate::systemd::invalidate();
+    }
+}
+
 
 /// Whether `unit` is a work scope [`scope_unit`] named: never a PTY server's own scope, a
 /// service, or the unit this process runs in.
@@ -361,9 +391,11 @@ pub(crate) fn await_join(
     let mut pause = Duration::from_millis(1);
     loop {
         if joined(unit, pid) {
+            finish_scope_join(unit);
             return Ok(Join::Joined);
         }
         if !alive()? {
+            finish_scope_join(unit);
             return Ok(Join::Exited);
         }
         if started.elapsed() >= limit {
@@ -382,12 +414,10 @@ pub(crate) fn has_ended(unit: &str) -> bool {
         .contains(unit)
 }
 
-fn mark_ended(unit: &str) {
+pub(crate) fn mark_ended(unit: &str) {
     let mut ended = ENDED.lock().unwrap_or_else(PoisonError::into_inner);
-    // A forgotten scope costs one `systemctl show` to learn again.
-    if ended.len() > 4096 {
-        ended.clear();
-    }
+    // Scope names identify a single generation. Forgetting terminal names makes historical
+    // reconciliation query the manager forever; an empty scope can never gain new members.
     ended.insert(unit.to_owned());
 }
 
@@ -526,35 +556,18 @@ pub fn signal_scope(unit: &str, signal: i32) -> Result<bool> {
 
 /// The cgroup directory of `unit`, or none once the unit is not loaded.
 fn control_group(unit: &str) -> Result<Option<PathBuf>> {
-    let mut command = systemctl();
-    command.args([
-        "--user",
-        "show",
-        "--property=LoadState",
-        "--property=ControlGroup",
-        unit,
-    ]);
-    let output = crate::pty::output_within(command, SYSTEMCTL_TIMEOUT)
-        .with_context(|| format!("ask the systemd user manager about {unit}"))?;
-    anyhow::ensure!(
-        output.status.success(),
-        "the systemd user manager could not show {unit}: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(parse_control_group(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
-}
-
-fn parse_control_group(show: &str) -> Option<PathBuf> {
-    let value = |key: &str| {
-        show.lines()
-            .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
-            .unwrap_or_default()
+    let snapshot = crate::systemd::snapshot()?;
+    let Some(observed) = snapshot.units.get(unit) else {
+        verify_scope_absence(unit, snapshot.captured_at)?;
+        return Ok(None);
     };
-    let cgroup = value("ControlGroup");
-    (value("LoadState") == "loaded" && cgroup.starts_with('/'))
-        .then(|| Path::new("/sys/fs/cgroup").join(cgroup.trim_start_matches('/')))
+    anyhow::ensure!(observed.load == "loaded", "work scope load state is unverified");
+    let cgroup = observed.control_group.as_ref()
+        .context("loaded work scope has no verified control group")?;
+    anyhow::ensure!(cgroup.file_name() == Some(OsStr::new(unit)),
+        "work scope has a different control group");
+    finish_scope_join(unit);
+    Ok(Some(cgroup.clone()))
 }
 
 /// Whether the cgroup still holds a process. A cgroup that is gone holds none; one that cannot
@@ -617,15 +630,19 @@ fn kill_unit(unit: &str, signal: i32, caller: ScopeSignalCaller) -> Result<bool>
         spawn_lock = "not_applicable",
         "signalling work scope"
     );
-    let output = crate::pty::output_within(command, SYSTEMCTL_TIMEOUT)
+    let captured_at = Instant::now();
+    let output = crate::systemd::output(&mut command)
         .with_context(|| format!("ask the systemd user manager to signal {unit}"))?;
     if output.status.success() {
+        crate::systemd::invalidate();
         return Ok(true);
     }
     let error = String::from_utf8_lossy(&output.stderr);
     if error.contains("not loaded") {
         tracing::debug!(?caller, recorded_scope = unit, signal, guard_decision = "skip", reason = "scope_not_loaded", "scope signal found no loaded unit");
-        mark_ended(unit);
+        if verify_scope_absence(unit, captured_at).is_ok() {
+            mark_ended(unit);
+        }
         return Ok(false);
     }
     anyhow::bail!(
@@ -810,23 +827,48 @@ mod tests {
     }
 
     #[test]
-    fn a_unit_that_is_not_loaded_has_no_cgroup() {
-        assert_eq!(
-            parse_control_group(
-                "LoadState=loaded\nControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/st3-w-1-0.scope\n"
-            ),
-            Some(PathBuf::from(
-                "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/st3-w-1-0.scope"
-            ))
-        );
-        assert_eq!(
-            parse_control_group("LoadState=not-found\nControlGroup=\n"),
-            None
-        );
-        assert_eq!(
-            parse_control_group("LoadState=loaded\nControlGroup=\n"),
-            None
-        );
+    fn a_pending_scope_is_not_terminal_absence() {
+        let unit = "st3-pending-join-absence.scope";
+        begin_scope_join(unit);
+        assert!(verify_scope_absence(unit, Instant::now()).is_err());
+        assert!(!has_ended(unit));
+        finish_scope_join(unit);
+        assert!(verify_scope_absence(unit, Instant::now()).is_ok());
+        assert!(!has_ended(unit));
+    }
+
+    #[test]
+    fn a_held_snapshot_cannot_prove_absence_after_a_new_join() {
+        let unit = "st3-held-snapshot-new-join.scope";
+        let held = std::sync::Arc::new(crate::systemd::Snapshot {
+            captured_at: Instant::now(),
+            units: std::collections::BTreeMap::new(),
+        });
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let reader_barrier = barrier.clone();
+        let reader = std::thread::spawn(move || {
+            reader_barrier.wait();
+            reader_barrier.wait();
+            assert!(held.units.get(unit).is_none());
+            assert!(verify_scope_absence(unit, held.captured_at).is_err());
+            assert!(!has_ended(unit));
+        });
+        barrier.wait();
+        begin_scope_join(unit);
+        finish_scope_join(unit);
+        barrier.wait();
+        reader.join().unwrap();
+        assert!(verify_scope_absence(unit, Instant::now()).is_ok());
+    }
+
+    #[test]
+    fn terminal_scope_memory_survives_large_histories() {
+        for index in 0..5000 {
+            mark_ended(&format!("st3-retained-history-{index}.scope"));
+        }
+        for index in 0..5000 {
+            assert!(has_ended(&format!("st3-retained-history-{index}.scope")));
+        }
     }
 
     #[test]

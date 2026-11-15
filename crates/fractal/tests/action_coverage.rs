@@ -4829,7 +4829,7 @@ async fn cli_service_install_status_restart_reset_uninstall_use_isolated_manager
     let manager = root.path().join("bin/systemctl");
     std::fs::write(&manager, r#"#!/bin/sh
 exec python3 - "$@" <<'PY'
-import os, pathlib, signal, subprocess, sys, time
+import json, os, pathlib, signal, subprocess, sys, time
 root = pathlib.Path(os.environ['ST3_COVERAGE_ROOT'])
 args = sys.argv[1:]
 with (root / 'manager.log').open('a') as log: log.write(' '.join(args) + '\n')
@@ -4850,12 +4850,15 @@ def start():
     log = (root / 'daemon.log').open('ab')
     child = subprocess.Popen([os.environ['ST3_COVERAGE_BINARY'], 'up', '--config', str(root / 'config/st3/config.toml'), '--pty-binary', str(root / 'bin/pty')], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(child.pid))
-if 'show' in args:
-    unit = next((arg for arg in args if arg.endswith('.service')), '')
-    if not (root / 'config/systemd/user' / unit).is_file():
-        print('LoadState=not-found\nActiveState=inactive\nSubState=dead')
-        sys.exit(4)
-    print('LoadState=loaded\nActiveState=active\nSubState=running')
+if 'list-units' in args:
+    print(json.dumps([{'unit':file.name, 'load':'loaded', 'active':'active', 'sub':'running'}
+        for file in (root / 'config/systemd/user').glob('*.service')]))
+elif 'show' in args:
+    for unit in (arg for arg in args if arg.endswith('.service')):
+        if not (root / 'config/systemd/user' / unit).is_file():
+            print(f'Id={unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n')
+            sys.exit(4)
+        print(f'Id={unit}\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID=0\nControlGroup=\n')
 elif 'st3-replication.service' in args and not (root / 'config/systemd/user/st3-replication.service').exists():
     print('Failed to stop st3-replication.service: Unit not loaded.', file=sys.stderr)
     sys.exit(5)

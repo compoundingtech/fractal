@@ -75,35 +75,40 @@ fn candidate_names(old: &str, home_manager_name: Option<&str>) -> Vec<String> {
     names
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub(super) fn native() -> Result<Services> {
-    #[cfg(target_os = "linux")]
-    let old = {
-        let default_instance = crate::instance::current().is_none();
-        // Home Manager uses smalltalk names for both default-instance services.
-        [
-            (service_name(), default_instance.then_some("smalltalk.service")),
-            (replication_service_name(), default_instance.then_some("smalltalk-replication.service")),
-        ]
-    };
-    #[cfg(target_os = "macos")]
-    let old = [(service_label(), None), (replication_service_label(), None)];
+    systemd(&fractal_runtime::systemd::snapshot()?)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn systemd(snapshot: &fractal_runtime::systemd::Snapshot) -> Result<Services> {
+    let default_instance = crate::instance::current().is_none();
+    let old = [
+        (service_name(), default_instance.then_some("smalltalk.service")),
+        (replication_service_name(), default_instance.then_some("smalltalk-replication.service")),
+    ];
     let resolve = |(old, home_manager_name): (&str, Option<&str>)| -> Result<ServiceStatus> {
         let names = candidate_names(old, home_manager_name);
         select(names.iter().map(|name| {
-            #[cfg(target_os = "linux")]
-            {
-                let mut status = systemd_service_status(name)?;
-                status.installed |= systemd_path(name)?.is_file();
-                Ok(status)
-            }
-            #[cfg(target_os = "macos")]
-            {
-                launchd_service_status(name, &launchd_path(name)?)
-            }
+            let mut status = systemd_service_status(name, snapshot.units.get(name));
+            status.installed |= systemd_path(name)?.is_file();
+            Ok(status)
         }).collect::<Result<Vec<_>>>()?)
     };
     let services = Services { daemon: resolve(old[0])?, replication: resolve(old[1])? };
+    check_conflicts([&services.daemon, &services.replication])?;
+    Ok(services)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn native() -> Result<Services> {
+    let resolve = |old: &str| -> Result<ServiceStatus> {
+        let names = candidate_names(old, None);
+        select(names.iter().map(|name| {
+            launchd_service_status(name, &launchd_path(name)?)
+        }).collect::<Result<Vec<_>>>()?)
+    };
+    let services = Services { daemon: resolve(service_label())?, replication: resolve(replication_service_label())? };
     check_conflicts([&services.daemon, &services.replication])?;
     Ok(services)
 }
@@ -221,35 +226,26 @@ mod tests {
         }).is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn systemd_absence_and_missing_properties_never_invent_installed_units() {
-        for active in ["inactive", "failed"] {
-            let reply = format!("LoadState=not-found\nActiveState={active}\nSubState=dead\n");
-            let legacy = parse_systemd_service_status("smalltalk.service", &reply).unwrap();
-            let new = parse_systemd_service_status("fractal.service", &reply).unwrap();
-            assert!(!legacy.installed && !legacy.running);
-            assert!(!new.installed && !new.running);
-            assert!(!select(vec![legacy, new]).unwrap().installed);
-        }
-        for reply in [
-            "",
-            "manager diagnostic, not unit properties",
-            "LoadState=not-found\n",
-            "LoadState=not-found\nSubState=dead\n",
-            "ActiveState=inactive\nSubState=dead\n",
-            "LoadState=\nActiveState=inactive\nSubState=dead\n",
-            "LoadState=unknown\nActiveState=inactive\nSubState=dead\n",
-        ] {
-            assert!(parse_systemd_service_status("fractal.service", reply).is_err(), "{reply:?}");
-        }
+    fn loaded_snapshot_absence_never_invents_installed_aliases() {
+        let legacy = systemd_service_status("smalltalk.service", None);
+        let new = systemd_service_status("fractal.service", None);
+        assert!(!legacy.installed && !legacy.running);
+        assert!(!new.installed && !new.running);
+        assert!(!select(vec![legacy, new]).unwrap().installed);
+
+        let mut unit = fractal_runtime::systemd::Unit {
+            load: "not-found".into(), active: "active".into(), sub: "running".into(),
+            main_pid: 42, control_group: None,
+        };
         // A manager-confirmed active service still counts after its unit file disappears.
-        let active = parse_systemd_service_status(
-            "fractal.service", "LoadState=not-found\nActiveState=active\nSubState=running\n",
-        ).unwrap();
+        let active = systemd_service_status("fractal.service", Some(&unit));
         assert!(!active.installed && active.running);
-        let loaded = parse_systemd_service_status(
-            "st3.service", "LoadState=loaded\nActiveState=inactive\nSubState=dead\n",
-        ).unwrap();
+        unit.load = "loaded".into();
+        unit.active = "inactive".into();
+        unit.sub = "dead".into();
+        let loaded = systemd_service_status("st3.service", Some(&unit));
         assert!(loaded.installed && !loaded.running);
     }
 }

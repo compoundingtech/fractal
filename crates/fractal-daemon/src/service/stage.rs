@@ -82,14 +82,17 @@ fn write_definitions(paths: [&Path; 2], definitions: [String; 2]) -> Result<()> 
 
 #[cfg(any(target_os = "linux", test))]
 fn systemd(spec: &ServiceSpec, daemon: &Path, replication: &Path, commands: &mut impl Commands) -> Result<()> {
-    // Probe both targets before any manager/file mutation; legacy services may remain running.
-    for name in UNITS {
-        let output = commands.output(&["--user", "show", name, "--property=LoadState", "--property=ActiveState"])?;
-        let properties = String::from_utf8_lossy(&output.stdout);
-        let absent = properties.lines().any(|line| line == "LoadState=not-found");
-        anyhow::ensure!(output.status.success() || (output.status.code() == Some(4) && absent), "cannot inspect {name}: {}", String::from_utf8_lossy(&output.stderr));
-        let state = properties.lines().find_map(|line| line.strip_prefix("ActiveState=")).unwrap_or("");
-        anyhow::ensure!(matches!(state, "inactive" | "failed"), "refusing to stage active or unknown target {name}: {state}");
+    // Enumerating loaded targets never creates stubs for absent aliases.
+    let output = commands.output(&["--user", "list-units", "--all", "--full", "--no-pager",
+        "--output=json", UNITS[0], UNITS[1]])?;
+    anyhow::ensure!(output.status.success(), "cannot enumerate staging targets: {}", String::from_utf8_lossy(&output.stderr));
+    #[derive(serde::Deserialize)]
+    struct Target { unit: String, active: String }
+    let targets: Vec<Target> = serde_json::from_slice(&output.stdout).context("read loaded staging targets")?;
+    for target in targets {
+        anyhow::ensure!(UNITS.contains(&target.unit.as_str()), "unexpected staging target {}", target.unit);
+        anyhow::ensure!(matches!(target.active.as_str(), "inactive" | "failed"),
+            "refusing to stage active or unknown target {}: {}", target.unit, target.active);
     }
     // No --now: stopping anything belongs exclusively to host cutover.
     write_definitions([daemon, replication], [render_systemd_user_unit(spec), render_systemd_replication_unit(spec)])?;
@@ -126,7 +129,10 @@ mod tests {
             }
             Ok(std::process::Output {
                 status: std::process::ExitStatus::from_raw(if args[0] == "print" && !self.active { 113 << 8 } else { 0 }),
-                stdout: if self.launchd { Vec::new() } else if self.active { b"LoadState=loaded\nActiveState=active\n".to_vec() } else { b"LoadState=not-found\nActiveState=inactive\n".to_vec() },
+                stdout: if self.launchd { Vec::new() } else if args.contains(&"list-units") {
+                    if self.active { br#"[{"unit":"fractal.service","load":"loaded","active":"active","sub":"running"}]"#.to_vec() }
+                    else { b"[]".to_vec() }
+                } else { Vec::new() },
                 stderr: Vec::new(),
             })
         }

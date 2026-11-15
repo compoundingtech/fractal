@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stop user-manager stub churn by sharing loaded-only systemd snapshots and remembering terminal execution scopes.",
+  "replay": {"status": "none", "detail": "No claim format or replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Linux service aliases and worker PIDs resolve from complete loaded-unit snapshots rather than per-name show calls. One process admits a refresh at most every two seconds, enumerates matching loaded units once, and batches properties for at most 128 enumerated names per invocation. Terminal scope names and generation-bound retirement proofs are retained and excluded from later property queries. Scope creation/join freshness prevents cached pre-creation absence from proving retirement. Stale or incomplete snapshots fail closed. Manager commands share single-flight ownership, a three-second invocation deadline followed by kill/reap, and failure backoff from two to sixty seconds. Actual successful controls invalidate observations without bypassing admission."},
+  "downtime": {"status": "changed", "detail": "Restart the daemon to activate bounded observations and terminal memory. No user-manager reset or state migration is required."},
+  "manual": {"status": "none", "detail": "No new configuration. Request-rate, historical-scope, timeout/backoff, unwind and freshness behavior is covered with injected clocks/runners and private manager fixtures; a live manager stall is not exercised."},
+  "recovery": {"status": "none", "detail": "A completed admitted refresh replaces stale observations. Kernel reap latency can exceed the command deadline; health is published before cleanup and single-flight remains held until the owned child is reaped."}
+}

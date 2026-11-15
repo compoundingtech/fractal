@@ -764,30 +764,19 @@ fn stop_native_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
-    let output = host_command("systemctl")
-        .args(arguments)
-        .output()
+    let output = fractal_runtime::systemd::output(host_command("systemctl").args(arguments))
         .with_context(|| format!("run systemctl {}", arguments.join(" ")))?;
     if output.status.success() {
+        fractal_runtime::systemd::invalidate();
         return Ok(());
     }
     // A unit file may be gone while its service remains loaded. Only the manager can
     // establish that a failed stop/disable addressed an absent, inactive unit.
-    let status = host_command("systemctl")
-        .args([
-            "--user",
-            "show",
-            name,
-            "--property=LoadState",
-            "--property=ActiveState",
-            "--no-pager",
-        ])
-        .output()
-        .with_context(|| format!("check whether {name} is absent"))?;
-    let states = String::from_utf8_lossy(&status.stdout);
+    let snapshot = fractal_runtime::systemd::snapshot()?;
     anyhow::ensure!(
-        states.lines().any(|line| line == "LoadState=not-found")
-            && states.lines().any(|line| line == "ActiveState=inactive"),
+        snapshot.units.get(name).is_none_or(|unit| {
+            unit.load == "not-found" && unit.active == "inactive"
+        }),
         "systemctl {} failed with {}: {}",
         arguments.join(" "),
         output.status,
@@ -977,55 +966,22 @@ fn status_systemd_user() -> Result<ServiceStatusReport> {
 }
 
 #[cfg(target_os = "linux")]
-fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
-    let output = host_command("systemctl")
-        .args([
-            "--user",
-            "show",
-            name,
-            "--property=LoadState",
-            "--property=ActiveState",
-            "--property=SubState",
-            "--no-pager",
-        ])
-        .output()
-        .with_context(|| format!("run systemctl --user show {name}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    anyhow::ensure!(
-        output.status.success() || !stdout.trim().is_empty(),
-        "systemctl failed with {}: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    parse_systemd_service_status(name, &stdout)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_systemd_service_status(name: &str, stdout: &str) -> Result<ServiceStatus> {
-    let value = |key: &str| {
-        stdout
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{key}=")))
-            .filter(|value| !value.is_empty())
-            .with_context(|| format!("systemctl show {name} omitted {key}"))
+fn systemd_service_status(name: &str, unit: Option<&fractal_runtime::systemd::Unit>) -> ServiceStatus {
+    let Some(unit) = unit else {
+        return ServiceStatus {
+            name: name.into(), installed: false, running: false, state: "not-installed".into(),
+        };
     };
-    let load = value("LoadState")?;
-    let active = value("ActiveState")?;
-    let sub = value("SubState")?;
-    anyhow::ensure!(
-        matches!(load, "loaded" | "error" | "masked" | "not-found" | "bad-setting" | "stub" | "merged"),
-        "systemctl show {name} returned an invalid LoadState: {load}"
-    );
-    Ok(ServiceStatus {
+    ServiceStatus {
         name: name.into(),
-        installed: load != "not-found",
-        running: active == "active",
-        state: if load == "not-found" {
+        installed: unit.load != "not-found",
+        running: unit.active == "active",
+        state: if unit.load == "not-found" {
             "not-installed".into()
         } else {
-            format!("{active}/{sub}")
+            format!("{}/{}", unit.active, unit.sub)
         },
-    })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1269,26 +1225,89 @@ WantedBy=default.target\n",
     )
 }
 
+#[cfg(target_os = "linux")]
+struct WorkerResolution {
+    snapshot: std::sync::Arc<fractal_runtime::systemd::Snapshot>,
+    pid: std::result::Result<u32, std::sync::Arc<str>>,
+}
+
+#[cfg(target_os = "linux")]
+fn cached_worker_pid(
+    cached: &mut Option<WorkerResolution>,
+    snapshot: std::sync::Arc<fractal_runtime::systemd::Snapshot>,
+    resolve: impl FnOnce(&fractal_runtime::systemd::Snapshot) -> Result<u32>,
+) -> Result<u32> {
+    if let Some(cached) = cached.as_ref().filter(|cached| std::sync::Arc::ptr_eq(&cached.snapshot, &snapshot)) {
+        return cached.pid.clone().map_err(anyhow::Error::msg);
+    }
+    let pid = resolve(&snapshot).map_err(|error| std::sync::Arc::<str>::from(format!("{error:#}")));
+    *cached = Some(WorkerResolution { snapshot, pid: pid.clone() });
+    pid.map_err(anyhow::Error::msg)
+}
+
 /// Observe the worker through its supervisor, never through caller-supplied argv.
 pub(crate) fn replication_worker_pid() -> Result<u32> {
-    let service = lookup::native()?.replication;
     #[cfg(target_os = "linux")]
-    let output = host_command("systemctl")
-        .args(["--user", "show", "--property=MainPID", "--value", &service.name])
-        .output()?;
+    {
+        // Resolve both namespaces and the PID from one complete loaded-unit
+        // snapshot. Request traffic never issues per-alias or per-PID queries.
+        let snapshot = fractal_runtime::systemd::snapshot()?;
+        static WORKER: std::sync::Mutex<Option<WorkerResolution>> = std::sync::Mutex::new(None);
+        let mut worker = WORKER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cached_worker_pid(&mut worker, snapshot, |snapshot| {
+            let service = lookup::systemd(snapshot)?.replication;
+            let pid = snapshot.units.get(&service.name).map_or(0, |unit| unit.main_pid);
+            anyhow::ensure!(pid != 0, "replication worker is not running");
+            Ok(pid)
+        })
+    }
     #[cfg(target_os = "macos")]
-    let output = host_command("launchctl")
-        .args(["print", &format!("{}/{}", launch_domain(), service.name)])
-        .output()?;
-    anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
-    let text = std::str::from_utf8(&output.stdout)?;
-    #[cfg(target_os = "linux")]
-    let pid = text.trim().parse::<u32>()?;
-    #[cfg(target_os = "macos")]
-    let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
-        .context("replication worker has no supervised PID")?.parse::<u32>()?;
-    anyhow::ensure!(pid != 0, "replication worker is not running");
-    Ok(pid)
+    {
+        let service = lookup::native()?.replication;
+        let output = host_command("launchctl")
+            .args(["print", &format!("{}/{}", launch_domain(), service.name)])
+            .output()?;
+        anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
+        let text = std::str::from_utf8(&output.stdout)?;
+        let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
+            .context("replication worker has no supervised PID")?.parse::<u32>()?;
+        anyhow::ensure!(pid != 0, "replication worker is not running");
+        Ok(pid)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod worker_snapshot_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn worker_alias_resolution_is_once_per_snapshot_even_when_absent() {
+        let mut cached = None;
+        let calls = std::cell::Cell::new(0);
+        let snapshot = Arc::new(fractal_runtime::systemd::Snapshot {
+            units: std::collections::BTreeMap::new(),
+            captured_at: std::time::Instant::now(),
+        });
+        for _ in 0..1000 {
+            assert!(cached_worker_pid(&mut cached, Arc::clone(&snapshot), |_| {
+                calls.set(calls.get() + 1);
+                anyhow::bail!("worker is absent")
+            }).is_err());
+        }
+        assert_eq!(calls.get(), 1);
+        let changed = Arc::new(fractal_runtime::systemd::Snapshot {
+            units: std::collections::BTreeMap::new(),
+            captured_at: std::time::Instant::now(),
+        });
+        for _ in 0..1000 {
+            assert_eq!(cached_worker_pid(&mut cached, Arc::clone(&changed), |_| {
+                calls.set(calls.get() + 1);
+                Ok(42)
+            }).unwrap(), 42);
+        }
+        assert_eq!(calls.get(), 2);
+    }
 }
 
 pub(crate) fn daemon_is_service_managed() -> Result<bool> {
