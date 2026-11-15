@@ -26,6 +26,67 @@ const DRAFT_COMBINED: &str = "Both saved drafts were combined for editing. Nothi
 const NOTHING_TO_SEND: &str = "Write something first; nothing was sent";
 /// One line under a paused thread's own heading; the view explains the pause once.
 const PAUSED_NOTICE: &str = "Paused · collapse a thread to resume live updates";
+const NO_ACCESS: &str = "You no longer have access to this thread.";
+
+/// A per-thread read st refused: access ended, followed by st's own reason. Matches web and iOS.
+fn access_refused(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return NO_ACCESS.into();
+    }
+    let stop = if reason.ends_with(['.', '!', '?']) { "" } else { "." };
+    format!("{NO_ACCESS} {reason}{stop}")
+}
+
+/// A failed read of one thread's summary or timeline. Only a refusal says access ended; any other
+/// failure keeps the shared wording.
+fn thread_read_failure(code: Option<&fractal_client::ErrorCode>, message: &str) -> String {
+    match code {
+        Some(fractal_client::ErrorCode::Forbidden) => access_refused(message),
+        code => fractal_client::human_message(code, message),
+    }
+}
+
+fn thread_read_error(error: ClientError) -> String {
+    match &error {
+        ClientError::Api(fractal_client::ErrorCode::Forbidden, message, _) => access_refused(message),
+        error => error.human(),
+    }
+}
+
+/// A thread action st answered with a definite refusal: what could not be done, and st's reason on
+/// its own line. A refused action says nothing about read access.
+struct ActionRefusal {
+    headline: &'static str,
+    reason: String,
+}
+
+impl ActionRefusal {
+    fn of(mutation: &Mutation, error: &ClientError) -> Option<Self> {
+        let headline = match mutation {
+            Mutation::Close => "Couldn't close this thread.",
+            Mutation::Reopen => "Couldn't reopen this thread.",
+            Mutation::Rename(_) => "Couldn't rename this thread.",
+            Mutation::Reply(_) => "Couldn't send your reply.",
+            Mutation::Start(_) | Mutation::MarkRead(_) => return None,
+        };
+        let reason = match error {
+            // st's own words, without the shared `not allowed:` prefix.
+            ClientError::Api(fractal_client::ErrorCode::Forbidden, message, _) => message.clone(),
+            // A server-side failure is not a refusal of the request.
+            ClientError::Api(
+                fractal_client::ErrorCode::Internal
+                | fractal_client::ErrorCode::Unknown
+                | fractal_client::ErrorCode::RemoteUnavailable
+                | fractal_client::ErrorCode::ResponseBudgetExceeded,
+                ..,
+            ) => return None,
+            ClientError::Api(_, message, _) => message.clone(),
+            _ => return None,
+        };
+        Some(Self { headline, reason })
+    }
+}
 
 fn start_draft_text<'a>(
     texts: &'a HashMap<String, String>,
@@ -344,7 +405,7 @@ impl Earlier {
             let head = client
                 .thread_timeline(&self.id, None, Some(50))
                 .await
-                .map_err(|error| error.human())?
+                .map_err(thread_read_error)?
                 .value;
             if head.items.last().is_none_or(|row| row.id != self.tail) {
                 return Err("The thread moved while loading history. Try again.".into());
@@ -356,7 +417,7 @@ impl Earlier {
                 .thread_timeline(&self.id, Some(&cursor), Some(50))
                 .await
                 .map(|result| result.value)
-                .map_err(|error| error.human()),
+                .map_err(thread_read_error),
             None => Ok(fractal_client::ThreadTimelinePage {
                 items: Vec::new(),
                 next_cursor: None,
@@ -386,6 +447,8 @@ pub(super) struct Threads {
     drafts: BTreeMap<String, Draft>,
     writes: Vec<Write>,
     pending_actions: BTreeMap<String, Delivery>,
+    /// The last definite refusal of an action on each thread, until the person acts on it again.
+    action_refusals: BTreeMap<String, ActionRefusal>,
     hover: Option<String>,
     /// Why the last Enter or Send queued nothing, until the shell says it (`take_refusal`).
     refusal: Option<String>,
@@ -460,6 +523,7 @@ impl Threads {
             self.histories.clear();
             self.earlier.clear();
             self.failures.clear();
+            self.action_refusals.clear();
             self.focused = None;
             self.writes.clear();
             for delivery in self.pending_actions.values_mut().chain(
@@ -1006,7 +1070,19 @@ impl Threads {
         }
     }
 
-    pub(super) fn failure(&mut self, interest: ThreadInterest, message: String, permanent: bool) {
+    pub(super) fn failure(
+        &mut self,
+        interest: ThreadInterest,
+        code: Option<fractal_client::ErrorCode>,
+        message: String,
+        permanent: bool,
+    ) {
+        let message = match &interest {
+            ThreadInterest::Timeline(_) | ThreadInterest::Summary(_) => {
+                thread_read_failure(code.as_ref(), &message)
+            }
+            _ => fractal_client::human_message(code.as_ref(), &message),
+        };
         if permanent {
             match &interest {
                 ThreadInterest::Timeline(id) => {
@@ -1462,6 +1538,12 @@ impl Threads {
         rename_editor_visible: bool,
         width: usize,
     ) {
+        if let Some(refusal) = self.action_refusals.get(id) {
+            doc.wrap(&[text::run(refusal.headline, theme::dim())], width);
+            if !refusal.reason.is_empty() {
+                doc.wrap(&[text::run(&refusal.reason, theme::dim())], width);
+            }
+        }
         if let Some(delivery) = self.pending_actions.get(id) {
             self.feedback(doc, host, delivery, width);
         }
@@ -2227,7 +2309,11 @@ impl Threads {
     }
 
     pub(super) fn writes(&mut self) -> Vec<Write> {
-        std::mem::take(&mut self.writes)
+        let writes = std::mem::take(&mut self.writes);
+        for write in &writes {
+            self.action_refusals.remove(&write.id);
+        }
+        writes
     }
 
     pub(super) fn complete(
@@ -2282,6 +2368,14 @@ impl Threads {
                 } else {
                     self.pending_actions.remove(&write.id);
                 }
+            }
+            if !keep
+                && !not_sent
+                && let Some(refusal) = ActionRefusal::of(&write.mutation, &error)
+            {
+                let headline = refusal.headline;
+                self.action_refusals.insert(write.id.clone(), refusal);
+                return Some(headline.into());
             }
             return Some(error.human());
         }

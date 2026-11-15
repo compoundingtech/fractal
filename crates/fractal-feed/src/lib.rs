@@ -199,7 +199,9 @@ pub enum Update {
         order: Vec<String>,
         has_more: bool,
     },
-    ThreadWindowFailed { interest: ThreadInterest, message: String, permanent: bool },
+    /// A thread window failed. `message` is st's own words (or the feed's, with no `code`);
+    /// clients render it with `code` at their presentation boundary.
+    ThreadWindowFailed { interest: ThreadInterest, code: Option<ErrorCode>, message: String, permanent: bool },
     /// The open conversation's entries. `replace` means these are its newest page and every
     /// earlier entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
@@ -845,14 +847,13 @@ async fn connected(
                     }
                     CollectionEvent::Error { id, code, message, .. } if id.starts_with("thread-window/") => {
                         let Some(window) = threads.active.iter().find(|window| window.id == id) else { continue };
-                        let message = fractal_client::human_message(code.as_ref(), &message);
-                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), message,
+                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), code, message,
                             permanent: true }).is_err() { return Ended::Closed; }
                     }
                     CollectionEvent::Resync { id, code, message, .. } if id.starts_with("thread-window/") => {
                         let Some(window) = threads.active.iter().find(|window| window.id == id) else { continue };
-                        let message = fractal_client::human_message(code.as_ref(), message.as_deref().unwrap_or("Thread window needs a fresh snapshot"));
-                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), message,
+                        let message = message.unwrap_or_else(|| "Thread window needs a fresh snapshot".into());
+                        if updates.send(Update::ThreadWindowFailed { interest: window.interest.clone(), code, message,
                             permanent: false }).is_err() { return Ended::Closed; }
                     }
                     CollectionEvent::Resync { id, code, message: Some(message), .. } if id.starts_with(CONVERSATION) => {

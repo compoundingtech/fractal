@@ -120,6 +120,7 @@ fn paused_threads_stay_visibly_open_with_their_own_notice_and_one_view_explanati
     for id in [first, second] {
         threads.failure(
             ThreadInterest::Timeline(id.into()),
+            None,
             THREAD_UPDATES_PAUSED.into(),
             false,
         );

@@ -779,9 +779,9 @@ pub fn run(context: Context) -> Result<()> {
                     ui.threads.window(interest, snapshot, replace, rows, removes, order, has_more);
                     changed = true;
                 }
-                feed::Update::ThreadWindowFailed { interest, message, permanent } => {
+                feed::Update::ThreadWindowFailed { interest, code, message, permanent } => {
                     if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
-                    ui.threads.failure(interest, message, permanent);
+                    ui.threads.failure(interest, code, message, permanent);
                     changed = true;
                 }
                 feed::Update::InventorySupport { granted, member_build } => {

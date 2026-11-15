@@ -143,6 +143,7 @@ impl ThreadWindows {
             updates
                 .send(Update::ThreadWindowFailed {
                     interest: interest.clone(),
+                    code: None,
                     message: THREAD_UPDATES_PAUSED.into(),
                     permanent: false,
                 })
@@ -414,6 +415,7 @@ mod socket_budget_tests {
             .filter_map(|update| match update {
                 Update::ThreadWindowFailed {
                     interest: ThreadInterest::Timeline(id),
+                    code: None,
                     message,
                     permanent: false,
                 } if message == super::THREAD_UPDATES_PAUSED => Some(id),

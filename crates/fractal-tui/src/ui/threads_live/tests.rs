@@ -679,10 +679,24 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
         false,
     );
     assert_eq!(lines(&threads, &texts), accepted);
-    threads.failure(context, "Ask access expired".into(), true);
+    threads.failure(context.clone(), None, "Ask access expired".into(), true);
     let refused = lines(&threads, &texts);
     assert!(refused.iter().any(|line| line == "Ask access expired"));
     assert!(!refused.iter().any(|line| line.contains("Worker test")));
+    // A refused collection read is connection-level: it keeps the shared wording and never
+    // claims access to one thread ended.
+    threads.failure(
+        context.clone(),
+        Some(fractal_client::ErrorCode::Forbidden),
+        "Ask access expired".into(),
+        true,
+    );
+    assert_eq!(threads.failures[&context], "not allowed: Ask access expired");
+    assert!(
+        !lines(&threads, &texts)
+            .iter()
+            .any(|line| line.contains("no longer have access"))
+    );
 }
 
 #[test]
@@ -1941,6 +1955,7 @@ fn paused_live_updates_keep_cached_thread_content_and_draft_until_a_fresh_frame_
     let timeline = ThreadInterest::Timeline("thread/worker".into());
     threads.failure(
         timeline.clone(),
+        None,
         THREAD_UPDATES_PAUSED.into(),
         false,
     );
@@ -3117,6 +3132,217 @@ fn lifecycle_success_flashes_only_after_server_confirmation_with_host_keys() {
     }
 }
 
+fn rendered_lines(threads: &Threads, pane: &Pane, texts: &HashMap<String, String>) -> Vec<String> {
+    threads
+        .mount(
+            pane,
+            100,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            texts,
+        )
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The headline and st's reason are separate lines, and a refused action never claims that read
+/// access ended.
+fn assert_refusal_lines(lines: &[String], headline: &str) {
+    let at = lines
+        .iter()
+        .position(|line| line == headline)
+        .unwrap_or_else(|| panic!("{headline} is its own line: {lines:#?}"));
+    assert_eq!(lines[at + 1], "Grant was revoked", "{lines:#?}");
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("no longer have access") || line.contains("not allowed")),
+        "{lines:#?}"
+    );
+}
+
+#[test]
+fn definite_lifecycle_refusals_name_the_action_and_put_the_reason_on_its_own_line() {
+    for (state, mutation, headline) in [
+        (ThreadState::Open, Mutation::Close, "Couldn't close this thread."),
+        (ThreadState::Closed, Mutation::Reopen, "Couldn't reopen this thread."),
+    ] {
+        let mut threads = observed_threads(state);
+        let id = "thread/worker";
+        let pane = Pane::Thread(id.into());
+        let mut texts = HashMap::new();
+        threads.lifecycle(&pane.key(), id.into(), mutation.clone());
+        let write = threads.writes().pop().unwrap();
+        assert_eq!(
+            threads.complete(
+                Receipt {
+                    write,
+                    confirmation: Confirmation::Failed(forbidden()),
+                },
+                &mut texts,
+            ),
+            Some(headline.into())
+        );
+        // A definite refusal settles the action: nothing is retained or offered for retry.
+        assert!(threads.pending_actions.is_empty());
+        let doc = threads.mount(
+            &pane,
+            100,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            &texts,
+        );
+        assert!(
+            !doc.targets
+                .iter()
+                .any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Retry(_))))
+        );
+        assert_refusal_lines(&rendered_lines(&threads, &pane, &texts), headline);
+        // Acting on the thread again replaces the old refusal.
+        threads.lifecycle(&pane.key(), id.into(), mutation);
+        assert_eq!(threads.writes().len(), 1);
+        assert!(
+            !rendered_lines(&threads, &pane, &texts)
+                .iter()
+                .any(|line| line == headline)
+        );
+    }
+}
+
+#[test]
+fn definite_action_refusals_keep_the_server_reason_unprefixed() {
+    for code in [
+        fractal_client::ErrorCode::Forbidden,
+        fractal_client::ErrorCode::NotFound,
+    ] {
+        let ClientError::Api(_, _, mut envelope) = forbidden() else {
+            unreachable!()
+        };
+        envelope.code = code.clone();
+        envelope.message = "The thread is unavailable".into();
+        let error = ClientError::Api(code, envelope.message.clone(), envelope);
+        let refusal = ActionRefusal::of(&Mutation::Close, &error).unwrap();
+        assert_eq!(refusal.headline, "Couldn't close this thread.");
+        assert_eq!(refusal.reason, "The thread is unavailable");
+    }
+}
+
+#[test]
+fn a_definitely_refused_rename_keeps_its_title_draft_editable() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    let mut texts = HashMap::new();
+    let key = Input::Rename(id.into()).key();
+    threads.tap(&pane.key(), thread::Tap::Rename(id.into()), &mut texts);
+    texts.insert(key.clone(), "Renamed worker".into());
+    threads.tap(&pane.key(), thread::Tap::Rename(id.into()), &mut texts);
+    let write = threads.writes().pop().unwrap();
+    assert!(matches!(write.mutation, Mutation::Rename(_)));
+    assert_eq!(
+        threads.complete(
+            Receipt {
+                write,
+                confirmation: Confirmation::Failed(forbidden()),
+            },
+            &mut texts,
+        ),
+        Some("Couldn't rename this thread.".into())
+    );
+    assert!(!threads.drafts[&key].locked());
+    assert!(threads.drafts[&key].delivery.is_none());
+    assert_eq!(texts[&key], "Renamed worker");
+    assert_refusal_lines(
+        &rendered_lines(&threads, &pane, &texts),
+        "Couldn't rename this thread.",
+    );
+}
+
+#[test]
+fn a_definitely_refused_reply_keeps_its_draft_and_says_the_reply_was_not_sent() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    let mut texts = HashMap::new();
+    let key = Input::Reply(id.into()).key();
+    threads.tap(&pane.key(), thread::Tap::Compose(id.into()), &mut texts);
+    threads.paste(&pane, "Refused reply", &edit::Cursor::default(), &mut texts);
+    threads.submit(&pane.key(), Input::Reply(id.into()), &texts);
+    let write = threads.writes().pop().unwrap();
+    assert_eq!(
+        threads.complete(
+            Receipt {
+                write,
+                confirmation: Confirmation::Failed(forbidden()),
+            },
+            &mut texts,
+        ),
+        Some("Couldn't send your reply.".into())
+    );
+    assert!(!threads.drafts[&key].locked());
+    assert_eq!(texts[&key], "Refused reply");
+    assert_refusal_lines(
+        &rendered_lines(&threads, &pane, &texts),
+        "Couldn't send your reply.",
+    );
+}
+
+#[test]
+fn unconfirmed_or_server_side_action_failures_keep_their_retry_and_wording() {
+    let internal = || {
+        let ClientError::Api(_, message, mut envelope) = forbidden() else {
+            unreachable!()
+        };
+        envelope.code = fractal_client::ErrorCode::Internal;
+        ClientError::Api(fractal_client::ErrorCode::Internal, message, envelope)
+    };
+    for error in [ClientError::Transport("lost receipt".into()), internal()] {
+        let mut threads = observed_threads(ThreadState::Open);
+        let id = "thread/worker";
+        let pane = Pane::Thread(id.into());
+        let mut texts = HashMap::new();
+        threads.lifecycle(&pane.key(), id.into(), Mutation::Close);
+        let write = threads.writes().pop().unwrap();
+        let said = error.human();
+        assert_eq!(
+            threads.complete(
+                Receipt {
+                    write: write.clone(),
+                    confirmation: Confirmation::Failed(error),
+                },
+                &mut texts,
+            ),
+            Some(said)
+        );
+        assert!(threads.pending_actions[id].unknown);
+        let lines = rendered_lines(&threads, &pane, &texts);
+        assert!(lines.iter().any(|line| line == "Close thread: outcome not confirmed. Retry the original action."));
+        assert!(!lines.iter().any(|line| line.starts_with("Couldn't")));
+        // A later refusal cannot answer the original request it may have applied.
+        threads.retry(&write.key);
+        let retried = threads.writes().pop().unwrap();
+        assert_eq!(retried.key, write.key);
+        assert_eq!(
+            threads.complete(
+                Receipt {
+                    write: retried,
+                    confirmation: Confirmation::Failed(forbidden()),
+                },
+                &mut texts,
+            ),
+            Some(forbidden().human())
+        );
+        assert!(threads.pending_actions[id].unknown);
+        assert!(
+            !rendered_lines(&threads, &pane, &texts)
+                .iter()
+                .any(|line| line.starts_with("Couldn't"))
+        );
+    }
+}
+
 #[test]
 fn lifecycle_failure_flashes_warn_and_never_a_success_notice() {
     let pane = Pane::Thread("thread/worker".into());
@@ -3127,4 +3353,70 @@ fn lifecycle_failure_flashes_warn_and_never_a_success_notice() {
     assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
     assert_eq!(ui.flash.as_ref().unwrap().0, "The original thread action was rejected");
     assert!(ui.threads.take_completion_notice().is_none());
+}
+
+#[test]
+fn definite_action_refusal_headlines_flash_as_warnings() {
+    let pane = Pane::Thread("thread/worker".into());
+    for (state, tap, headline) in [
+        (ThreadState::Open, thread::Tap::Close("thread/worker".into()), "Couldn't close this thread."),
+        (ThreadState::Closed, thread::Tap::Reopen("thread/worker".into()), "Couldn't reopen this thread."),
+    ] {
+        let mut ui = writable_thread_in(&pane);
+        ui.threads = observed_threads(state);
+        ui.click(Hit::Thread(pane.key(), tap));
+        let write = ui.threads.writes().pop().unwrap();
+        ui.complete_thread(Receipt { write, confirmation: Confirmation::Failed(forbidden()) });
+        assert_eq!(ui.flash.as_ref().unwrap().0, headline);
+        assert_eq!(ui.flash_severity, Some(super::super::Severity::Warn));
+        assert!(ui.threads.take_completion_notice().is_none());
+    }
+}
+
+#[test]
+fn a_refused_thread_read_says_access_ended_with_the_reason() {
+    assert_eq!(
+        thread_read_error(forbidden()),
+        "You no longer have access to this thread. Grant was revoked."
+    );
+    let lost = ClientError::Transport("lost".into());
+    assert_eq!(thread_read_error(ClientError::Transport("lost".into())), lost.human());
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    let texts = HashMap::new();
+    let summary = ThreadInterest::Summary(id.into());
+    threads.failure(
+        summary.clone(),
+        Some(fractal_client::ErrorCode::Forbidden),
+        "Grant was revoked.".into(),
+        true,
+    );
+    assert_eq!(
+        threads.failures[&summary],
+        "You no longer have access to this thread. Grant was revoked."
+    );
+    let timeline = ThreadInterest::Timeline(id.into());
+    threads.failure(
+        timeline.clone(),
+        Some(fractal_client::ErrorCode::Forbidden),
+        "Grant was revoked".into(),
+        true,
+    );
+    let lines = rendered_lines(&threads, &pane, &texts);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "You no longer have access to this thread. Grant was revoked."),
+        "{lines:#?}"
+    );
+    assert!(!lines.iter().any(|line| line.contains("not allowed")));
+    // Any other failure of the same read keeps the shared wording.
+    threads.failure(
+        timeline.clone(),
+        Some(fractal_client::ErrorCode::NotFound),
+        "thread/worker".into(),
+        true,
+    );
+    assert_eq!(threads.failures[&timeline], "it is gone: thread/worker");
 }
