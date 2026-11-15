@@ -118,7 +118,7 @@ async fn assistant_summary_nonempty_queue_work_by_grant_count() {
             body["fields"]["credential_hash"] = json!(format!("{index:064x}"));
             fixture.state.store.append_claim(&ClaimInput {
                 subject: format!("custom/client/assistant-v1-{suffix}"), kind: GRANTED.into(),
-                actor: template.actor.clone(), body, ..Default::default()
+                actor: template.actor.clone(), fields: body["fields"].clone(), ..Default::default()
             }).unwrap();
         }
         {
