@@ -446,3 +446,41 @@ fn history_refuses_unbounded_reads_and_reads_an_empty_past_as_unreported() {
     let rows = day.buckets.iter().map(|bucket| (bucket.status.available, bucket.status.away, bucket.status_source.presence, bucket.status_source.unreported)).collect::<Vec<_>>();
     assert_eq!(rows, vec![(0, 3_600_000, 3_600_000, 0), (3_600_000, 0, 0, 3_600_000)]);
 }
+
+#[test]
+fn historical_window_cost_does_not_grow_with_post_window_claims() {
+    use rusqlite::StatementStatus;
+    use smallclaims::store::claims_in_order_before_query;
+
+    let store = store();
+    let end = T0 + 60 * MINUTE;
+    set(&store, AvailabilityChange::Status(Some(Status::Away), None), T0 - MINUTE);
+    set(&store, AvailabilityChange::Status(Some(Status::Available), None), T0 + 30 * MINUTE);
+    // The exclusive endpoint must not affect the last bucket.
+    set(&store, AvailabilityChange::Status(Some(Status::Away), None), end);
+    let read = || store.person_availability_history(ADA, T0, end, 600, end + MINUTE).unwrap();
+    let expected = read();
+    assert_eq!(expected.buckets[0].status.away, 600_000);
+    assert_eq!(expected.buckets[5].status.available, 600_000);
+    let cost = || {
+        let connection = store.readers.get();
+        let query = claims_in_order_before_query();
+        let mut statement = connection.prepare(&query).unwrap();
+        let rows = statement.query_map(params![ADA, STATUS_KIND, end.to_string()], |row| row.get::<_, String>(0))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        let steps = statement.get_status(StatementStatus::VmStep);
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap()
+            .query_map(params![ADA, STATUS_KIND, end.to_string()], |row| row.get::<_, String>(3))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(plan.iter().any(|line| line.contains("claims_subject_kind_accepted_index") && line.contains("<")),
+            "expected an indexed upper-bound seek: {plan:?}");
+        eprintln!("availability history plan: {plan:?}; VM steps: {steps}");
+        (rows, steps)
+    };
+    let before = cost();
+    for index in 1..=256 {
+        set(&store, AvailabilityChange::Status(Some(Status::Away), None), end + index * MINUTE);
+    }
+    assert_eq!(serde_json::to_value(read()).unwrap(), serde_json::to_value(expected).unwrap());
+    assert_eq!(cost(), before, "post-window claims must not add parsed rows or SQLite VM work");
+}

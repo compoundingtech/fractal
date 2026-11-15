@@ -558,9 +558,9 @@ impl Store {
     /// then in force.
     fn history_claims(&self, person: &str, kind: &str, since: u128, end: u128, with_prior: bool) -> Result<Vec<ClaimRecord>> {
         let mut claims = Vec::new();
-        self.claims_in_order(person, kind, true, |claim| {
+        self.claims_in_order_before(person, kind, end, |claim| {
             let at = claim.accepted_at_unix_ms;
-            if at < end && (at > since || with_prior) {
+            if at > since || with_prior {
                 claims.push(claim.clone());
             }
             at > since

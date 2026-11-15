@@ -3,7 +3,7 @@
   "summary": "Read a person's availability history in buckets through client-v0",
   "replay": {
     "status": "none",
-    "detail": "The new read folds the existing availability claims; nothing is written or replayed."
+    "detail": "The new read folds the existing availability claims; nothing is written or replayed. Historical windows seek the existing subject/kind acceptance-time index below the exclusive end, so newer claims do not increase the read cost; each axis retains the single prior value needed at the window's start."
   },
   "schema": {
     "status": "none",
