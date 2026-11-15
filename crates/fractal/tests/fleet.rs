@@ -9256,11 +9256,37 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
     .await;
     let upgraded = agent_send(&o, b_seat, "route-from-upgraded-o").await;
     assert!(upgraded["created_index"].as_u64().unwrap() > base, "{upgraded}");
-    // Rolled back, its sends are graph claims again, and it lists what it holds.
+    // Rollback restores the baseline's observed send routing, including a baseline
+    // that already writes stream mail. Its archive keeps the original routing inputs.
     let restored = previous_release_rollback(&mut o, &old, &recovery).await;
     let rollback = restored.as_ref().unwrap_or(&o);
+    assert!(newest_start_advertises(rollback, "b", "messages_stream_inbox").await);
     let rolled_back = agent_send(rollback, b_seat, "route-from-rolled-back-o").await;
-    assert!(rolled_back["created_index"].as_u64().unwrap() < base, "{rolled_back}");
+    let rolled_back_subject = rolled_back["subject"].as_str().unwrap();
+    if release_routes_stream {
+        assert!(rolled_back["created_index"].as_u64().unwrap() > base, "{rolled_back}");
+    } else {
+        assert!(rolled_back["created_index"].as_u64().unwrap() < base, "{rolled_back}");
+    }
+    assert_eq!(rolled_back["to"], b_seat, "{rolled_back}");
+    assert_eq!(held(rollback, rolled_back_subject).await, release_sent_store);
+    let again = agent_send(rollback, b_seat, "route-from-rolled-back-o").await;
+    assert_eq!(again["already_sent"], true, "{again}");
+    assert_eq!(again["subject"], rolled_back_subject, "{again}");
+    assert_eq!(again["created_index"], rolled_back["created_index"], "{again}");
+    assert_eq!(held(rollback, rolled_back_subject).await, release_sent_store);
+    let page: Value = rollback.client().get(&format!("/v1/messages?to={b_seat}")).await.unwrap();
+    let listed = page.as_array().unwrap().iter()
+        .filter(|item| item["subject"] == rolled_back_subject).collect::<Vec<_>>();
+    assert_eq!(listed.len(), 1, "{page}");
+    assert_eq!(listed[0]["to"], b_seat);
+    assert_eq!(listed[0]["content"], "routed mail route-from-rolled-back-o");
+    for (subject, expected) in [
+        (&to_b_subject, (0, 1)), (&to_o_subject, o_held),
+        (&nowhere_subject, (1, 0)), (&from_o_subject, release_sent_store),
+    ] {
+        assert_eq!(held(rollback, subject).await, expected, "rollback lost {subject}");
+    }
     if release_inbox {
         wait_until("the rolled-back member still lists the stream mail it holds", 60, || async {
             client_listed(rollback, false, 200).await.contains(&to_o_subject)
