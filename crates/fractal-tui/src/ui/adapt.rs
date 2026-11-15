@@ -1097,19 +1097,23 @@ mod tests {
     }
 
     #[test]
-    fn identity_labels_show_fallback_ids_only_once() {
-        for id in ["agent/example/unnamed", "person/ada"] {
+    fn identity_labels_use_names_or_plain_agent_words() {
+        for (id, expected) in [("agent/example/unnamed", "an agent"), ("person/ada", "person/ada")] {
             let actor = fractal_client::AttentionActor {
                 id: id.into(),
                 label: id.into(),
             };
-            assert_eq!(who(&actor), id);
+            let shown = who(&actor);
+            assert_eq!(shown, expected);
+            assert!(!shown.contains("agent/"), "{shown}");
         }
         let named = fractal_client::AttentionActor {
             id: "agent/example/maintainer".into(),
             label: "Maintainer".into(),
         };
-        assert_eq!(who(&named), "Maintainer · agent/example/maintainer");
+        let shown = who(&named);
+        assert_eq!(shown, "Maintainer");
+        assert!(!shown.contains("agent/"), "{shown}");
     }
 
     #[test]
