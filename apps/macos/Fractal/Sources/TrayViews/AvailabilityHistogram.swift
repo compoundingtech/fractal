@@ -105,7 +105,7 @@ struct AvailabilityHistorySection: View {
       let all = history.total(since: history.from, until: history.to)
       return "\(Int((all.share(.available) * 100).rounded()))% available"
     case .today:
-      let day = history.total(since: history.to.addingTimeInterval(-24 * 3600), until: history.to)
+      let day = history.total(since: HistoryPeriod.lastDayStart(history), until: history.to)
       return "\(TimeWords.hoursAndMinutes(day.available)) available"
     }
   }
@@ -137,9 +137,15 @@ enum HistoryPeriod {
     history.days(7, endingAt: history.to, calendar: calendar).first?.start ?? history.from
   }
 
+  /// Include the first overlapping hour in full: aggregate buckets cannot tell us which
+  /// minutes belong before the cutoff. The header, chart and tile share this boundary.
+  static func lastDayStart(_ history: AvailabilityHistory) -> Date {
+    let cutoff = history.to.addingTimeInterval(-24 * 3600)
+    return history.buckets.first { $0.end > cutoff }?.start ?? cutoff
+  }
+
   static func lastDay(_ history: AvailabilityHistory) -> [AvailabilityHistory.Bucket] {
-    let since = history.to.addingTimeInterval(-24 * 3600)
-    return history.buckets.filter { $0.end > since }
+    history.buckets(since: lastDayStart(history), until: history.to)
   }
 }
 
@@ -361,29 +367,31 @@ struct WeekStrips: View {
             .font(.caption.weight(today ? .semibold : .regular))
             .foregroundStyle(today ? .primary : .secondary)
             .frame(width: Self.labelWidth, alignment: .leading)
-          GeometryReader { geometry in
-            HistoryStrip(
-              buckets: day.buckets, since: day.start, span: Self.span(day.start, calendar),
-              now: today ? history.to : nil, hovered: hovered?.start
-            )
-            .contentShape(.rect)
-            .onContinuousHover { phase in
-              switch phase {
-              case .active(let location):
-                let at = day.start.addingTimeInterval(location.x / geometry.size.width * Self.span(day.start, calendar))
-                hovered = day.buckets.first { $0.start <= at && at < $0.end }
-              case .ended:
-                hovered = nil
+          VStack(spacing: 2) {
+            GeometryReader { geometry in
+              HistoryStrip(
+                buckets: day.buckets, since: day.start, span: Self.span(day.start, calendar),
+                now: today ? history.to : nil, hovered: hovered?.start
+              )
+              .contentShape(.rect)
+              .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                  let at = day.start.addingTimeInterval(location.x / geometry.size.width * Self.span(day.start, calendar))
+                  hovered = day.buckets.first { $0.start <= at && at < $0.end }
+                case .ended:
+                  hovered = nil
+                }
               }
             }
+            .frame(height: 14)
+            HourAxis(day: day.start, calendar: calendar)
           }
-          .frame(height: 14)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(today ? "Today" : day.start.formatted(.dateTime.weekday(.wide)))
         .accessibilityValue(HistoryMark.summary(day.total))
       }
-      HourAxis().padding(.leading, Self.labelWidth + 6)
       if let hovered {
         DetailLine(text: "\(HistoryMark.hourRange(hovered)) · \(HistoryMark.describe(hovered))", emphasis: true)
       } else {
@@ -406,8 +414,17 @@ struct WeekStrips: View {
   }
 }
 
-/// 0, 6, 12, 18 and 24 under a 24-hour strip.
-private struct HourAxis: View {
+/// Local clock labels positioned on each day's actual elapsed-time strip.
+struct HourAxis: View {
+  let day: Date
+  let calendar: Calendar
+
+  static func fraction(hour: Int, day: Date, calendar: Calendar) -> Double {
+    if hour == 24 { return 1 }
+    let at = calendar.date(bySettingHour: hour, minute: 0, second: 0, of: day) ?? day
+    return at.timeIntervalSince(day) / WeekStrips.span(day, calendar)
+  }
+
   var body: some View {
     GeometryReader { geometry in
       ForEach([0, 6, 12, 18, 24], id: \.self) { hour in
@@ -415,7 +432,7 @@ private struct HourAxis: View {
           .font(.caption2.monospacedDigit())
           .foregroundStyle(.secondary)
           .fixedSize()
-          .position(x: geometry.size.width * CGFloat(hour) / 24, y: 6)
+          .position(x: geometry.size.width * Self.fraction(hour: hour, day: day, calendar: calendar), y: 6)
       }
     }
     .frame(height: 12)
@@ -608,7 +625,7 @@ struct LastDayChart: View {
 
   var body: some View {
     let buckets = HistoryPeriod.lastDay(history)
-    let since = history.to.addingTimeInterval(-24 * 3600)
+    let since = HistoryPeriod.lastDayStart(history)
     VStack(alignment: .leading, spacing: 4) {
       Chart {
         ForEach(Self.segments(buckets)) { segment in
@@ -662,7 +679,7 @@ struct LastDayChart: View {
       .frame(height: 112)
       .accessibilityElement(children: .contain)
       .accessibilityLabel("Availability, last 24 hours")
-      InterruptionsLane(buckets: buckets, since: since, span: 24 * 3600)
+      InterruptionsLane(buckets: buckets, since: since, span: history.to.timeIntervalSince(since))
       if let hovered {
         DetailLine(text: "\(HistoryMark.hourRange(hovered)) · \(HistoryMark.describe(hovered))", emphasis: true)
       } else {
@@ -739,7 +756,8 @@ struct TileHistoryStrip: View {
 
   var body: some View {
     HistoryStrip(
-      buckets: HistoryPeriod.lastDay(history), since: history.to.addingTimeInterval(-24 * 3600), span: 24 * 3600
+      buckets: HistoryPeriod.lastDay(history), since: HistoryPeriod.lastDayStart(history),
+      span: history.to.timeIntervalSince(HistoryPeriod.lastDayStart(history))
     )
     .frame(height: 4)
     .accessibilityHidden(true)

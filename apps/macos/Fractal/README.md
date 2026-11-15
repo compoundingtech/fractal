@@ -99,7 +99,11 @@ collection, but `FractalClient` has no typed attention or availability stream.
   of the day's available share over the four weeks with today as a line, H3 the
   last 24 hours as minutes available above and away below the baseline with a
   lane of limited interruptions, and the same 24 hours as a strip on the
-  availability tile. Hover names an hour; VoiceOver reads each day or hour in
+  availability tile. H1 places clock labels separately for each local day,
+  including 23- and 25-hour daylight-saving days. H3 includes the whole first
+  hour overlapping its 24-hour window in the chart, header total and tile:
+  hourly aggregates cannot locate changes within that partial hour.
+  Hover names an hour; VoiceOver reads each day or hour in
   words. A member without the read (an empty 404, which the client reports as
   `unsupported-capability`) shows "History unavailable on this Fractal version"
   instead of a failure, and is asked again hourly. A design-review build
