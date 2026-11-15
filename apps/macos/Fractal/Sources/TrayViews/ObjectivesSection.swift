@@ -38,13 +38,36 @@ struct ObjectivesSection: View {
     }
   }
 
-  private static func isStale(_ state: ConnectionState) -> Bool {
+  static func isStale(_ state: ConnectionState) -> Bool {
     if case .stale = state { true } else { false }
   }
 }
 
+/// One glance signal's page: the objectives and budgets behind it, each with its last 24 hours,
+/// the worst one open.
+struct SignalSection: View {
+  let signal: Signal
+  let model: AttentionModel
+
+  var body: some View {
+    PanelSection(title: signal.title, aside: "\(signal.value) · \(SignalTone.word(signal.tone))") {
+      SectionFailure(state: model.slo.state)
+      if case .stale = model.sloHistory.state, !ObjectivesSection.isStale(model.slo.state) {
+        SectionFailure(state: model.sloHistory.state)
+      }
+      if signal.members.isEmpty {
+        Text("No objective feeds this signal yet").foregroundStyle(.secondary)
+      } else {
+        SloEntries(entries: signal.members, histories: model.sloHistory.value ?? [:])
+      }
+    } footer: {
+      if let snapshot = model.slo.value { RelativeTime(date: snapshot.asOf, prefix: "Measured") }
+    }
+  }
+}
+
 /// Disclosure rows; the worst entry that is not met starts open.
-private struct SloEntries: View {
+struct SloEntries: View {
   let entries: [SloEntry]
   let histories: [String: SloHistory]
 
@@ -108,7 +131,7 @@ private struct SloValue: View {
 }
 
 /// Status symbol (shape, not only color), what the objective promises and its window.
-private struct SloLabel: View {
+struct SloLabel: View {
   static let inset: CGFloat = 26
 
   let entry: SloEntry

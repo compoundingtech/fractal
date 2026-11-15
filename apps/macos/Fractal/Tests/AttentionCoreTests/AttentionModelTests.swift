@@ -17,6 +17,10 @@ final class AttentionModelTests: XCTestCase {
     let adapter = FakeAdapter(attention: [.success(.init(records: [ask, update, ignored], canAnswer: true))], slo: [.success(slo)])
     let model = AttentionModel(adapter: adapter)
     XCTAssertEqual(model.connection, .loading)
+    XCTAssertEqual(model.signalBoard.signals.count, 10)
+    XCTAssertTrue(model.signalBoard.signals.allSatisfy {
+      $0.tone == .quiet && $0.value == "—" && $0.subtitle == "no objective"
+    })
 
     await model.refresh(now: now)
 
@@ -24,8 +28,26 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.updates, [update])
     XCTAssertEqual(model.openAskCount, 1, "updates ask nothing and are not counted")
     XCTAssertEqual(model.sloBoard?.objectives.map(\.id), ["read"])
+    XCTAssertEqual(model.signalBoard, SignalBoard(rows: slo.rows))
     XCTAssertTrue(model.canAnswer)
     XCTAssertEqual(model.connection, .fresh(now))
+  }
+
+  func testSignalBoardUpdatesWithRowsAndSurvivesAFailedRead() async {
+    let first = SloSnapshot(asOf: now, rows: [Fixture.slo("fleet/online", status: "met")])
+    let second = SloSnapshot(asOf: now, rows: [Fixture.slo("fleet/online", status: "missed")])
+    let adapter = FakeAdapter(
+      attention: Array(repeating: .success(.init(records: [], canAnswer: true)), count: 3),
+      slo: [.success(first), .success(second), .failure("slo down")])
+    let model = AttentionModel(adapter: adapter)
+    await model.refresh(now: now)
+    XCTAssertEqual(model.signalBoard.needsAttention, 0)
+    await model.refresh(now: now.addingTimeInterval(30))
+    XCTAssertEqual(model.signalBoard.needsAttention, 1)
+    XCTAssertEqual(model.signalBoard, SignalBoard(rows: second.rows))
+    await model.refresh(now: now.addingTimeInterval(60))
+    XCTAssertEqual(model.signalBoard, SignalBoard(rows: second.rows))
+    XCTAssertEqual(model.sloBoard, SloBoard(second.rows))
   }
 
   func testOneSectionFailingKeepsTheOtherFreshAndItsOwnLastData() async {
@@ -40,6 +62,7 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.attention.state, .fresh(now))
     XCTAssertEqual(model.slo.state, .stale(lastSuccess: nil, reason: "slo down"))
     XCTAssertNil(model.slo.value)
+    XCTAssertEqual(model.signalBoard, SignalBoard(rows: []))
     XCTAssertEqual(model.asks, [ask])
 
     await model.refresh(now: later)
@@ -47,6 +70,7 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.asks, [ask], "a failed read keeps the last asks")
     XCTAssertEqual(model.slo.state, .fresh(later))
     XCTAssertEqual(model.slo.value, slo)
+    XCTAssertEqual(model.signalBoard, SignalBoard(rows: slo.rows))
     XCTAssertEqual(model.connection, .stale(lastSuccess: now, reason: "gateway down"))
   }
 
@@ -71,6 +95,7 @@ final class AttentionModelTests: XCTestCase {
     XCTAssertEqual(model.connection, .unconfigured("Missing ATTENTION_FRACTAL_SOCKET"))
     XCTAssertTrue(model.asks.isEmpty)
     XCTAssertNil(model.sloBoard)
+    XCTAssertEqual(model.signalBoard, SignalBoard(rows: []))
   }
 
   func testAnswerIsShownOnlyAfterCommitThenTheCardLeavesOnTheNextRead() async {

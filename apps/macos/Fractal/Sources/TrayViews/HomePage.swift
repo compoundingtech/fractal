@@ -4,7 +4,8 @@ import BuildIdentity
 import SwiftUI
 
 /// The top level, Control Center style: a row of module tiles (availability, speech,
-/// objectives), the inbox as one-line rows that drill in, and the footer.
+/// objectives), the inbox as one-line rows capped so the signals below stay in view, the
+/// signals two across, and the footer.
 struct HomePage: View {
   let model: AttentionModel
   let build: BuildIdentity
@@ -16,10 +17,40 @@ struct HomePage: View {
         if let message = model.configurationError {
           ConfigurationNotice(message: message)
         } else {
-          InboxList(model: model)
+          Glance(model: model)
         }
       }
       PanelFooter(model: model, build: build)
+    }
+  }
+}
+
+/// The full inbox: every shown ask and update, asks first. The top level's More row opens it.
+struct InboxPage: View {
+  let model: AttentionModel
+
+  var body: some View {
+    let asks = model.asks
+    let updates = model.updates
+    VStack(alignment: .leading, spacing: 0) {
+      PageHeader(title: "Inbox", model: model) {
+        Text("\(asks.count + updates.count)")
+          .font(.subheadline.monospacedDigit())
+          .foregroundStyle(.secondary)
+      }
+      PanelScroll {
+        if case .stale = model.attention.state { StaleRow(model: model) }
+        if asks.isEmpty && updates.isEmpty { CaughtUpRow() }
+        if !asks.isEmpty {
+          SectionLabel(title: "Asks", aside: "\(asks.count)")
+          ForEach(asks) { InboxRow(record: $0, model: model) }
+        }
+        if !updates.isEmpty {
+          SectionLabel(title: "Updates", aside: "\(updates.count)")
+          ForEach(updates) { InboxRow(record: $0, model: model) }
+        }
+        SnoozedNote(model: model)
+      }
     }
   }
 }
@@ -35,7 +66,7 @@ struct PanelScroll<Content: View>: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 0, content: content)
           .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(.vertical, 4)
+          .padding(.vertical, PanelMetrics.scrollPadding)
       }
     }
   }
@@ -312,34 +343,91 @@ enum TileText {
 
 // MARK: - Inbox
 
-/// Asks and updates as one-line rows; everything else is one click in.
-private struct InboxList: View {
+/// Notices, the inbox capped to what fits, then the signals. Asks come first, then updates; rows
+/// past the cap leave for the full inbox behind a More row, so the whole panel fits the scroll
+/// limit (at least three rows stay, however short the screen). Everything but the rows has a
+/// known height: labels and signals are fixed, notices are measured.
+private struct Glance: View {
   let model: AttentionModel
+  @Environment(\.panelScrollHeight) private var maxHeight
+  @State private var noticesHeight: CGFloat = 0
+  @State private var snoozedHeight: CGFloat = 0
 
   var body: some View {
     let asks = model.asks
     let updates = model.updates
+    let total = asks.count + updates.count
+    let board = model.signalBoard
+    let cap = InboxCap(
+      totalCount: total, availableHeight: Double(maxHeight), fixedHeight: Double(fixedHeight(board)),
+      rowHeight: Double(PanelMetrics.rowHeight), moreRowHeight: Double(PanelMetrics.rowHeight))
+    let shownAsks = min(cap.visibleCount, asks.count)
+    VStack(alignment: .leading, spacing: 0) { InboxNotices(model: model, asks: asks, isEmpty: total == 0) }
+      .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { noticesHeight = $0 }
+    if total > 0 {
+      SectionLabel(title: "Inbox", aside: "\(total)")
+      ForEach(asks.prefix(shownAsks)) { InboxRow(record: $0, model: model) }
+      ForEach(updates.prefix(cap.visibleCount - shownAsks)) { InboxRow(record: $0, model: model) }
+      if cap.hiddenCount > 0 { MoreRow(count: cap.hiddenCount, model: model) }
+    }
+    VStack(alignment: .leading, spacing: 0) { SnoozedNote(model: model) }
+      .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { snoozedHeight = $0 }
+    SignalsSection(board: board, model: model)
+  }
+
+  /// The scroll's own padding, notices, the inbox label, the snoozed note and the signals.
+  private func fixedHeight(_ board: SignalBoard) -> CGFloat {
+    2 * PanelMetrics.scrollPadding + noticesHeight + SectionLabel.height + snoozedHeight
+      + SignalsSection.height(board)
+  }
+}
+
+/// What the inbox says before its rows: the last commit, a stale read, a read-only session, and
+/// loading or caught up when there are no rows.
+private struct InboxNotices: View {
+  let model: AttentionModel
+  let asks: [AttentionRecord]
+  let isEmpty: Bool
+
+  var body: some View {
     if let receipt = model.receipt { ReceiptRow(receipt: receipt) }
     if case .stale = model.attention.state { StaleRow(model: model) }
     if !model.canAnswer, model.attention.value != nil, asks.contains(where: { $0.role == .ask(.native) }) {
       NoticeRow(text: "This session may only read (no work.done grant). Answer in Fractal.", symbol: "lock")
     }
-    if asks.isEmpty && updates.isEmpty {
+    if isEmpty {
       if model.attention.value == nil {
         NoticeRow(text: "Loading…", symbol: "circle.dotted")
       } else {
         CaughtUpRow()
       }
     }
-    if !asks.isEmpty {
-      SectionLabel(title: "Asks", aside: "\(asks.count)")
-      ForEach(asks) { InboxRow(record: $0, model: model) }
+  }
+}
+
+/// The rows past the cap: how many, opening the full inbox.
+private struct MoreRow: View {
+  let count: Int
+  let model: AttentionModel
+
+  var body: some View {
+    Button {
+      PanelMotion.open(.inbox, in: model)
+    } label: {
+      HStack(spacing: PanelMetrics.symbolSpacing) {
+        Color.clear.frame(width: PanelMetrics.symbolWidth, height: 1)
+        Text("\(count) more").foregroundStyle(.tint)
+        Spacer(minLength: 4)
+        Image(systemName: "chevron.right")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.tertiary)
+      }
     }
-    if !updates.isEmpty {
-      SectionLabel(title: "Updates", aside: "\(updates.count)")
-      ForEach(updates) { InboxRow(record: $0, model: model) }
-    }
-    SnoozedNote(model: model)
+    .buttonStyle(.panelRow)
+    .help("Show the full inbox")
+    .accessibilityLabel("\(count) more in the inbox")
+    .accessibilityHint("Opens the full inbox")
+    .focusOnArrival(model.backFrom == .inbox)
   }
 }
 

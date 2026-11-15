@@ -6,11 +6,13 @@ objectives every Fractal client reads. It reads only Fractal, through
 `FractalClient`, at launch and every 30 seconds; Fractal streams the attention
 collection, but `FractalClient` has no typed attention or availability stream.
 
-- **The panel** is a Control Center module: tiles for Availability, Speech and
-  Objectives (the circle toggles, the rest opens the module's page), the inbox
-  as one-line rows (symbol, title, asker, age; a draft, a write in flight or a
-  refusal is marked on the row), and the footer. A row or tile opens its page
-  within the panel, with a back chevron and Esc; with Reduce Motion pages
+- **The panel** is a Control Center module: the existing Availability, Speech and
+  Objectives tiles, a height-capped inbox, ten signal tiles in two columns, and
+  the footer. Inbox rows show symbol, title, asker and age; drafts, writes in flight
+  and refusals are marked on the row. Overflow opens a full scrollable inbox via
+  “N more”; the home cap adapts to the panel height with at least three rows.
+  A row or tile opens its page within the panel, with a back chevron and Esc;
+  cards opened from the full inbox return there on Back. With Reduce Motion pages
   cross-fade instead of sliding, and VoiceOver focus moves to the page title
   and back to the row or tile that opened it. Closing the panel returns it to
   the top level.
@@ -72,6 +74,16 @@ collection, but `FractalClient` has no typed attention or availability stream.
   first, then stale, then met; unmeasured objectives collapse; budgets follow.
   They stay in the panel: the status item shows asks only (one template glyph
   and the count; offline swaps in the sync-problem glyph, keeping the count).
+- **Signals** are a fixed glance board over the same Fractal SLO rows: PR throughput,
+  merge latency p95, CI critical path p95, flakes, main green, fleet, Fractal,
+  agents, spend and disk. The worst measured member determines the tone and
+  subtitle; multi-member signals show missed/measured counts, and spend shows the
+  worst budget's used percentage. An explicit `fractal` objective supersedes the
+  daemon-health rollup. Missing objectives show “— / no objective”; objectives
+  without measurements show “— / no data”. Each tile opens its member objectives
+  with the existing 24-hour histories; the Objectives tile still opens all rows.
+  These histories are budget remaining, not PR throughput: a per-day throughput
+  histogram remains a Fractal data-side gap.
 - **Objective history** (`GET v1/client/slo/history`): for every listed row,
   what was left over the last 24 hours in 24 hourly steps (Fractal's default
   period; a row's `window` is display text and is not parsed). Each step holds
@@ -318,6 +330,12 @@ the Nix-built gallery (`nix run ./flakes/attention-tray#gallery -- <dir> …`).
 Every manifest's `trayRev` records the gallery build's `machineVersion`, and
 the footers show its build identity at render time. It needs a Mac with a login
 session and has these outputs:
+
+The `glance-quiet` (three items) and `glance-busy` (17 items) scenarios render at
+the live panel height, not an uncapped page. Their synthetic Fractal fixtures cover
+all tones, unmeasured producer objectives, daemon-health misses and a 37%-used
+weekly budget. Render just these on a Mac with:
+`swift run TrayGallery <out-dir> glance-quiet glance-busy`.
 
 - `devenv tasks run attention-tray:gallery`: every scenario, light and dark,
   as `@2x` PNGs, and the status item in every state, plus `manifest.json`,
