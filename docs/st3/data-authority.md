@@ -382,7 +382,7 @@ order from the same admitted claims.
 | `local_ask_digest_pending` | Local cache | Arrival-indexed deadline resolutions awaiting reporting, including local staging marks. Rebuilt from retained ask/answer claims and authenticated emission history. |
 | `local_ask_digest_retry` | Local cache | Bounded dependency retry work and keyset progress. Sleeping work wakes on graph dependency changes; no replicated identity or digest contribution. |
 | `local_ask_digest_source_history` | Local cache | Per-authenticated-source payload paging and reported-ID indexing progress, reconstructed from native notice/document claims. Never replicated or included in projection digests. |
-| `local_ask_digest_sources` | Local cache | Rebuildable per-person/date emission fences and coverage boundaries derived from authenticated source claims; replicated source identities remain the durable authority. |
+| `local_ask_digest_sources` | Local cache | Rebuildable emission fences and coverage boundaries per person and date, derived from authenticated source claims; replicated source identities remain the durable authority. |
 | `local_blob_uploads` | Local | Who uploaded an attachment file, for the per-actor quota and for who may read it before a message names it. Never replicated; the bytes are files under `<state_dir>/blobs`, see [Attachments](attachments.md). |
 | `local_blobs` | Local | Staged upload bytes awaiting a durable claim reference. Promotion into `blobs` commits with the referencing claim. |
 | `local_client_message_cut_epoch` | Local | Single-row counter that invalidates issued message page cursors after deletions, repairs or a selector rebuild. Never replicated. |
