@@ -133,7 +133,7 @@ mission "example/report" state="ready" {
 
 #[test]
 fn daemon_capabilities_refuse_unknown_provider_class_and_target_before_admission() {
-    use crate::store::effects::EffectClass;
+    use crate::store::effects::{EffectClass, EffectTarget};
     let fixture = Fixture::new();
     for (provider, class, target, code) in [
         ("sdk-provider", EffectClass::NativeCoordinated, "agent/example/reader", "effect-provider-unknown"),
@@ -142,7 +142,7 @@ fn daemon_capabilities_refuse_unknown_provider_class_and_target_before_admission
         ("git.branch-create", EffectClass::ProviderIdempotent, r#"{"repo":"example/repo"}"#, "effect-target-mismatch"),
     ] {
         let error = fixture.state.store.admit_effect(fixture.owner(), &fixture.request.from,
-            &fixture.request.from, "digest", provider, class, target).unwrap_err();
+            &fixture.request.from, "digest", EffectTarget { provider, class, target }).unwrap_err();
         assert_eq!(error.code, code);
     }
     // Refused declarations cannot consume the key or widen native-message capability.
