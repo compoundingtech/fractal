@@ -25,10 +25,14 @@ impl Commands for NativeCommands<'_> {
     }
 
     fn output(&mut self, arguments: &[&str]) -> Result<Output> {
-        super::host_command(self.0)
-            .args(arguments)
-            .output()
-            .with_context(|| format!("run {} {}", self.0, arguments.join(" ")))
+        let mut command = super::host_command(self.0);
+        command.args(arguments);
+        let output = if self.0 == "launchctl" {
+            super::launchctl::output(&mut command)
+        } else {
+            command.output()
+        };
+        output.with_context(|| format!("run {} {}", self.0, arguments.join(" ")))
     }
 }
 

@@ -21,6 +21,11 @@ impl Native {
     fn output(program: &str, arguments: &[&str]) -> Result<Output> {
         use std::io::{Read as _, Seek as _};
         use std::process::Stdio;
+        if matches!(program, "launchctl" | "/bin/launchctl") {
+            return fractal_daemon::service::launchctl::output(
+                fractal_daemon::service::host_command(program).args(arguments),
+            ).with_context(|| format!("run {program} {}", arguments.join(" ")));
+        }
         // A wedged manager must not leave the host halfway through an unbounded gap.
         // Files avoid pipe-buffer deadlock while the child is polled.
         let mut stdout = tempfile::tempfile()?;
