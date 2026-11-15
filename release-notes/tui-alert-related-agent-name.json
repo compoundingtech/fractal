@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Inbox alert related agents use the same display names as thread senders while preserving graph link targets",
+  "replay": {"status": "none", "detail": "Rendering only; no graph replay changes."},
+  "schema": {"status": "none", "detail": "No wire or persisted schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest changes."},
+  "compatibility": {"status": "none", "detail": "Related agent links retain their subjects and show readable names instead of raw ids."},
+  "downtime": {"status": "none", "detail": "No upgrade work runs."},
+  "manual": {"status": "none", "detail": "No upgrade steps."},
+  "recovery": {"status": "none", "detail": "No upgrade state changes to recover."}
+}

@@ -1659,7 +1659,16 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             || target.starts_with("mission/")
             || target.starts_with("attention/")
         {
-            link(&mut card, &prefix, target, target);
+            let label = if target.starts_with("agent/") {
+                world.agents.items().iter().find(|agent| agent.id == *target)
+                    .map_or_else(
+                        || fractal_ui_model::agents::label(target.trim_start_matches("agent/"), None),
+                        |agent| agent.name.clone(),
+                    )
+            } else {
+                target.clone()
+            };
+            link(&mut card, &prefix, &label, target);
         } else {
             card.line(Line::from(vec![
                 span(prefix, theme::dim()),
@@ -3616,6 +3625,24 @@ pub fn devices_card(world: &World, width: usize) -> Doc {
 #[cfg(test)]
 mod tree_tests {
     use super::*;
+
+    #[test]
+    fn demo_alert_related_agent_uses_the_thread_sender_name() {
+        let world = crate::ui::demo::world();
+        let item = &world.attention.items()[0];
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
+            form: Default::default(),
+        };
+        let doc = home_detail(&world, Some(&item.id), 120, &drafts);
+        let text = doc.lines.iter().map(|line| {
+            line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Atlas Builder"), "{text}");
+        assert!(!text.contains("agent/example/atlas/builder"), "{text}");
+        assert!(doc.targets.iter().any(|target| target.hit == Hit::Peek("agent/example/atlas/builder".into())));
+    }
 
     #[test]
     fn attention_identity_labels_named_st_are_not_product_names() {
