@@ -22,9 +22,9 @@ static SQL: std::sync::LazyLock<[String; 2]> = std::sync::LazyLock::new(|| {
              json_extract(claims.body,'$.fields.to'),
              json_extract(claims.body,'$.fields.session_id'),printf('%039s',claims.accepted_at_unix_ms),
              ({UNREPAIRED_CLAIM} AND claims.store_index<=?3 AND claims.id=(
-                SELECT winner.id FROM claims AS winner INDEXED BY claims_subject_kind_accepted_index
-                WHERE winner.subject=claims.subject AND winner.kind='message.sent'
-                ORDER BY CANONICAL_ASC(winner) LIMIT 1))
+                SELECT sent.id FROM claims AS sent INDEXED BY claims_subject_kind_accepted_index
+                WHERE sent.subject=claims.subject AND sent.kind='message.sent'
+                ORDER BY CANONICAL_ASC(sent) LIMIT 1))
              FROM claims INDEXED BY {index}
              WHERE claims.kind='message.sent' AND claims.actor=?1
              AND json_extract(claims.body,'$.fields.to')=?2
