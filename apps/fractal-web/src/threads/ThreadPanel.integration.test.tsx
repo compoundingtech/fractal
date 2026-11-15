@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 import { ThreadPanel } from './ThreadPanel.tsx'
+import type { ThreadRefusal } from './threadSource.ts'
 
 beforeEach(() => vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true))
 afterEach(() => vi.unstubAllGlobals())
@@ -193,7 +194,7 @@ it('renames in place in the header: Escape cancels, Enter saves, and focus retur
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  const rename = vi.fn(async (_title: string, _revision: string): Promise<string | undefined> => undefined)
+  const rename = vi.fn(async (_title: string, _revision: string): Promise<ThreadRefusal | undefined> => undefined)
   const change = vi.fn(async () => undefined)
   const render = (title: string) => act(async () => {
     root.render(<ThreadPanel thread={{ title, title_revision: 'event/one', state: 'open' }} initiallyExpanded onRename={rename} onChangeState={change}>
