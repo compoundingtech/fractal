@@ -5,6 +5,8 @@ import * as React from 'react'
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DecisionCard } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
 import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import type { AgentNames } from '../../data/agentName.ts'
+import { useAgentNames } from '../../data/useAgentNames.ts'
 import type { UxTelemetry } from '../../telemetry/ux.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { conversationAlerts } from './alertChoices.ts'
@@ -43,7 +45,7 @@ const useRoom = (): readonly [React.RefCallback<HTMLElement>, number | undefined
  * The alerts of an agent's conversation, above its composer: one focused card, with a pager when there are several.
  * Answering advances to the next at once; a refused answer comes back without moving the person off what they are on.
  */
-export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, paused = false, onOpenDocument }: {
+export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, paused = false, onOpenDocument, agentNames }: {
   readonly alerts: readonly Native.Attention[]
   /** Keeps the record of an answer in view after the feed has dropped its alert. */
   readonly agentRef?: string
@@ -52,6 +54,8 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, paused = false,
   /** Disconnected, or grants not read yet: the cards wait instead of reading as read-only. */
   readonly paused?: boolean
   readonly onOpenDocument?: (ref: string) => void
+  /** Roster names by agent id, so a card names an agent as the sidebar does. */
+  readonly agentNames?: AgentNames | undefined
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
   const narrow = React.useContext(NarrowLayoutContext)
@@ -91,7 +95,7 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, paused = false,
     onPrevious: () => setCurrentId(open[index - 1]?.id),
     onNext: () => setCurrentId(open[index + 1]?.id),
   } : undefined
-  const shared = { density: folded ? 'row' as const : 'docked' as const, paused, onFold: () => setFoldChoice(!folded), onBegin, focusRef: card, ...(pager === undefined ? {} : { pager }), ...(maxBlockSize === undefined ? {} : { maxBlockSize }) }
+  const shared = { density: folded ? 'row' as const : 'docked' as const, paused, onFold: () => setFoldChoice(!folded), onBegin, focusRef: card, agentNames, ...(pager === undefined ? {} : { pager }), ...(maxBlockSize === undefined ? {} : { maxBlockSize }) }
   return (
     <div ref={roomRef} {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
       <div {...stylex.props(styles.strip)}>
@@ -111,8 +115,9 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, paused = false,
 /** The agent's alerts from the active data source, answered through its ports. */
 export const LiveAgentAlerts = ({ agentRef, ux, onOpenDocument }: { readonly agentRef: string; readonly ux?: UxTelemetry; readonly onOpenDocument?: (ref: string) => void }): React.ReactNode => {
   const { feed, onAct, onAnswer, paused } = useAlertAnswers(ux)
+  const agentNames = useAgentNames()
   const alerts = React.useMemo(() => (feed._tag === 'Observed' ? conversationAlerts(feed.value, agentRef) : []), [feed, agentRef])
-  return <AgentAlerts alerts={alerts} agentRef={agentRef} paused={paused === true} {...(onAct === undefined ? {} : { onAct })} {...(onAnswer === undefined ? {} : { onAnswer })} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />
+  return <AgentAlerts alerts={alerts} agentRef={agentRef} paused={paused === true} agentNames={agentNames} {...(onAct === undefined ? {} : { onAct })} {...(onAnswer === undefined ? {} : { onAnswer })} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />
 }
 
 const styles = stylex.create({

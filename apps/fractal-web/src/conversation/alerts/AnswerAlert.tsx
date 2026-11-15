@@ -11,7 +11,7 @@ import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../..
 import { DecisionMore, type DecisionSubject } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionMore.tsx'
 import type { IconName } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
-import { agentDisplayName } from '../../data/agentName.ts'
+import { agentDisplayName, type AgentNames } from '../../data/agentName.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
@@ -41,7 +41,8 @@ const Question = ({ text }: { readonly text: string }): React.ReactNode => {
 }
 
 /** What a launch would start, as its planner previewed it: goal, steps, agents and gates. */
-const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode => {
+const LaunchPreview = ({ alert, agentNames }: { readonly alert: Native.Attention; readonly agentNames?: AgentNames | undefined }): React.ReactNode => {
+  const name = (id: string) => agentNames?.(id) ?? agentDisplayName({ id })
   if (Option.isNone(alert.preview)) {
     return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? ` ${cleanMessageText(alert.detail)}` : ''}</div>
   }
@@ -54,7 +55,7 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
           {preview.steps.map((step) => (
             <li key={step.path}>
               {step.title}
-              {Option.isSome(step.assignee) ? <span {...stylex.props(styles.soft)}> · <span title={step.assignee.value}>{agentDisplayName({ id: step.assignee.value })}</span></span> : null}
+              {Option.isSome(step.assignee) ? <span {...stylex.props(styles.soft)}> · <span title={step.assignee.value}>{name(step.assignee.value)}</span></span> : null}
               {step.depends.length > 0 ? <span {...stylex.props(styles.soft)}> · after {step.depends.join(', ')}</span> : null}
             </li>
           ))}
@@ -62,7 +63,7 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
       ) : null}
       {preview.agents.length > 0 ? (
         <div {...stylex.props(styles.soft)}>
-          Agents: {preview.agents.map((agent, index) => <React.Fragment key={agent.id}>{index > 0 ? '; ' : null}<span title={agent.id}>{agentDisplayName({ id: agent.id })}</span>{Option.isSome(agent.host) ? ` on ${agent.host.value}` : null}{Option.isSome(agent.worktree) ? ` in ${agent.worktree.value}` : null}</React.Fragment>)}
+          Agents: {preview.agents.map((agent, index) => <React.Fragment key={agent.id}>{index > 0 ? '; ' : null}<span title={agent.id}>{name(agent.id)}</span>{Option.isSome(agent.host) ? ` on ${agent.host.value}` : null}{Option.isSome(agent.worktree) ? ` in ${agent.worktree.value}` : null}</React.Fragment>)}
         </div>
       ) : null}
       <div {...stylex.props(styles.soft)}>
@@ -105,7 +106,7 @@ const Command = ({ children }: { readonly children: React.ReactNode }) => <code 
  */
 const elsewhere = (alert: Native.Attention, step: string | undefined): React.ReactNode | undefined => {
   switch (alert.attention_kind) {
-    case 'harness-login': return 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
+    case 'harness-login': return 'Sign in from the agent\'s terminal. One sign-in answers every agent that shares it.'
     case 'model-drift': return 'Nothing to answer: these agents keep working on another model. This clears by itself once each runs its declared model again.'
     case 'revision-approval': return <>A revision isn't approved from the web yet. Run <Command>fractal work revision approve</Command> or <Command>cancel</Command>, as in the terminal app.</>
     case 'fault': return step === undefined
@@ -136,6 +137,7 @@ export const AnswerAlert = ({
   onOpenRef,
   opensRef = () => true,
   context,
+  agentNames,
 }: {
   readonly alert: Native.Attention
   readonly onAct?: Act
@@ -155,6 +157,8 @@ export const AnswerAlert = ({
   readonly opensRef?: (ref: string) => boolean
   /** The surface showing this alert, prefixed to its landmark name. */
   readonly context?: string
+  /** Roster names by agent id, so the card names an agent as the sidebar does. */
+  readonly agentNames?: AgentNames | undefined
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
   const choices = alertChoices(alert)
@@ -163,7 +167,7 @@ export const AnswerAlert = ({
   const chosen = store.selected(alert)
   const selected = chosen ?? parts.options.filter((choice) => choice.recommended === true).map((choice) => choice.key)
   const answer = choices === null ? undefined : effectiveChoice(choices, selected[0], words)
-  const from = alertFrom(alert)
+  const from = alertFrom(alert, agentNames)
   const send = (choice: NonNullable<typeof answer>) => {
     if (onAct === undefined) return
     store.send(alert, answeredLabel(choice, words), () => onAct(alert, choice.action(words)))
@@ -194,7 +198,7 @@ export const AnswerAlert = ({
   const more = why !== undefined || evidence.length > 0 || related.length > 0 || shownContext !== undefined
     ? <DecisionMore clamp={!full} evidence={evidence} related={related} {...(why === undefined ? {} : { why })} {...(shownContext === undefined ? {} : { context: shownContext })} />
     : undefined
-  const body = alert.attention_kind === 'launch-approval' ? <LaunchPreview alert={alert} />
+  const body = alert.attention_kind === 'launch-approval' ? <LaunchPreview alert={alert} agentNames={agentNames} />
     : question !== undefined && !plain ? <Question text={question} />
       : request === undefined && isRequest(alert.attention_kind) && report(detail) !== null ? <Question text={detail} /> : undefined
   const failure = store.failure(alert)

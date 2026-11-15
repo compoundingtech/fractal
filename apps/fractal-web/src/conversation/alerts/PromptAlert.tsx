@@ -7,6 +7,7 @@ import { answerLabel, pendingQuestions, promptAlertKey, promptAnswers, promptCal
 import { ago } from '../../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, radiusVars as r, spaceVars as sp, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import type { AgentNames } from '../../data/agentName.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { alertFrom } from './alertChoices.ts'
 import { contextOf, useArmed } from './decisionText.ts'
@@ -18,9 +19,9 @@ type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise
 /**
  * A prompt a harness waits on, in the decision card, with the answers Fractal can deliver: the one waiting call in full
  * beside `allow` (or a plan beside `approve`), a screen prompt's own answers, or a question's options, one question at
- * a time and sent together. Anything else is answered in the seat's terminal, and an answer there still wins.
+ * a time and sent together. Anything else is answered in the agent's terminal, and an answer there still wins.
  */
-export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(), density = 'docked', pager, onFold, maxBlockSize, onBegin, focusRef, context }: {
+export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(), density = 'docked', pager, onFold, maxBlockSize, onBegin, focusRef, context, agentNames }: {
   readonly alert: Native.Attention
   readonly onAnswer?: Answer
   /** Answers wait for the connection: controls show disabled, never the read-only notice. */
@@ -34,6 +35,8 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
   readonly focusRef?: React.Ref<HTMLElement>
   /** The surface showing this alert, prefixed to its landmark name. */
   readonly context?: string
+  /** Roster names by agent id, so the card names an agent as the sidebar does. */
+  readonly agentNames?: AgentNames | undefined
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
   const prompt = promptAnswers(alert)
@@ -72,7 +75,7 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
   const incomplete = prompt === null || served.calls === null
     ? `${served.calls === null ? `${served.why} ` : ''}Answer it in the agent's terminal.`
     : gated !== undefined && !offered.includes(gated)
-      ? prompt.call_id == null ? 'Fractal does not say which call this asks about: answer it in the seat\'s terminal.' : 'The prompt details are incomplete or unsupported: answer it in the agent\'s terminal.'
+      ? prompt.call_id == null ? 'Fractal does not say which call this asks about: answer it in the agent\'s terminal.' : 'The prompt details are incomplete or unsupported: answer it in the agent\'s terminal.'
       : undefined
   const failure = store.failure(alert)
   const { line, overflows } = contextOf(alert.detail ?? '')
@@ -86,7 +89,7 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
     density={density}
     label={context === undefined ? alert.title : `${context}: ${alert.title}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
-    meta={[...[alertFrom(alert)].filter((name) => name !== undefined), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
+    meta={[...[alertFrom(alert, agentNames)].filter((name) => name !== undefined), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
     heading={heading}
     headingText={heading}
     {...(line === '' || line === alert.title ? {} : { context: line })}

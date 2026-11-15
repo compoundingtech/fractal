@@ -105,3 +105,30 @@ it('heads observed missions with one notice counting rejected rows, never degrad
   act(() => root.unmount())
   container.remove()
 })
+
+it('names a stuck step\'s agent by its name, says agent rather than seat, and never shows its id or path', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const container = document.body.appendChild(document.createElement('div')), root = createRoot(container)
+  // A roster name equal to the id without agent/ is the label of a seat that declares no name, not a name.
+  data.agents = { _tag: 'Observed', value: [{ id: 'agent/example/builder', name: 'example/builder', state: 'stopped', fault: Option.none(), next_work_id: Option.none(), upcoming_work_ids: [], current_work: [] }], freshness: 'live' }
+  data.missions = { _tag: 'Observed', freshness: 'live', value: [
+    mission('mission/example/parser', 'Fix the parser', 'running', [step('parse', 'blocked', 'agent/example/builder')]),
+    mission('mission/example/collections', 'Virtualize collections', 'running', [step('collections', 'blocked', 'agent/build-host-a/missions-ui')]),
+  ] }
+  await act(async () => root.render(<MissionsPane />))
+  const open = async (title: string) => {
+    await act(async () => [...container.querySelectorAll<HTMLElement>('li > button')].find((row) => row.textContent?.includes(title))!.click())
+    return container.querySelector(`[aria-label="${title} steps"]`)!
+  }
+  const known = await open('Fix the parser')
+  expect(known.textContent).toContain('Stuck at parse; its agent builder is stopped.')
+  expect(known.querySelector('[title="agent/example/builder"]')?.textContent).toBe('builder')
+  const unknown = await open('Virtualize collections')
+  expect(unknown.textContent).toContain('Stuck at collections; Fractal has no state for its agent missions-ui.')
+  expect(unknown.querySelector('[title="agent/build-host-a/missions-ui"]')?.textContent).toBe('missions-ui')
+  for (const detail of [known, unknown]) {
+    expect(detail.textContent).not.toMatch(/\bseat\b|example\/builder|build-host-a\/missions-ui/)
+  }
+  act(() => root.unmount())
+  container.remove()
+})

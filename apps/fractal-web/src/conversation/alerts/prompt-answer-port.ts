@@ -39,7 +39,7 @@ export const gatewayPromptAnswers = (client: FractalClient): PromptAnswerPort =>
       if (!granted) {
         return {
           _tag: 'Refused',
-          detail: 'This device is not granted answering prompts. Answer it in the seat\'s terminal.',
+          detail: 'This device is not granted answering prompts. Answer it in the agent\'s terminal.',
         }
       }
       const snapshot = (observed.snapshot as { id?: unknown } | undefined)?.id
@@ -56,7 +56,7 @@ export const gatewayPromptAnswers = (client: FractalClient): PromptAnswerPort =>
       const status = (response.value as { status?: unknown }).status
       if (status === 'accepted' || status === 'completed') return { _tag: 'Sent' }
       return status === 'rejected'
-        ? { _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the seat\'s terminal.' }
+        ? { _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the agent\'s terminal.' }
         : { _tag: 'Refused', detail: 'Fractal did not say whether it took this answer; check the alert before answering again.' }
     } catch (error) {
       return {

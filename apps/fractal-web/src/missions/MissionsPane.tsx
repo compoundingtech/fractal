@@ -105,7 +105,9 @@ const MissionDetail = ({ mission, presentation, onOpenAgent, onOpenThread, onOpe
       <div {...stylex.props(styles.meta)}>{word.explain} · {mission.id}</div>
       {presentation.stuck?.agent ? (
         <div {...stylex.props(styles.stuck)}>
-          Stuck at {presentation.stuck.step.split('/').pop()}{presentation.stuck.attempts > 1 ? ` after ${presentation.stuck.attempts} attempts` : ''}; its seat {presentation.stuck.agent.label} is {presentation.stuck.agent.state}.
+          Stuck at {presentation.stuck.step.split('/').pop()}{presentation.stuck.attempts > 1 ? ` after ${presentation.stuck.attempts} attempts` : ''}; {presentation.stuck.agent.state === 'unknown'
+            ? <>Fractal has no state for its agent <span title={presentation.stuck.agent.id}>{presentation.stuck.agent.label}</span>.</>
+            : <>its agent <span title={presentation.stuck.agent.id}>{presentation.stuck.agent.label}</span> is {presentation.stuck.agent.state}.</>}
         </div>
       ) : null}
       {presentation.last_progress ? <div {...stylex.props(styles.progress)}>Last progress: {presentation.last_progress}</div> : null}

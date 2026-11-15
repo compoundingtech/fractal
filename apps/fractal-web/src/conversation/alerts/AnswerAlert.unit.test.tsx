@@ -243,6 +243,22 @@ describe('AnswerAlert', () => {
     }
   })
 
+  it('names a requesting agent as the roster does, and Fractal for its own runtime, never by id or path', () => {
+    const roster = (id: string) => (id === 'agent/build-host-a/worker-tests' ? 'Worker tests' : undefined)
+    const requested = renderToStaticMarkup(<AnswerAlert alert={item({ requester_id: 'agent/build-host-a/worker-tests' })} onAct={sent} now={now} agentNames={roster} />)
+    expect(requested).toContain('>Worker tests · Request')
+    expect(requested).not.toContain('build-host-a/worker-tests')
+    // The roster outranks a path-shaped served label, so the card and the sidebar agree.
+    const served = renderToStaticMarkup(<AnswerAlert alert={item({ requester_id: 'agent/build-host-a/worker-tests',
+      presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: Option.some({ id: 'agent/build-host-a/worker-tests', label: 'build-host-a/worker-tests' }), waiting: null } })} onAct={sent} now={now} agentNames={roster} />)
+    expect(served).toContain('>Worker tests · Request')
+    expect(served).not.toContain('build-host-a/worker-tests')
+    const runtime = renderToStaticMarkup(<AnswerAlert alert={item({ requester_id: undefined,
+      presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: Option.some({ id: 'daemon/runtime', label: 'st' }), waiting: null } })} onAct={sent} now={now} />)
+    expect(runtime).toContain('>Fractal · Request')
+    expect(runtime).not.toContain('daemon/runtime')
+  })
+
   it('says how long is left before an ask resolves by itself and what then applies', () => {
     const deadline = DateTime.makeUnsafe(Date.parse(at) + 3 * 3_600_000 + 5 * 60_000)
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ request: decision, deadline_at: deadline, default_answer: { id: 'hold', label: 'Hold' } })} onAct={sent} now={now} />))
@@ -321,7 +337,7 @@ describe('AnswerAlert', () => {
     expect(readOnly).toMatch(/type="radio"[^>]*disabled=""/)
     expect(readOnly).not.toContain('>Send<')
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'harness-login', actions: [] })} onAct={sent} now={now} />))
-      .toContain('Sign in from the seat&#x27;s terminal.')
+      .toContain('Sign in from the agent&#x27;s terminal. One sign-in answers every agent that shares it.')
     const fault = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: [], blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={sent} now={now} />)
     expect(fault).toContain('fractal work retry build')
     expect(fault).not.toContain('in Fractal')

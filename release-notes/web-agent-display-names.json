@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "The web names an agent the same way everywhere, by its roster name when it has one and otherwise by the last part of its id, so a seat with no declared name no longer appears by its path in the header, sidebar, tabs, thread senders or request cards",
+  "summary": "The web names an agent the same way everywhere, by its roster name when it has one and otherwise by the last part of its id, so a seat with no declared name no longer appears by its path in the header, sidebar, tabs, thread senders, request cards or a mission's stuck-step line, and the web says agent rather than seat",
   "replay": {
     "status": "none",
     "detail": "Presentation only; no history is replayed or rebuilt."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Web only, against the same daemons. A roster name that is the agent's id, or the id without 'agent/' (the label Fractal gives a seat that declares no name), now shows as the id's last part, for example 'atlas'; the full id stays in the hover title of thread senders and launch previews. A request card names who asked by the served raised-by name under the same rule. The connected threads preview now declares its seats as 'Atlas' and 'Manager'."
+    "detail": "Web only, against the same daemons. A roster name that is the agent's id, or the id without 'agent/' (the label Fractal gives a seat that declares no name), now shows as the id's last part, for example 'atlas'; the full id stays in the hover title of thread senders, launch previews and a mission's stuck agent. A request card names who asked as the roster names that agent, else by the served raised-by name under the same rule, and Fractal for its own runtime. Alert answers and a mission's stuck-step line say 'agent's terminal' and 'its agent' instead of 'seat'. The connected threads preview now declares its seats as 'Atlas' and 'Manager'."
   },
   "downtime": {
     "status": "none",

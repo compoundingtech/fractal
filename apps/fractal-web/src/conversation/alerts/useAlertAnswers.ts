@@ -49,7 +49,7 @@ export const useAlertAnswers = (ux?: UxTelemetry): {
   const onAnswer: Answer | undefined = prompts === undefined || !answerable ? undefined : (alert, _answer, sent) => {
     const prompt = promptAnswers(alert)
     return prompt === null
-      ? Promise.resolve({ _tag: 'Refused', detail: 'This prompt is answered in the seat\'s terminal.' })
+      ? Promise.resolve({ _tag: 'Refused', detail: 'This prompt is answered in the agent\'s terminal.' })
       : prompts.respond({ alert: { id: alert.id, revision: alert.revision, source_id: alert.source_id, target_id: prompt.target_id, episode: prompt.episode }, answer: sent })
   }
   return { feed, ...(onAct === undefined ? {} : { onAct }), ...(onAnswer === undefined ? {} : { onAnswer }), ...(paused ? { paused: true as const } : {}) }

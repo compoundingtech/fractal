@@ -5,7 +5,7 @@ import { expect, it, vi } from 'vitest'
 import type * as Native from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
-const data = vi.hoisted(() => ({ attention: [] as unknown[], act: vi.fn(), actions: 'granted', unread: false, freshness: 'live' }))
+const data = vi.hoisted(() => ({ attention: [] as unknown[], act: vi.fn(), actions: 'granted', unread: false, freshness: 'live', names: new Map<string, string>() }))
 vi.mock('@stylexjs/stylex', () => ({
   create: (styles: unknown) => styles,
   defineVars: (variables: unknown) => variables,
@@ -17,6 +17,8 @@ vi.mock('../../data/react.tsx', () => ({
   useAttention: () => ({ _tag: 'Observed', value: data.attention, freshness: data.freshness }),
   useDataSource: () => ({ alertActions: { act: data.act } }),
   useGrants: () => ({ actions: data.actions, ...(data.unread ? { unread: true } : {}) }),
+  // The roster's display names by agent ref, as `selectRosterNames` reads them.
+  useFleetSelection: () => data.names,
 }))
 
 import { LiveAgentAlerts } from './AgentAlerts.tsx'
@@ -144,5 +146,21 @@ it('removes a served prompt card when its authoritative attention row closes', a
   data.attention = [{ ...data.attention[0] as Native.Attention, state: 'resolved' }]
   await render()
   expect(container.querySelector('[data-testid="conversation-alerts"]')).toBeNull()
+  await dispose()
+})
+
+it('names the requesting agent as the roster names it, never by its id or path', async () => {
+  data.attention = [ask('attention/one')]
+  data.names = new Map([[seat, 'Atlas']])
+  const { container, render, dispose } = mount()
+  await render()
+  const card = container.querySelector('[data-testid="conversation-alerts"]')!
+  expect(card.textContent).toContain('Atlas')
+  expect(card.textContent).not.toContain('example/atlas')
+  // No roster row yet: the id's last segment stands in, still never the path.
+  data.names = new Map()
+  await render()
+  expect(card.textContent).toContain('atlas')
+  expect(card.textContent).not.toContain('example/atlas')
   await dispose()
 })

@@ -12,6 +12,7 @@ import { AnswerAlert } from '../conversation/alerts/AnswerAlert.tsx'
 import { PromptAlert } from '../conversation/alerts/PromptAlert.tsx'
 import { useAlertAnswers } from '../conversation/alerts/useAlertAnswers.ts'
 import { useNow } from '../data/react.tsx'
+import { useAgentNames } from '../data/useAgentNames.ts'
 import { credentialExpiredMessage, credentialExpiredTitle } from '../data/source.ts'
 import { LiveInboxThreads } from '../threads/LiveThreads.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
@@ -38,6 +39,7 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
   const now = useNow()
   const store = useAlertAnswersStore()
   const { feed, onAct, onAnswer, paused } = useAlertAnswers(ux)
+  const agentNames = useAgentNames()
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const open = rows.filter((row) => !store.hidden(row.item))
   const row = open.find((each) => each.id === id)
@@ -80,8 +82,8 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
             : row !== undefined
               ? <>
                 {row.item.attention_kind === 'harness-prompt'
-                  ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} context="Inbox" paused={paused === true} {...(onAnswer === undefined ? {} : { onAnswer })} />
-                  : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} context="Inbox" paused={paused === true} {...(onAct === undefined ? {} : { onAct })} />}
+                  ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} context="Inbox" paused={paused === true} agentNames={agentNames} {...(onAnswer === undefined ? {} : { onAnswer })} />
+                  : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} context="Inbox" paused={paused === true} agentNames={agentNames} {...(onAct === undefined ? {} : { onAct })} />
                 <LiveInboxThreads alert={row.item} onOpenThread={onOpenRef} />
               </>
               : <div {...stylex.props(styles.gone)}>

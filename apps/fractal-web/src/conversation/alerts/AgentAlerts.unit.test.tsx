@@ -203,7 +203,7 @@ describe('gatewayPromptAnswers', () => {
       promptRespond: async () => ({ value: { id: 'action/b', status: 'rejected', targets: [seat] }, snapshot }),
     } as unknown as FractalClient)
     expect(await rejected.respond({ alert: promptAlert as never, answer: 'allow' })).toEqual({
-      _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the seat\'s terminal.',
+      _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the agent\'s terminal.',
     })
     const unseen = gatewayPromptAnswers({
       capabilities: async () => ({ value: { capabilities: [{ id: 'prompt.respond', state: 'granted' }] }, snapshot: {} }),
