@@ -6,9 +6,12 @@
  *   node apps/fractal-web/scripts/threads-live-preview.mjs up           # up + seed without serving
  *   node apps/fractal-web/scripts/threads-live-preview.mjs offline|online|revoke|status|agent-reply|link-ask|down
  *
- * `serve` makes a throwaway instance (`threadspreview`) under its own HOME in PREVIEW_ROOT
- * (default /var/tmp/fractal-threadspreview), so neither `~/.st-instance` nor the default install
- * is touched. The daemon opts into thread writes and names agent/example/manager as the explicit
+ * `serve` makes a throwaway PREVIEW_INSTANCE (default `threadspreview`, 1–24 lowercase letters,
+ * digits or hyphens; no leading, trailing or repeated hyphen, matching the kernel instance rules)
+ * under its own HOME in PREVIEW_ROOT (default /var/tmp/fractal-${PREVIEW_INSTANCE}).
+ * Its daemon unit is ${PREVIEW_INSTANCE}-fractal-up. For side-by-side previews use, for example,
+ * PREVIEW_INSTANCE=threadsweb PREVIEW_PORT=5317 and PREVIEW_INSTANCE=threadsios PREVIEW_PORT=5318.
+ * Neither `~/.st-instance` nor the default install is touched. The daemon opts into thread writes and names agent/example/manager as the explicit
  * `inbox_fallback_agent`. It declares person/avery and two program seats (atlas and manager), pairs
  * one full-control owner device for avery, and through it a browser by Fractal's own browser pairing,
  * so the daemon grants the browser `thread-browser-send` (both bearers stay in PREVIEW_ROOT, mode 0600).
@@ -46,15 +49,14 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFil
 import { request } from 'node:http'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { derivePreviewConfig } from './threads-preview-config.mjs'
 
 const app = fileURLToPath(new URL('..', import.meta.url))
-const root = process.env.PREVIEW_ROOT ?? '/var/tmp/fractal-threadspreview'
+const { root, instance, unit } = derivePreviewConfig(process.env)
 const port = Number(process.env.PREVIEW_PORT ?? 5317)
-const instance = 'threadspreview'
 const person = 'person/avery'
 const agents = { atlas: 'agent/example/atlas', manager: 'agent/example/manager' }
 const mission = 'example/release-notes'
-const unit = 'threadspreview-fractal-up'
 const home = join(root, 'home')
 const tools = join(root, 'tools')
 const instanceDir = join(home, '.st-instance', instance)
@@ -309,8 +311,8 @@ async function revoke() {
 
 function down() {
   // PREVIEW_ROOT comes from the environment: act only on a directory this script made.
-  if (!basename(root).startsWith('fractal-threadspreview') || !existsSync(marker('fleet-created'))) {
-    console.error(`not removing ${root}: it is not named fractal-threadspreview* or has no fleet-created marker from this script`)
+  if (!basename(root).startsWith(`fractal-${instance}`) || !existsSync(marker('fleet-created'))) {
+    console.error(`not removing ${root}: it is not named fractal-${instance}* or has no fleet-created marker from this script`)
     process.exitCode = 1
     return
   }
@@ -333,4 +335,4 @@ else if (command === 'status') console.log(JSON.stringify(fractalJson(['attentio
 else if (command === 'agent-reply') await agentReplies()
 else if (command === 'link-ask') await linkAsk()
 else if (command === 'down') down()
-else throw new Error('usage: threads-live-preview.mjs [serve|up|offline|online|revoke|status|agent-reply|link-ask|down]')
+else throw new Error('usage: [PREVIEW_INSTANCE=<1-24 lowercase letters/digits/hyphens; no edge/repeated hyphen>] [PREVIEW_ROOT=<directory>] threads-live-preview.mjs [serve|up|offline|online|revoke|status|agent-reply|link-ask|down]')
