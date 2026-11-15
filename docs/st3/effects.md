@@ -44,7 +44,7 @@ Native messages use native coordination. First origination of an absent effect r
 
 The anchor is retained for the run's lifetime: `mission-run.created` is durable (`crates/fractal-schema/retention.toml:137`), and claims without a checkpoint rule are retained (`retention.toml:297`; `crates/fractal-store/src/checkpoint_rules.rs:265–268`). Its system-only once semantics additionally prevent checkpoint dropping (`checkpoint_rules.rs:853–859`).
 
-**Cross-run uniqueness is NOT guaranteed under partition.** The key remains mission-global, but the origination fence is limited to the same step's original run. Claim replication does not provide a contiguous per-origin visibility fence: an earlier held envelope can be rolled back while later envelopes are admitted (`crates/smallclaims/src/store.rs:8523–8612`). Consequently, seeing an earlier run's terminal claim does not prove that its effect receipts are locally visible. This slice does not claim partition-safe cross-run absence or add a broader coordination protocol.
+**Cross-run uniqueness is NOT guaranteed under partition.** The key remains mission-global, but the origination fence is limited to the same step's original run. Claim replication does not provide a contiguous per-origin visibility fence: an earlier held envelope can be rolled back while later envelopes are admitted (`crates/smallclaims/src/store.rs:8523–8612`). Consequently, seeing an earlier run's terminal claim does not prove that its effect receipts are locally visible. This contract does not guarantee partition-safe cross-run absence or add a broader coordination protocol.
 
 A replacement attempt encountering intended or in-flight state reads the existing message by key. It confirms the observed committed message or remains blocked; it never sends again. In particular, interruption after intended but before a message commit may leave an unresolved effect. An empty local lookup, missing response cache, stopped worker or unavailable originating store is not proof of non-delivery. There is no timeout-based takeover or automatic retry of origination. Unresolved state requires explicit human or revision action, not elapsed time.
 
@@ -54,4 +54,50 @@ A different verified worker may recover an effect only while holding the current
 
 For a long message, recovery checks the supplied full text's hash and byte length before reusing the committed body attachment metadata, including its original host. Recovering on another host does not change immutable message identity.
 
-Confirmation proves the native message committed, not that a recipient read it. Delivery and read observations remain the message lifecycle's evidence. Unobserved optional result metadata remains absent, not fabricated. Provider adapters, effect products/gates and program/CLI authoring helpers are separate from this native-message contract.
+Confirmation proves the native message committed, not that a recipient read it. Delivery and read observations remain the message lifecycle's evidence. Unobserved optional result metadata remains absent, not fabricated.
+
+## Unresolved effects and explicit resolution
+
+An unresolved effect waits like a broken gate: reconciliation does not acquire
+origination authority through lease expiry, restart or elapsed time. The owning
+agent receives one `effect-unresolved:<effect-subject>` fault episode and the
+person sees one attention item. The run view's `effects` block identifies each
+effect, its state and any observed `provider_ref`.
+
+Read an effect by its full stable key:
+
+```sh
+fractal effects status --key 'native-effect/["example/report","report-ready"]'
+```
+
+The same read is available at `GET /v1/effects/by-key?key=...`. A missing
+effect is not permission to originate on another host.
+
+Only an authenticated person may explicitly resolve an uncertain outcome.
+An actor string alone, an agent identity or a non-person principal is not
+person authority. Inspect the provider and evidence before choosing:
+
+```sh
+fractal effects resolve --subject effect/OPERATION_ID --as person/example \
+  --confirmed --provider-ref message/EXAMPLE --evidence CLAIM_ID \
+  --idempotency-key example-confirmation
+fractal effects resolve --subject effect/OPERATION_ID --as person/example \
+  --abandoned --evidence CLAIM_ID --idempotency-key example-abandonment
+```
+
+`POST /v1/effects/{subject}/resolve` accepts the same actor, outcome
+(`confirmed` or `abandoned`), evidence and idempotency key; confirmation also
+requires a provider reference. Resolution appends the existing
+`effect.confirmed` receipt with `resolution: "human"` and `recovering_actor`.
+Abandonment additionally records `outcome: "abandoned"`; it does not invent a
+provider reference or delivery evidence. Ordinary receipts omit these optional
+fields. Neither resolution option re-sends the effect.
+
+The explicit resolution clears the covered unresolved fence and permits the
+bound step and run to continue. Abandonment explicitly waives an effect's product
+hold without turning it into delivery: `delivered` remains false and no
+`provider_ref` is invented. An explicit delivery predicate still evaluates false.
+Confirmed effects expose `delivered` and the observed `provider_ref` through the
+existing product/field-gate machinery, rather than a second hold mechanism.
+See [gate evidence](gate-evidence.md) and the
+[program engine](program-engine.md) for the surrounding completion contract.

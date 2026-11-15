@@ -1701,7 +1701,7 @@ mod tests {
     use fractal_daemon::model::{LoopRunView, MissionRunInput, UnderSpec};
 
     fn step(subject: &str, path: &str, status: &str) -> StepRunView {
-        StepRunView { retry: None, executions: None, subject: subject.into(),
+        StepRunView { retry: None, executions: None, effects: Vec::new(), subject: subject.into(),
         run: "mission-run/demo/run".into(),
         generation: "run-generation/demo-generation".into(),
         step: path.into(),

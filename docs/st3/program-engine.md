@@ -10,6 +10,12 @@ runtime](mission-graph-runtime.md) (runs, generations, steps, revisions) and the
 registry](schema.md). The preview API it executes is in `docs/site/concepts/steps.md` and
 `docs/site/guides/missions-in-practice.md` (Effect variant).
 
+[Native mission effects](effects.md) bind outward actions to stable author keys,
+not program attempts. Their unresolved fence survives restart and lease churn;
+inspect it with `fractal effects status` and use an authenticated person's
+explicit resolution rather than replaying the provider action.
+
+
 ## Why
 
 A static mission graph cannot branch on a step's value, pass values between steps, or know which

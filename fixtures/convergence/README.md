@@ -420,3 +420,11 @@ and admitting lease; confirmed draws include a provider reference and evidence.
 The v32 fixed sweep retains the exact `NEVER_TRIMS` set `[179]`. That seed still
 trims on every modern node after its old build is excused and the next cut falls due;
 all other fixed seeds trim. The per-seed and majority trim-coverage assertions remain enforced.
+
+`claims-v33.json` registers the optional `resolution: "human"` and
+`outcome: "abandoned"` fields on existing native effect receipt kinds. No kind is
+added. Versions 1 through 32 remain byte-identical. Generate it with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v33.json`;
+do not hand-edit it. The simulation and audit reports select v33. Ordinary effect
+draws retain their explicit immutable binding and confirmation-evidence mapping;
+human resolution is exercised by focused effect API and reconciliation tests.

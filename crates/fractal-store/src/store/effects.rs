@@ -4,6 +4,16 @@ use fractal_kernel::model::EffectOwner;
 pub use fractal_schema::effects::{EffectClass, EffectRecord};
 use fractal_schema::effects::{KIND_CONFIRMED, KIND_IN_FLIGHT, KIND_INTENDED, KIND_UNRESOLVED};
 
+pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h4d33c1e58bfd owner=fractal_store::store::effects TODO=chunk-or-reference-variable-columns */
+        "CREATE INDEX IF NOT EXISTS claims_effect_step_index
+         ON claims(json_extract(body,'$.fields.bound_step_run'), subject)
+         WHERE kind IN ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved');",
+    )?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum EffectAdmission {
     Originate(EffectRecord),
@@ -16,6 +26,13 @@ pub struct EffectTarget<'a> {
     pub provider: &'a str,
     pub class: EffectClass,
     pub target: &'a str,
+}
+
+pub struct EffectResolution<'a> {
+    pub outcome: &'a str,
+    pub provider_ref: Option<&'a str>,
+    pub evidence: &'a [String],
+    pub key: &'a str,
 }
 
 /// JSON tuples are unambiguous even when mission names or user keys contain separators.
@@ -46,14 +63,33 @@ fn intended_tx(tx: &Connection, id: &str) -> Result<Option<EffectRecord>, Fracta
     }).transpose()
 }
 
+/// A resolution clears only episodes in its causal past, never concurrent observations.
+pub(super) fn effect_is_unresolved_tx(tx: &Connection, subject: &str) -> rusqlite::Result<bool> {
+    tx.query_row(
+        /* sqlite-large-value: allow-for-now lv-hb9a49c3cca1c owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
+        "WITH RECURSIVE resolved(id) AS (
+           SELECT p.value FROM claims r, json_each(r.predecessors) p
+           WHERE r.subject=?1 AND r.kind='effect.confirmed'
+             AND json_extract(r.body,'$.fields.resolution')='human'
+           UNION
+           SELECT p.value FROM resolved a JOIN claims c ON c.id=a.id, json_each(c.predecessors) p
+           WHERE c.subject=?1
+         )
+         SELECT EXISTS(SELECT 1 FROM claims u WHERE u.subject=?1 AND u.kind='effect.unresolved'
+           AND NOT EXISTS(SELECT 1 FROM resolved WHERE resolved.id=u.id))",
+        [subject], |row| row.get(0))
+}
+
 fn latest_tx(tx: &Connection, id: &str) -> Result<Option<(String, EffectRecord)>, FractalError> {
-    // A late observation cannot erase an unresolved fence or regress committed evidence.
+    let unresolved = effect_is_unresolved_tx(tx, id).map_err(internal)?;
     let row: Option<(String, String)> = tx.query_row(
-        /* sqlite-large-value: allow-for-now lv-h115b9b22ffe0 owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
+        /* sqlite-large-value: allow-for-now lv-h01c4365780a3 owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
         &canonical_sql("SELECT kind,id FROM claims WHERE subject=?1 AND kind IN (?2,?3,?4,?5)
-         ORDER BY CASE kind WHEN ?5 THEN 4 WHEN ?4 THEN 3 WHEN ?3 THEN 2 ELSE 1 END DESC,
+         AND (?6 OR kind!=?5)
+         ORDER BY CASE WHEN kind=?4 AND json_extract(body,'$.fields.resolution')='human' THEN 5
+                  WHEN kind=?5 THEN 6 WHEN kind=?4 THEN 3 WHEN kind=?3 THEN 2 ELSE 1 END DESC,
                   CANONICAL_DESC(claims) LIMIT 1"),
-        params![id, KIND_INTENDED, KIND_IN_FLIGHT, KIND_CONFIRMED, KIND_UNRESOLVED],
+        params![id, KIND_INTENDED, KIND_IN_FLIGHT, KIND_CONFIRMED, KIND_UNRESOLVED, unresolved],
         |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(internal)?;
     row.map(|(kind, id)| {
         let claim = claim_by_id_tx(tx, &id).map_err(internal)?.ok_or_else(|| internal("the effect claim is missing"))?;
@@ -61,16 +97,38 @@ fn latest_tx(tx: &Connection, id: &str) -> Result<Option<(String, EffectRecord)>
     }).transpose()
 }
 
-/// Unresolved is a monotonic phase, so no later work or effect observation can clear it.
 pub(super) fn step_has_unresolved_effect_tx(connection: &Connection, step: &str) -> rusqlite::Result<bool> {
-    connection.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='effect.unresolved'
-         AND json_extract(body,'$.fields.bound_step_run')=?1)",
-    )?.query_row(/* sqlite-large-value: allow-for-now lv-h51c18f03a1dc owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */ [step], |row| row.get(0))
+    let mut statement = connection.prepare_cached(
+        "SELECT DISTINCT subject FROM claims
+         WHERE json_extract(body,'$.fields.bound_step_run')=?1
+           AND kind IN ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved')")?;
+    for subject in statement.query_map([step], |row| row.get::<_, String>(0))? {
+        if effect_is_unresolved_tx(connection, &subject?)? { return Ok(true); }
+    }
+    Ok(false)
+}
+
+pub(super) fn effect_views_for_step_tx(connection: &Connection, step: &str) -> rusqlite::Result<Vec<fractal_kernel::model::EffectRunView>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.fields.bound_step_run')=?1
+         AND kind IN ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved')")?;
+    let subjects = statement.query_map([step], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    subjects.into_iter().filter_map(|subject| match latest_tx(connection, &subject) {
+        Ok(Some((kind, record))) => Some(Ok(fractal_kernel::model::EffectRunView {
+            effect_id: subject, state: record.outcome.clone().unwrap_or_else(||
+                kind.strip_prefix("effect.").unwrap_or(&kind).to_owned()), provider_ref: record.provider_ref,
+        })),
+        Ok(None) => None,
+        Err(error) => Some(Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))),
+    }).collect()
 }
 
 fn append_effect_tx(tx: &Transaction<'_>, origin: &str, kind: &str, record: &EffectRecord) -> Result<(), FractalError> {
-    let predecessors = latest_claim_id_tx(tx, &record.effect_id).map_err(internal)?.into_iter().collect::<Vec<_>>();
+    // Bind every observed episode. A concurrent unresolved receipt remains fenced on merge.
+    let mut statement = tx.prepare_cached("SELECT id FROM claims WHERE subject=?1").map_err(internal)?;
+    let predecessors = statement.query_map([&record.effect_id], |row| row.get::<_, String>(0))
+        .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
     append_claim_tx(tx, origin, &record.effect_id, kind,
         record.recovering_actor.as_deref().or(Some(&record.lease_owner)),
         &json!({"fields":record,"evidence":record.evidence}), &predecessors, None).map_err(internal)?;
@@ -78,10 +136,29 @@ fn append_effect_tx(tx: &Transaction<'_>, origin: &str, kind: &str, record: &Eff
 }
 
 fn park_tx(tx: &Transaction<'_>, origin: &str, record: &EffectRecord, step: &str, reason: &str, recovering_actor: &str) -> Result<(), FractalError> {
+    if effect_is_unresolved_tx(tx, &record.effect_id).map_err(internal)? {
+        if step != record.bound_step_run { park_step_tx(tx, origin, step, record)?; }
+        return Ok(());
+    }
     let mut unresolved = record.clone();
+    unresolved.resolution = None;
+    unresolved.outcome = None;
     unresolved.error = Some(reason.into());
     unresolved.recovering_actor = Some(recovering_actor.into());
     append_effect_tx(tx, origin, KIND_UNRESOLVED, &unresolved)?;
+    let run: Option<(String, String)> = tx.query_row(
+        "SELECT m.id,CASE WHEN m.phase='terminal' THEN 'normal' ELSE m.phase END
+         FROM step_runs s JOIN mission_runs m ON m.id=s.run_id
+         WHERE s.subject=?1 AND s.generation_id=m.current_generation_id",
+        [&record.bound_step_run], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(internal)?;
+    if let Some((run, phase)) = run {
+        let subject = format!("mission-run/{run}");
+        let predecessors = latest_claim_id_tx(tx, &subject).map_err(internal)?.into_iter().collect::<Vec<_>>();
+        let claim = append_claim_tx(tx, origin, &subject, "mission-run.state", Some("daemon/runtime"),
+            &json!({"fields":{"status":"blocked","phase":phase,"reason":"effect-unresolved"},
+                "evidence":[record.effect_id]}), &predecessors, None).map_err(internal)?;
+        project_mission_run_update(tx, &claim)?;
+    }
     park_step_tx(tx, origin, &record.bound_step_run, record)?;
     if step != record.bound_step_run { park_step_tx(tx, origin, step, record)?; }
     Ok(())
@@ -140,6 +217,174 @@ fn operation_conflicted_tx(tx: &Connection, operation: &str) -> Result<bool, Fra
 }
 
 impl Store {
+    /// Effective wire state, including causal human resolution, not arrival order.
+    pub fn effect_state(&self, subject: &str) -> Result<Option<(String, EffectRecord)>, FractalError> {
+        Ok(latest_tx(&self.readers.get(), subject)?.map(|(kind, record)| {
+            let state = record.outcome.clone().unwrap_or_else(||
+                kind.strip_prefix("effect.").unwrap_or(&kind).to_owned());
+            (state, record)
+        }))
+    }
+
+    pub fn effect_by_key(&self, key: &str) -> Result<Option<(String, EffectRecord)>, FractalError> {
+        self.effect_state(&format!("effect/{}", operation_id_for_key(key)))
+    }
+
+    pub fn effects_for_step(&self, step: &str) -> Result<Vec<(String, EffectRecord)>, FractalError> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.fields.bound_step_run')=?1
+             AND kind IN ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved')")
+            .map_err(internal)?;
+        let subjects = statement.query_map([step], |row| row.get::<_, String>(0)).map_err(internal)?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+        subjects.into_iter().filter_map(|subject| match latest_tx(&connection, &subject) {
+            Ok(Some((kind, record))) => Some(Ok((record.outcome.clone().unwrap_or_else(||
+                kind.strip_prefix("effect.").unwrap_or(&kind).to_owned()), record))),
+            Ok(None) => None, Err(error) => Some(Err(error)),
+        }).collect()
+    }
+
+    pub fn unresolved_effects(&self) -> Result<Vec<EffectRecord>, FractalError> {
+        let subjects = {
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(
+                "SELECT DISTINCT subject FROM claims WHERE kind='effect.unresolved'").map_err(internal)?;
+            statement.query_map([], |row| row.get::<_, String>(0)).map_err(internal)?
+                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
+        };
+        let mut records = Vec::new();
+        for subject in subjects {
+            if let Some((state, record)) = self.effect_state(&subject)? && state == "unresolved" { records.push(record); }
+        }
+        Ok(records)
+    }
+
+    /// The caller supplies server-established person authority, never the request actor alone.
+    pub fn resolve_effect_authorized(&self, subject: &str, actor: &str, authorized_person: &str,
+        resolution: EffectResolution<'_>) -> Result<EffectRecord, FractalError> {
+        let EffectResolution { outcome, provider_ref, evidence, key } = resolution;
+        if actor != authorized_person || !actor.starts_with("person/") || actor.len() == 7 || actor.matches('/').count() != 1 {
+            return Err(FractalError::new("forbidden", "only an authenticated person can resolve an effect"));
+        }
+        if !matches!(outcome, "confirmed" | "abandoned") || key.trim().is_empty()
+            || evidence.is_empty() || evidence.iter().any(|value| value.trim().is_empty())
+            || provider_ref.is_some_and(|value| value.trim().is_empty())
+            || (outcome == "confirmed" && provider_ref.is_none())
+        {
+            return Err(FractalError::new("invalid-effect-resolution", "resolution requires an outcome, key, evidence and a reference when confirmed"));
+        }
+        let record = self.effect_state(subject)?.ok_or_else(||
+            FractalError::new("not-found", "the effect does not exist"))?.1;
+        self.with_run_fence(&record.bound_step_run, |tx| {
+            let mut request = json!({"actor":actor,"outcome":outcome,"evidence":evidence});
+            if let Some(reference) = provider_ref { request["provider_ref"] = json!(reference); }
+            let mut statement = tx.prepare_cached(
+                "SELECT body FROM claims WHERE subject=?1 AND kind='effect.confirmed'
+                 AND json_extract(body,'$._resolution.key')=?2").map_err(internal)?;
+            let rows = statement.query_map(params![subject,key], |row| row.get::<_, String>(0)).map_err(internal)?;
+            let mut existing = None;
+            for body in rows {
+                let body: Value = serde_json::from_str(&body.map_err(internal)?).map_err(internal)?;
+                if body["_resolution"]["request"] != request {
+                    return Err(FractalError::new("idempotency-conflict", "the resolution key already identifies different terms"));
+                }
+                if existing.is_none() {
+                    existing = Some(serde_json::from_value(body["fields"].clone()).map_err(internal)?);
+                }
+            }
+            if let Some(existing) = existing { return Ok(existing); }
+            let Some((kind, _)) = latest_tx(tx, subject)? else { return Err(internal("effect disappeared")); };
+            if kind != KIND_UNRESOLVED {
+                return Err(FractalError::new("effect-not-unresolved", "only an unresolved effect can be human resolved"));
+            }
+            // Start with the immutable intent, not a replacement worker's observations.
+            let mut resolved = intended_tx(tx, subject)?.unwrap_or_else(|| record.clone());
+            resolved.resolution = Some("human".into());
+            resolved.outcome = (outcome == "abandoned").then(|| "abandoned".into());
+            resolved.recovering_actor = Some(actor.into());
+            resolved.provider_ref = provider_ref.map(str::to_owned);
+            resolved.error = None;
+            resolved.evidence = evidence.to_vec();
+            let mut statement = tx.prepare_cached("SELECT id FROM claims WHERE subject=?1").map_err(internal)?;
+            let predecessors = statement.query_map([subject], |row| row.get::<_, String>(0)).map_err(internal)?
+                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+            append_claim_tx(tx, self.origin(), subject, KIND_CONFIRMED, Some(actor),
+                &json!({"fields":resolved,"evidence":evidence,"_resolution":{"key":key,"request":request}}),
+                &predecessors, None).map_err(internal)?;
+            if !step_has_unresolved_effect_tx(tx, &resolved.bound_step_run).map_err(internal)? {
+                let previous = latest_claim_id_tx(tx, &resolved.bound_step_run).map_err(internal)?;
+                let blocked: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM step_runs WHERE subject=?1 AND status='blocked'
+                       AND blocked_reason='effect-unresolved')", [&resolved.bound_step_run], |row| row.get(0)).map_err(internal)?;
+                if blocked {
+                    let claim = append_claim_tx(tx, self.origin(), &resolved.bound_step_run, "step-run.state",
+                        Some("daemon/runtime"), &json!({"fields":{"status":"ready","reason":"effect-resolved","attempt":resolved.bound_attempt},
+                            "evidence":[resolved.effect_id]}), &previous.into_iter().collect::<Vec<_>>(), None).map_err(internal)?;
+                    project_mission_run_update(tx, &claim)?;
+                }
+            }
+            Ok(resolved)
+        })
+    }
+
+    /// Recovery is observation only. Native effects never gain new send authority.
+    pub fn reconcile_effects(&self) -> Result<bool, FractalError> {
+        let subjects = {
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(
+                "SELECT DISTINCT subject FROM claims WHERE kind IN ('effect.intended','effect.in-flight')").map_err(internal)?;
+            statement.query_map([], |row| row.get::<_, String>(0)).map_err(internal)?
+                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
+        };
+        let mut changed = false;
+        for subject in subjects {
+            let Some((state, record)) = self.effect_state(&subject)? else { continue };
+            if state == "unresolved" || record.resolution.as_deref() == Some("human") { continue; }
+            let conflict = operation_conflicted_tx(&self.readers.get(), &record.operation_id)?;
+            if conflict {
+                self.with_run_fence(&record.bound_step_run, |tx|
+                    park_tx(tx, self.origin(), &record, &record.bound_step_run, "idempotency-conflict", "daemon/runtime"))?;
+                changed = true;
+                continue;
+            }
+            if state == "confirmed" { continue; }
+            let live = {
+                let connection = self.readers.get();
+                connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM step_runs WHERE subject=?1 AND attempt=?2
+                     AND lease_owner=?3 AND lease_incarnation=?4
+                     AND CAST(lease_expires_at_unix_ms AS INTEGER)>CAST(?5 AS INTEGER)
+                     AND status IN ('claimed','working','submitted'))",
+                    params![record.bound_step_run,record.bound_attempt,record.lease_owner,record.lease_incarnation,now_ms().to_string()],
+                    |row| row.get::<_, bool>(0)).map_err(internal)?
+                    && work_incarnation_live(&connection, &record.lease_owner, &record.lease_incarnation).map_err(internal)?
+            };
+            if live { continue; }
+            if record.provider == "native-message" {
+                let key = format!("native-effect-message/{}", record.operation_id);
+                if operation_conflicted_tx(&self.readers.get(), &operation_id_for_key(&key))? {
+                    self.unresolved_message_effect(&record, "idempotency-conflict", "daemon/runtime")?;
+                    changed = true;
+                    continue;
+                }
+                match self.operation_claim(&key).map_err(internal)? {
+                    Some(message) => {
+                        if let Err(error) = self.confirm_message_effect(&record, &message, "daemon/runtime") {
+                            if error.code != "effect-evidence-mismatch" { return Err(error); }
+                            self.unresolved_message_effect(&record, error.code, "daemon/runtime")?;
+                        }
+                    }
+                    None => { self.unresolved_message_effect(&record, "delivery-unknown", "daemon/runtime")?; }
+                }
+            } else {
+                self.unresolved_message_effect(&record, "provider-readback-unavailable", "daemon/runtime")?;
+            }
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     pub fn step_has_unresolved_effect(&self, step: &str) -> Result<bool, FractalError> {
         step_has_unresolved_effect_tx(&self.readers.get(), step).map_err(internal)
     }
@@ -147,14 +392,15 @@ impl Store {
     pub fn mission_run_has_unresolved_effect(&self, run: &str) -> Result<bool, FractalError> {
         // Cleanup uses a lightweight run view without steps. Query the current generation
         // directly instead of treating an empty view as evidence that no effect is fenced.
-        self.readers.get().query_row(
-            "SELECT EXISTS(SELECT 1 FROM mission_runs m
-             JOIN step_runs s ON s.run_id=m.id AND s.generation_id=m.current_generation_id
-             JOIN claims c ON c.kind='effect.unresolved'
-                 AND json_extract(c.body,'$.fields.bound_step_run')=s.subject
-             WHERE m.id=?1)",
-            [run.strip_prefix("mission-run/").unwrap_or(run)], |row| row.get(0),
-        ).map_err(internal)
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT s.subject FROM mission_runs m JOIN step_runs s ON s.run_id=m.id
+             AND s.generation_id=m.current_generation_id WHERE m.id=?1").map_err(internal)?;
+        for step in statement.query_map([run.strip_prefix("mission-run/").unwrap_or(run)],
+            |row| row.get::<_, String>(0)).map_err(internal)? {
+            if step_has_unresolved_effect_tx(&connection, &step.map_err(internal)?).map_err(internal)? { return Ok(true); }
+        }
+        Ok(false)
     }
 
     pub fn admit_message_effect(&self, owner: &EffectOwner, caller: &str, payload_sender: &str,
@@ -180,6 +426,17 @@ impl Store {
                 None => latest_tx(tx, &id)?.map(|(_, record)| record),
             };
             if let Some(original) = original {
+                let resolved = latest_tx(tx, &id)?.filter(|(kind, record)|
+                    kind == KIND_CONFIRMED && record.resolution.as_deref() == Some("human"));
+                if let Some((_, resolved)) = resolved {
+                    if original.payload_digest != payload_digest || original.target != target
+                        || original.provider != provider || original.class != class
+                        || original.lease_owner != payload_sender {
+                        return Ok(EffectAdmission::Blocked(FractalError::new("idempotency-mismatch",
+                            "the resolved effect retains its original immutable intent")));
+                    }
+                    return Ok(EffectAdmission::Recover(resolved));
+                }
                 if operation_conflicted_tx(tx, &operation_id)? {
                     park_tx(tx, self.origin(), &original, &owner.step, "idempotency-conflict", caller)?;
                     return Ok(EffectAdmission::Blocked(FractalError::new("idempotency-conflict",
@@ -219,7 +476,8 @@ impl Store {
                 payload_digest: payload_digest.into(), class,
                 bound_step_run: owner.step.clone(), bound_attempt: owner.attempt,
                 lease_owner: caller.into(), lease_incarnation: owner.incarnation.clone(),
-                provider_ref: None, result_digest: None, error: None, recovering_actor: None, evidence: Vec::new(),
+                provider_ref: None, result_digest: None, error: None, recovering_actor: None,
+                resolution: None, outcome: None, evidence: Vec::new(),
             };
             if !may_originate_tx(tx, self.origin(), &owner.step, caller, owner.attempt, &owner.incarnation)? {
                 park_tx(tx, self.origin(), &record, &owner.step,
@@ -294,6 +552,7 @@ impl Store {
             if kind == KIND_UNRESOLVED {
                 return Err(FractalError::new("effect-unresolved", "an unresolved effect cannot be implicitly confirmed"));
             }
+            if current.resolution.as_deref() == Some("human") { return Ok(()); }
             let message_operation = operation_id_for_key(&format!("native-effect-message/{}", current.operation_id));
             if message.kind != "message.sent" || message.body["fields"]["to"] != current.target
                 || message.body["fields"]["from"] != current.lease_owner
@@ -391,6 +650,7 @@ mod tests {
             lease_owner: "agent/example/worker".into(), lease_incarnation: owner.incarnation.clone(),
             provider_ref: Some("message/example".into()), result_digest: None,
             error: Some("delivery remains unresolved".into()), recovering_actor: Some("agent/example/recovery".into()),
+            resolution: None, outcome: None,
             evidence: vec!["claim/example-message".into()],
         };
         let mut connection = store.connection.write();

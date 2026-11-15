@@ -3221,6 +3221,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::note_due(now_ms() + 5_000);
         }
         self.observe_member_admission()?;
+        // Recovery is readback-only: late conflicts and dead leases never transfer send authority.
+        self.store.reconcile_effects()?;
+        self.raise_unresolved_effects()?;
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
         // be presented to planning as a post-completion observation.
@@ -11652,6 +11655,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.evaluate_mission_run(run, &mission)
     }
 
+    fn raise_unresolved_effects(&self) -> Result<()> {
+        for effect in self.store.unresolved_effects()? {
+            let Some(step) = self.store.step_run(&effect.bound_step_run)? else { continue };
+            let episode = format!("effect-unresolved:{}", effect.effect_id);
+            // Durable episode identity survives both daemon restart and lease churn.
+            self.store.record_runtime_failure(
+                &episode,
+                &AttentionRequest {
+                    reviewer: effect.lease_owner.clone(),
+                    title: "Native effect requires resolution".into(),
+                    reason: format!(
+                        "{} waits on {}: {}. No second send will be attempted. A person must confirm delivery or explicitly abandon the effect.",
+                        step.run, effect.effect_id,
+                        effect.error.as_deref().unwrap_or("delivery cannot be established"),
+                    ),
+                    severity: "error".into(),
+                    targets: vec![step.run.clone(), step.generation.clone(),
+                        effect.effect_id.clone(), step.subject.clone()],
+                    actor: RECONCILER_ACTOR.into(),
+                    idempotency_key: episode.clone(),
+                },
+                "effect-unresolved",
+            )?;
+        }
+        Ok(())
+    }
+
     // Both normal evaluation and the direct cleanup entrypoint must honor this fence.
     fn unresolved_effect_run_fence(&self, run: &MissionRunView) -> Result<Option<bool>> {
         if self.store.mission_run_has_unresolved_effect(&run.id)? {
@@ -15215,7 +15245,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                 }
                 DependencySpec::Predicate { gate } => {
-                    let fake = crate::model::StepRunView { executions: None, subject: format!(
+                    let fake = crate::model::StepRunView { executions: None, effects: Vec::new(), subject: format!(
                         "step-run/{}/{}",
                         run.generation
                             .strip_prefix("run-generation/")
@@ -16310,6 +16340,14 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<Option<MissingProduct>> {
         for product in products {
             let subject = crate::mission::interpolate(&product.subject, variables)?;
+            if subject.starts_with("effect/")
+                && self.store.effect_state(&subject)?.is_some_and(|(state, record)|
+                    state == "abandoned" && record.resolution.as_deref() == Some("human"))
+            {
+                // Explicit abandonment waives this product obligation; it does not
+                // fabricate delivered=true or a provider receipt for field predicates.
+                continue;
+            }
             let mut fields = Vec::with_capacity(product.fields.len());
             for (field, expected) in &product.fields {
                 let expected = match expected {
@@ -20595,6 +20633,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn subject_value(&self, subject: &str) -> Result<Option<Value>> {
+        if subject.starts_with("effect/") {
+            return self.store.effect_state(subject)?
+                .map(|(state, record)| {
+                    let mut fields = serde_json::to_value(record)?;
+                    fields["delivered"] = Value::Bool(state == "confirmed");
+                    Ok(serde_json::json!({"fields": fields}))
+                })
+                .transpose();
+        }
         if subject.starts_with("resource/")
             && let Some((name, claim_id)) = subject.rsplit_once('@')
         {

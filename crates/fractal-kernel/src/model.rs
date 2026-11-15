@@ -3333,6 +3333,15 @@ pub struct LoopRoundView {
     pub recorded_at_unix_ms: u128,
 }
 
+/// Durable native effect evidence attached to a step, including explicit abandonment.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EffectRunView {
+    pub effect_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_ref: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StepRunView {
     pub subject: String,
@@ -3342,6 +3351,8 @@ pub struct StepRunView {
     /// Detail-read execution evidence; absent on lean work reads and older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executions: Option<Vec<crate::step_execution::StepExecution>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectRunView>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
