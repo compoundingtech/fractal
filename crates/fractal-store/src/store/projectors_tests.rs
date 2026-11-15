@@ -36,6 +36,7 @@ fn open_installs_each_domain_in_order() {
             "run-eta",
             "gate-runners",
             "wake-lookup",
+            "subscription-request-frontier",
         ]
     );
 }
@@ -62,6 +63,9 @@ fn append_projects_each_claim_kind_in_order() {
         ("work.claimed", &["custom", "resource-preparation", "ordered-membership-flush"]),
         ("message.read", &["custom", "resource-preparation", "ordered-membership-flush"]),
     ] {
+        let mut expected = expected.to_vec();
+        let position = expected.iter().position(|name| name.starts_with("ordered-membership")).unwrap();
+        expected.insert(position, "subscription-request-frontier");
         assert_eq!(taking(projectors::APPEND, kind), expected, "append order for {kind}");
     }
     assert_eq!(
@@ -80,6 +84,7 @@ fn append_projects_each_claim_kind_in_order() {
             "arrangements",
             "read-positions",
             "attention-controls",
+            "subscription-request-frontier",
             "ordered-membership",
             "ordered-membership-flush",
         ]
@@ -107,7 +112,7 @@ fn replicated_claims_project_credits_arrangements_read_positions_and_ordered_mem
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "usage-credits", "arrangements", "run-eta", "ordered-membership"]
+        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "usage-credits", "arrangements", "run-eta", "subscription-request-frontier", "ordered-membership"]
     );
 }
 
@@ -115,7 +120,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "attention-controls", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "attention-controls", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "subscription-request-frontier", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -133,6 +138,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/usage-credits",
             "full-replay/run-eta",
             "full-replay/wake-lookup",
+            "full-replay/subscription-request-frontier",
             "full-replay/ordered-membership",
             "full-replay/flush",
         ]

@@ -63,6 +63,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "run-eta", run: run_eta::open },
     Hook { name: "gate-runners", run: gate_runners::open },
     Hook { name: "wake-lookup", run: wake_lookup::open },
+    Hook { name: "subscription-request-frontier", run: subscription_request_frontier::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
@@ -135,6 +136,11 @@ pub const APPEND: &[AppendProjector] = &[
         project: attention_controls::project,
     },
     AppendProjector {
+        name: "subscription-request-frontier",
+        takes: Takes::Every,
+        project: |transaction, _| subscription_request_frontier::flush(transaction),
+    },
+    AppendProjector {
         name: "ordered-membership",
         takes: Takes::Kinds(&["ordered-membership.edited"]),
         project: ordered_membership::project,
@@ -189,6 +195,7 @@ pub const FLUSH: &[Hook] = &[
     Hook { name: "usage-credits", run: usage_credits::flush },
     Hook { name: "arrangements", run: arrangements::flush },
     Hook { name: "run-eta", run: run_eta::flush },
+    Hook { name: "subscription-request-frontier", run: subscription_request_frontier::flush },
     Hook { name: "ordered-membership", run: ordered_membership::flush },
 ];
 
@@ -210,6 +217,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "run-eta", run: run_eta::rebuild },
     Hook { name: "gate-runners", run: gate_runners::rebuild },
     Hook { name: "wake-lookup", run: wake_lookup::rebuild },
+    Hook { name: "subscription-request-frontier", run: subscription_request_frontier::rebuild },
     Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 
@@ -228,6 +236,7 @@ pub const GRAPH_REPLAY: &[ReplayStage] = &[
     ReplayStage { phase: "full-replay/usage-credits", run: usage_credits::rebuild },
     ReplayStage { phase: "full-replay/run-eta", run: run_eta::rebuild },
     ReplayStage { phase: "full-replay/wake-lookup", run: wake_lookup::rebuild },
+    ReplayStage { phase: "full-replay/subscription-request-frontier", run: subscription_request_frontier::rebuild },
     ReplayStage { phase: "full-replay/ordered-membership", run: ordered_membership::rebuild },
     ReplayStage { phase: "full-replay/flush", run: publication_facts::reset },
 ];

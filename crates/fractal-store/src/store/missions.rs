@@ -406,6 +406,24 @@ impl Store {
                 "an embedded loop mission can start only through its parent loop",
             ));
         }
+        // Admission and capacity decisions see all pending run parts under one writer fence.
+        let stages = holds::Stages::begin();
+        let create = |transaction: &Transaction<'_>| {
+        // Lineage inherits the immutable creation policy, never the current subscription.
+        // json_patch omits absent policy fields so legacy request hashes stay unchanged.
+        let inherited_policy = retry.map(|(source, _)| source)
+            .or_else(|| supersession.map(|(source, _)| source))
+            .map(|source| {
+                let fields: String = transaction.query_row(
+                    "SELECT json_patch('{}', json_object(
+                         'admission', json_extract(body, '$.fields.admission'),
+                         'authors', json_extract(body, '$.fields.authors')))
+                     FROM claims WHERE subject=?1 AND kind='mission-run.created'
+                     ORDER BY store_index LIMIT 1",
+                    [&source.subject], |row| row.get(0),
+                ).map_err(internal)?;
+                serde_json::from_str::<Value>(&fields).map_err(internal)
+            }).transpose()?;
         let mut request_identity = json!({
             "request": request,
             "parent": child.as_ref().map(|child| json!({
@@ -415,7 +433,8 @@ impl Store {
                 "default_selector": child.default_selector,
             })),
         });
-        let subscription_policy = latest_ref.and_then(|(_, _, fields, _)| fields);
+        let subscription_policy = inherited_policy.as_ref()
+            .or_else(|| latest_ref.and_then(|(_, _, fields, _)| fields));
         for name in ["admission", "authors"] {
             if let Some(value) = subscription_policy.and_then(|fields| fields.get(name)) {
                 request_identity[name] = value.clone();
@@ -430,9 +449,6 @@ impl Store {
         let request_hash = hex::encode(Sha256::digest(
             serde_json::to_vec(&request_identity).map_err(internal)?,
         ));
-        // Admission and capacity decisions see all pending run parts under one writer fence.
-        let stages = holds::Stages::begin();
-        let create = |transaction: &Transaction<'_>| {
         let subject = occurrence_subject.map(str::to_owned).unwrap_or_else(|| {
             self.mission_run_subject_for_idempotency_key(&request.idempotency_key)
         });

@@ -6,6 +6,29 @@ use super::*;
 pub use fractal_store::store::delivery::*;
 use smallclaims::store::canonical::CANONICAL_ORDER_DESC;
 
+// The frontier retains finished winners as an anti-resurrection fence. Neither candidate
+// selection nor completion probes visit historical relevant-change requests.
+pub(super) const PENDING_SUBSCRIPTION_REQUESTS_SQL: &str = "
+    WITH candidates(id) AS MATERIALIZED (
+        SELECT id FROM claims INDEXED BY claims_subscription_legacy_requests
+        WHERE subject=?1 AND kind='subscription.mission-requested'
+          AND json_extract(body,'$.fields.admission') IS NOT 'relevant-changes'
+        UNION ALL
+        SELECT claim_id FROM local_subscription_request_frontier WHERE subject=?1
+    )
+    SELECT request.id,request.store_index,request.batch_id,request.subject,
+           request.kind,request.origin,request.actor,request.body,
+           request.predecessors,request.accepted_at_unix_ms
+    FROM candidates CROSS JOIN claims request ON request.id=candidates.id
+    WHERE NOT EXISTS (
+        SELECT 1 FROM claims finished INDEXED BY claims_subscription_request_closer
+        WHERE finished.subject=?1
+          AND json_extract(finished.body,'$.fields.request')=request.id
+          AND finished.kind IN ('subscription.mission-started','subscription.mission-failed',
+                                'subscription.mission-request-cancelled')
+    )
+    ORDER BY CANONICAL_ASC(request)";
+
 fn subscription_request_view(
     request: &ClaimRecord,
     decisions: &[ClaimRecord],
@@ -912,55 +935,10 @@ impl DeliveryStore for Store {
     fn pending_subscription_mission_requests(&self, subject: &str) -> Result<Vec<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        // Every pass asks this for every subscription. The finished requests are listed once, not
-        // scanned for each request: a correlated NOT EXISTS read every finished claim once per
-        // request, 0.4 s a pass for a subscription with hundreds of runs.
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfa785c4cf4bd owner=fractal_delivery::store::delivery TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT request.id, request.store_index, request.batch_id, request.subject,
-                    request.kind, request.origin, request.actor, request.body,
-                    request.predecessors, request.accepted_at_unix_ms
-             FROM claims AS request
-             WHERE request.subject=?1 AND request.kind='subscription.mission-requested'
-               AND request.id NOT IN (
-                 SELECT json_extract(finished.body, '$.fields.request') FROM claims AS finished
-                 WHERE finished.subject=?1
-                   AND finished.kind IN (
-                     'subscription.mission-started',
-                     'subscription.mission-failed',
-                     'subscription.mission-request-cancelled'
-                   )
-                   AND json_extract(finished.body, '$.fields.request') IS NOT NULL
-               )
-             ORDER BY CANONICAL_ASC(request)",
-        ))?;
-        let mut requests = statement
+        let mut statement = connection.prepare(&canonical_sql(PENDING_SUBSCRIPTION_REQUESTS_SQL))?;
+        Ok(statement
             .query_map([subject], claim_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        let relevant = |request: &ClaimRecord| {
-            request.body.pointer("/fields/admission").and_then(Value::as_str)
-                == Some("relevant-changes")
-        };
-        if requests.iter().any(relevant) {
-            // Rank all relevant deliveries, including finished ones: completing the latest
-            // delivery must not revive an older request for the same resource.
-            let mut latest = connection.prepare(format!(
-                "SELECT id FROM (
-                   SELECT claims.id,
-                          ROW_NUMBER() OVER (
-                            PARTITION BY json_extract(claims.body, '$.fields.resource')
-                            ORDER BY {CANONICAL_ORDER_DESC}
-                          ) AS ordinal
-                   FROM claims WHERE claims.subject=?1
-                     AND claims.kind='subscription.mission-requested'
-                     AND json_extract(claims.body, '$.fields.admission')='relevant-changes'
-                 ) WHERE ordinal=1"
-            ).as_str())?;
-            let latest = latest
-                .query_map([subject], |row| row.get::<_, String>(0))?
-                .collect::<Result<BTreeSet<_>, _>>()?;
-            requests.retain(|request| !relevant(request) || latest.contains(&request.id));
-        }
-        Ok(requests)
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     fn subscription_mission_deferral(

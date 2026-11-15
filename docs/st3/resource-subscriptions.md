@@ -585,12 +585,14 @@ This policy admits draft transitions, closure and reopen, head moves, same-head 
 outcomes, comment and body digests, and base changes. Drafts and closures are eligible inputs,
 not reasons to cancel an otherwise current request or run. Newer relevant snapshots supersede
 older unstarted requests: at most one pending request remains for each PR. Each request and its
-run-start lineage retain the selected admission and configured authors, so a subscription edit
-does not reinterpret already queued or started work. The relevant-change delivery-key namespace
-is separate from the default ready-head namespace.
+run-start lineage retain the selected admission and configured authors, including revision
+successors and retries, so a subscription edit does not reinterpret already queued or started
+work. The relevant-change delivery-key namespace is separate from the default ready-head namespace.
 The key includes the relevant snapshot identity and its preceding admitted delivery key: observing
 the same snapshot again is a no-op, while a genuine state cycle such as close → reopen → close
 is a new change each time. Replicated requests choose the same canonical pending frontier.
+Before comparing a poll with its local mirror, the observer overlays replicated admission facts
+from the graph. A stale mirror therefore cannot hide a genuine return to a previously seen state.
 
 Repeated `author` entries form a case-insensitive GitHub login allowlist. They do not refer to
 `opened_by`, ownership, or authority. Omit them to leave authors unrestricted. A known nonmatching

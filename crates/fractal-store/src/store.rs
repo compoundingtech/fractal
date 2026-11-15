@@ -366,6 +366,7 @@ pub mod mission_ivm;
 pub mod run_eta;
 pub mod gate_runners;
 pub mod wake_lookup;
+pub mod subscription_request_frontier;
 #[cfg(test)]
 mod gate_runners_tests;
 #[cfg(test)]

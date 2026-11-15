@@ -3,7 +3,7 @@
   "summary": "Add opt-in relevant-change admission and GitHub author scoping to per-PR mission subscriptions",
   "replay": {
     "status": "changed",
-    "detail": "Existing subscriptions and request/run lineage retain ready-head behavior. New relevant-change requests snapshot their admission and configured authors so later declaration edits do not reinterpret queued work."
+    "detail": "Existing subscriptions and request/run lineage retain ready-head behavior. New relevant-change requests snapshot their admission and configured authors so later declaration edits do not reinterpret queued work. Revision successors and retries inherit that immutable source-run policy."
   },
   "schema": {
     "status": "changed",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Durable observations, requests and pinned lineage retain the selected policy across restart and replication. Restore ready-head admission for future requests by removing the opt-in declaration; existing lineage is not reinterpreted."
+    "detail": "Durable observations, requests and pinned lineage retain the selected policy across restart and replication. Replicated admission facts override stale local mirrors before detecting new transitions. Restore ready-head admission for future requests by removing the opt-in declaration; existing lineage is not reinterpreted."
   }
 }

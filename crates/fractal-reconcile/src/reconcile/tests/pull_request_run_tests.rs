@@ -507,6 +507,80 @@ fn request_snapshot_admission_controls_draft_and_closed_eligibility() {
 }
 
 #[test]
+fn superseding_subscription_runs_inherit_immutable_policy_and_pass_the_stale_fence() {
+    for (state, draft, relevant) in [
+        ("open", true, true),
+        ("closed", false, true),
+        ("open", false, false),
+    ] {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        // The current declaration deliberately has no policy: lineage must use creation.
+        apply_source(&store, SOURCE, "fixture");
+        let snapshot = observe_state(&store, &"a".repeat(40), state, draft);
+        request_with_policy(&store, &snapshot, "request", relevant.then(|| {
+            serde_json::json!({"admission":"relevant-changes", "authors":["orchid-bot"]})
+        }));
+        reconciler(&store)
+            .reconcile_subscription_missions(&store.desired_subjects().unwrap())
+            .unwrap();
+        let mut source = store.active_mission_runs_for_mission("review").unwrap().pop().unwrap();
+        for (key, goal) in [("second", "Review the next revision."), ("third", "Review another revision.")] {
+            apply_source(&store, &SOURCE.replace("Review one immutable pull request snapshot.", goal), key);
+            store.supersede_mission_publications().unwrap();
+            let predecessor = store.mission_run(&source.subject).unwrap().unwrap();
+            let successor = store.mission_run(predecessor.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+            assert_eq!(successor.parent_step_run, source.parent_step_run);
+            assert!(successor.parent_step_run.is_some());
+            assert_eq!(successor.inputs, source.inputs);
+            let created = store.latest_claim(&successor.subject, Some("mission-run.created")).unwrap().unwrap();
+            if relevant {
+                assert_eq!(created.body["fields"]["admission"], "relevant-changes");
+                assert_eq!(created.body["fields"]["authors"], serde_json::json!(["orchid-bot"]));
+            } else {
+                assert!(created.body["fields"].get("admission").is_none());
+                assert!(created.body["fields"].get("authors").is_none());
+            }
+            assert!(store.stale_subscription_pull_request_run(&successor).unwrap().is_none());
+            source = successor;
+        }
+        observe_state(&store, &"b".repeat(40), state, draft);
+        assert!(store.stale_subscription_pull_request_run(&source).unwrap().unwrap().contains("moved from head"));
+    }
+}
+
+#[test]
+fn retrying_subscription_runs_inherits_policy_without_changing_legacy_omission() {
+    for relevant in [false, true] {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SOURCE, "fixture");
+        let snapshot = observe(&store, &"a".repeat(40), "open");
+        request_with_policy(&store, &snapshot, "request", relevant.then(|| {
+            serde_json::json!({"admission":"relevant-changes", "authors":["orchid-bot"]})
+        }));
+        reconciler(&store)
+            .reconcile_subscription_missions(&store.desired_subjects().unwrap())
+            .unwrap();
+        let source = store.active_mission_runs_for_mission("review").unwrap().pop().unwrap();
+        store.set_mission_run_state(&source.subject, "failed", "terminal", None).unwrap();
+        let options = crate::model::MissionRunRetryRequest {
+            actor: "person/operator".into(), same_revision: true,
+            reason: None, idempotency_key: "retry-policy".into(),
+        };
+        let retry = store.retry_mission_run(&source.subject, &options).unwrap();
+        let created = store.latest_claim(&retry.subject, Some("mission-run.created")).unwrap().unwrap();
+        if relevant {
+            assert_eq!(created.body["fields"]["admission"], "relevant-changes");
+            assert_eq!(created.body["fields"]["authors"], serde_json::json!(["orchid-bot"]));
+        } else {
+            assert!(created.body["fields"].get("admission").is_none());
+            assert!(created.body["fields"].get("authors").is_none());
+        }
+        assert_eq!(store.retry_mission_run(&source.subject, &options).unwrap().subject, retry.subject);
+        assert!(retry.parent_step_run.is_none());
+    }
+}
+
+#[test]
 fn relevant_changes_run_policy_survives_restart_and_replication_but_not_a_head_move() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("store.db");
