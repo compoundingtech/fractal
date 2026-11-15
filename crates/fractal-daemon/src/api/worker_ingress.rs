@@ -56,8 +56,11 @@ fn pin_supervised(observe: impl Fn() -> anyhow::Result<u32> + Send + Sync + 'sta
             return Ok(worker.pid());
         }
         *pinned = None;
-        let worker = fractal_runtime::PeerProcessIdentity::capture_pid(observe()?)?;
-        let pid = worker.pid();
+        let pid = observe()?;
+        let worker = fractal_runtime::PeerProcessIdentity::capture_pid(pid)?;
+        // The observed worker may end and its PID be reused before the capture; the supervisor
+        // must still name that PID once the captured generation exists.
+        anyhow::ensure!(observe()? == pid, "the supervisor replaced the worker during observation");
         *pinned = Some(worker);
         Ok(pid)
     })
@@ -136,21 +139,36 @@ mod tests {
             assert!(authorize(Some(&worker), &*observe).is_ok());
         }
         assert!(authorize(Some(&process(second.id())), &*observe).is_err());
-        assert_eq!(observations.load(Ordering::SeqCst), 1);
+        // One observation names the worker, one reconfirms it after the capture.
+        assert_eq!(observations.load(Ordering::SeqCst), 2);
 
         // The supervisor names a successor only once its predecessor has ended.
         named.store(second.id(), Ordering::SeqCst);
         first.kill().unwrap();
         first.wait().unwrap();
         assert!(authorize(Some(&process(second.id())), &*observe).is_ok());
-        assert_eq!(observations.load(Ordering::SeqCst), 2);
+        assert_eq!(observations.load(Ordering::SeqCst), 4);
 
         named.store(0, Ordering::SeqCst);
         second.kill().unwrap();
         second.wait().unwrap();
         assert!(observe().is_err());
         assert!(observe().is_err());
-        assert_eq!(observations.load(Ordering::SeqCst), 4, "a failed observation pins nothing");
+        assert_eq!(observations.load(Ordering::SeqCst), 6, "a failed observation pins nothing");
+    }
+
+    #[test]
+    fn supervised_worker_replaced_during_observation_is_not_pinned() {
+        let mut first = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let mut second = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let names = std::sync::Mutex::new(vec![second.id(), second.id(), second.id(), first.id()]);
+        let observe = pin_supervised(move || Ok(names.lock().unwrap().pop().unwrap()));
+        assert!(authorize(Some(&process(first.id())), &*observe).is_err());
+        assert!(authorize(Some(&process(second.id())), &*observe).is_ok());
+        first.kill().unwrap();
+        first.wait().unwrap();
+        second.kill().unwrap();
+        second.wait().unwrap();
     }
 
     #[tokio::test]
