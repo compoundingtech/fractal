@@ -3,7 +3,7 @@ import { Option } from 'effect'
 
 import { alertsIn, alertConversations } from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { ANSWERS, isRequest, personAnswer, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
-import { agentDisplayName, FRACTAL_NAME, isFractalMachinery } from '../../data/agentName.ts'
+import { agentDisplayName, FRACTAL_NAME, isFractalMachinery, personName } from '../../data/agentName.ts'
 import type { AlertAction } from './alert-action-port.ts'
 
 // What an alert offers, separate from how it looks: the answers the Fractal terminal UI and the phone give (a structured
@@ -126,8 +126,7 @@ export const webLink = (url: string | undefined): string | undefined => {
 const actorName = (id: string, served?: string): string | undefined =>
   isFractalMachinery(id) ? FRACTAL_NAME
     : id.startsWith('agent/') ? agentDisplayName({ id, name: served })
-      : id.startsWith('person/') ? id.slice('person/'.length).split('/')[0] || undefined
-        : undefined
+      : personName(id)
 
 /**
  * Who an alert is from, by name, or undefined when nothing names it. Fractal's served `raised_by` is the attribution

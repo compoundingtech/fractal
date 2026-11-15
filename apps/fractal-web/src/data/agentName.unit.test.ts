@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { agentDisplayName, isFractalMachinery, nameInSentence } from './agentName.ts'
+import { agentDisplayName, isFractalMachinery, nameInSentence, personName } from './agentName.ts'
 
 const id = 'agent/example/atlas'
 const opaque = 'agent/example/d415892ea7a1dab11e6ba7ed22a8eb13'
@@ -31,6 +31,12 @@ describe('agent display names', () => {
     expect(nameInSentence(agentDisplayName({ id }))).toBe('an agent')
     expect(nameInSentence(agentDisplayName({ id, name: 'Atlas' }))).toBe('Atlas')
     expect(nameInSentence(agentDisplayName({ id: 'agent/st3/reconciler' }))).toBe('Fractal')
+  })
+
+  it('reads a person by their handle, and nothing else as a person', () => {
+    expect(personName('person/robin')).toBe('robin')
+    expect(personName('person/robin/session/1')).toBe('robin')
+    for (const actor of ['person/', id, 'daemon/runtime', 'step-run/example/build']) expect(personName(actor)).toBeUndefined()
   })
 
   // Mirrors is_fractal in crates/fractal-ui-model/src/attention.rs.

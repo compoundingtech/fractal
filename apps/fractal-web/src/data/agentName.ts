@@ -30,3 +30,7 @@ export const agentDisplayName = ({ id, name }: { readonly id: string; readonly n
 
 /** A shown agent name inside a sentence ("To an agent"): only the unnamed form changes case. */
 export const nameInSentence = (shown: string): string => shown === UNNAMED_AGENT ? 'an agent' : shown
+
+/** A person's handle (`person/robin` → `robin`), or undefined when the actor is not a person. */
+export const personName = (id: string): string | undefined =>
+  id.startsWith('person/') ? id.slice('person/'.length).split('/')[0] || undefined : undefined

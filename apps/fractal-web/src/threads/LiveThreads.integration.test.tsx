@@ -508,6 +508,26 @@ it('names thread senders without their ids: an unobserved agent as An agent, Fra
   } finally { await view.dispose() }
 })
 
+it('names another person in a thread by their handle, never as an agent', async () => {
+  const robin = 'person/robin'
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    actions: ['thread.reply'],
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.reopened', id: 'event/reopened', actor_id: robin, accepted_at_unix_ms: Date.parse('2026-11-01T11:04:30Z') },
+      { kind: 'message', id: 'message/robin', actor_id: robin, content: 'The rollback step is covered.', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The rollback step is covered.'))
+    const sender = view.host.querySelector('ol > li > div > strong')
+    expect(sender?.textContent).toBe('robin')
+    expect(sender?.getAttribute('title')).toBe(robin)
+    expect(view.host.querySelector('[data-thread-event="thread.reopened"]')?.textContent).toMatch(/^robin reopened the thread/)
+    expect(view.button('Reply')?.getAttribute('aria-label')).toBe('Reply to robin')
+    expect(view.host.textContent).not.toMatch(/an agent/i)
+  } finally { await view.dispose() }
+})
+
 it.each([
   // A served name is shown as declared, a slug included.
   { id: agent, name: 'atlas', shown: 'atlas', hidden: 'example/atlas' },

@@ -10,7 +10,7 @@ import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAgent, useDataSource, useGatewaySync, useNow } from '../data/react.tsx'
-import { agentDisplayName, nameInSentence } from '../data/agentName.ts'
+import { agentDisplayName, nameInSentence, personName } from '../data/agentName.ts'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
@@ -556,8 +556,9 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
       : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
     <ol {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
+        // Another person reads by their handle; only agents and Fractal's machinery go through the agent formatter.
         const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You'
-          : agentDisplayName({ id: event.actor_id, name: event.actor_id === agentId ? agentName : undefined })
+          : personName(event.actor_id) ?? agentDisplayName({ id: event.actor_id, name: event.actor_id === agentId ? agentName : undefined })
         const date = new Date(event.accepted_at_unix_ms)
         const iso = Number.isFinite(date.getTime()) ? date.toISOString() : undefined
         const time = iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>
