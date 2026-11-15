@@ -184,7 +184,7 @@ mod tests {
             for index in 0..10_000 {
                 insert_run(&tx, &format!("unrelated-{index}"), &format!("unrelated/{index}"), "running");
                 tx.execute(
-                    "INSERT INTO desired(subject,kind,revision,claim_id,body,member) VALUES(?1,'agent','revision','claim/fixture','{}','node-a')",
+                    "INSERT INTO desired(subject,kind,revision,claim_id,body,member) VALUES(?1,'agent','revision','claim/fixture','{}','{\"host\":\"node-a\"}')",
                     [format!("agent/unrelated-{index}")],
                 ).unwrap();
             }
