@@ -334,8 +334,13 @@ fn subject_label(world: &World, subject: &str) -> String {
     }
     if subject.starts_with("step-run/") || subject.starts_with("step/") {
         return world.missions.items().iter().find_map(|mission| {
-            mission.steps.iter().find(|step| step.id == subject)
-                .map(|step| format!("{} › {}", mission.title, step.name))
+            mission.steps.iter().find(|step| step.id == subject).map(|step| {
+                mission.step_metadata.get(&step.id)
+                    .and_then(|metadata| metadata.title.as_deref())
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or("Question for you")
+                    .to_owned()
+            })
         }).unwrap_or_else(|| "a step".into());
     }
     subject.to_owned()
@@ -3654,13 +3659,17 @@ mod tree_tests {
     #[test]
     fn inbox_related_steps_show_the_mission_step_name_or_a_neutral_label() {
         let mut world = crate::ui::demo::world();
-        let mission = &world.missions.items()[0];
-        let step = &mission.steps[0];
-        let step_id = step.id.clone();
-        let expected = format!("{} › {}", mission.title, step.name);
+        let Load::Ready(missions) = &mut world.missions else { panic!() };
+        let mission = &mut missions[0];
+        let opaque_id = "D415892ea7a1dab11e6ba7ed22a8eb13";
+        mission.title = format!("person-ask · {opaque_id}");
+        let step_id = mission.steps[0].id.clone();
+        let expected = "Choose the delivery target";
+        mission.step_metadata.entry(step_id.clone()).or_default().title = Some(expected.into());
         let Load::Ready(items) = &mut world.attention else { panic!() };
         items[0].related = vec![(step_id.clone(), None), ("step-run/missing".into(), None)];
         items[0].blocked = Some(Blocked { step: "step-run/missing".into(), goal: String::new() });
+        items[0].raised_by = Some("Atlas/Manager".into());
         let id = items[0].id.clone();
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
@@ -3669,10 +3678,19 @@ mod tree_tests {
         };
         let doc = home_detail(&world, Some(&id), 200, &drafts);
         let shown = doc.lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
-        assert!(shown.contains(&expected), "{shown}");
+        assert!(shown.contains(expected), "{shown}");
+        assert!(shown.contains("raised by Atlas/Manager"), "{shown}");
+        assert!(!shown.contains("agent/"), "{shown}");
+        assert!(!shown.contains(opaque_id), "{shown}");
         assert!(shown.contains("a step"), "{shown}");
         assert!(!shown.contains(&step_id), "{shown}");
         assert!(!shown.contains("step-run/missing"), "{shown}");
+        let Load::Ready(missions) = &mut world.missions else { panic!() };
+        missions[0].step_metadata.get_mut(&step_id).unwrap().title = None;
+        let shown = home_detail(&world, Some(&id), 200, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("Question for you"), "{shown}");
+        assert!(!shown.contains(opaque_id), "{shown}");
     }
 
     #[test]

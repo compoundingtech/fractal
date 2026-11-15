@@ -379,13 +379,15 @@ fn tier(id: &str) -> Option<Tier> {
     }
 }
 
-/// Who Fractal names, as a person reads it: an agent by its label and id, Fractal's own
+/// Who Fractal names, as a person reads it: an agent by its display label, Fractal's own
 /// machinery as "Fractal", a mission or a person as Fractal labels it.
 fn who(actor: &fractal_client::AttentionActor) -> String {
     if actor.label == "st" {
         "Fractal".into()
-    } else if actor.id.starts_with("agent/") && actor.label != actor.id {
-        format!("{} · {}", actor.label, actor.id)
+    } else if actor.id.starts_with("agent/")
+        && (actor.label.trim().is_empty() || actor.label.starts_with("agent/"))
+    {
+        "an agent".into()
     } else {
         actor.label.clone()
     }
@@ -2225,6 +2227,7 @@ mod tests {
         mission.step_metadata.insert(
             "step-run/example/build".into(),
             fractal_ui_model::missions::StepMetadata {
+                title: None,
                 blocked_reason: None,
                 last_progress: Some("  Tests pass on\nmain; opening the PR \n".into()),
                 nudged: None,
@@ -2650,10 +2653,24 @@ mod tests {
         assert_eq!(items[0].agent.as_deref(), Some("agent/example/auditor"));
         assert_eq!(
             items[0].raised_by.as_deref(),
-            Some("Auditor · agent/example/auditor")
+            Some("Auditor")
         );
+        assert!(!items[0].raised_by.as_deref().unwrap().contains("agent/"));
         assert_eq!(items[0].waiting.as_deref(), Some("step review"));
         assert_eq!(items[1].agent.as_deref(), Some("agent/example/builder"));
+    }
+
+    #[test]
+    fn attention_actor_labels_never_fall_back_to_agent_ids() {
+        for label in ["Atlas/Manager", "agent/example/atlas", ""] {
+            let actor = fractal_client::AttentionActor {
+                id: "agent/example/atlas".into(),
+                label: label.into(),
+            };
+            let shown = who(&actor);
+            assert_eq!(shown, if label == "Atlas/Manager" { label } else { "an agent" });
+            assert!(!shown.contains("agent/"), "{shown}");
+        }
     }
 
     #[test]
