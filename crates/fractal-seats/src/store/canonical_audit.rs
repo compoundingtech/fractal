@@ -108,6 +108,15 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_cut_epoch",
         // Like message cut epochs, desired write generations invalidate local cursors.
         "local_desired_write_witness",
+        // Rebuildable daily-digest arrival indexes, dependency work and staging:
+        // replicated notice/document claims, not these cursors, are the authority.
+        "local_ask_digest_pending",
+        "local_ask_digest_emitted",
+        "local_ask_digest_sources",
+        "local_ask_digest_source_history",
+        "local_ask_digest_draft",
+        "local_ask_digest_deferred",
+        "local_ask_digest_retry",
         "local_idle_messages",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",

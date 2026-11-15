@@ -219,6 +219,264 @@ fn notice_sources_are_producer_input_without_runtime_or_daemon_authors() {
     }
 }
 
+const DIGEST_SOURCE: &str = "custom/attention/source/digest/person/example/2026-11-15";
+const DIGEST_SNAPSHOT: &str = "custom/attention/snapshot/digest/person/example/2026-11-15";
+
+fn digest_fields(source: &ClaimRecord) -> Value {
+    let mut fields = serde_json::to_value(custom::fields(source)).unwrap();
+    fields.as_object_mut().unwrap().remove("_registration");
+    fields.as_object_mut().unwrap().remove("producer");
+    fields["source"]["digest"] = json!([{
+        "resolution_id":"resolution-1",
+        "title":"Choose a deployment", "requester_id":"agent/example/requester",
+        "default_answer":{"id":"wait","label":"Wait"}, "resolved_at":"2026-11-15T08:00:00Z",
+        "target_id":"mission/example/step/approve", "episode":"episode-1",
+        "action_parameters":{"work.override":{"target_id":"mission/example/step/approve","episode":"episode-1"}}
+    }]);
+    fields
+}
+
+#[test]
+fn digest_sources_and_snapshots_require_the_bound_owner_and_matching_identity() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    for (store, actor) in [(&fleet.birch, RUNTIME), (&fleet.alder, "person/example"), (&fleet.alder, "agent/example/producer")] {
+        assert!(store.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, actor, fields.clone())).is_err());
+    }
+    let mut forged = fields.clone();
+    forged["producer"] = json!(RUNTIME);
+    assert!(fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, forged)).is_err());
+    let mut forged = fields.clone();
+    forged["recipient"] = json!("person/other");
+    assert!(fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, forged)).is_err());
+    let mut forged = fields.clone();
+    forged["source"]["digest"][0]["action_parameters"]["work.override"]["episode"] = json!("forged");
+    assert!(fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, forged)).is_err());
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap();
+    let mut snapshot = snapshot(&source);
+    snapshot["source_id"] = json!(DIGEST_SOURCE);
+    snapshot["producer"] = json!(RUNTIME);
+    assert!(fleet.alder.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, snapshot.clone())).is_err());
+    fleet.alder.append_claim(&input(DIGEST_SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, snapshot)).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    assert_eq!(state(&fleet.birch, DIGEST_SOURCE)["state"], "ready");
+    assert_eq!(state(&fleet.birch, DIGEST_SNAPSHOT)["state"], "ready");
+}
+
+#[test]
+fn imported_non_owner_digest_source_cannot_fence_or_conflict_a_legitimate_emission() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    let forged = fleet.birch.connection.batched(|tx| {
+        let mut fields = fields.clone();
+        fields["_registration"] = json!(custom::registration(tx, DIGEST_SOURCE)?.unwrap().0);
+        fields["source"]["owner_claim"] = json!(current_desired_row_tx(tx, notice_owner::SUBJECT)?.unwrap().claim_id);
+        append_claim_tx(tx, &fleet.birch.origin, DIGEST_SOURCE, &fleet.source.kind,
+            Some(RUNTIME), &json!({"fields":fields}), &[], None)
+    }).unwrap().unwrap();
+    sync(&fleet.birch, &fleet.alder);
+    assert!(!authenticated_digest_source(&fleet.alder.readers.get(), &forged).unwrap());
+    let row = state(&fleet.alder, DIGEST_SOURCE);
+    assert_ne!(row["state"], "ready");
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap();
+    let mut snapshot = snapshot(&source);
+    snapshot["source_id"] = json!(DIGEST_SOURCE);
+    snapshot["producer"] = json!(RUNTIME);
+    fleet.alder.append_claim(&input(DIGEST_SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, snapshot)).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
+        assert_eq!(state(store, DIGEST_SNAPSHOT)["state"], "ready");
+        store.connection.batched(|tx| {
+            assert!(authenticated_digest_source(tx, &source)?);
+            custom::rebuild(tx)?;
+            assert_eq!(custom::source(tx, DIGEST_SOURCE)?.unwrap()["state"], "ready");
+            assert_eq!(custom::source(tx, DIGEST_SNAPSHOT)?.unwrap()["state"], "ready");
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+    }
+}
+
+#[test]
+fn digest_registration_bootstrap_requires_an_owner_and_installs_only_reviewed_pins() {
+    let store = Store::open_memory("alder").unwrap();
+    store.connection.batched(|tx| {
+        assert!(ensure_digest_registrations_tx(tx, "alder").unwrap_err().to_string().contains("missing notice-owner"));
+        Ok::<_, anyhow::Error>(())
+    }).unwrap().unwrap();
+    let alder_key = key();
+    let (_, _, stores) = fleet(&[("alder", &alder_key)]);
+    let alder = &stores[0];
+    declare(alder, "alder", alder_key.public()).unwrap();
+    alder.connection.batched(|tx| {
+        ensure_digest_registrations_tx(tx, "alder")?;
+        ensure_digest_registrations_tx(tx, "alder")?;
+        for (subject, pin) in [(DIGEST_SOURCE, notice::HASHES[0]), (DIGEST_SNAPSHOT, notice::HASHES[1])] {
+            let (hash, _, state) = custom::registration(tx, subject)?.unwrap();
+            assert_eq!((hash.as_str(), state.as_str()), (pin, "ready"));
+        }
+        Ok::<_, anyhow::Error>(())
+    }).unwrap().unwrap();
+}
+
+#[test]
+fn reviewed_runtime_registrations_survive_handover_and_unrelated_registry_refresh() {
+    let (alder_key, birch_key) = (key(), key());
+    let (_, _, stores) = fleet(&[("alder", &alder_key), ("birch", &birch_key)]);
+    let (alder, birch) = (&stores[0], &stores[1]);
+    declare(alder, "alder", alder_key.public()).unwrap();
+    alder.connection.batched(|tx| ensure_digest_registrations_tx(tx, "alder")).unwrap().unwrap();
+    declare(alder, "birch", birch_key.public()).unwrap();
+    sync(alder, birch);
+    custom::tests_shared_delivery::registration(birch);
+    birch.connection.batched(|tx| {
+        ensure_digest_registrations_tx(tx, "birch")?;
+        custom::rebuild(tx)?;
+        for (subject, pin) in [(DIGEST_SOURCE, notice::HASHES[0]), (DIGEST_SNAPSHOT, notice::HASHES[1])] {
+            let (hash, _, state) = custom::registration(tx, subject)?.unwrap();
+            assert_eq!((hash.as_str(), state.as_str()), (pin, "ready"));
+        }
+        assert!(ensure_digest_registrations_tx(tx, "alder").is_err(),
+            "registration persistence must not authorize the former owner to write");
+        Ok::<_, anyhow::Error>(())
+    }).unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_digest_emission_survives_handover_and_still_fences_the_date() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields.clone())).unwrap();
+    declare(&fleet.alder, "birch", &fleet.birch.member_public_key().unwrap()).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert!(authenticated_digest_source(&store.readers.get(), &source).unwrap());
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
+    }
+    let error = fleet.birch.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap_err();
+    assert!(error.message.contains("producer input is immutable"), "{error:?}");
+}
+
+#[test]
+fn imported_self_binding_rival_root_does_not_establish_digest_authority() {
+    let fleet = setup();
+    let intent = crate::parse_intent(&format!(
+        "version 2\nnotice-owner {{ member \"birch\"; member-key \"{}\"; always-on }}",
+        fleet.birch.member_public_key().unwrap(),
+    ), "birch").unwrap();
+    let forged = fleet.birch.connection.batched(|tx| {
+        let rival = append_claim_tx(tx, "birch", notice_owner::SUBJECT, "intent.desired",
+            Some("person/example"), &serde_json::to_value(&intent.subjects[notice_owner::SUBJECT])?, &[], None)?;
+        let mut fields = digest_fields(&fleet.source);
+        fields["_registration"] = json!(notice::HASHES[0]);
+        fields["source"]["owner_claim"] = json!(rival.id);
+        append_claim_tx(tx, "birch", DIGEST_SOURCE, &fleet.source.kind, Some(RUNTIME),
+            &json!({"fields":fields}), &[], None)
+    }).unwrap().unwrap();
+    sync(&fleet.birch, &fleet.alder);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert!(!authenticated_digest_source(&store.readers.get(), &forged).unwrap());
+        assert_ne!(state(store, DIGEST_SOURCE)["state"], "ready");
+    }
+}
+
+#[test]
+fn former_owner_cannot_mint_a_new_digest_pinning_its_superseded_declaration() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    let prior = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields.clone())).unwrap();
+    let old_owner = custom::fields(&prior)["source"]["owner_claim"].clone();
+    declare(&fleet.alder, "birch", &fleet.birch.member_public_key().unwrap()).unwrap();
+    let next_source = format!("{}person/example/2026-11-16", notice::DIGEST_SOURCE_PREFIX);
+    let forged = fleet.alder.connection.batched(|tx| {
+        let mut fields = fields.clone();
+        fields["_registration"] = json!(notice::HASHES[0]);
+        fields["source"]["owner_claim"] = old_owner.clone();
+        append_claim_tx(tx, "alder", &next_source, &fleet.source.kind, Some(RUNTIME),
+            &json!({"fields":fields}), &[], None)
+    }).unwrap().unwrap();
+    let connection = fleet.alder.readers.get();
+    let handover = current_desired_row_tx(&connection, notice_owner::SUBJECT).unwrap().unwrap();
+    let handover = claim_by_id_tx(&connection, &handover.claim_id).unwrap().unwrap();
+    assert!(Position::written(&connection, &prior).unwrap().sequence < Position::written(&connection, &handover).unwrap().sequence);
+    assert!(Position::written(&connection, &handover).unwrap().sequence < Position::written(&connection, &forged).unwrap().sequence);
+    drop(connection);
+    sync(&fleet.alder, &fleet.birch);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert!(authenticated_digest_source(&store.readers.get(), &prior).unwrap());
+        assert!(!authenticated_digest_source(&store.readers.get(), &forged).unwrap());
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
+        assert_ne!(state(store, &next_source)["state"], "ready");
+    }
+    let legitimate = fleet.birch.append_claim(&input(&next_source, &fleet.source.kind, RUNTIME, fields)).unwrap();
+    sync(&fleet.birch, &fleet.alder);
+    for store in [&fleet.alder, &fleet.birch] {
+        store.connection.batched(|tx| {
+            assert!(authenticated_digest_source(tx, &legitimate)?);
+            assert_eq!(custom::source(tx, &next_source)?.unwrap()["state"], "ready");
+            custom::rebuild(tx)?;
+            assert_eq!(custom::source(tx, &next_source)?.unwrap()["state"], "ready");
+            assert!(authenticated_digest_source(tx, &prior)?);
+            assert!(!authenticated_digest_source(tx, &forged)?);
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+    }
+}
+
+#[test]
+fn partitioned_former_owner_digest_converges_to_one_current_owner_source() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    // Birch hands ownership to itself; alder has not received that declaration.
+    declare(&fleet.birch, "birch", &fleet.birch.member_public_key().unwrap()).unwrap();
+    let current = fleet.birch.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields.clone())).unwrap();
+    let mut current_snapshot = snapshot(&current);
+    current_snapshot["source_id"] = json!(DIGEST_SOURCE);
+    current_snapshot["producer"] = json!(RUNTIME);
+    current_snapshot["runtime"] = json!("host/birch");
+    fleet.birch.append_claim(&input(DIGEST_SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, current_snapshot)).unwrap();
+    let former = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap();
+    assert_ne!(custom::fields(&former)["source"]["owner_claim"], custom::fields(&current)["source"]["owner_claim"]);
+    let mut former_snapshot = snapshot(&former);
+    former_snapshot["source_id"] = json!(DIGEST_SOURCE);
+    former_snapshot["producer"] = json!(RUNTIME);
+    fleet.alder.append_claim(&input(DIGEST_SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, former_snapshot)).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    sync(&fleet.birch, &fleet.alder);
+    for store in [&fleet.alder, &fleet.birch] {
+        store.connection.batched(|tx| {
+            // Both emissions have valid writer-chain evidence. The missing cross-writer
+            // frontier must not be replaced by a receiver-local arrival-time assumption.
+            assert!(authenticated_digest_source(tx, &former)?);
+            assert!(authenticated_digest_source(tx, &current)?);
+            let mut history = custom::claims(tx, DIGEST_SOURCE)?;
+            retain_authenticated_digest_sources(tx, DIGEST_SOURCE, &mut history)?;
+            assert_eq!(history.iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec![current.id.as_str()]);
+            assert_eq!(custom::source(tx, DIGEST_SOURCE)?.unwrap()["state"], "ready");
+            assert_eq!(custom::source(tx, DIGEST_SNAPSHOT)?.unwrap()["state"], "ready");
+            assert_eq!(custom::source(tx, DIGEST_SNAPSHOT)?.unwrap()["input_count"], 1);
+            custom::rebuild(tx)?;
+            assert_eq!(custom::source(tx, DIGEST_SOURCE)?.unwrap()["state"], "ready");
+            assert_eq!(custom::source(tx, DIGEST_SNAPSHOT)?.unwrap()["state"], "ready");
+            assert_eq!(custom::source(tx, DIGEST_SNAPSHOT)?.unwrap()["input_count"], 1);
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+    }
+}
+
+#[test]
+fn digest_source_without_an_owner_is_unavailable_even_with_reviewed_registrations() {
+    let store = Store::open_memory("alder").unwrap();
+    for manifest in notice::manifests() {
+        store.register_custom_kind(&RegistrationRequest { manifest: manifest.clone(), actor: "person/example".into() }).unwrap();
+    }
+    let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h785fc345c83c owner=fractal_store::store::notice_authority_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../docs/st3/client-v0/fixtures/notice-conformance.json")).unwrap();
+    let mut fields = fixture["snapshot"]["input"].clone();
+    fields["source"]["digest"] = json!([]);
+    let error = store.append_claim(&input(DIGEST_SOURCE, "custom.attention.notice-created", RUNTIME, fields)).unwrap_err();
+    assert!(error.message.contains("missing notice-owner declaration"), "{error:?}");
+}
+
 #[test]
 fn notice_snapshot_update_preserves_links_like_rebuild() {
     let fleet = written();
@@ -318,5 +576,32 @@ fn notice_work_signal_preserves_savepoint_work_and_shares_outer_boundary() {
         if commit { tx.commit().unwrap(); } else { tx.rollback().unwrap(); }
         assert!(!transaction_work::custom_pending(&connection));
         assert!(!transaction_work::resources_pending(&connection));
+    }
+}
+
+#[test]
+fn concurrent_same_owner_digest_sources_select_lowest_claim_id_not_arrival_order() {
+    let fleet = setup();
+    let first = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, digest_fields(&fleet.source))).unwrap();
+    let second = fleet.alder.connection.batched(|tx| {
+        let mut fields = custom::fields(&first);
+        fields.insert("summary".into(), json!("Competing retry"));
+        append_claim_tx(tx, "alder", DIGEST_SOURCE, &fleet.source.kind, Some(RUNTIME),
+            &json!({"fields":fields}), &[], None)
+    }).unwrap().unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    let expected = first.id.min(second.id);
+    for store in [&fleet.alder, &fleet.birch] {
+        let connection = store.readers.get();
+        let history = custom::claims(&connection, DIGEST_SOURCE).unwrap();
+        assert_eq!(history.len(), 2);
+        for reverse in [false, true] {
+            let mut history = history.clone();
+            if reverse { history.reverse(); }
+            retain_authenticated_digest_sources(&connection, DIGEST_SOURCE, &mut history).unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].id, expected);
+        }
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
     }
 }

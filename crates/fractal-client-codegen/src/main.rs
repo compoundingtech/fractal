@@ -732,7 +732,7 @@ fn rust_field(name: &str) -> String {
 }
 
 fn lower_camel_snake(value: &str) -> String {
-    let mut parts = value.split('_');
+    let mut parts = value.split(['_', '.', '-']);
     let mut out = parts.next().unwrap_or_default().to_owned();
     for part in parts {
         if matches!(part, "id" | "url" | "ms") {
@@ -1539,7 +1539,12 @@ fn ts_object(value: &Value) -> Result<String> {
             } else {
                 "?"
             };
-            fields.push(format!("  {name}{optional}: {};", ts_type(definition)?));
+            let identifier = name.chars().enumerate().all(|(index, character)| {
+                character.is_ascii_alphabetic() || matches!(character, '_' | '$')
+                    || (index > 0 && character.is_ascii_digit())
+            });
+            let key = if identifier { name.clone() } else { serde_json::to_string(name)? };
+            fields.push(format!("  {key}{optional}: {};", ts_type(definition)?));
         }
     }
     // `{}` accepts arbitrary properties in TypeScript; closed empty args must not.
