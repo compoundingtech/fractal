@@ -408,10 +408,16 @@ input tool, not a transcript search and not a recorder of unsent drafts.
 - Include successfully accepted text, including dictated sends; exclude pending,
   failed, duplicate delivery attempts, harness-injected inputs and other authors.
   A multi-recipient message has one stable history identity, not one per delivery.
-- Exclude deleted, redacted and sensitive inputs before indexing, returning counts
-  or sending text to a client. Missing or ambiguous eligibility fails closed.
-  Eligibility is server-owned policy/metadata, not a client-side secret regex.
-  Never reconstruct excluded text from a transcript, attachment or older cache.
+- Eligibility requires an accepted sent message, exact authenticated author,
+  current source authorization and no canonical exclusion fact. Legacy messages
+  need no affirmative eligibility marker. Honor existing redaction, deletion,
+  sensitivity or body-hiding expiry facts before indexing, counts or delivery;
+  do not infer them from tags or regexes or create a new write policy here.
+  If the eligibility or authorization read errors or is unknown, return no result
+  with an explicit error at query/accept time; absence of an exclusion fact is
+  not itself unknown eligibility. Future redaction/deletion features must add
+  their canonical fact to this eligibility fold. Never reconstruct excluded text
+  from a transcript, attachment or older cache.
 - Recalling text does not restore old attachments, execute commands or send a
   message. Attachment references in text remain text. The current unsent draft,
   its subject, attachment identities, selection and cursor remain recoverable.
