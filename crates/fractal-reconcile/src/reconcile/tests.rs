@@ -31080,7 +31080,7 @@ mission "fresh" state="ready" {
         let crate::store::effects::EffectAdmission::Originate(effect) =
             seat.store.admit_message_effect(&owner, SEAT, SEAT, "original-payload", SEAT).unwrap()
         else { panic!("the creation host must admit the original effect"); };
-        if matches!(case, "submitted" | "late-projection") {
+        if case == "submitted" {
             seat.work(&step, "complete", "effect-worker-submitted").unwrap();
             assert!(seat.store.step_run(&step).unwrap().unwrap().worker_reported);
         }
@@ -31102,12 +31102,14 @@ mission "fresh" state="ready" {
                 assert!(seat.store.work_claim_is_orphaned(&claimed).unwrap());
             }
             "late-projection" => {
-                // Replay a valid worker submission after parking, then a late daemon readiness
+                // A worker submission arrives after parking, followed by a late daemon readiness
                 // decision. Neither may replace the durable fence with its own status/reason.
-                let submitted = seat.store.claims_for(&step, Some("work.submitted")).unwrap().pop().unwrap();
                 seat.store.append_claim(&ClaimInput {
-                    subject: step.clone(), kind: submitted.kind, actor: submitted.actor,
-                    fields: serde_json::from_value(submitted.body["fields"].clone()).unwrap(),
+                    subject: step.clone(), kind: "work.submitted".into(), actor: Some(SEAT.into()),
+                    fields: BTreeMap::from([
+                        ("attempt".into(), serde_json::json!(claimed.attempt)),
+                        ("submitted_incarnation".into(), serde_json::json!("seat-one")),
+                    ]),
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                 }).unwrap();
                 seat.store.append_claim(&ClaimInput {
