@@ -398,11 +398,10 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
             if fractal_schema::notice::validate_registration(&m, hash).is_err() {
                 continue;
             }
-            if !c.actor.as_deref().is_some_and(|actor| actor.starts_with("agent/") || actor.starts_with("person/")) {
-                if c.actor.as_deref() != Some(fractal_schema::notice::RUNTIME_ACTOR)
-                    || fractal_schema::notice::pinned_hash(&m) != Some(hash) {
-                    continue;
-                }
+            if !c.actor.as_deref().is_some_and(|actor| actor.starts_with("agent/") || actor.starts_with("person/"))
+                && (c.actor.as_deref() != Some(fractal_schema::notice::RUNTIME_ACTOR)
+                    || fractal_schema::notice::pinned_hash(&m) != Some(hash)) {
+                continue;
             }
             registrations.entry(hash.to_owned()).or_insert((m, c));
         }
