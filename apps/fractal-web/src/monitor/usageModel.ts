@@ -81,4 +81,4 @@ export const money = (microusd: number): string => {
 
 /** Credit spend has its own served start, independent of the usage rows' requested window. */
 export const creditsText = (credits: Native.UsageCredits, untilMs: number): string =>
-  `credits ${money(credits.used_microusd)}${credits.unpriced_tokens > 0 ? '+' : ''} of ${money(credits.budget_microusd)} · ${new Date(credits.period_start_ms).toISOString()} to ${new Date(untilMs).toISOString()} UTC`
+  `credits ${money(credits.used_microusd)}${credits.unpriced_tokens > 0 || (credits.unpriced_responses ?? 0) > 0 ? '+' : ''} of ${money(credits.budget_microusd)} · ${new Date(credits.period_start_ms).toISOString()} to ${new Date(untilMs).toISOString()} UTC`

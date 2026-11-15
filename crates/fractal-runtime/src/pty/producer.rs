@@ -265,9 +265,9 @@ impl PtyRuntime {
         Ok(true)
     }
 
-    /// Runs once at runtime startup, including already-applied starts that no
-    /// longer enter the pending-start cleanup path.
-    pub(super) fn reconcile_producers(&self) -> Result<()> {
+    /// Explicit daemon-startup mutation, including already-applied starts that
+    /// no longer enter pending-start cleanup. Never call from identityless reads.
+    pub fn reconcile_producers_at_daemon_startup(&self) -> Result<()> {
         let roots = match std::fs::read_dir(self.spawn_state_directory()) {
             Ok(roots) => roots,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -320,7 +320,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn startup_finalizes_a_vanished_producer_end_to_end() {
+    fn constructing_runtime_is_read_only_until_daemon_startup_hook() {
         if crate::isolation_mode() != crate::Isolation::Scope {
             eprintln!("requires real systemd user scope support");
             return;
@@ -333,7 +333,11 @@ mod tests {
         child.wait().unwrap();
         let directory = startup_fixture(&runtime, "vanished-start", pid, token);
         assert!(!directory.join("closure.json").exists());
-        let _restarted = PtyRuntime::new(root.path().join("registry"));
+        let original_owner = std::fs::read(directory.join("owner.json")).unwrap();
+        let restarted = PtyRuntime::new(root.path().join("registry"));
+        assert!(!directory.join("closure.json").exists(), "constructing a runtime must not finalize a producer");
+        assert_eq!(std::fs::read(directory.join("owner.json")).unwrap(), original_owner);
+        restarted.reconcile_producers_at_daemon_startup().unwrap();
         let closure: serde_json::Value = serde_json::from_reader(
             File::open(directory.join("closure.json")).expect("startup must finalize the vanished producer")).unwrap();
         assert_eq!(closure["reason"], "runtime-vanished");
@@ -360,7 +364,8 @@ mod tests {
         let newer = startup_fixture(&runtime, "newer-start", pid, token);
         let newer_owner = std::fs::read(newer.join("owner.json")).unwrap();
         let newer_server = std::fs::read(newer.join(format!("server-{pid}.json"))).unwrap();
-        let _restarted = PtyRuntime::new(root.path().join("registry"));
+        let restarted = PtyRuntime::new(root.path().join("registry"));
+        restarted.reconcile_producers_at_daemon_startup().unwrap();
         assert!(old.join("closure.json").exists(), "the old generation must be finalized");
         let owner: ProducerOwnership =
             serde_json::from_reader(File::open(old.join("owner.json")).unwrap()).unwrap();
@@ -379,7 +384,8 @@ mod tests {
             let directory = runtime.producer_directory("worker", "op");
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(directory.join(name), b"{").unwrap();
-            let _restarted = PtyRuntime::new(root.path().join("registry"));
+            let restarted = PtyRuntime::new(root.path().join("registry"));
+            restarted.reconcile_producers_at_daemon_startup().unwrap();
             assert_eq!(std::fs::read(directory.join(name)).unwrap(), b"{");
             assert!(!directory.join("closure.json").exists());
             assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);

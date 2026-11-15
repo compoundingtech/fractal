@@ -1286,6 +1286,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::ValidationFailed
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
+        | ErrorCode::AttentionDismissUnsupported
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -1434,9 +1435,9 @@ impl Client {
 
     fn features(&self) -> &'static str {
         if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2"
         } else {
-            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1"
         }
     }
 
@@ -2235,6 +2236,21 @@ impl Client {
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
+    pub async fn availability_list(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Envelope<PersonAvailabilities>, ClientError> {
+        match person {
+            Some(person) => {
+                self.get(&format!(
+                    "/v1/client/availability?person={}",
+                    percent_encode(person)
+                ))
+                .await
+            }
+            None => self.get("/v1/client/availability").await,
+        }
+    }
     pub async fn custom_subjects_list(
         &self,
         kind: Option<&str>,
@@ -2362,6 +2378,31 @@ impl Client {
             path.push_str(&format!("&revision={}", percent_encode(revision)));
         }
         self.get(&path).await
+    }
+    pub async fn source_map_get(
+        &self,
+        subject: &str,
+        revision: Option<&str>,
+    ) -> Result<Envelope<SubjectSourceMap>, ClientError> {
+        let mut path = format!("/v1/client/source-maps?subject={}", percent_encode(subject));
+        if let Some(revision) = revision {
+            path.push_str(&format!("&revision={}", percent_encode(revision)));
+        }
+        self.get(&path).await
+    }
+    pub async fn source_blob_get(
+        &self,
+        hash: &str,
+        subject: &str,
+        revision: &str,
+    ) -> Result<Envelope<SourceBlob>, ClientError> {
+        self.get(&format!(
+            "/v1/client/source-blobs/{}?subject={}&revision={}",
+            percent_encode(hash),
+            percent_encode(subject),
+            percent_encode(revision)
+        ))
+        .await
     }
     pub async fn subject_definition(
         &self,
@@ -3232,6 +3273,17 @@ impl Client {
                 .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn attention_dismiss(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionDismissParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_dismiss(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -3240,6 +3292,28 @@ impl Client {
         parameters: AttentionResolveParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::attention_resolve(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_seen(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSeenParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_seen(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_snooze(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSnoozeParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_snooze(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3819,6 +3893,40 @@ impl Client {
         report: &ObservationReport,
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Set or clear the session person's own availability. Requires `write.availability`;
+    /// agent sessions are refused.
+    pub async fn availability_set(
+        &self,
+        request: &AvailabilitySet,
+    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/availability", Some(body))
+            .await
+    }
+
+    /// Report one device's raw state for the session person, on every state change and again at
+    /// the result's `report_again_at`; the daemon derives presence and assigns the source.
+    /// Requires `write.presence`; agent sessions are refused.
+    pub async fn presence_report(
+        &self,
+        report: &PresenceReport,
+    ) -> Result<Envelope<PresenceReportResult>, ClientError> {
+        self.post("/v1/client/presence", report).await
+    }
+
+    /// Set or clear the session person's own directive note. Requires `write.notes`;
+    /// agent sessions are refused.
+    pub async fn notes_set(
+        &self,
+        request: &DirectiveNoteSet,
+    ) -> Result<Envelope<DirectiveNoteSetResult>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/notes", Some(body))
+            .await
     }
 
     /// Replace this paired device's local-only push registration. No graph receipt.
@@ -5232,7 +5340,7 @@ mod wire_receiver_tests {
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
         // WebSocket sender cutover does not change the HTTP API/error versions.
-        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1").unwrap();
+        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1").unwrap();
         assert_eq!(
             request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
             TERMINAL_SUBPROTOCOL
@@ -5857,6 +5965,7 @@ mod tests {
         for code in [
             ErrorCode::InvalidAnswer,
             ErrorCode::NotAnswerable,
+            ErrorCode::AttentionDismissUnsupported,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
@@ -5920,8 +6029,8 @@ mod tests {
 
     #[test]
     fn messages_paging_is_explicit_for_every_constructor_and_websocket_request() {
-        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1";
-        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2";
+        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1";
+        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, model-drift-attention.v1, messages-paging.v2";
         for client in [
             Client::unix("/unused"),
             Client::unix_as("/unused", "person/test"),

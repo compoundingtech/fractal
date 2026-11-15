@@ -128,6 +128,7 @@ export const KIND_WORDS: Record<string, string> = {
   'launch-approval': 'Launch approval',
   'revision-approval': 'Revision approval',
   'harness-login': 'Sign-in',
+  'model-drift': 'Model drift',
 }
 
 /** The answers a card shows: options as one group, and the two that are not options. The recommended answer leads. */

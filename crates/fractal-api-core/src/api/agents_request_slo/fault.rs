@@ -37,11 +37,11 @@ pub(super) fn route(store: &Store, reviewer: &str, cut: &PendingFault) -> Result
         store,
         &[row],
         &BTreeSet::from([OBJECTIVE.to_owned()]),
-        Some(ObjectiveResponse {
+        ObjectiveResponse {
             reviewer,
             condition: AGENTS_REQUEST_SLO_MISSED,
             title: "GET agents performance",
-        }),
+        },
     )
     .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     ensure!(

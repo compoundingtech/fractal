@@ -782,8 +782,7 @@ impl CodexInboxDelivery {
             }
         };
         let timeline =
-            crate::harness_timeline::Writer::new(&config.agent_dir, "codex", runtime.incarnation())
-                .with_model(config.model.clone());
+            crate::harness_timeline::Writer::new(&config.agent_dir, "codex", runtime.incarnation());
         // The record belongs to this incarnation: the protocol gate already admitted the version
         // it names, so `support` is a measured fact rather than a probe result.
         let mut diagnostics = driver_diagnostic::Publisher::new(

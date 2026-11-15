@@ -2,7 +2,7 @@
 
 An objective is a target for something Fractal measures, with an error budget and an optional
 response when it is missed. There is one concept and one KDL kind, `objective`. Fractal ships its
-own objectives (request latency, the store, CPU, CI) and a fleet declares more with `fractal apply`,
+own objectives (request latency, the store, CPU) and a fleet declares more with `fractal apply`,
 like agents, missions and accounts. Both are read the same way: `fractal slo ls`, `fractal slo
 explain ID` and `fractal slo chart ID`.
 
@@ -35,11 +35,12 @@ objective "ops/change-rollout" {
 - `about` says what is measured, in one sentence.
 - `indicator` says how a sample is measured. Each kind is below.
 - `target STAT BOUND` bounds one statistic. `STAT` is what the indicator reports (`p50`, `p99`,
-  `max`, `cores`, ...) and the bound is `within=DURATION`, `max=NUMBER` or `min-percent=NUMBER`.
-  Each indicator names its rows (table below). A percentile over claims or CI is the row
-  `NAME/pNN` (`ops/change-rollout/p95`), one per target.
-- `window` is the span the budget is measured over, and `min-samples` the samples it needs before it
-  is met or missed; with fewer it is `no-data`. Only an indicator over claims takes a window.
+  `max`, `cores`, `per-hour`, ...) and the bound is `within=DURATION`, `max=NUMBER`, `min=NUMBER`
+  or `min-percent=NUMBER`. Each indicator names its rows (table below). A percentile over claims or
+  CI is the row `NAME/pNN` (`ops/change-rollout/p95`), one per target.
+- `window` is the span the budget is measured over, and `min-samples` the samples an interval needs
+  before it is met or missed; with fewer it is `no-data`. Only an indicator over claims takes a
+  window.
   Native telemetry keeps its own windows, below.
 - `on-breach` is what happens when a row is missed. It is optional; without it a miss is shown and
   nothing is delivered.
@@ -67,16 +68,13 @@ the daemon was built with.
 | `cpu` | The daemon and its replication workers over closed UTC minutes; children `idle-min-minutes` and `load-max-cores` | `cores max=`, `idle-cores max=` | `NAME`, `NAME/idle` | the hour |
 | `database` | The store's pages in use and their daily growth | `live-gb max=`, `growth-mb-per-day max=` | `NAME` | the newest hourly measurement |
 | `divergence` | Open projection divergence faults | `open max=` | `NAME`, once a divergence check has run | now |
-| `ci-duration` | A CI `series` (`ci/merge-queue`) read by the repository observer | `pNN within=` | `NAME/pNN` | 1d |
-| `ci-count` | Events in a CI `series` | `per-hour max=` | `NAME` | 1h |
 
 The statement, transaction, writer-hold, CPU, database and divergence objectives are one each,
 named as the table's rows say (`sql-statement`, `transaction`, `writer-hold`, `cpu`, `database`,
 `projection-divergence`): `fractal doctor` and the OTLP export read them by these names.
 
 These keep the meanings they had as built-in targets: a p99 is missed in a window when more than
-1% of its samples are over, a max when any one is, and CI rows are no-data on a member that reads no
-Workspace CI runs.
+1% of its samples are over, and a max when any one is.
 
 ### Interval over claims
 
@@ -87,12 +85,13 @@ from claims those processes write. Each subject under `subject-prefix` is one sa
 |---|---|
 | `subject-prefix "P"` | The sample subjects: every subject that starts with `P`. Custom claims (`custom/NS/...`) need no registration and replicate to every member. |
 | `start KIND at=FIELD` | The sample starts at the earliest such claim. |
-| `expect KIND set=FIELD` | The members a sample must stop on, a list of strings in the newest such claim (by its time, then its claim id, so every member picks the same one). An empty list stops the sample at the expect claim's time. Without `expect`, one stop claim ends the sample. `expect` may name the `start` kind, so one claim starts the sample and names its members (merge to live); every other kind has one role. |
-| `stop KIND member=FIELD` | One member has stopped: the earliest such claim per value of `FIELD`. The sample stops when every expected member has, at the latest of their times. |
+| `expect KIND set=FIELD` | The members a sample must stop on, a list of strings in the newest such claim (by its time, then its claim id, so every member picks the same one). An empty list stops the sample at the expect claim's time. Without `expect`, one stop claim ends the sample. `expect` may name the `start` kind, so one claim starts the sample and names its members (merge to live). |
+| `stop KIND member=FIELD` | One member has stopped: the earliest such claim per value of `FIELD`. The sample stops when every expected member has, at the latest of their times. `stop` may name the `start` kind when both read their time from different `at=` fields and there is no `expect` or `member=`: one claim is then the whole sample, from its start field to its stop field (a CI run from `started_at` to `completed_at`). Every other kind has one role. |
 | `cancel KIND` | An open sample with such a claim is cancelled. A sample that stopped before the cancel was accepted keeps its value. |
 | `pause KIND resume=KIND` | The clock stops from each pause to the next resume, and a sample still paused is not aging. Pauses and resumes are timed when they were accepted. |
 | `label "FIELD"` | Also one row per value of `FIELD` on the start or expect claim: `ops/change-rollout/p95{class=routine}`. A sample without the field is only in the unlabelled row. `label "member"` splits by member, each sample's value being that member's stop: the expected members, or without `expect` the members that stopped. |
 | `exclude "FIELD" "A" "B"` | A sample whose start or expect claim has one of these values is excluded. |
+| `only "FIELD" "A" "B"` | A sample is kept only when its start or expect claim has one of these values; one without the field is left out too. Several `only` must all hold, each on its own field. A left-out sample is counted with the excluded ones. |
 
 `at=FIELD` reads a time from the claim's fields: an RFC 3339 string or Unix milliseconds, either
 also as a JSON-encoded string. Without `at`, the time is when the claim's origin accepted it, which
@@ -121,6 +120,92 @@ is `no-data` and spends no budget; with none it reads `no samples`.
 Each evaluation reads only the claims newer than the last it read, keeping each objective's samples
 in memory; a sample closed, cancelled or excluded before the window is dropped from memory.
 
+### Count over claims
+
+`count` counts events that processes write as claims, such as pull requests merged or flaky tests
+seen, per hour over the window. Each subject under `subject-prefix` is at most one event.
+
+```kdl
+objective "factory/work-throughput" {
+  about "Factory-authored pull requests merged into the roster's default branches"
+  indicator "count" {
+    subject-prefix "custom/factory/merged-pr/"
+    event "custom.factory.pr-merged" at="merged_at"
+    label "repository"
+    exclude "author" "renovate"
+  }
+  window "24h"
+  target "per-hour" min=10
+}
+```
+
+| Child | Meaning |
+|---|---|
+| `subject-prefix "P"` | The event subjects, as for an interval. |
+| `event KIND at=FIELD` | A subject's event is at its earliest such claim, its time read from `FIELD` as an interval's `at`. `at` is required: the event's own time, which every retry and every producer of the subject repeats, so a retry inside the window is the same event and one after it is before the window and ignored. Retries and a second producer never count twice. |
+| `label "FIELD"` | Also one row per value of `FIELD` on the event claims the revision has read: `factory/work-throughput{repository=fractal}`. A label row is a part of the count, shown without a verdict (below). |
+| `exclude "FIELD" "A" "B"` | An event whose claim has one of these values is excluded: counted apart, never in the rate. |
+| `only "FIELD" "A" "B"` | An event is counted only when its claim has one of these values; one without the field is left out and counted with the excluded ones. Several `only` must all hold, each on its own field. |
+
+The objective takes one target, `per-hour` with `max=N` (at most N an hour, N ≥ 0) or `min=N` (at
+least N an hour, N > 0), and a `window` without `min-samples`. The row `NAME` reports the events in
+the window and the rate, events ÷ window hours:
+
+```
+factory/work-throughput  met  ≥ 10 an hour  312 in the last 24h (13.00 an hour)  24h  23%
+```
+
+- `max=N` is met when the rate is at most N, and the budget left is `100 × (1 − rate ÷ N)`: with
+  `max=0` it is 100% while met and 0% once missed.
+- `min=N` is met when the rate is at least N, and the budget left is `100 × (1 − N ÷ rate)`, the
+  share of the rate above the minimum, as a `share`'s budget is the share of its allowed remainder:
+  0% at the minimum or below, nearing 100% as the rate grows.
+
+Only the row `NAME` is judged. The bound is the whole count's, so a label row is a part of it: it
+reports its events and rate with the target `part of NAME`, is `no-data` with no budget, and never
+opens a fault. With `min=10` over five repositories, 13 an hour in all is met though no repository
+alone reaches 10. A label value keeps its row once the revision has read it, reading 0 when its
+events have left the window, so a repository that stopped merging still shows; the values are kept
+per revision, at most the distinct values the event claims carry.
+
+```
+factory/work-throughput{repository=fractal}  no-data  part of factory/work-throughput  0 in the last 24h (0.00 an hour)  24h
+```
+
+The row `NAME` is `no-data` until the objective has read one event claim for its revision; from
+then on an empty window is a real 0, so a producer that stopped shows as a missed minimum rather
+than hiding.
+A claim whose time cannot be read is counted as unreadable and changes nothing. `fractal slo explain`
+says the events counted and excluded in the window, the rate, the unreadable claims, and the
+subject and revision.
+
+Each evaluation reads only the event claims newer than the last it read, and keeps only the events
+in the window and the label values read: an event before it is dropped from memory, and a claim
+timed before it is not kept, though its label value is.
+
+### Fractal's own CI
+
+Fractal's Workspace CI objectives are declared, not shipped, in
+[`slo/fractal-ci.kdl`](../../slo/fractal-ci.kdl), over the `github.workflow-run` claims the
+repository's poller writes, one per completed run ([plugins](plugins.md#the-graph-kinds)). Every
+member evaluates them from the replicated claims, so each reads the same rows:
+
+- `fractal/merge-latency/p50` and `/p95`: an interval over successful first-attempt merge group
+  runs, from `created_at` (the group entered the queue) to `completed_at` (its run went green), at
+  most 10 minutes over a day. It is a proxy for entering the queue until merging: the wait before
+  GitHub creates the group's run and the merge after it are not counted.
+- `fractal/ci-critical-path/p95`: an interval over successful first-attempt pull request runs,
+  from `started_at` to `completed_at`, at most 13 minutes over a day. A rerun restarts its start
+  and reruns only some jobs, so only a first attempt measures the run.
+- `fractal/flakes`: a count of runs whose `flakes` is not 0 (a test nextest passed only on a retry,
+  or a merge group ejected from the queue) over the last hour, at most 0 an hour. With `max=0` the
+  row is missed exactly when any flake is seen; it counts runs, not flaky tests. Pull request runs
+  of every conclusion are recorded, so a flaky test in a failed or cancelled pull request run counts
+  too (the shipped `flakes` row it replaces read only successful pull request runs).
+
+Each names its owner in `on-breach`. Publish the file with `fractal apply slo/fractal-ci.kdl`
+once every member runs a build that knows `only` and the `github.workflow-run` kind.
+
 ### Ratio over Prometheus metrics
 
 There is none: Fractal does not read Prometheus. It exports its native readings as OTLP gauges
@@ -136,15 +221,17 @@ on-breach "fault" owner="agent/NS/NAME" backup="agent/NS/OTHER" condition="NAME-
 
 A missed row opens one `operational.failure` on `daemon/MEMBER` addressed to `owner`, with the
 `condition`. It stays one episode until the row is met again, when `operational.recovered` ends it.
-A row with no data neither opens nor ends one. The member that delivers it is the one the owner
-agent is declared on: every member evaluates the objective from the same replicated claims, and one
-delivers. An owner that is not a live declaration gets nothing, and the explanation says so.
+A row with no data neither opens nor ends one. A row the objective no longer judges ends its fault:
+an interval's label row whose samples have all left the window, a row a new revision no longer
+has, or a count's label row, which is never met or missed. The member that delivers it is the one
+the owner agent is declared on: every member evaluates the objective from the same replicated
+claims, and one delivers. An owner that is not a live declaration gets nothing, and the
+explanation says so.
 
 `backup` is held: it is recorded and shown, and never becomes the fault's reviewer. It differs from
 the owner.
 
-Objectives Fractal ships respond as they always have: a missed CI row is a fault for the fleet fault
-agent.
+Objectives Fractal ships open no fault.
 
 ## Publishing, revisions and replication
 
@@ -171,5 +258,6 @@ A declaration this build cannot read, as one replicated from a newer build, is t
 
 `GET /v1/claims` filters by `kind`, by `subject_prefix` or by an exact `subject`, and pages by store
 index. `fractal claims ls --kind KIND --subject-prefix PREFIX` prints them. Both read through the
-claims' kind and subject indexes. The interval indicator reads its claims the same way, keeping each
-objective's samples in memory and reading only claims newer than the last it saw.
+claims' kind and subject indexes. The interval and count indicators read their claims the same way,
+keeping each objective's samples or events in memory and reading only claims newer than the last it
+saw.

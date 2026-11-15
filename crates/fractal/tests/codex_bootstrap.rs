@@ -605,14 +605,15 @@ async fn delivery_recovery_control(
         .post(
             "/v1/messages",
             &fractal_daemon::model::MessageSendRequest {
-                idempotency_key: "delayed-handoff".into(),
-                from: "person/eval".into(),
-                to: SUBJECT.into(),
-                content: "An invented delayed-control signal.".into(),
-                title: None,
-                in_reply_to: None,
-                tags: vec![],
-                attachments: vec![],
+            owner: None,
+            idempotency_key: "delayed-handoff".into(),
+            from: "person/eval".into(),
+            to: SUBJECT.into(),
+            content: "An invented delayed-control signal.".into(),
+            title: None,
+            in_reply_to: None,
+            tags: vec![],
+            attachments: vec![],
             },
         )
         .await

@@ -141,6 +141,16 @@ describe('program missions', () => {
         const bundle = readFileSync(join(bundleDir, `${sha256}.mjs`))
         expect(createHash('sha256').update(bundle).digest('hex')).toBe(sha256)
         expect(kdl).toContain(`program "${join(bundleDir, `${sha256}.mjs`)}"`)
+        expect(kdl).toContain(
+          [
+            '    retry {',
+            '      attempts 4',
+            '      delays "2m" "10m" "30m"',
+            '      within "2h"',
+            '      on "HostUnavailable" "SlotLost"',
+            '    }',
+          ].join('\n'),
+        )
       }),
     120_000,
   )

@@ -27,11 +27,11 @@ mission "orchid" state="ready" {{
     )
 }
 
-fn start(store: &Store, key: &str) -> MissionRunView {
+fn start(store: &Store, revision: &MissionSpec, key: &str) -> MissionRunView {
     store
         .create_mission_run(&crate::model::MissionRunRequest {
             mission: "orchid".into(),
-            revision: None,
+            revision: Some(revision.revision.clone()),
             workspace: "/tmp".into(),
             requester: Some("person/lichen".into()),
             mode: None,
@@ -64,8 +64,18 @@ fn settle(reconciler: &Reconciler<FakeRuntime>) {
 #[test]
 fn revision_carries_completed_start_seats_and_four_queued_builders() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "garden");
+    let first = publish(&store, &source("Grow a garden."), "first");
+    // Publish every candidate before admission so only explicit adoption changes generations.
+    let candidates: Vec<_> = (1..=2)
+        .map(|round| {
+            publish(
+                &store,
+                &source(&format!("Grow garden {round}.")),
+                &format!("publish-{round}"),
+            )
+        })
+        .collect();
+    let run = start(&store, &first, "garden");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -85,16 +95,12 @@ fn revision_carries_completed_start_seats_and_four_queued_builders() {
             .status,
         "completed"
     );
-    for round in 1..=2 {
-        let next = publish(
-            &store,
-            &source(&format!("Grow garden {round}.")),
-            &format!("publish-{round}"),
-        );
+    for (index, next) in candidates.iter().enumerate() {
+        let round = index + 1;
         let revised = store
             .adopt_mission_revision(
                 &run.id,
-                &next,
+                next,
                 "person/lichen",
                 "Update garden goal",
                 &format!("revise-{round}"),
@@ -160,7 +166,7 @@ fn revision_carries_completed_start_seats_and_four_queued_builders() {
 #[test]
 fn no_eligible_agent_fault_is_actionable_deduped_and_recovers() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(
+    let first = publish(
         &store,
         r#"version 2
 mission "orchid" state="ready" {
@@ -170,7 +176,7 @@ mission "orchid" state="ready" {
 }"#,
         "publish",
     );
-    let run = start(&store, "absent");
+    let run = start(&store, &first, "absent");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -229,8 +235,9 @@ mission "orchid" state="ready" {
 #[test]
 fn explicit_stop_survives_completed_declaration_carry_without_a_fault() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "garden-stop");
+    let first = publish(&store, &source("Grow a garden."), "first");
+    let next = publish(&store, &source("Respect a stopped seat."), "second");
+    let run = start(&store, &first, "garden-stop");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -258,7 +265,6 @@ fn explicit_stop_survives_completed_declaration_carry_without_a_fault() {
             Some("person/lichen"),
         )
         .unwrap();
-    let next = publish(&store, &source("Respect a stopped seat."), "second");
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -285,15 +291,7 @@ fn explicit_stop_survives_completed_declaration_carry_without_a_fault() {
 #[test]
 fn changed_declarations_execute_again_and_removed_seats_retire() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "garden-change");
-    let reconciler = Reconciler::new(
-        store.clone(),
-        Arc::new(FakeRuntime::default()),
-        "node".into(),
-        Arc::new(Notify::new()),
-    );
-    settle(&reconciler);
+    let first = publish(&store, &source("Grow a garden."), "first");
     let next_source = source("Change the garden.")
         .replace(
             "agent \"amber\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }",
@@ -304,6 +302,14 @@ fn changed_declarations_execute_again_and_removed_seats_retire() {
             "",
         );
     let next = publish(&store, &next_source, "second");
+    let run = start(&store, &first, "garden-change");
+    let reconciler = Reconciler::new(
+        store.clone(),
+        Arc::new(FakeRuntime::default()),
+        "node".into(),
+        Arc::new(Notify::new()),
+    );
+    settle(&reconciler);
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -347,8 +353,13 @@ fn changed_declarations_execute_again_and_removed_seats_retire() {
 fn unsafe_completed_exec_carry_refuses_and_rolls_back_generation_publication() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let first = source("Grow a garden.").replace("    agent \"dahlia\" {", "    exec \"dahlia\" {");
-    publish(&store, &first, "first");
-    let run = start(&store, "garden-refuse");
+    let first_revision = publish(&store, &first, "first");
+    let next = publish(
+        &store,
+        &first.replace("Grow a garden.", "Change only the goal."),
+        "second",
+    );
+    let run = start(&store, &first_revision, "garden-refuse");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -365,11 +376,6 @@ fn unsafe_completed_exec_carry_refuses_and_rolls_back_generation_publication() {
     store
         .set_step_state(&declaring.subject, "completed", None)
         .unwrap();
-    let next = publish(
-        &store,
-        &first.replace("Grow a garden.", "Change only the goal."),
-        "second",
-    );
     let cards_before = store
         .agent_card_status_at(None, store.index().unwrap(), false)
         .unwrap();
@@ -401,7 +407,7 @@ fn unsafe_completed_exec_carry_refuses_and_rolls_back_generation_publication() {
 #[test]
 fn dependency_waits_and_cancellation_do_not_raise_missing_agent_faults() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(
+    let first = publish(
         &store,
         r#"version 2
 mission "orchid" state="ready" {
@@ -412,7 +418,7 @@ mission "orchid" state="ready" {
 }"#,
         "publish",
     );
-    let run = start(&store, "waiting");
+    let run = start(&store, &first, "waiting");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -455,8 +461,9 @@ mission "orchid" state="ready" {
 #[test]
 fn completed_seat_carry_replays_canonical_desired_ownership() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "garden-replica");
+    let first = publish(&store, &source("Grow a garden."), "first");
+    let next = publish(&store, &source("Grow a revised garden."), "second");
+    let run = start(&store, &first, "garden-replica");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -464,7 +471,6 @@ fn completed_seat_carry_replays_canonical_desired_ownership() {
         Arc::new(Notify::new()),
     );
     settle(&reconciler);
-    let next = publish(&store, &source("Grow a revised garden."), "second");
     let revised = store
         .adopt_mission_revision(
             &run.id,
@@ -511,8 +517,9 @@ fn completed_seat_carry_replays_canonical_desired_ownership() {
 #[test]
 fn declared_revision_uses_the_same_atomic_completed_seat_carry() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "declared-revision");
+    let first = publish(&store, &source("Grow a garden."), "first");
+    let next = publish(&store, &source("Grow a declared revision."), "second");
+    let run = start(&store, &first, "declared-revision");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -520,7 +527,6 @@ fn declared_revision_uses_the_same_atomic_completed_seat_carry() {
         Arc::new(Notify::new()),
     );
     settle(&reconciler);
-    let next = publish(&store, &source("Grow a declared revision."), "second");
     let text = format!(
         "version 2\nmission-run {:?} {{ revision \"update\" {{ mission {:?}; from {:?}; reason \"Update the garden\" }} }}",
         run.id,
@@ -573,8 +579,8 @@ fn generation_dependent_completed_declaration_is_refused_before_publication() {
     let store = Arc::new(Store::open_memory("node").unwrap());
     let first = source("Grow a garden.")
         .replace("command \"true\"", "command \"echo ${ST_RUN_GENERATION}\"");
-    publish(&store, &first, "first");
-    let run = start(&store, "dynamic-source");
+    let first_revision = publish(&store, &first, "first");
+    let run = start(&store, &first_revision, "dynamic-source");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -611,8 +617,8 @@ fn generation_dependent_completed_declaration_is_refused_before_publication() {
 #[test]
 fn reopening_after_cleanup_requires_explicit_reexecution_of_completed_declarations() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "reopen-source");
+    let first = publish(&store, &source("Grow a garden."), "first");
+    let run = start(&store, &first, "reopen-source");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -651,8 +657,9 @@ fn completed_seat_owner_cards_survive_reopen_and_dirty_both_owner_steps() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("claims.sqlite3");
     let store = Arc::new(Store::open(&path, "node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "garden-reopen");
+    let first = publish(&store, &source("Grow a garden."), "first");
+    let next = publish(&store, &source("Grow a revised garden."), "second");
+    let run = start(&store, &first, "garden-reopen");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -660,7 +667,6 @@ fn completed_seat_owner_cards_survive_reopen_and_dirty_both_owner_steps() {
         Arc::new(Notify::new()),
     );
     settle(&reconciler);
-    let next = publish(&store, &source("Grow a revised garden."), "second");
     let old_step = run
         .steps
         .iter()
@@ -758,8 +764,8 @@ mission "orchid" state="ready" {
  completion { when "all-steps-exhausted" }
  step "work" { assigned-to "agent/orchid/amber" }
 }"#;
-    publish(&store, first, "first");
-    let run = start(&store, "lost-ready");
+    let first = publish(&store, first, "first");
+    let run = start(&store, &first, "lost-ready");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -841,8 +847,8 @@ mission "orchid" state="ready" {
  completion { when "all-steps-exhausted" }
  step "work" { assigned-to "agent/orchid/absent" }
 }"#;
-    publish(&store, source, "first");
-    let run = start(&store, "backoff");
+    let first = publish(&store, source, "first");
+    let run = start(&store, &first, "backoff");
     store
         .set_step_state(&run.steps[0].subject, "failed", Some("Control retry"))
         .unwrap();
@@ -878,8 +884,13 @@ mission "orchid" state="ready" {
  completion { when "all-steps-exhausted" }
  step "work" { assigned-to "agent/orchid/absent" }
 }"#;
-    publish(&store, first, "first");
-    let run = start(&store, "stale-fault");
+    let first_revision = publish(&store, first, "first");
+    let next = publish(
+        &store,
+        &first.replace("Offer work to a missing seat.", "Revise missing work."),
+        "second",
+    );
+    let run = start(&store, &first_revision, "stale-fault");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -889,11 +900,6 @@ mission "orchid" state="ready" {
     settle(&reconciler);
     let predecessor = store.mission_run(&run.id).unwrap().unwrap();
     assert_eq!(store.fault_items(Some("person/lichen")).unwrap().len(), 1);
-    let next = publish(
-        &store,
-        &first.replace("Offer work to a missing seat.", "Revise missing work."),
-        "second",
-    );
     let successor = store
         .adopt_mission_revision(
             &run.id,
@@ -922,7 +928,7 @@ mission "orchid" state="ready" {
 fn deduped_and_deliberately_stopped_fault_checks_do_not_wait_for_the_writer() {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&directory.path().join("claims.sqlite3"), "node").unwrap());
-    publish(
+    let first = publish(
         &store,
         r#"version 2
 mission "orchid" state="ready" {
@@ -932,7 +938,7 @@ mission "orchid" state="ready" {
 }"#,
         "first",
     );
-    let run = start(&store, "quiet-fault");
+    let run = start(&store, &first, "quiet-fault");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -980,8 +986,9 @@ mission "orchid" state="ready" {
 #[test]
 fn failure_after_canonical_carry_rolls_back_seats_generation_and_public_cards() {
     let store = Arc::new(Store::open_memory("node").unwrap());
-    publish(&store, &source("Grow a garden."), "first");
-    let run = start(&store, "late-rollback");
+    let first = publish(&store, &source("Grow a garden."), "first");
+    let next = publish(&store, &source("Grow a revised garden."), "second");
+    let run = start(&store, &first, "late-rollback");
     let reconciler = Reconciler::new(
         store.clone(),
         Arc::new(FakeRuntime::default()),
@@ -989,7 +996,6 @@ fn failure_after_canonical_carry_rolls_back_seats_generation_and_public_cards() 
         Arc::new(Notify::new()),
     );
     settle(&reconciler);
-    let next = publish(&store, &source("Grow a revised garden."), "second");
     let before = store.index().unwrap();
     let cards_before = store.agent_card_status_at(None, before, false).unwrap();
     store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h56af38fbc8fd owner=fractal_reconcile::reconcile::tests::revision_seat_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER fail_cutover AFTER UPDATE OF current_generation_id ON mission_runs WHEN NEW.current_generation_id <> OLD.current_generation_id BEGIN SELECT RAISE(ABORT, 'injected cutover failure after seat carry'); END;").unwrap();

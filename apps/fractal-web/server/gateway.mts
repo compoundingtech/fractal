@@ -32,7 +32,7 @@ export const cleanHeaders = (headers: IncomingHttpHeaders, upgrade = false): Out
  */
 export const participantsFeature = 'conversation-message-participants.v1'
 export const withClientFeatures = (requested: string | readonly string[] | undefined): string => {
-  const list: string = typeof requested === 'string' ? requested : requested === undefined ? 'custom-subjects.v1, conversation-blocks.v1' : requested.join(',')
+  const list: string = typeof requested === 'string' ? requested : requested === undefined ? 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1' : requested.join(',')
   const features = list.split(',').map(feature => feature.trim()).filter(feature => feature !== '')
   return (features.includes(participantsFeature) ? features : [...features, participantsFeature]).join(', ')
 }

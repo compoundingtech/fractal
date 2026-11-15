@@ -812,11 +812,11 @@ mission "harvest" state="ready" {{
     let anchor =
         (next - chrono::Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let parent_file = node.root.join("parent.kdl");
-    let parent = |revision: &str| {
+    let parent = |revision: &str, goal: &str| {
         format!(
             r#"version 2
 mission "orchard/weekly" state="ready" {{
-  goal "Maintain the orchard."
+  goal "{goal}"
   schedule "cycle" {{
     host "orchard"
     every "7d"
@@ -832,7 +832,7 @@ mission "orchard/weekly" state="ready" {{
             node.root.join("cycles").display()
         )
     };
-    fs::write(&parent_file, parent(&revisions[0])).unwrap();
+    fs::write(&parent_file, parent(&revisions[0], "Maintain the orchard.")).unwrap();
     node.st_ok(&["apply", parent_file.to_str().unwrap(),
     "--as",
     PERSON,]);
@@ -854,12 +854,13 @@ mission "orchard/weekly" state="ready" {{
     })
     .await;
 
-    for index in 0..4 {
-        fs::write(&parent_file, parent(&revisions[index % 2])).unwrap();
-        node.st_ok(&["apply", parent_file.to_str().unwrap(),
-        "--as",
-        PERSON,]);
-        if index > 0 {
+    // Republishing the same revision changes nothing. `work revise` adopts a new revision under
+    // the same run. Publishing a new revision supersedes the run with a fresh linked run, here
+    // twice in a row. The reached occurrence belongs to the schedule through all of them.
+    let goals = ["Maintain the orchard.", "Maintain the orchard.", "Keep the orchard.", "Tend the orchard."];
+    for (index, goal) in goals.into_iter().enumerate() {
+        fs::write(&parent_file, parent(&revisions[index % 2], goal)).unwrap();
+        if index == 1 {
             node.st_ok(&[
                 "work",
                 "revise",
@@ -870,6 +871,8 @@ mission "orchard/weekly" state="ready" {{
                 "--as",
                 PERSON,
             ]);
+        } else {
+            node.st_ok(&["apply", parent_file.to_str().unwrap(), "--as", PERSON]);
         }
         // Let the daemon reach a quiet pass, including any incorrectly admitted duplicate.
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -883,6 +886,16 @@ mission "orchard/weekly" state="ready" {{
             "parent publication/revision replayed the due weekly tick"
         );
     }
+    let first = node.st_json(&["missions", "show", "mission-run/orchard/weekly"]);
+    let successor = first["superseded_by"]
+        .as_str()
+        .unwrap_or_else(|| panic!("publishing a new parent revision did not supersede the weekly run: {first}"))
+        .to_owned();
+    let second = node.st_json(&["missions", "show", &successor]);
+    assert!(
+        second["superseded_by"].is_string(),
+        "the second new parent revision did not supersede the replacement run: {second}"
+    );
     node.restart().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(

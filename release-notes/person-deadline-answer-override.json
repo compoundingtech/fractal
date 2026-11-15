@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "People can replace an ask's deadline answer for seven days with work override; the asker is told without undoing prior effects",
+  "replay": { "status": "changed", "detail": "Person answer views recognize replicated work.person-override claims. Overrides do not reopen or rewind completed work." },
+  "schema": { "status": "changed", "detail": "Registers work.person-override with the asking episode, named answer and overridden deadline claim; no SQLite table change." },
+  "rules": { "status": "changed", "detail": "Only the ask's person may override a deadline resolution within seven days. Each answer key is idempotent; a newer different answer becomes standing." },
+  "compatibility": { "status": "changed", "detail": "POST /v1/work/override and fractal work override are additive. All members must run an override-aware build to show the replacement answer." },
+  "downtime": { "status": "none", "detail": "No coordinated downtime is needed." },
+  "manual": { "status": "none", "detail": "No operator action is required. Deadline policy remains opt-in." },
+  "recovery": { "status": "changed", "detail": "Older builds do not show explicit overrides; upgrade again to restore their standing-answer view. Effects already taken on the default are never undone." }
+}

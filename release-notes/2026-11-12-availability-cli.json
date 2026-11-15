@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add `fractal availability` to show, set and clear a person's status, interruptions and deadline clock, and to report a device's raw state",
+  "replay": {
+    "status": "none",
+    "detail": "The CLI writes the existing availability claims through the client operations; nothing new is stored or replayed."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No claim, table or wire change. The command uses GET and PUT /v1/client/availability and POST /v1/client/presence."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Only a person writes their own availability; an agent, including one in a seat, is refused before any request and may only read. `--for` or `--until` applies to every axis named in one set. `clear` returns status to presence, interruptions to all and the deadline clock to run. `presence` takes only a raw device state (active, inactive, locked or sleeping) with an optional `--last-input-at` and an optional `--observed-at` (when the device saw the state, defaulting to now; the daemon refuses one older than 15 minutes or more than 2 minutes ahead of its clock); derived words (present, idle, unreported) are refused. It prints the daemon's `report_again_at`. A person with no device reporting reads as available (no device reporting)."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Needs a daemon that serves the availability client operations; against an older daemon the command fails with the daemon's not-found error and changes nothing."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup migration or service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "A person corrects availability by setting a newer value or clearing it."
+  }
+}

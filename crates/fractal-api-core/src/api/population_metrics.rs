@@ -428,10 +428,10 @@ mod tests {
         Bucket { driver: "unattributed".into(), kind: "unattributed", repo: "unattributed".into(),
             state, reason, has_work: false }
     }
-    fn attention() -> [(&'static str, u64); 10] {
+    fn attention() -> [(&'static str, u64); 11] {
         [("person-step", 0), ("human-gate", 0), ("launch-approval", 0), ("unread-message", 0),
          ("agent-request", 0), ("revision-approval", 0), ("harness-login", 0),
-         ("harness-prompt", 0), ("fault", 0), ("unattributed", 0)]
+         ("harness-prompt", 0), ("fault", 0), ("model-drift", 0), ("unattributed", 0)]
     }
 
     #[tokio::test(start_paused = true)]
@@ -677,7 +677,7 @@ mod tests {
         let occupied = BTreeMap::from([(bucket("working", "unattributed"), 17), (bucket("unknown", "unattributed"), 30)]);
         summary.publish(occupied, attention(), Instant::now(), 123).unwrap();
         assert_eq!(summary.buckets.values().map(|(count, _, _)| count).sum::<u64>(), 47);
-        assert_eq!(summary.attention.len(), 10);
+        assert_eq!(summary.attention.len(), 11);
         assert!(summary.attention.iter().all(|(_, count)| *count == 0));
         assert_eq!(summary.last_success, Some(123));
     }
