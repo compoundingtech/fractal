@@ -2452,6 +2452,13 @@ mission "garden/runtime" state="ready" {
 }"#, "runtime-mission");
         let run = start(&store, "garden/runtime", "runtime-1");
         let (_, owned) = step(&run, "plant");
+        let mut declarations = crate::graph::parse_execution_intent(
+            "version 2\nagent \"worker\" { command \"true\" }", "cedar", &run.id).unwrap();
+        for desired in declarations.subjects.values_mut() {
+            desired.owner_run = Some(run.subject.clone());
+            desired.owner_generation = Some(run.generation.clone());
+        }
+        crate::store::owned_sets_tests_shared::direct(&store, &declarations, "runtime-declaration").unwrap();
         assert_eq!(store.desired_subjects().unwrap().iter().find(|row| row.subject == owned)
             .unwrap().owner_run.as_deref(), Some(run.subject.as_str()));
         let subjects = if reverse {
