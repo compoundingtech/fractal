@@ -11650,15 +11650,10 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     // Both normal evaluation and the direct cleanup entrypoint must honor this fence.
     fn unresolved_effect_run_fence(&self, run: &MissionRunView) -> Result<Option<bool>> {
-        for step in &run.steps {
-            if self.store.step_has_unresolved_effect(&step.subject)? {
-                let changed = self.store.set_step_state(
-                    &step.subject, "blocked", Some("effect-unresolved"),
-                )?;
-                return Ok(Some(self.store.set_mission_run_state(
-                    &run.id, "blocked", &run.phase, Some("effect-unresolved"),
-                )? || changed));
-            }
+        if self.store.mission_run_has_unresolved_effect(&run.id)? {
+            return Ok(Some(self.store.set_mission_run_state(
+                &run.id, "blocked", &run.phase, Some("effect-unresolved"),
+            )?));
         }
         Ok(None)
     }

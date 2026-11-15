@@ -127,6 +127,19 @@ impl Store {
         step_has_unresolved_effect_tx(&self.readers.get(), step).map_err(internal)
     }
 
+    pub fn mission_run_has_unresolved_effect(&self, run: &str) -> Result<bool, FractalError> {
+        // Cleanup uses a lightweight run view without steps. Query the current generation
+        // directly instead of treating an empty view as evidence that no effect is fenced.
+        self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM mission_runs m
+             JOIN step_runs s ON s.run_id=m.id AND s.generation_id=m.current_generation_id
+             JOIN claims c ON c.kind='effect.unresolved'
+                 AND json_extract(c.body,'$.fields.bound_step_run')=s.subject
+             WHERE m.id=?1)",
+            [run.strip_prefix("mission-run/").unwrap_or(run)], |row| row.get(0),
+        ).map_err(internal)
+    }
+
     pub fn admit_message_effect(&self, owner: &EffectOwner, caller: &str, payload_sender: &str,
         payload_digest: &str, target: &str) -> Result<EffectAdmission, FractalError> {
         let key = effect_key(owner)?;
