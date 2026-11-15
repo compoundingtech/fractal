@@ -188,8 +188,8 @@ impl<C: Clock, R: Runner> Monitor<C, R> {
         loop {
             if let Some(error) = self.admission_error(&state) { return Err(error); }
             if state.next_refresh.is_some_and(|at| self.clock.now() < at) {
-                if !state.stale {
-                    if let Some(snapshot) = &state.snapshot { return Ok(Arc::clone(snapshot)); }
+                if !state.stale && let Some(snapshot) = &state.snapshot {
+                    return Ok(Arc::clone(snapshot));
                 }
                 return Err(anyhow!("systemd snapshot invalidated; fresh observation not yet admitted"));
             }
@@ -241,18 +241,16 @@ impl<C: Clock, R: Runner> Monitor<C, R> {
                     // Only a stale successful observation's admission boundary
                     // is waitable here. Transport/backoff errors stay prompt.
                     if self.admission_error(&state).is_some() { return Err(error); }
-                    if state.stale {
-                        if let Some(at) = state.next_refresh {
-                            let delay = at.saturating_duration_since(self.clock.now());
-                            if !delay.is_zero() {
-                                // Condvar releases the state lock during the wait;
-                                // no flight or subprocess is owned by this caller.
-                                drop(wait(state, delay));
-                            } else {
-                                drop(state);
-                            }
-                            continue;
+                    if state.stale && let Some(at) = state.next_refresh {
+                        let delay = at.saturating_duration_since(self.clock.now());
+                        if !delay.is_zero() {
+                            // Condvar releases the state lock during the wait;
+                            // no flight or subprocess is owned by this caller.
+                            drop(wait(state, delay));
+                        } else {
+                            drop(state);
                         }
+                        continue;
                     }
                     return Err(error);
                 },
@@ -312,10 +310,10 @@ impl<C: Clock, R: Runner> Monitor<C, R> {
                 output.status, String::from_utf8_lossy(&output.stderr));
             let properties = parse_properties(&output.stdout, batch)?;
             for (name, unit) in &properties {
-                if name.ends_with(".service") && unit.main_pid != 0 {
-                    if let Some(identity) = self.runner.capture_service_identity(unit.main_pid) {
-                        service_identities.insert(name.clone(), identity);
-                    }
+                if name.ends_with(".service") && unit.main_pid != 0
+                    && let Some(identity) = self.runner.capture_service_identity(unit.main_pid)
+                {
+                    service_identities.insert(name.clone(), identity);
                 }
             }
             units.extend(properties);
@@ -540,11 +538,9 @@ impl Invocation for ChildInvocation {
             self.status = self.owner.child.try_wait()?;
             if self.status.is_some() { self.owner.reaped = true; }
         }
-        if let Some(status) = self.status {
-            if self.out_done && self.err_done {
-                return Ok(Some(Output { status, stdout: std::mem::take(&mut self.out),
-                    stderr: std::mem::take(&mut self.err) }));
-            }
+        if let Some(status) = self.status && self.out_done && self.err_done {
+            return Ok(Some(Output { status, stdout: std::mem::take(&mut self.out),
+                stderr: std::mem::take(&mut self.err) }));
         }
         Ok(None)
     }

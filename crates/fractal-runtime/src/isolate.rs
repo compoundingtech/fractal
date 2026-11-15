@@ -850,7 +850,7 @@ mod tests {
         let reader = std::thread::spawn(move || {
             reader_barrier.wait();
             reader_barrier.wait();
-            assert!(held.units.get(unit).is_none());
+            assert!(!held.units.contains_key(unit));
             assert!(verify_scope_absence(unit, held.captured_at).is_err());
             assert!(!has_ended(unit));
         });
