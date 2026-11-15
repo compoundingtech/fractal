@@ -692,12 +692,15 @@ capacity counts nor the host-local authority proves value sizes.
 ### Indexed mission run summaries
 
 The `fractal_store::store` maintainer owns revised schema site
-`lv-h2c1da3f5b1d1`, replacing `lv-h0f50685697d0`. Its new
-`mission_runs_open_mission_page_index` retains existing mission ID, creation-time
-and run ID TEXT keys, restricted to nonterminal runs. The existing
-`chunk-or-reference-variable-columns` task must preserve prefix seeks, descending
-creation-time/run-ID ordering and the nonterminal predicate when those keys move
-to a bounded or referenced representation.
+`lv-h709be0a6fbc5`, replacing `lv-h2c1da3f5b1d1`. Its new
+`mission_runs_open_mission_prefix_index` retains existing mission ID, creation-time
+and run ID TEXT keys, restricted to nonterminal runs. The explicit `mission_id>=''`
+domain predicate scopes planner eligibility to prefix readers rather than changing
+the index selected by unrelated open-run queues. Schema installation builds this
+index synchronously, not online; its duration on a large store is unmeasured.
+The existing `chunk-or-reference-variable-columns` task must preserve prefix seeks,
+descending creation-time/run-ID ordering and both partial-index predicates when
+those keys move to a bounded or referenced representation.
 
 The `fractal_store::store::mission_run_query` maintainer owns
 `lv-hbc959d871d00`, `lv-h890a38462624`, `lv-hf58566f1b601` and

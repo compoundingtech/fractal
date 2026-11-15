@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Store open installs an additive partial index on non-terminal mission runs by mission ID and run ordering. Existing stores build this index once; no claim schema changes or projection replay."
+    "detail": "Store open installs a prefix-reader-scoped partial index on non-terminal mission runs by mission ID and run ordering, replacing the earlier preview index if present. Existing stores build this index once synchronously, not online; large-store installation duration is unmeasured. No claim schema changes or projection replay."
   },
   "rules": {
     "status": "none",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "Normal binary restart only."
+    "detail": "Normal binary restart includes synchronous first-open index construction; large-store installation duration is unmeasured."
   },
   "manual": {
     "status": "none",

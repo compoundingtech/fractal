@@ -833,7 +833,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2c1da3f5b1d1 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h709be0a6fbc5 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1294,10 +1294,12 @@ ON mission_runs(root_run_id, created_at_unix_ms, id);
 -- OPEN_MISSION_RUN, which queries repeat so the planner uses this index.
 CREATE INDEX IF NOT EXISTS mission_runs_open_index ON mission_runs(created_at_unix_ms, id)
 WHERE status NOT IN ('completed','failed','cancelled');
--- Additive migration for prefix-scoped active run queries on existing stores.
-CREATE INDEX IF NOT EXISTS mission_runs_open_mission_page_index
+-- Scope this partial index to explicit mission-key range readers. Without the
+-- domain term, unrelated open-run queue reads can choose its differently ordered scan.
+DROP INDEX IF EXISTS mission_runs_open_mission_page_index;
+CREATE INDEX IF NOT EXISTS mission_runs_open_mission_prefix_index
 ON mission_runs(mission_id, created_at_unix_ms DESC, id DESC)
-WHERE status NOT IN ('completed','failed','cancelled');
+WHERE mission_id>='' AND status NOT IN ('completed','failed','cancelled');
 
 CREATE TABLE IF NOT EXISTS mission_run_deadlines (
     run_id TEXT PRIMARY KEY REFERENCES mission_runs(id),

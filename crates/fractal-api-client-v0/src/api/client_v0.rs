@@ -10426,7 +10426,7 @@ mod tests {
         let response: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(response["value"], json!({"runs": [], "truncated": false}));
         assert_eq!(response["snapshot"]["store_index"], pinned_index);
-        assert_eq!(response["snapshot"]["host_id"], state.node);
+        assert_eq!(response["snapshot"]["host_id"], client_host_id(&state.node));
         assert_eq!(response["request_id"], "request/mission-runs-envelope");
         assert!(response["snapshot"]["created_at"].is_string());
         assert!(response["value"].get("snapshot").is_none());

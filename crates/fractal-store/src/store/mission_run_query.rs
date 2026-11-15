@@ -4,7 +4,7 @@ use super::*;
 macro_rules! run_query {
     ($end:literal, $active:literal) => {
         concat!(
-            "SELECT r.id,r.mission_id,g.revision,r.status,r.phase,r.created_at_unix_ms,r.updated_at_unix_ms,r.current_generation_id FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id WHERE r.mission_id>=?1 ",
+            "SELECT r.id,r.mission_id,g.revision,r.status,r.phase,r.created_at_unix_ms,r.updated_at_unix_ms,r.current_generation_id FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id WHERE r.mission_id>=?1 AND r.mission_id>='' ",
             $end, $active,
             " ORDER BY r.mission_id,r.created_at_unix_ms DESC,r.id DESC LIMIT ?3"
         )
