@@ -4,6 +4,7 @@ use super::*;
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h34f56ac109e6 owner=fractal_store::store::input_history TODO=chunk-or-reference-variable-columns */
         "CREATE INDEX IF NOT EXISTS input_history_author_agent ON claims(
          actor,json_extract(body,'$.fields.to'),printf('%039s',accepted_at_unix_ms) DESC,subject DESC,id DESC)
          WHERE kind='message.sent' AND json_extract(body,'$.fields.from')=actor;
@@ -88,7 +89,7 @@ impl Store {
         anyhow::ensure!((1..=200).contains(&query.limit), "history window must be 1 through 200");
         anyhow::ensure!(query.conversation.is_none_or(|id| !id.is_empty()), "empty conversation");
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&SQL[usize::from(query.conversation.is_some())])?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h84e689b7b7df owner=fractal_store::store::input_history TODO=trace-statement-and-value-representation */ &SQL[usize::from(query.conversation.is_some())])?;
         let candidates = statement.query_map(params![query.person,query.agent,query.through,
             query.before.map_or("\u{10ffff}", |c|c.accepted_order.as_str()),
             query.before.map_or("", |c|c.message_id.as_str()),

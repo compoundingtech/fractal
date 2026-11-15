@@ -42,7 +42,7 @@ fn frozen_membership_current_repairs_and_authorization_errors() {
     let second=store.append_claim(&sent("message/second","person/ada","agent/worker","session/one")).unwrap();
     let q=Query {limit:200,..query(&store)};
     store.append_claim(&sent("message/later","person/ada","agent/worker","session/one")).unwrap();
-    store.connection.write().execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&second.id]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2c2001d69ecf owner=fractal_store::store::input_history::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&second.id]).unwrap();
     let page=store.input_history_candidates(&q, |_|Ok(true)).unwrap();
     assert_eq!(page.entries.iter().map(|e|&e.claim_id).collect::<Vec<_>>(),vec![&first.id]);
     assert!(store.input_history_candidates(&q, |_|anyhow::bail!("source authorization unavailable")).is_err());
@@ -64,7 +64,7 @@ fn indexed_seek_work_does_not_grow_with_other_conversations_or_receipts() {
     fn steps(store:&Store, conversation:Option<&str>) -> i32 {
         let connection=store.readers.get();
         let sql=&SQL[usize::from(conversation.is_some())];
-        let mut statement=connection.prepare(sql).unwrap();
+        let mut statement=connection.prepare(/* sqlite-large-value: allow-for-now lv-h5a5cc8c639cc owner=fractal_store::store::input_history::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         let rows=statement.query_map(params!["person/ada","agent/worker",i64::MAX,"\u{10ffff}","","",conversation,3],|r|r.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(rows,vec!["message/kept"]);
         assert_eq!(statement.get_status(rusqlite::StatementStatus::FullscanStep),0);
@@ -104,11 +104,11 @@ fn canonical_subject_winners_and_order_survive_opposite_replication() {
     sync(&right,&reverse); sync(&left,&reverse);
     let rows=|store:&Store|store.input_history_candidates(&Query {limit:200,..query(store)}, |_|Ok(true)).unwrap().entries;
     assert_eq!(rows(&forward),rows(&reverse));
-    let winner=forward.readers.get().query_row(&message_sent::graph_sent_claim(),["message/same"],claim_from_row).unwrap();
+    let winner=forward.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-hb40613939937 owner=fractal_store::store::input_history::tests TODO=trace-statement-and-value-representation */ &message_sent::graph_sent_claim(),["message/same"],claim_from_row).unwrap();
     for store in [&forward,&reverse] {
         let page=store.input_history_candidates(&Query {person:winner.actor.as_deref().unwrap(),limit:200,..query(store)}, |_|Ok(true)).unwrap();
         assert_eq!(page.entries.iter().filter(|e|e.message_id=="message/same").map(|e|&e.claim_id).collect::<Vec<_>>(),vec![&winner.id]);
-        store.connection.write().execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&winner.id]).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hcf630123788a owner=fractal_store::store::input_history::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&winner.id]).unwrap();
         for person in ["person/ada","person/other"] {
             assert!(store.input_history_candidates(&Query {person,limit:200,..query(store)}, |_|Ok(true)).unwrap().entries.iter().all(|e|e.message_id!="message/same"));
         }

@@ -689,3 +689,24 @@ TODO is to bound or reference bodies and account for their cleanup without
 weakening fencing or releasing uncertain execution custody. Neither queue order,
 capacity counts nor the host-local authority proves value sizes.
 
+### Composer history source headers
+
+`fractal_store::store::input_history` owns schema site `lv-h34f56ac109e6`
+and dynamic seek sink `lv-h84e689b7b7df`. The two derived indexes retain author,
+recipient, optional session, accepted-time and source identity keys; no prompt
+body is copied. Their variable identifier keys remain inline to preserve
+ordered source seeks, but identifier byte sizes and total index costs are not
+proven bounded. The schema TODO is to chunk or reference those variable keys;
+the seek TODO is to trace the selected static template and its bound cursor,
+scope and identity values through that representation change.
+
+`fractal_store::store::input_history::tests` owns repair insertion sites
+`lv-h2c2001d69ecf` and `lv-hcf630123788a`, dynamic seek sink
+`lv-h5a5cc8c639cc` and canonical-winner sink `lv-hb40613939937`. These bind
+source claim identifiers or execute the production templates on synthetic
+fixtures; a fixed fixture count is not a general value-size proof. Their TODOs
+retain repair-key cleanup and production-template/value tracing obligations.
+The inventory records these as real SQL-template/unresolved-sink registrations;
+the current guard additionally requires adjacent allow-for-now markers for
+every registration and supports no permanent size exemption.
+
