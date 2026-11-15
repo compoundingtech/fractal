@@ -1,8 +1,15 @@
 # Conversation timeline blocks
 
-Fractal shows in a conversation what the harness shows in its terminal, normalized for
-the terminal UI, web and phone without token filtering, secret scrubbing or allow-lists.
-Access checks still apply. Only reasoning the harness exposes is shown.
+Fractal retains native harness records independently from its conversation presentation.
+The terminal UI, web and phone share one normalized semantic display contract:
+conversation is a projection, not a native event log. Access checks still apply;
+only reasoning the harness exposes is available.
+
+The **versioned semantic projection** below is the approved target contract.
+The existing `conversation-blocks.v1` implementation remains the legacy baseline
+until each consumer migrates. This specification replaces the former policy that
+unknown native records receive visible JSON transcript rows; it does not claim
+that the implementation has already completed that cutover.
 
 ## One display contract
 
@@ -20,26 +27,21 @@ notices. Optional `block.metadata` is an open JSON
 object for source-supplied timing (including `wallTimeMs` and `timeoutSeconds`),
 preserving original names, units, values and future fields. Native tool-result details
 and assistant text/reasoning metadata use that same shape.
-Unknown uses `payload: {raw: <original JSON>}` and retains the native type and role
-when supplied. Future fields and full structured tool arguments survive; unknown
-blocks have a readable JSON view. A `source_record` block with the `internal`
-visibility hint retains the entire parsed native record, including fields unused by
-the typed projection. A `document` block carries the original Claude document,
-rather than only a placeholder. The optional open-string `visibility` field is a
-UI hint (`visible` by default, `internal`, or `hidden-by-harness`), never a read-scope
-restriction. Unknown role means unknown attribution, not omission.
+Unknown retains `payload: {raw: <original JSON>}`, the native discriminator and
+source attribution without inventing a speaker. Future fields and full structured
+tool arguments survive. Raw JSON is available through explicit inspection, never
+as synthesized conversation prose. A `source_record` block with the `internal`
+visibility hint retains the entire parsed native record, including unused fields.
+A `document` retains the original Claude document. Legacy `visibility` is an open
+UI hint, not a read-scope restriction; the versioned projection derives default
+disposition from semantic category. Unknown attribution does not authorize omission.
 
-Fractal Web ignores source records when classifying content visibility. If every
-presentation block is internal/hidden-by-harness, it retains an inspectable event,
-hidden by default, named after the primary block's typed view when available.
-Mixed visible/internal bodies instead keep a quiet, visible-by-default
-“Message with internal records · Show” disclosure; raw body data appears only on
-expansion. Native text blocks may only reference `body.text` via `body_ref`, so
-mixed bodies cannot safely reconstruct visible prose until blocks carry per-block
-text or body ranges. Unspecified visibility retains its existing visible behavior.
-This is defensive schema coverage: at producer revision `25d9c8000`, OMP
-`push_omp_content` emits ordinary text parts as separate entries, and no producer
-of mixed visible/internal presentation blocks has been demonstrated.
+In the legacy implementation, Web ignores source records when classifying visibility,
+hides all-internal bodies behind inspection, and uses a disclosure for mixed bodies.
+Text blocks referencing the whole `body.text` cannot safely separate mixed prose
+from administrative JSON. The versioned projection requires per-block text or typed
+fields: it MUST NOT reconstruct visible prose from a mixed raw fallback body.
+This requirement applies to all surfaces, not only Web.
 
 Malformed JSON, unfinished tail lines, blank lines and unknown encodings become
 `raw_text` blocks. Their payload has `encoding: "base64"`, `bytes` containing the
@@ -53,8 +55,9 @@ A torn prefix can produce both a raw block and a recovered typed record.
 
 The sole omission table is `omission_reason` in
 `crates/fractal-store/src/external_sessions.rs`: one named match arm per permitted type with
-an explicit reason. It omits only the four categories below. Nothing else may be
-dropped by a parser branch: an otherwise empty projection falls back to raw JSON.
+an explicit reason. It omits only the four categories below. Every other source
+record MUST be retained with an explicit semantic outcome, including Unknown when
+unclassified; an empty reading-lane projection is not permission to drop the record.
 The coverage test uses harness-specific native record fixtures, the redacted OMP
 resume/tool captures (also exercising Pi’s shared format), and message/part objects
 from the OpenCode 1.18.34 admission capture. It fails if an empty result has no
@@ -75,7 +78,7 @@ direct owner reads. Fixture provenance is in `crates/fractal-daemon/fixtures/nat
 | OpenCode `snapshot` | Retain raw; visibility is not established across releases. |
 | Claude documents | Retain the complete document payload, with a readable document fallback. |
 | Malformed/partial/unknown-encoding input | Retain exact bytes as a `raw_text` block; never silently skip a tail line. |
-| Any unknown record/block/role | Retain original JSON and original attribution with a visible unknown label. |
+| Any unknown record/block/role | Retain original JSON and source attribution; count as Unknown and expose ordered inspection, not a raw transcript row. |
 
 These decisions avoid silent per-type exclusions. Bounded native input windows and
 read failures still produce visible size/read notices; they are transport
@@ -84,19 +87,163 @@ OpenCode items whose native rows fit the input bound receive bounded display stu
 and full owner continuations. Rows exceeding that bound produce explicit
 not-fetchable notices, rather than disappearing or acquiring unusable refs.
 
-The normalizer in `crates/fractal-store/src/external_sessions.rs` retains exposed reasoning and
-image references. A 512-character unknown excerpt is a UI preference only. Native
-transcript formats remain authoritative.
+The normalizer retains exposed reasoning and image references. Native transcript
+formats remain authoritative; JSON previews and excerpt limits apply only to
+inspection. The retention audit above does not determine reading-lane visibility.
+
+## Versioned semantic projection
+
+### Categories and default disposition
+
+Adapters MUST classify each retained native record or independently identified part.
+Known native discriminators use explicit typed mappings; input and wire decoders
+remain open to future discriminators and fields. Category is not inferred from
+`[omp ...]`, XML wrappers or any other conversation-text prefix.
+
+| Category | Default presentation | Examples |
+| --- | --- | --- |
+| Conversation | Reading lane, with existing reasoning/image/document controls | Human/model text, visible extension messages, supplied summaries |
+| Tool activity | Existing folded invocation/result controls | Tool calls, correlated outputs, jobs/subagents and historical asks |
+| Actionable notice | Quiet typed row or live authorized question control | Rule applied, model/context change, session failure, approval required |
+| Usage | Compact usage indicator; no per-record reading-lane row | OMP `model_usage`, request token/cost facts |
+| Internal activity | Counted, ordered inspector; no prose row | Session initialization, title/header bookkeeping, credential pin |
+| Unknown | Distinct counted disclosure and ordered inspector; no prose row | Unclassified type/subtype/role or unsupported semantic category |
+| Source diagnostic | Visible bounded diagnostic, with authorized source inspection | Malformed bytes, unavailable/truncated input, invalid required native fields |
+
+Known administrative data MUST NOT become Conversation merely because its view
+is unsupported. OMP `session_init` is Internal activity; `title_change` updates
+header state; `ttsr_injection` remains a quiet Rule applied notice, never rule
+text dumped into prose. Errors and unanswered permissions MUST NOT disappear
+under a blanket telemetry/internal filter. A source `display:false` hint remains
+available and cannot promote hidden native content into the reading lane.
+Source records and inspection references are not extra conversation rows.
+Pi/OMP `custom_message` has explicit native display intent (`CustomMessageEntry.display`:
+OMP `packages/coding-agent/src/session/session-entries.ts:323-332`). An otherwise
+unknown, valid `customType` is Conversation only with `display: true`; false or absent
+display leaves it counted, inspectable Unknown. Known tool/notice subtypes retain their
+explicit categories. Missing, null or non-string required type/subtype/role discriminators
+are Source diagnostic, not the future-string fallback.
+
+One source record may yield several semantically distinct parts, or no reading-lane
+rows. Each part MUST have stable identity, source linkage and its own display
+text/typed fields. Unknown attribution remains unknown; embedded Claude request
+roles MUST NOT turn bookkeeping into the person's words.
+
+### Counts, inspection and source identity
+
+Unknown is retained data whose meaning is not classified, not a synonym for safe
+bookkeeping. Its visible disclosure MUST distinguish it from Internal activity.
+Counts identify scope: `loaded window` unless the owner supplies a complete
+session total. Partial source coverage, unavailable history or transport limits
+MUST be shown; a zero count for an incomplete window is not a whole-session claim.
+
+Count distinct stable source-record/part identities once per category; retransmitted
+frames, continuation expansion and page overlap MUST NOT inflate counts. Multiple
+Unknown parts of one record require explicit part identities, not row-position IDs.
+Inspection preserves source order, discriminator, harness, attribution, native
+timestamp, source identity and available raw payload/bytes. Existing access checks,
+bounded previews and owner continuation validation apply to every inspection.
+Denied, expired or unavailable source is explicit, never an empty successful view.
+
+Pagination remains source-based. A page containing only non-reading-lane events
+MUST still advance its cursor; filtering MUST NOT skip source identities or require
+rescanning the entire transcript per frame. Mixed blocks retain real prose without
+exposing neighboring raw payloads. Show-everything is an explicit reversible debug
+view, not the normal reading lane and not an authorization bypass.
+
+### Usage indicator
+
+The indicator exposes only source-supplied normalized facts: input/output/cache
+tokens, total tokens and monetary cost with currency when supplied. Each metric
+carries its units, coverage scope and completeness; unavailable is not zero.
+Native explicit zero remains zero. Estimates and model/provider attribution remain
+identified; unsupported metrics stay absent rather than being fabricated.
+
+Adapters MUST distinguish per-request deltas from cumulative snapshots and supply
+stable request/counter identity. Request retries, fallback/auxiliary model calls,
+assistant metadata and standalone usage records MUST NOT double count one fact.
+Cumulative snapshots replace their counter state; independent deltas accumulate
+once. If correlation or semantics are unknown, expose unaggregated inspectable
+facts and unavailable aggregate rather than summing arbitrary JSON numbers.
+Loading older pages and reconnecting MUST NOT inflate totals. Visible values label
+loaded-window versus complete-session scope and retain source links for inspection.
+This contract supersedes blind summation of legacy header cost metadata.
+
+### Schema evolution and shared ownership
+
+One schema authority owns semantic category, disposition, source identity,
+counter semantics and projection revision. Generate client definitions from it;
+Rust, Web and iOS MUST use the same language-neutral conformance vectors.
+Layout remains surface-specific. Independent harness-type allowlists or raw-text
+fallback parsers in each renderer are not alternative semantic authorities.
+
+CI MUST inventory observed fixture discriminators by harness, type and relevant
+subtype/role, and fail on an unclassified discriminator or unjustified empty
+adapter outcome. Synthetic future-type vectors explicitly expect Unknown.
+Additive fields MUST survive without failing classification. Fixture provenance
+MUST distinguish real redacted captures from constructed contract examples.
+Runtime MUST retain Unknown and continue the session rather than reject the
+whole transcript on a new native type. Bounded local compatibility counters may
+record harness/version/type/adapter revision, never prompts or raw payloads.
+Remote telemetry requires a separate privacy decision.
+
+### Projection revision, rebuild and compatibility boundary
+
+The semantic projection capability MUST be distinct from `conversation-blocks.v1`.
+Responses identify the selected projection revision; clients request only revisions
+they implement. Native bytes/IDs are authoritative; normalized items are derived.
+Projection revision MUST participate in fold/cache identity and page-cursor
+validation. Changing it deterministically rebuilds projections from retained native
+records, invalidates obsolete cursors with explicit resync, and preserves source
+identity/order and authorization. It MUST NOT rewrite native transcript history.
+Process-local caches clear on restart; persistent or hot-reconfigured projections
+MUST NOT reuse stale items merely because source bytes are unchanged.
+
+All supported consumers MUST migrate before removing their old-capability path.
+Supported legacy readers receive safe typed-derived readable fallback: actual
+conversation text and bounded semantic notices, never serialized administrative or
+unknown payloads as prose. Unsupported readers receive an explicit upgrade refusal
+before incompatible decoding; closed legacy top-level enums MUST NOT receive new
+unnegotiated kinds. Exact minimum reader versions belong to the generated client
+compatibility matrix when this capability ships, not an invented version here.
+No indefinite raw-as-prose bridge remains after that boundary. Raw inspection and
+authorized source continuations remain available independently of reader layout.
+
+### Required conformance vectors
+
+Every surface MUST exercise identical expected categories, default reading items,
+usage facts, scoped counts and source-inspection identities for these vectors:
+
+| Vector | Required assertion |
+| --- | --- |
+| Real redacted OMP admin capture | Usage outside prose; init internal; title updates header; quiet rule notice |
+| Claude/Codex native-shape contract fixtures | Explicit bookkeeping/mirror classification, no false speaker or duplicated prose |
+| Literal `[omp model_usage]` in actual message text | Preserved as conversation, never prefix-filtered |
+| Synthetic future type/category/role and additive fields | Counted Unknown; runtime continues; raw retained; extra fields survive |
+| Missing required fields and malformed/torn bytes | Explicit diagnostic and exact bytes; valid recovered record not lost |
+| Mixed text/internal/unknown blocks | Real prose retained independently; correct distinct counts and inspection |
+| Usage delta/snapshot/retry/duplicate/absent/zero | Correct deduplication, scope and units; unavailable never fabricated zero |
+| Page overlap, invisible-only page, reconnect and session switch | Stable source cursor/counts; no duplication or cross-session state |
+| Revision change with unchanged native input | Rebuild, explicit cursor expiry/resync, native identities preserved |
+| Continuation denied/expired/oversized and old/new readers | Honest bounds/access outcomes and negotiated compatibility |
+
+Parser retention tests alone are insufficient. Producer vectors, Rust/TypeScript
+projection tests and fixture-driven TUI/Web/iOS captures MUST prove the normal lane
+contains no synthesized native JSON. Explicit debug/export paths MUST still recover
+the authorized original record. Migration is complete only when obsolete raw
+fallback synthesis and per-surface native-envelope inference are removed.
+
 
 ## Typed views and conversation header
 
-Typed views and the header are additive and optional, on top of the block contract, so an
-old client ignores the new fields and keeps the existing text fallback. A block MAY
+Legacy typed views are additive and optional on `conversation-blocks.v1`; old clients
+ignore unfamiliar fields. Versioned semantic readers instead use category disposition
+and the compatibility boundary above, never a raw-as-prose fallback. A block MAY
 carry `view: {type: <string>, ...}`; `type` is an open discriminator, and the client-v0
 schema encodes one closed definition per known `view.type` (`TimelineView*` in
 `docs/st3/client-v0/schemas/client-v0.schema.json`) plus a `TimelineView` fallback
-branch that accepts any other type string. A renderer that does not know a type
-renders the block as it does a block without a view. `view` holds parsed fields only;
+branch that accepts any other type string. An unfamiliar view uses its known semantic
+category or Unknown, not serialized native prose. `view` holds parsed fields only;
 the full native arguments or output stay in `payload`, without changing the block contract. Raw JSON
 stays available for every record, `view` is computed per record and deterministic,
 and the fold caches it with the entry. Generated Rust, Swift and TypeScript clients
@@ -216,7 +363,8 @@ precedence when supplied. The current `conversation_header::register_value` adap
 returns `None`, so headers contain transcript-derived fields and omit `working`. A
 field is absent when its source supplies no value. Transcript derivation uses the
 normalized block metadata: model = last `metadata.model`; context = last
-`metadata.context_tokens`; cost = sum of `metadata.usage.cost_usd` in the window;
+`metadata.context_tokens`; legacy cost = sum of `metadata.usage.cost_usd` in the window
+(versioned readers use the usage-indicator deduplication/scope contract instead);
 todos = last todo tool_output view, else the last todo call; jobs = latest state per
 job id from job blocks and hub outputs, keeping non-terminal ones; subagents = task
 outputs whose status is not terminal; ask = the last ask call without a matching
@@ -240,12 +388,12 @@ explicit named filter set. `DEFAULT_FILTERS` selects harness-markup, context-blo
 control-character, internal-block and excerpt filters. This keeps terminal UI and the
 phone's familiar delivery/task/command display shapes, folded tools/mail and
 heartbeat/usage suppression, while new reasoning, image/link, document,
-job/subagent/ask/status and unknown blocks have readable fallbacks. Default filters
+job/subagent/ask/status blocks have readable typed controls. Legacy filters
 hide XML reasoning/internal/system-reminder/tool wrappers, setup context wrappers
 (permissions, environment, collaboration, skills, app/plugin and command metadata),
-control characters and `internal`/`hidden-by-harness` block payloads; unknown text
-has a visibly marked 512-character excerpt. Diagnostic and tool display bounds
-remain UI choices. These operations act only on a presentation copy.
+control characters and `internal`/`hidden-by-harness` payloads. Versioned readers
+apply semantic disposition before layout: Unknown has a counted inspector rather
+than an excerpted prose row. Bounds remain presentation-only choices.
 
 `SHOW_EVERYTHING` is the empty filter set: every entry, including message metadata,
 usage/status, original JSON blocks and raw byte payloads, is rendered as reversible
@@ -379,12 +527,12 @@ explicit notices for unavailable content.
 
 Existing terminal UI/iOS clients retain their negotiated capabilities. Swift decodes a closed
 `TimelineType` enum, so sending new top-level kinds to old clients is breaking.
-Advertise/negotiate blocks and chunk fetch; retain existing entry types and complete
-text/JSON fallbacks with explicit transport truncation notices for legacy clients.
-New clients render reasoning, full expandable arguments/results, unknown JSON,
-images, jobs/subagents, asks and availability consistently. Old clients keep their
-known text/tool/status behavior; they do not gain image fetch or new interactive
-rendering. An incompatible wire change requires rejecting an old client.
+Advertise/negotiate blocks, chunk fetch and semantic projection revision. Supported
+old clients retain their known text/tool/status shapes through safe typed-derived
+fallbacks, not native JSON. New clients apply the category/count/usage contract;
+they inspect unknown JSON only explicitly. Unsupported readers are refused before
+an incompatible wire response. Removing legacy paths requires the supported-reader
+matrix and all-surface conformance vectors above.
 
 ## Collection timeline frames
 
