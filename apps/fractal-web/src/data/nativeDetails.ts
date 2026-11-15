@@ -4,6 +4,7 @@ import type { DetailsOverview, DetailsReadFailure, DetailsSection, DetailsSpendR
 import type { SyncStatus } from '@fractal/ui/assistant-ui/sync-status'
 import { DateTime, Duration, Option } from 'effect'
 import { earliestChange } from '@fractal/ui/human-time/format'
+import { agentDisplayName } from './agentName.ts'
 import { contextOccupancy } from './contextOccupancy.ts'
 import { credentialExpiredMessage, credentialNotice, type Agent, type Feed } from './source.ts'
 import type { NativeDeclarations } from './nativeDeclarations.ts'
@@ -244,7 +245,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     projected?.usage._tag === 'Known' && projected.usage.value.context !== undefined ? DateTime.toEpochMillis(projected.usage.value.context.observed_at_unix_ms) : undefined,
   ])
   return {
-    overview: { title: row?.name, status: projected?.status, activity: projected?.activity, machine: projected?.host, harness: projected?.harness, model, mission,
+    overview: { title: row === undefined ? undefined : agentDisplayName({ id: row.id, name: row.name }), status: projected?.status, activity: projected?.activity, machine: projected?.host, harness: projected?.harness, model, mission,
       durations: [
         { label: 'Session elapsed', value: timingPending ? 'Loading' : timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs), pending: timingPending, ...(timing.elapsedMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
         { label: 'Session age', value: timingPending ? 'Loading' : timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs), pending: timingPending, ...(timing.sessionAgeMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },

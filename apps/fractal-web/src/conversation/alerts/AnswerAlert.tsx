@@ -11,6 +11,7 @@ import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../..
 import { DecisionMore, type DecisionSubject } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionMore.tsx'
 import type { IconName } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
+import { agentDisplayName } from '../../data/agentName.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
@@ -53,7 +54,7 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
           {preview.steps.map((step) => (
             <li key={step.path}>
               {step.title}
-              {Option.isSome(step.assignee) ? <span {...stylex.props(styles.soft)}> · {step.assignee.value.replace(/^agent\//, '')}</span> : null}
+              {Option.isSome(step.assignee) ? <span {...stylex.props(styles.soft)}> · <span title={step.assignee.value}>{agentDisplayName({ id: step.assignee.value })}</span></span> : null}
               {step.depends.length > 0 ? <span {...stylex.props(styles.soft)}> · after {step.depends.join(', ')}</span> : null}
             </li>
           ))}
@@ -61,7 +62,7 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
       ) : null}
       {preview.agents.length > 0 ? (
         <div {...stylex.props(styles.soft)}>
-          Agents: {preview.agents.map((agent) => `${agent.id.replace(/^agent\//, '')}${Option.isSome(agent.host) ? ` on ${agent.host.value}` : ''}${Option.isSome(agent.worktree) ? ` in ${agent.worktree.value}` : ''}`).join('; ')}
+          Agents: {preview.agents.map((agent, index) => <React.Fragment key={agent.id}>{index > 0 ? '; ' : null}<span title={agent.id}>{agentDisplayName({ id: agent.id })}</span>{Option.isSome(agent.host) ? ` on ${agent.host.value}` : null}{Option.isSome(agent.worktree) ? ` in ${agent.worktree.value}` : null}</React.Fragment>)}
         </div>
       ) : null}
       <div {...stylex.props(styles.soft)}>

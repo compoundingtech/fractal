@@ -53,6 +53,8 @@ const port = Number(process.env.PREVIEW_PORT ?? 5317)
 const instance = 'threadspreview'
 const person = 'person/avery'
 const agents = { atlas: 'agent/example/atlas', manager: 'agent/example/manager' }
+// Each seat declares its display name; without one the daemon labels a seat by its path.
+const seatNames = { atlas: 'Atlas', manager: 'Manager' }
 const mission = 'example/release-notes'
 const unit = 'threadspreview-fractal-up'
 const home = join(root, 'home')
@@ -185,8 +187,8 @@ async function up() {
   if (!existsSync(marker('declared'))) {
     // Program seats exist in the roster and run; they never write on their own.
     const seats = join(root, 'seats.kdl')
-    writeFileSync(seats, ['version 2', ...Object.values(agents).map((agent) =>
-      `agent "${agent.slice('agent/'.length)}" {\n  workspace "${join(root, 'workspace')}"\n  argv "${sleep}" "infinity"\n}`)].join('\n') + '\n')
+    writeFileSync(seats, ['version 2', ...Object.entries(agents).map(([key, agent]) =>
+      `agent "${agent.slice('agent/'.length)}" {\n  name "${seatNames[key]}"\n  workspace "${join(root, 'workspace')}"\n  argv "${sleep}" "infinity"\n}`)].join('\n') + '\n')
     fractal(['apply', seats, '--as', person])
     const missionFile = join(root, 'mission.kdl')
     writeFileSync(missionFile, `version 2

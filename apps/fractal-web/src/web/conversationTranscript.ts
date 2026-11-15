@@ -11,6 +11,7 @@ import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import { Schema } from 'effect'
 import { ConversationItem, type RunStatus, type SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
+import { agentDisplayName, shortAgentName } from '../data/agentName.ts'
 import { credentialExpiredMessage, credentialExpiredTitle, type ConversationPage, type Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
 import { toolKindFor } from '../conversation/toolClassification.ts'
@@ -165,9 +166,10 @@ export const participantName = (ref: string | undefined, names: TranscriptTurnOp
   if (ref === undefined || ref === '') return undefined
   if (ref.startsWith('daemon/')) return { label: 'Fractal', ref }
   const named = names?.(ref)
+  if (ref.startsWith('agent/')) return { label: agentDisplayName({ id: ref, name: named }), ref }
   if (named !== undefined && named !== '') return { label: named, ref }
   if (ref.startsWith('person/')) return { label: ref.slice('person/'.length), ref }
-  return { label: ref.split('/').filter(part => part !== '').at(-1) ?? ref, ref }
+  return { label: shortAgentName(ref), ref }
 }
 
 /**

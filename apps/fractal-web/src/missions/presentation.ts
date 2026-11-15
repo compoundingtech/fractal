@@ -3,6 +3,7 @@ import type { DecodedAgent } from '@fractal/sdk/read'
 import { DateTime, Option } from 'effect'
 import type { MissionEta } from '../../../../packages/fractal-ui/src/assistant-ui/MissionEta.tsx'
 
+import { agentDisplayName } from '../data/agentName.ts'
 import { leafText } from '../data/projections.ts'
 import { missionDisplayTitle } from './missionTitle.ts'
 import type { MissionWord } from './missionWords.ts'
@@ -96,7 +97,7 @@ export const presentMission = ({
 }): MissionPresentation => {
   const row = mission as Row
   const work = missionSteps(row)
-  const label = (id: string) => agents.find((agent) => agent.id === id)?.name ?? id.replace(/^agent\//, '')
+  const label = (id: string) => agentDisplayName({ id, name: agents.find((agent) => agent.id === id)?.name })
   const gates = attention.filter((item) => item.state === 'open' && item.attention_kind === 'human-gate')
   const gated = new Set(gates.map((item) => item.source_id as string))
   const decision = gates.some((item) => item.mission_id === mission.id)
@@ -131,8 +132,8 @@ export const presentMission = ({
       const busy = queuing?.current_work?.[0]
       const note = queuing !== undefined
         ? busy !== undefined && !broken(queuing)
-          ? `queued for ${queuing.name}, which is busy with ${Option.getOrUndefined(busy.title) ?? busy.path}`
-          : `queued for ${queuing.name}, which is ${leafText(queuing.state)}`
+          ? `queued for ${label(queuing.id)}, which is busy with ${Option.getOrUndefined(busy.title) ?? busy.path}`
+          : `queued for ${label(queuing.id)}, which is ${leafText(queuing.state)}`
         : ['waiting', 'blocked'].includes(step.state) ? Option.getOrNull(step.blocked_reason) : null
       return {
         id: step.id,
@@ -177,7 +178,7 @@ export const presentMission = ({
       word: stepWord(stuckStep, gated),
       attempts: stuckStep.attempt,
       blockers: stuckStep.blockers ?? [],
-      agent: stuckAgent === undefined ? stuckSeat === undefined ? null : { id: stuckSeat, label: label(stuckSeat), state: 'unknown' } : { id: stuckAgent.id, label: stuckAgent.name, state: leafText(stuckAgent.state) },
+      agent: stuckAgent === undefined ? stuckSeat === undefined ? null : { id: stuckSeat, label: label(stuckSeat), state: 'unknown' } : { id: stuckAgent.id, label: label(stuckAgent.id), state: leafText(stuckAgent.state) },
     },
     progress: { done: work.filter((step) => step.state === 'completed').length, total: work.length },
     last_progress: inHand === undefined ? null : Option.getOrNull(inHand.last_progress),

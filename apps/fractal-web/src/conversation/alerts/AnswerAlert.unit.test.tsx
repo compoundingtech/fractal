@@ -203,10 +203,23 @@ describe('AnswerAlert', () => {
 
   it('shows who asks, the step it holds and how long it waited, with its answers', () => {
     const html = renderToStaticMarkup(<AnswerAlert alert={item({ blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={sent} now={now} />)
-    expect(html).toContain('example/atlas · Request · step build · waited 5m')
+    expect(html).toContain('>atlas · Request · step build · waited 5m')
     expect(html).toContain('The parser now accepts trailing commas.')
     expect(html).toContain('Yes')
     expect(html).toContain('>Nothing to do<')
+  })
+
+  it('names who asks by the served name, never by the raw id or its path', () => {
+    const meta = (raised_by: { id: string; label: string } | null) => renderToStaticMarkup(<AnswerAlert alert={item({
+      blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 },
+      presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: raised_by === null ? Option.none() : Option.some(raised_by), waiting: null },
+    })} onAct={sent} now={now} />)
+    expect(meta({ id: seat, label: 'Atlas' })).toContain('>Atlas · Request · step build')
+    // A seat with no declared name is labelled by its path; that is not a name.
+    for (const html of [meta({ id: seat, label: 'example/atlas' }), meta({ id: seat, label: seat }), meta(null)]) {
+      expect(html).toContain('>atlas · Request · step build')
+      expect(html).not.toContain('example/atlas')
+    }
   })
 
   it('says how long is left before an ask resolves by itself and what then applies', () => {
@@ -259,10 +272,12 @@ describe('AnswerAlert', () => {
 
   it('shows what a launch would start, or why it has nothing to approve', () => {
     const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', title: 'Launch nightly', actions: ['launch.approve'], preview: Option.some(preview) })} onAct={sent} now={now} />)
-    expect(html).toContain('example/atlas · Launch approval')
+    expect(html).toContain('>atlas · Launch approval')
     expect(html).toContain('Launch nightly')
     expect(html).toContain('Review it<span> · after build</span>')
-    expect(html).toContain('Agents: example/builder on example-host')
+    expect(html).toContain('Build it<span> · <span title="agent/example/builder">builder</span></span>')
+    expect(html).toContain('Agents: <span title="agent/example/builder">builder</span> on example-host')
+    expect(html.replaceAll('title="agent/example/builder"', '')).not.toContain('example/builder')
     expect(html).toContain('Gates: 1 for a person, 2 automated')
     expect(html).toContain('Approve launch')
     const none = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', detail: 'The mission file does not parse.', actions: ['launch.approve'], preview: Option.none() })} onAct={sent} now={now} />)

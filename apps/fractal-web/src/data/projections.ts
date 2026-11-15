@@ -17,6 +17,7 @@ import * as Schema from 'effect/Schema'
 import type { MissionView, ProposedMissionFields } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { isWaitingForAnswer } from './attention.ts'
+import { agentDisplayName } from './agentName.ts'
 import type { Agent, Fleet, Host, Known } from './source.ts'
 
 const isAgentId = Schema.is(Fractal.AgentId)
@@ -132,7 +133,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     terminal: terminalSubjectForAgent(row.id),
     ...(row.runtime_ids.length === 0 ? { terminalDisabledReason: 'This agent has no terminal.' } : {}),
     runtimeKey: row.runtime_ids.join(' '),
-    name: row.name,
+    name: agentDisplayName({ id: row.id, name: row.name }),
     lifecycle: lifecycleOf(row),
     host: hostName(row),
     ...(harness === undefined ? {} : { harness }),

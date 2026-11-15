@@ -1,3 +1,4 @@
+import { agentDisplayName } from '../data/agentName.ts'
 import type { ConversationItem, Role, Sender, TextItem } from './model.ts'
 
 /** The media type used by Fractal's wire-compatible omp custom-message projection. */
@@ -38,7 +39,7 @@ export const deliverySender = (from: string | undefined): Sender =>
   from?.startsWith('daemon/') === true
     ? { kind: 'system', label: 'Fractal', via: 'daemon' }
     : from?.startsWith('agent/') === true
-    ? { kind: 'st-agent', label: from.slice('agent/'.length), via: 'st' }
+    ? { kind: 'st-agent', label: agentDisplayName({ id: from }), via: 'st' }
     : from?.startsWith('human/') === true ||
         from?.startsWith('user/') === true ||
         from?.startsWith('person/') === true

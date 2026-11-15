@@ -1,3 +1,4 @@
+import { agentDisplayName } from '../data/agentName.ts'
 import { isMissionRef } from '../missions/missionTitle.ts'
 
 /**
@@ -55,14 +56,16 @@ export const workspaceView = (pane: { readonly ref: string } | undefined): Works
 const SCREEN_LABELS: Readonly<Record<string, string | undefined>> = { [MISSIONS_REF]: 'Missions', 'monitor/quota': 'Usage' }
 
 /**
- * A workspace tab's label: the subject's own title verbatim (agent names keep their case), else the
- * screen's name, else the ref's last segment in sentence case. A thread never observed with a title
- * says whether its read is still loading or unavailable: a bare "Thread" would repeat the main tab.
+ * A workspace tab's label: the subject's own title verbatim (agent names keep their case), else an agent's
+ * short name as everywhere else, else the screen's name, else the ref's last segment in sentence case. A thread
+ * never observed with a title says whether its read is still loading or unavailable: a bare "Thread" would repeat
+ * the main tab.
  */
 export const paneTabLabel = (ref: string, title: string | undefined, threadUnavailable = false): string => {
   if (isMissionRef(ref)) return 'Missions'
   if (title !== undefined) return title
   if (ref.startsWith('thread/')) return threadUnavailable ? 'Thread (unavailable)' : 'Thread (loading)'
+  if (ref.startsWith('agent/')) return agentDisplayName({ id: ref })
   const label = SCREEN_LABELS[ref] ?? ref.split('/').at(-1) ?? ref
   return label.charAt(0).toUpperCase() + label.slice(1)
 }

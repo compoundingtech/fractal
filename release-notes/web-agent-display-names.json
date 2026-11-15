@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The web names an agent the same way everywhere, by its roster name when it has one and otherwise by the last part of its id, so a seat with no declared name no longer appears by its path in the header, sidebar, tabs, thread senders or request cards",
+  "replay": {
+    "status": "none",
+    "detail": "Presentation only; no history is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage, wire or generated-schema change. The roster, threads and attention rows are read as before."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Grants and delivery policy are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Web only, against the same daemons. A roster name that is the agent's id, or the id without 'agent/' (the label Fractal gives a seat that declares no name), now shows as the id's last part, for example 'atlas'; the full id stays in the hover title of thread senders and launch previews. A request card names who asked by the served raised-by name under the same rule. The connected threads preview now declares its seats as 'Atlas' and 'Manager'."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Refreshing the web bundle does not interrupt the daemon."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step. A seat shows a chosen name once its declaration sets `name`."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling the web bundle back restores the previous labels."
+  }
+}

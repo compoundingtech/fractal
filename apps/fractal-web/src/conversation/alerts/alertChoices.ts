@@ -3,6 +3,7 @@ import { Option } from 'effect'
 
 import { alertsIn, alertConversations } from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { ANSWERS, isRequest, personAnswer, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
+import { agentDisplayName } from '../../data/agentName.ts'
 import type { AlertAction } from './alert-action-port.ts'
 
 // What an alert offers, separate from how it looks: the answers the Fractal terminal UI and the phone give (a structured
@@ -117,9 +118,12 @@ export const webLink = (url: string | undefined): string | undefined => {
   }
 }
 
-/** Who an alert is from: the agent that asked, else the seat it is about. */
-export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id'>): string =>
-  (alert.requester_id ?? alert.source_id).replace(/^agent\//, '')
+/** Who an alert is from, by name: the served name of whoever raised it, else an agent's short name; never its raw id. */
+export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id' | 'presentation'>): string => {
+  const id = alert.requester_id ?? alert.source_id
+  const raisedBy = Option.getOrUndefined(alert.presentation?.raised_by ?? Option.none())
+  return id.startsWith('agent/') ? agentDisplayName({ id, name: raisedBy?.id === id ? raisedBy.label : undefined }) : id
+}
 
 export const KIND_WORDS: Record<string, string> = {
   'human-gate': 'Review',

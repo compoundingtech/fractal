@@ -10,6 +10,7 @@ import { LiveRing } from '../../../../../packages/fractal-ui/src/assistant-ui/co
 import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { HumanTime } from '@fractal/ui/human-time'
 
+import { agentDisplayName } from '../../data/agentName.ts'
 import { useDataSource } from '../../data/react.tsx'
 import { credentialExpiredMessage } from '../../data/source.ts'
 import { agentTodosAtom, todoTextParts, type TodoState } from './model.ts'
@@ -125,7 +126,7 @@ const chipWords = { PullRequest: 'Pull request', Commit: 'Commit', Agent: 'Agent
 /** Plain text with its references as chips. They label for now: a bare #123 has no repository to open against. */
 const TaskText = ({ text }: { readonly text: string }) => <>{todoTextParts(text).map((part, index) => part._tag === 'Text'
   ? <React.Fragment key={index}>{part.text}</React.Fragment>
-  : <span key={index} title={`${chipWords[part._tag]} ${part.text}`} data-todo-ref={part._tag} {...stylex.props(styles.chip)}><Icon name={chipIcons[part._tag]} size={10} />{part._tag === 'Agent' ? part.text.split('/').at(-1) : part.text}</span>)}</>
+  : <span key={index} title={`${chipWords[part._tag]} ${part.text}`} data-todo-ref={part._tag} {...stylex.props(styles.chip)}><Icon name={chipIcons[part._tag]} size={10} />{part._tag === 'Agent' ? agentDisplayName({ id: part.text }) : part.text}</span>)}</>
 
 const TaskRows = ({ tasks, live }: { readonly tasks: readonly Task[]; readonly live: boolean }) => {
   const occurrences = new Map<string, number>()
