@@ -97,6 +97,9 @@ const lostPath = (error: unknown): boolean =>
 const logReadFailure = (message: string, error: unknown) => Effect.runSync(Effect.logWarning(message, {
   error: error instanceof ClientError ? `${error.status} ${error.response.code}` : error instanceof Error ? `${error.name}: ${error.message}` : String(error),
 }))
+const sameAccess = (a: ThreadAccess, b: ThreadAccess) => a.failure === undefined && b.failure === undefined
+  && a.read === b.read && a.inboxOrigins === b.inboxOrigins && a.upgradeRequired === b.upgradeRequired
+  && a.unknown === b.unknown && a.actor === b.actor && a.actions.size === b.actions.size && [...b.actions].every(action => a.actions.has(action))
 
 /** `transportLive`, when given, re-reads access each time the gateway connection is live again, as grants do. */
 export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches, transportLive?: Atom.Atom<boolean>): ThreadSource {
@@ -119,7 +122,9 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        observedAccess = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor }
+        const answered = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor }
+        // An unchanged answer keeps its identity, so reading access again does not read every thread projection twice.
+        if (observedAccess === undefined || !sameAccess(observedAccess, answered)) observedAccess = answered
         get.setSelf(observedAccess)
       }
     }).catch(error => {
