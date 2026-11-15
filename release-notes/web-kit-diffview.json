@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The kit adds DiffView on @pierre/diffs 1.6.1 with a plain-text first paint at the same height and one --fractal-syntax-* palette shared with Markdown code blocks",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Web UI only; adds the @pierre/diffs 1.6.1 dependency (lockfile, dependency licenses and the Nix dependency hash regenerated)."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous rendering."
+  }
+}

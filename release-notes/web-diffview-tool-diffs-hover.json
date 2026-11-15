@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Transcript tool diffs and resource hover-card diff previews render through the kit DiffView; the compact hover-card preview adds no tab stop or landmark",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Web UI only; no wire, protocol, runtime or client changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous rendering."
+  }
+}

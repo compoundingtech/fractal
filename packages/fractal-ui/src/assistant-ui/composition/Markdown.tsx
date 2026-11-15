@@ -10,11 +10,13 @@ import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
 import { createLazyChunk } from '../../lazy-chunk'
 import { MarkdownLinkPreviewContext } from './markdownLinkPreview.ts'
-import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, syntaxVars as syntax } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
-import { codeFenceLabel, diffStats, isDiffLanguage } from './markdown-code'
+import { codeFenceLabel, isDiffLanguage } from './markdown-code'
+import { DiffView } from './DiffView'
+import { diffStats } from './diff-patch'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
 import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
 import { filteredMarkdownText, markdownTreeText, remarkCaptureTree, remarkHtmlPolicy, safeLinkHref, type MarkdownParsedTree } from './markdown-html-policy'
@@ -289,14 +291,10 @@ export function HighlightedSource({ code, language }: { code: string; language: 
   })}</React.Fragment>)}{code.slice(sourceOffset)}</>
 }
 
-/** A diff's body. The kit DiffView (@pierre/diffs) takes over here once it lands; until then the highlighter draws it. */
-function DiffBody({ code }: { readonly code: string }) {
-  return <HighlightedSource code={code} language="diff" />
-}
-
 /**
  * A fenced block: a header naming the file (with Copy path) and the language, a diff's +added −removed counts, a Copy
- * button shown on hover or focus, and one ⋯ menu holding Wrap, Copy and, when a host opens files, Open.
+ * button shown on hover or focus, and one ⋯ menu holding Wrap, Copy and, when a host opens files, Open. A diff renders
+ * through the kit DiffView and is counted by its hunks.
  */
 const CodeBlock = React.memo(function CodeBlock({ code, language: info, meta }: { code: string; language: string; meta?: string | null }) {
   const { language, path } = codeFenceLabel(info, meta)
@@ -329,7 +327,9 @@ const CodeBlock = React.memo(function CodeBlock({ code, language: info, meta }: 
         </Popover>
       </MenuTrigger>
     </div>
-    <pre data-testid="markdown-code" role="group" aria-label={`Code, ${path ?? language}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}>{diff ? <DiffBody code={code} /> : <HighlightedSource code={code} language={info === '' && path === undefined ? '' : language} />}</code></pre>
+    {/* A diff is the kit DiffView, a region of its own, in place of the code block's <pre>; this header stays. */}
+    {diff ? <DiffView patch={code} wrap={wrap} {...(path === undefined ? {} : { path })} label={`Diff, ${path ?? language}`} />
+      : <pre data-testid="markdown-code" role="group" aria-label={`Code, ${path ?? language}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}><HighlightedSource code={code} language={info === '' && path === undefined ? '' : language} /></code></pre>}
     <span role="status" aria-live="polite" {...stylex.props(copy.tag === 'failed' && styles.copyStatus)}>{copy.tag === 'failed' ? 'Could not copy code. Check clipboard permissions and try again.' : <VisuallyHidden>{copy.tag === 'copied' && !copiedCurrentCode ? 'Code has changed since the last copy.' : announcement}</VisuallyHidden>}</span>
   </div>
 })
@@ -531,14 +531,15 @@ const styles = stylex.create({
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
-  // Hosts that tint rows under highlighted source (inspector frames, diff washes) raise
-  // `--fractal-syntax-muted` so muted tokens keep AA contrast on the tint.
-  syntaxComment: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})`, fontStyle: 'italic' },
-  syntaxKeyword: { color: status.runningFg },
-  syntaxString: { color: `var(--fractal-syntax-muted, ${textColor.fgMuted})` },
-  syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
-  syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
-  syntaxDeleted: { color: status.dangerFg },
+  // One palette with the kit DiffView (syntaxVars: Pierre's default theme), so code blocks and diffs never disagree.
+  // Hosts that tint rows under highlighted source (inspector frames, diff washes) set `--fractal-syntax-<token>` to a
+  // raised ink so every token keeps AA contrast on the tint; elsewhere each token is the palette colour itself.
+  syntaxComment: { color: `var(--fractal-syntax-comment, ${syntax.comment})`, fontStyle: 'italic' },
+  syntaxKeyword: { color: `var(--fractal-syntax-keyword, ${syntax.keyword})` },
+  syntaxString: { color: `var(--fractal-syntax-string, ${syntax.string})` },
+  syntaxLiteral: { color: `var(--fractal-syntax-literal, ${syntax.constant})` },
+  syntaxFunction: { color: `var(--fractal-syntax-function, ${syntax.func})` },
+  syntaxDeleted: { color: `var(--fractal-syntax-deleted, ${syntax.deleted})` },
   blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
   tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },

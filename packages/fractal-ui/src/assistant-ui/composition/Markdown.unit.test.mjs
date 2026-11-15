@@ -927,7 +927,8 @@ test('a link calls its hooks before any early return, and an unsafe href never r
 
 // R8: code block header (path, language, diff counts, one menu) and nested lists without a rail.
 test('a code fence names its file from the fence title or a path as its info', async () => {
-  const { codeFenceLabel, diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-code.ts')
+  const { codeFenceLabel } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-code.ts')
+  const { diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/diff-patch.ts')
   assert.deepEqual(codeFenceLabel('ts', 'title=src/x.ts'), { language: 'ts', path: 'src/x.ts' })
   assert.deepEqual(codeFenceLabel('ts', 'title="src/a b.ts"'), { language: 'ts', path: 'src/a b.ts' })
   assert.deepEqual(codeFenceLabel('src/model.rs', null), { language: 'rs', path: 'src/model.rs' })
@@ -937,7 +938,7 @@ test('a code fence names its file from the fence title or a path as its info', a
 })
 
 test('diff stats distinguish file headers from repeated plus and minus hunk content', async () => {
-  const { diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-code.ts')
+  const { diffStats } = await server.ssrLoadModule('/src/assistant-ui/composition/diff-patch.ts')
   assert.deepEqual(diffStats('--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n---counter\n+++counter\n-plain\n+plain\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n---x\n+++x'), { added: 3, removed: 3 })
 })
 
@@ -951,4 +952,14 @@ test('the code header shows path, language and diff counts, with Wrap, Copy and 
   assert.match(html, /aria-label="Copy code"/)
   assert.doesNotMatch(html, />Wrap</)
   assert.doesNotMatch(block('```ts\nconst a = 1\n```'), /markdown-code-path|markdown-code-diffstat/)
+})
+
+test('a diff fence renders the kit DiffView in place of the code block body, counted by its hunks', () => {
+  const sql = '```diff title=db/schema.sql\n--- a/db/schema.sql\n+++ b/db/schema.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+-- new comment\n select 1;\n```'
+  const html = block(sql)
+  assert.match(html, /data-testid="diff-view"/)
+  assert.doesNotMatch(html, /data-testid="markdown-code"/)
+  // A removed line whose text starts with `--` is still one removal: counts come from the hunks, not line prefixes.
+  assert.match(html, /data-testid="markdown-code-diffstat"[^>]*>[\s\S]*\+1[\s\S]*−1/)
+  assert.match(block('```ts\nconst a = 1\n```'), /data-testid="markdown-code"/)
 })

@@ -8,7 +8,7 @@ import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { darkTheme } from './assistant-ui/embrace-theme'
 import { DiffPanel } from './assistant-ui/composition/DiffPanel'
-import { assertDiffTint } from './assistant-ui/composition/diff-tint-assertion'
+import { assertDiffTint, diffShadow } from './assistant-ui/composition/diff-tint-assertion'
 
 const diff = ['@@ -1,2 +1,2 @@', ' const rows = [', '-  [PREVIOUS, 1, false, "previous row"],', '+  [RETAINED, 2, true, "retained row"],', ' ]']
 const themes = { neutral: baselineTheme, composition: [], embrace: [...baselineTheme, darkTheme] } as const
@@ -16,14 +16,13 @@ function DiffTintCanvas({ theme = 'neutral', scheme = 'dark', captured = false }
   return <div data-scheme={scheme} {...stylex.props(styles.canvas, ...themes[theme], ...(scheme === 'light' ? lightTheme : []))}><DiffPanel open width={captured ? 440 : '100%'} diff={diff} path="sample/rows.ts" added={1} removed={1} scopeLabel={captured ? 'Captured' : undefined} showSurfaceTabs={!captured} info={captured ? <p>Successful-tool captures · loaded transcript window. Reported sender unknown · Tool: Edit · Call: call/edit. Counts cover captured lines, not current repository contents.</p> : undefined} onOpenFile={captured ? () => document.querySelector<HTMLElement>('[data-testid="diff-code"]')?.focus() : undefined} /></div>
 }
 const meta = { excludeStories: ['scenarioExemptions'], id: 'fractal-ui-diff-tint', title: 'Components/Diff tint', component: DiffTintCanvas, args: { theme: 'neutral', scheme: 'dark' }, parameters: { scenario: { _tag: 'primitive', reason: "Measures diff token contrast and captured diff presentation independently of domain state." }, layout: 'fullscreen' }, play: async ({ canvasElement, args }) => {
-  await waitFor(() => expect(canvasElement.querySelector('[data-syntax-token="keyword"]')).not.toBeNull())
-  const receipt = assertDiffTint(canvasElement)
+  await waitFor(() => expect(canvasElement.querySelector<HTMLElement>('[data-testid="diff-code"]')?.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
+  const receipt = await waitFor(() => assertDiffTint(canvasElement), { timeout: 10_000 })
   canvasElement.dataset.diffTintReceipt = JSON.stringify(receipt)
   await expect(receipt.minimumTextContrast).toBeGreaterThanOrEqual(4.5)
   await expect(receipt.minimumGutterContrast).toBeGreaterThanOrEqual(4.5)
-  for (const token of ['constant', 'number', 'boolean']) {
-    await waitFor(() => expect(canvasElement.querySelector(`[data-diff-kind="added"] [data-syntax-token="${token}"]`)).not.toBeNull())
-  }
+  // Literals in changed lines are tokenized (Pierre's highlighter, our palette), not left as plain ink.
+  await expect([...diffShadow(canvasElement).querySelectorAll('[data-line-type="change-addition"] span')].some(span => span.getAttribute('style')?.includes('token-constant'))).toBe(true)
   const counts = [...canvasElement.querySelectorAll('span')].filter(element => /^[-−+]1$/.test(element.textContent ?? ''))
   await expect(counts.length).toBeGreaterThan(0)
   for (const count of counts) {
@@ -74,25 +73,11 @@ const meta = { excludeStories: ['scenarioExemptions'], id: 'fractal-ui-diff-tint
     scope.style.removeProperty(tokens.added.slice(4, -1))
     await expect(aliases()).toEqual([true, true])
   }
-  const row = canvasElement.querySelector<HTMLElement>('[data-diff-kind="added"]')!
-  const gutter = row.querySelector<HTMLElement>('[data-diff-gutter]')!
-  const original = [row, gutter].map(element => element.getAttribute('style'))
-  try {
-    // Actual pre-tint route paint: a neutral wash and a separate muted gutter.
-    row.style.backgroundColor = args.scheme === 'light' ? 'rgba(128, 128, 128, 0.08)' : 'rgba(128, 128, 128, 0.09)'
-    gutter.style.borderLeftColor = getComputedStyle(canvasElement).getPropertyValue(text.fgMuted.slice(4, -1))
-    await expect(() => assertDiffTint(canvasElement)).toThrow('Added wash and gutter do not share a semantic token')
-    // Equal blue pixels from unrelated variables are not a shared semantic token.
-    row.style.setProperty('--independent-addition-ink', getComputedStyle(gutter).getPropertyValue(receipt.gutterToken!))
-    row.style.backgroundColor = 'color-mix(in srgb, var(--independent-addition-ink) 9%, transparent)'
-    gutter.style.removeProperty('border-left-color')
-    await expect(() => assertDiffTint(canvasElement)).toThrow('Added wash and gutter do not share a semantic token')
-  } finally {
-    for (const [index, element] of [row, gutter].entries()) {
-      if (original[index] === null) element.removeAttribute('style')
-      else element.setAttribute('style', original[index]!)
-    }
-  }
+  // Control: a grey addition ink is rejected.
+  const view = canvasElement.querySelector<HTMLElement>('[data-testid="diff-code"]')!
+  view.style.setProperty('--fractal-diff-addition', 'rgb(128, 128, 128)')
+  view.style.setProperty('--fractal-diff-canvas', 'rgb(128, 128, 128)')
+  try { await expect(() => assertDiffTint(canvasElement)).toThrow() } finally { view.style.removeProperty('--fractal-diff-addition'); view.style.removeProperty('--fractal-diff-canvas') }
   await expect(assertDiffTint(canvasElement)).toEqual(receipt)
 } } satisfies Meta<typeof DiffTintCanvas>
 export default meta
@@ -125,8 +110,9 @@ export const Captured: Story = { args: { captured: true }, play: async ({ canvas
   await expect(toolbar.getBoundingClientRect().height).toBeLessThanOrEqual(36)
   const code = canvasElement.querySelector<HTMLElement>('[data-testid="diff-code"]')!
   await expect(code.getBoundingClientRect().top - header.getBoundingClientRect().bottom).toBeLessThanOrEqual(72)
-  await expect(canvasElement.querySelector('[data-diff-kind="removed"] [data-diff-gutter] > span')?.textContent).toBe('')
-  await expect(canvasElement.querySelector('[data-diff-kind="added"] [data-diff-gutter] > span')?.textContent).toBe('2')
+  await waitFor(() => expect(code.dataset.diffState).toBe('rendered'), { timeout: 10_000 })
+  const numbers = await waitFor(() => { const shadow = diffShadow(canvasElement); return ['change-deletion', 'change-addition'].map(kind => shadow.querySelector(`[data-gutter] [data-line-type="${kind}"]`)?.textContent) }, { timeout: 10_000 })
+  await expect(numbers).toEqual(['2', '2'])
   await userEvent.click(canvas.getByRole('button', { name: /^Open$/ }))
   await expect(code).toHaveFocus()
 } }

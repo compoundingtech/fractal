@@ -7,7 +7,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Icon, type IconName } from '../composition/Icons'
-import { radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { DiffView } from '../composition/DiffView'
+import { radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { ResourceData, ResourceFile } from '../resources/resource-model.ts'
 import { EntityCard, EntityCardHeader, EntityCardList, EntityCardListItem, EntityCardMeta, EntityCardMetaLine, EntityCardNote, EntityCardSection, EntityCardText, EntityStatusMark } from './EntityCard'
 import type { EntityDescriptor, EntityStatus } from './entity.ts'
@@ -48,7 +49,8 @@ export function ResourceEntityCard({ id, title, kind, icon, status, summary = []
       glyph={status !== undefined ? <EntityStatusMark status={status} /> : icon !== undefined ? <Icon name={icon} size={12} /> : undefined}
       summary={[status?.label, ...summary]} />
     {text !== undefined && text !== '' && <EntityCardText icon={icon ?? 'message'} data-resource-detail>{text}</EntityCardText>}
-    {preview !== undefined && preview.length > 0 && <pre data-entity-card-preview={previewKind} {...stylex.props(styles.preview)}>{preview.slice(0, 6).map((line, index) => <div key={index} {...stylex.props(previewKind === 'diff' && line.startsWith('+') && styles.added, previewKind === 'diff' && line.startsWith('-') && styles.removed)}>{line}</div>)}</pre>}
+    {preview !== undefined && preview.length > 0 && previewKind === 'diff' && <div data-entity-card-preview="diff" {...stylex.props(styles.diffPreview)}><DiffView patch={preview.join('\n')} path={title} density="compact" maxLines={6} label={`Diff preview, ${title}`} /></div>}
+    {preview !== undefined && preview.length > 0 && previewKind !== 'diff' && <pre data-entity-card-preview={previewKind} {...stylex.props(styles.preview)}>{preview.slice(0, 6).map((line, index) => <div key={index}>{line}</div>)}</pre>}
     {children}
     {meta.length > 0 && <EntityCardMeta>{meta.map(line => <EntityCardMetaLine key={line.label} icon={line.icon} label={line.label}>{line.value}</EntityCardMetaLine>)}</EntityCardMeta>}
     {note !== undefined && <EntityCardNote>{note}</EntityCardNote>}
@@ -89,7 +91,6 @@ export function FolderEntityCard({ id, name, host, description, agents = [], nee
 }
 
 const styles = stylex.create({
-  added: { color: tone.diffAddTint },
-  removed: { color: tone.diffRemoved },
+  diffPreview: { borderRadius: r.sm, overflow: 'hidden' },
   preview: { margin: s.zero, padding: s.sm, borderRadius: r.sm, backgroundColor: surface.canvas, color: ink.fgSoft, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'pre', overflow: 'hidden' },
 })

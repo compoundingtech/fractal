@@ -6,12 +6,11 @@ import { surfaceOptions } from '../composition-model'
 import { Icon } from './Icons'
 import { Button, IconButton, Tooltip } from './Controls'
 import { PaneHeader } from './Pane'
-import { HighlightedSource, languageFromPath } from './Markdown'
+import { DiffView } from './DiffView'
+import { collapseWhitespaceChanges, normalizePatch } from './diff-patch'
 import { ThemePortal } from '../taste/ThemePortal'
 
-type DiffKind = 'context' | 'added' | 'removed' | 'hunk'
 type DiffScope = 'current' | 'branch'
-interface DiffRow { readonly kind: DiffKind; readonly text: string; readonly oldNumber?: number; readonly newNumber?: number; readonly hidden?: readonly DiffRow[] }
 export interface DiffFile { readonly path: string; readonly diff: readonly string[]; readonly added: number; readonly removed: number }
 export interface DiffTurn extends DiffFile { readonly id: string; readonly label: string }
 export interface DiffRevealRequest { readonly path: string; readonly sequence: number }
@@ -40,76 +39,14 @@ export interface DiffPanelProps {
   turns?: readonly DiffTurn[]
 }
 
-function withoutWhitespaceChanges(rows: readonly DiffRow[]) {
-  const visible: DiffRow[] = []
-  let index = 0
-  while (index < rows.length) {
-    const row = rows[index]!
-    if (row.kind !== 'added' && row.kind !== 'removed') { visible.push(row); index += 1; continue }
-    const changes: DiffRow[] = []
-    while (index < rows.length && (rows[index]!.kind === 'added' || rows[index]!.kind === 'removed')) changes.push(rows[index++]!)
-    const removed = changes.filter(line => line.kind === 'removed')
-    const added = changes.filter(line => line.kind === 'added')
-    const hidden = new Set<DiffRow>()
-    for (let pair = 0; pair < Math.min(removed.length, added.length); pair += 1) {
-      if (removed[pair]!.text.replace(/\s/g, '') === added[pair]!.text.replace(/\s/g, '')) {
-        hidden.add(removed[pair]!)
-        hidden.add(added[pair]!)
-      }
-    }
-    for (const change of changes) if (!hidden.has(change) && change.text.trim() !== '') visible.push(change)
-  }
-  return visible
-}
-
-function rowsFromDiff(diff: readonly string[], hideWhitespace: boolean) {
-  const rows: DiffRow[] = []; let oldNumber = 1; let newNumber = 1; let previousEnd = 1
-  for (const line of diff) {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
-    if (hunk) { oldNumber = Number(hunk[1]); newNumber = Number(hunk[2]); const skipped = Math.max(0, oldNumber - previousEnd); if (skipped > 0) rows.push({ kind: 'hunk', text: `${skipped} unmodified lines` }); continue }
-    if (/^(?:diff |index |---|\+\+\+|\\)/.test(line)) continue
-    if (line.startsWith('+')) rows.push({ kind: 'added', text: line.slice(1), newNumber: newNumber++ })
-    else if (line.startsWith('-')) rows.push({ kind: 'removed', text: line.slice(1), oldNumber: oldNumber++ })
-    else if (line.startsWith(' ')) rows.push({ kind: 'context', text: line.slice(1), oldNumber: oldNumber++, newNumber: newNumber++ })
-    previousEnd = oldNumber
-  }
-  const collapsed: DiffRow[] = []; let context: DiffRow[] = []
-  const flush = () => { if (context.length >= 4) collapsed.push({ kind: 'hunk', text: `${context.length} unmodified lines`, hidden: context }); else collapsed.push(...context); context = [] }
-  for (const row of hideWhitespace ? withoutWhitespaceChanges(rows) : rows) { if (row.kind === 'context') context.push(row); else { flush(); collapsed.push(row) } }
-  flush()
-  return collapsed
-}
-
-function pairRows(rows: readonly DiffRow[]) {
-  const pairs: { old?: DiffRow; next?: DiffRow; hunk?: DiffRow }[] = []
-  let index = 0
-  while (index < rows.length) {
-    const row = rows[index]!
-    if (row.kind === 'hunk') { pairs.push({ hunk: row }); index += 1; continue }
-    if (row.kind === 'context') { pairs.push({ old: row, next: row }); index += 1; continue }
-    const removedRows: DiffRow[] = []; const addedRows: DiffRow[] = []
-    while (index < rows.length && rows[index]!.kind === 'removed') removedRows.push(rows[index++]!)
-    while (index < rows.length && rows[index]!.kind === 'added') addedRows.push(rows[index++]!)
-    for (let pair = 0; pair < Math.max(removedRows.length, addedRows.length); pair += 1) pairs.push({ old: removedRows[pair], next: addedRows[pair] })
-  }
-  return pairs
-}
-
-function CodeLine({ row, side, wrap, language }: { row: DiffRow; side?: 'old' | 'new'; wrap: boolean; language: string }) {
-  const number = side === 'old' ? row.oldNumber : row.newNumber
-  const sign = row.kind === 'added' ? '+' : row.kind === 'removed' ? '−' : ''
-  return <div data-diff-kind={row.kind} {...stylex.props(styles.codeRow, row.kind === 'added' && styles.addedRow, row.kind === 'removed' && styles.removedRow)}><span data-diff-gutter {...stylex.props(styles.gutter, row.kind === 'added' && styles.addedGutter, row.kind === 'removed' && styles.removedGutter)}><span>{number ?? ''}</span><span>{sign}</span></span><code {...stylex.props(styles.codeText, wrap && styles.wrappedText)}><HighlightedSource code={row.text} language={language} /></code></div>
-}
-
-function ContextRow({ row, split = false, wrap, language }: { row: DiffRow; split?: boolean; wrap: boolean; language: string }) {
-  const [open, setOpen] = React.useState(false)
-  return row.hidden ? <><AriaButton aria-expanded={open} onPress={() => setOpen(value => !value)} {...stylex.props(styles.hunk)}>{open ? 'Hide unmodified lines' : row.text}</AriaButton>{open ? row.hidden.map((line, index) => split ? <div key={index} {...stylex.props(styles.split)}><div {...stylex.props(styles.splitCell)}><CodeLine row={line} side="old" wrap={wrap} language={language} /></div><div {...stylex.props(styles.splitCell)}><CodeLine row={line} side="new" wrap={wrap} language={language} /></div></div> : <CodeLine key={index} row={line} wrap={wrap} language={language} />) : null}</> : <div {...stylex.props(styles.hunk)}>{row.text}</div>
-}
-
 function FileDiff({ file, landmarkContext, collapsed, onToggle, layout, wrap, hideWhitespace, revealRequest, onOpenFile }: { file: DiffFile; landmarkContext?: string; collapsed: boolean; onToggle: () => void; layout: 'unified' | 'split'; wrap: boolean; hideWhitespace: boolean; revealRequest?: DiffRevealRequest; onOpenFile?: (path: string) => void }) {
-  const rows = React.useMemo(() => rowsFromDiff(file.diff, hideWhitespace), [file.diff, hideWhitespace])
-  const language = React.useMemo(() => languageFromPath(file.path), [file.path])
-  const splitRows = React.useMemo(() => layout === 'split' ? pairRows(rows) : [], [rows, layout])
+  // One normalized patch per file. Hiding whitespace collapses equal-up-to-whitespace pairs to context and
+  // drops blank-only changes; a file left with no hunk has nothing to draw.
+  const files = React.useMemo(() => {
+    const normalized = normalizePatch(file.diff.join('\n'), { path: file.path })
+    return hideWhitespace ? normalized.map(collapseWhitespaceChanges).filter(entry => /^@@/m.test(entry.patch)) : normalized
+  }, [file.diff, file.path, hideWhitespace])
+  const changed = files.some(entry => entry.added + entry.removed > 0)
   const codeId = React.useId()
   const lastScrolled = React.useRef<number | undefined>(undefined)
   const revealPath = revealRequest?.path
@@ -122,7 +59,7 @@ function FileDiff({ file, landmarkContext, collapsed, onToggle, layout, wrap, hi
   }, [collapsed, file.path, revealPath, revealSequence])
   return <section ref={revealFile} aria-label={landmarkContext ? `${file.path}, ${landmarkContext}` : file.path} {...stylex.props(styles.fileSection)}>
     <div {...stylex.props(styles.fileHead)}><AriaButton aria-expanded={!collapsed} aria-controls={codeId} onPress={onToggle} {...stylex.props(styles.fileToggle)}><Icon name={collapsed ? 'chevron-right' : 'chevron-down'} /><span title={file.path} {...stylex.props(styles.path)}>{file.path}</span></AriaButton>{file.added !== 0 && <span {...stylex.props(styles.added)}>+{file.added}</span>}{file.removed !== 0 && <span {...stylex.props(styles.removed)}>−{file.removed}</span>}{onOpenFile ? <Button onPress={() => { if (collapsed) { onToggle(); requestAnimationFrame(() => onOpenFile(file.path)) } else onOpenFile(file.path) }}>Open</Button> : null}<IconButton icon="copy" label={`Copy file path ${file.path}`} onPress={() => { void navigator.clipboard.writeText(file.path) }} /></div>
-    {!collapsed ? <div id={codeId} data-testid="diff-code" role="region" aria-label={`Diff lines for ${file.path}${landmarkContext ? `, ${landmarkContext}` : ''}`} tabIndex={0} {...stylex.props(styles.code)}>{rows.length === 0 ? <p {...stylex.props(styles.empty)}>{hideWhitespace && file.diff.length > 0 ? 'No non-whitespace changes.' : 'No diff lines supplied.'}</p> : layout === 'unified' ? rows.map((row, index) => row.kind === 'hunk' ? <ContextRow key={index} row={row} wrap={wrap} language={language} /> : <CodeLine key={index} row={row} wrap={wrap} language={language} />) : splitRows.map((pair, index) => pair.hunk ? <ContextRow key={index} row={pair.hunk} split wrap={wrap} language={language} /> : <div key={index} {...stylex.props(styles.split)}><div {...stylex.props(styles.splitCell)}>{pair.old ? <CodeLine row={pair.old} side="old" wrap={wrap} language={language} /> : null}</div><div {...stylex.props(styles.splitCell)}>{pair.next ? <CodeLine row={pair.next} side="new" wrap={wrap} language={language} /> : null}</div></div>)}</div> : null}
+    {!collapsed ? <div id={codeId} {...stylex.props(styles.code)}>{files.length === 0 || (!changed && hideWhitespace) ? <p {...stylex.props(styles.empty)}>{hideWhitespace && file.diff.length > 0 ? 'No non-whitespace changes.' : 'No diff lines supplied.'}</p> : null}{files.length === 0 ? null : <DiffView files={files} layout={layout} wrap={wrap} testId="diff-code" label={`Diff lines for ${file.path}${landmarkContext ? `, ${landmarkContext}` : ''}`} />}</div> : null}
   </section>
 }
 
@@ -205,18 +142,7 @@ const styles = stylex.create({
   added: { fontFamily: t.fontMono, fontSize: t.denseSize, color: status.diffAdded, fontVariantNumeric: 'tabular-nums', flexShrink: 0 },
   removed: { fontFamily: t.fontMono, fontSize: t.denseSize, color: text.fgMuted, fontVariantNumeric: 'tabular-nums', flexShrink: 0 },
   spacer: { flexGrow: 1 },
-  code: { minHeight: 0, overflowX: 'auto', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, paddingBottom: s.lg, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(0px - ${g.focusRing})` } },
-  codeRow: { display: 'flex', alignItems: 'stretch', minHeight: t.uiLeading, minWidth: '100%' },
-  addedRow: { backgroundColor: `color-mix(in srgb, ${diffColor.added} 9%, transparent)` },
-  removedRow: { backgroundColor: status.diffRemovedWash },
-  gutter: { width: g.gutter40, minWidth: g.gutter40, flexShrink: 0, boxSizing: 'border-box', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: s.xs2, paddingInline: s.xs, color: text.fgMuted, fontVariantNumeric: 'tabular-nums', userSelect: 'none', borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: 'transparent' },
-  addedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: diffColor.added, color: diffColor.added },
-  removedGutter: { backgroundColor: surface.washSubtle, borderLeftColor: diffColor.removed, color: diffColor.removed },
-  codeText: { '--fractal-diff-literal': diffColor.literal, fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', paddingInline: s.sm, color: text.fgSoft, whiteSpace: 'pre', flexGrow: 1 },
-  wrappedText: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', minWidth: 0, flexBasis: 0 },
-  hunk: { width: '100%', minHeight: g.toolRow, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: t.fontSans, fontSize: t.denseSize, color: text.fgMuted, borderWidth: 0, backgroundColor: 'transparent', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
-  split: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' },
-  splitCell: { minWidth: 0, overflowX: 'auto', borderRightWidth: g.hairline, borderRightStyle: 'solid', borderRightColor: border.border },
+  code: { minHeight: 0, minWidth: 0, paddingBottom: s.lg },
   empty: { margin: 0, padding: s.lg, fontFamily: t.fontSans, fontSize: t.metaSize, color: text.fgMuted },
   launcher: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: s.sm, padding: s.xl, color: text.fgMuted, fontSize: t.uiSize },
 })
