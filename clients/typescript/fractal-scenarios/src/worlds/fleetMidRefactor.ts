@@ -197,6 +197,16 @@ const build = (ctx: FactoryContext): Slices => {
     episode: 'claim/scenario-worker-typecheck',
     conversation_id: builder.id,
     thread_unread: true,
+    presentation: {
+      tier: 'stopped',
+      kind: 'request',
+      agent: { id: builder.id, label: builder.name },
+      raised_by: null,
+      waiting: null,
+      revision: null,
+      launch: null,
+      prompt: null,
+    },
   }
   const attention: Slice<'attention'> = {
     kind: 'attention',

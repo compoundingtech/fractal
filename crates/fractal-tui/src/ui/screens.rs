@@ -3641,6 +3641,9 @@ mod tree_tests {
         }).collect::<Vec<_>>().join("\n");
         assert!(text.contains("Atlas Builder"), "{text}");
         assert!(!text.contains("agent/example/atlas/builder"), "{text}");
+        assert!(matches!(item.kind, AttentionKind::Request { .. }));
+        assert!(text.contains("Thread the session through"), "{text}");
+        assert!(!text.contains("older, or has not presented it yet"), "{text}");
         assert!(doc.targets.iter().any(|target| target.hit == Hit::Peek("agent/example/atlas/builder".into())));
     }
 
