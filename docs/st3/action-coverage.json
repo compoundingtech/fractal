@@ -9,6 +9,11 @@
   ],
   "typed_actions": [
     {
+      "action": "work.override",
+      "tests": ["crates/fractal/tests/client_v0_contract.rs::auto_resolved_read_and_override_round_trip"],
+      "behavior": "Person-scoped deadline resolutions and exact-episode overrides; same action replay is idempotent, other people are forbidden and closed windows refused."
+    },
+    {
       "action": "harness.answer",
       "tests": [
         "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::accepted_receipts_survive_reopen_without_an_adapter_or_duplicate_writes",
