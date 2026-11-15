@@ -54,10 +54,7 @@
             "label": "Atlas Builder"
           },
           "kind": "request",
-          "launch": null,
-          "prompt": null,
           "raised_by": null,
-          "revision": null,
           "tier": "stopped",
           "waiting": null
         },

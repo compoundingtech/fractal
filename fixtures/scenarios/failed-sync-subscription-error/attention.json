@@ -48,6 +48,16 @@
         "mission_id": "mission/example/atlas/load-user-rename",
         "mission_run_id": "mission-run/example/atlas/load-user-rename/1",
         "person_id": "person/robin",
+        "presentation": {
+          "agent": {
+            "id": "agent/example/atlas/builder",
+            "label": "Atlas Builder"
+          },
+          "kind": "request",
+          "raised_by": null,
+          "tier": "stopped",
+          "waiting": null
+        },
         "priority": "normal",
         "requested_at": "2030-01-01T11:58:25.000Z",
         "requester_id": "agent/example/atlas/builder",

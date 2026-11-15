@@ -203,9 +203,6 @@ const build = (ctx: FactoryContext): Slices => {
       agent: { id: builder.id, label: builder.name },
       raised_by: null,
       waiting: null,
-      revision: null,
-      launch: null,
-      prompt: null,
     },
   }
   const attention: Slice<'attention'> = {
