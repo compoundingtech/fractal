@@ -402,9 +402,9 @@ input tool, not a transcript search and not a recorder of unsent drafts.
 - The durable source is Fractal's accepted sent-message log. Include only messages
   whose authenticated author equals the current person; a `person/` sender prefix,
   a `user` transcript role or readable conversation is not sufficient.
-- Default scope is **person × agent**, across that agent's conversations. Search
-  can explicitly narrow to a conversation or broaden to all authorized agents
-  within the connected authority. Never merge accounts or authorities implicitly.
+- Scope is **person × agent**, across that agent's conversations. Search can
+  explicitly narrow to a conversation within that agent. Cross-agent history
+  requires a separate product decision; never merge accounts or authorities.
 - Include successfully accepted text, including dictated sends; exclude pending,
   failed, duplicate delivery attempts, harness-injected inputs and other authors.
   A multi-recipient message has one stable history identity, not one per delivery.
@@ -433,9 +433,9 @@ It requires an authenticated person session and `read.projections`; it never
 accepts an owner override. Existing authorization for the source message,
 conversation and agent remains necessary on every read.
 
-The query contains `scope` (`conversation`, `agent`, `authority`), the required
-`conversation` or `agent` identifier for a narrowed scope, optional `text`, and
-the usual bounded `limit` and opaque `cursor`. Inconsistent selectors are
+The query contains `scope` (`conversation` or `agent`), the required `agent`
+identifier, a required `conversation` identifier only for conversation scope,
+optional `text`, and the usual bounded `limit` and opaque `cursor`. Inconsistent selectors are
 validation errors, not silently widened searches. Empty text lists recent inputs;
 nonempty text is a literal, Unicode case-folded substring search, not regex,
 shell syntax or transcript search. Preserve original input bytes in the result.
@@ -492,7 +492,7 @@ native keyboard adapters must not become a separate history implementation.
 
 The platform-neutral contract consists of:
 
-- `HistoryScope`: conversation, agent or authority, with canonical scope IDs.
+- `HistoryScope`: agent, or a conversation within that agent, with canonical IDs.
 - `HistoryEntry` / `HistoryPage`: the authorized projection entry, stable order,
   continuation, revision and coverage; excluded entries are never represented
   by reusable redaction placeholders.
