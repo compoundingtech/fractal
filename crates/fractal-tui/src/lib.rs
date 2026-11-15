@@ -707,6 +707,36 @@ async fn act_on_card(
     };
     Ok(format!("{}: {}", action_label(action), result.value.kind))
 }
+
+/// The action id, idempotency key and parameters of the person's own answer to an ask that
+/// resolved by itself. Both ids are fixed by the episode and the answer, as on every client, so a
+/// retry replays the same action rather than asking twice.
+pub(crate) fn override_request(
+    target_id: &str,
+    episode: &str,
+    answer: &str,
+) -> (String, String, fractal_client::PersonOverrideParameters) {
+    let key = format!("person-override:{episode}:{answer}");
+    (
+        format!("action/{key}"),
+        key,
+        fractal_client::PersonOverrideParameters {
+            target_id: target_id.to_owned(),
+            episode: episode.to_owned(),
+            answer: fractal_client::PersonOverrideAnswer { id: answer.to_owned(), text: None },
+            summary: None,
+        },
+    )
+}
+
+/// Replace the default an ask resolved with by the person's own answer (`work.override`). The
+/// episode is the fence: st refuses an override once the ask's window closed or it was answered.
+pub(crate) async fn override_ask(client: &Client, target_id: &str, episode: &str, answer: &str, label: &str) -> Result<String> {
+    let fence = Fence { snapshot_id: client.capabilities().await?.snapshot.id, ..Fence::default() };
+    let (id, idem, parameters) = override_request(target_id, episode, answer);
+    client.work_override(id, idem, fence, parameters).await?;
+    Ok(format!("Answered “{label}” instead of the default"))
+}
 async fn send_terminal_key(
     client: &Client,
     terminal_id: &str,
