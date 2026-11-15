@@ -8,6 +8,7 @@ import re
 import runpy
 import subprocess
 import tempfile
+import textwrap
 
 root = Path(__file__).resolve().parent.parent
 detector = root / "scripts/ci-fractal-web-changes"
@@ -438,6 +439,10 @@ for event in ("pull_request", "merge_group", "workflow_dispatch"):
     assert f"  {event}:" in header, event
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", jobs))
 changes, execution, gate_job = blocks["fractal-web-changes"], blocks["fractal-web-execution"], blocks["fractal-web"]
+embedded_detector = re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", changes)
+assert embedded_detector is not None, "the hosted detector must embed its Python source"
+# workspace-ci.ts's embeddedPython adds a newline before the closing heredoc delimiter.
+assert textwrap.dedent(embedded_detector.group(1)) == detector.read_text() + "\n", "regenerate workflows: the embedded detector must equal the tested source, including KIT_PATTERNS"
 
 # A relevant, sharded merge group covered by evidence produces no execution or receipts.
 conditions = [
