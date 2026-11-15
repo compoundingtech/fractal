@@ -4,6 +4,7 @@ use crate::message_desired_recipient_match;
 use crate::message_sent_recipient_match;
 use super::*;
 pub use fractal_store::store::delivery::*;
+use smallclaims::store::canonical::CANONICAL_ORDER_DESC;
 
 fn subscription_request_view(
     request: &ClaimRecord,
@@ -930,22 +931,36 @@ impl DeliveryStore for Store {
                    )
                    AND json_extract(finished.body, '$.fields.request') IS NOT NULL
                )
-               AND (
-                 COALESCE(json_extract(request.body, '$.fields.admission'), '') != 'relevant-changes'
-                 OR request.id=(
-                   SELECT newest.id FROM claims AS newest
-                   WHERE newest.subject=request.subject AND newest.kind='subscription.mission-requested'
-                     AND json_extract(newest.body, '$.fields.admission')='relevant-changes'
-                     AND json_extract(newest.body, '$.fields.resource')=json_extract(request.body, '$.fields.resource')
-                   ORDER BY CANONICAL_DESC(newest) LIMIT 1
-                 )
-               )
              ORDER BY CANONICAL_ASC(request)",
         ))?;
-        statement
+        let mut requests = statement
             .query_map([subject], claim_from_row)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
+            .collect::<Result<Vec<_>, _>>()?;
+        let relevant = |request: &ClaimRecord| {
+            request.body.pointer("/fields/admission").and_then(Value::as_str)
+                == Some("relevant-changes")
+        };
+        if requests.iter().any(relevant) {
+            // Rank all relevant deliveries, including finished ones: completing the latest
+            // delivery must not revive an older request for the same resource.
+            let mut latest = connection.prepare(format!(
+                "SELECT id FROM (
+                   SELECT claims.id,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY json_extract(claims.body, '$.fields.resource')
+                            ORDER BY {CANONICAL_ORDER_DESC}
+                          ) AS ordinal
+                   FROM claims WHERE claims.subject=?1
+                     AND claims.kind='subscription.mission-requested'
+                     AND json_extract(claims.body, '$.fields.admission')='relevant-changes'
+                 ) WHERE ordinal=1"
+            ).as_str())?;
+            let latest = latest
+                .query_map([subject], |row| row.get::<_, String>(0))?
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            requests.retain(|request| !relevant(request) || latest.contains(&request.id));
+        }
+        Ok(requests)
     }
 
     fn subscription_mission_deferral(

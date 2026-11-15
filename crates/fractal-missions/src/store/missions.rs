@@ -4,6 +4,7 @@ use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
 use fractal_store::store::{work_actor_matches, work_actor_spellings_json};
+use smallclaims::store::canonical::CANONICAL_ORDER_DESC;
 
 mod run_review;
 pub mod step_history;
@@ -452,16 +453,16 @@ fn latest_relevant_delivery_tx(
     scope: &str,
     resource: &str,
 ) -> rusqlite::Result<Option<(String, String)>> {
-    let mut statement = transaction.prepare(&canonical_sql(
-        "SELECT request.subject,
-                json_extract(request.body, '$.fields.delivery_key'),
-                json_extract(request.body, '$.fields.change_identity')
-         FROM claims AS request WHERE request.kind='subscription.mission-requested'
-           AND json_extract(request.body, '$.fields.mission')=?1
-           AND json_extract(request.body, '$.fields.resource')=?2
-           AND json_extract(request.body, '$.fields.admission')='relevant-changes'
-         ORDER BY CANONICAL_DESC(request)",
-    ))?;
+    let mut statement = transaction.prepare(format!(
+        "SELECT claims.subject,
+                json_extract(claims.body, '$.fields.delivery_key'),
+                json_extract(claims.body, '$.fields.change_identity')
+         FROM claims WHERE claims.kind='subscription.mission-requested'
+           AND json_extract(claims.body, '$.fields.mission')=?1
+           AND json_extract(claims.body, '$.fields.resource')=?2
+           AND json_extract(claims.body, '$.fields.admission')='relevant-changes'
+         ORDER BY {CANONICAL_ORDER_DESC}",
+    ).as_str())?;
     let mut rows = statement.query(params![format!("mission/{mission}"), resource])?;
     while let Some(row) = rows.next()? {
         let subject: String = row.get(0)?;

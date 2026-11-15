@@ -330,15 +330,13 @@ fn pull_request_needs_review(prior: Option<&Value>, item: &Value) -> bool {
 
 /// Facts that can change the responsibility of an opt-in PR evaluation. Observation
 /// timestamps and attribution to a local agent are deliberately not admission events.
-fn pull_request_change_facts(item: &Value) -> BTreeMap<&'static str, Value> {
+fn pull_request_change_facts(item: &Value) -> [(&'static str, Option<&Value>); 15] {
     [
         "state", "draft", "merged", "head_sha", "base_branch", "base_sha",
         "checks_state", "checks", "required_checks", "review_decision", "reviews",
         "comments", "last_comment", "recent_comments", "body_digest",
     ]
-    .into_iter()
-    .filter_map(|field| item.get(field).map(|value| (field, value.clone())))
-    .collect()
+    .map(|field| (field, item.get(field)))
 }
 
 fn pull_request_has_relevant_change(prior: Option<&Value>, item: &Value) -> bool {

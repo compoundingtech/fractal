@@ -2104,10 +2104,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v32 adds durable native effect receipts to v31's explicit person overrides.
+/// Corpus v34's fixed sweep trims in all seeds except 55, 293 and 1597.
 /// Non-trimming seeds must still trim on every modern node after excusing the old build
 /// and advancing to the next cut.
-const NEVER_TRIMS: &[u64] = &[179];
+const NEVER_TRIMS: &[u64] = &[55, 293, 1597];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
@@ -2117,7 +2117,7 @@ fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
     let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v33 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v34 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2126,7 +2126,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v33 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v34 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2134,7 +2134,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v33 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v34 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }

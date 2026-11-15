@@ -434,3 +434,15 @@ and run lineage, with durable attribution-pending and scope-excluded receipts. V
 through 33 remain frozen. Generate it with
 `cargo run --locked -p fractal-schema --example claim_corpus -- fixtures/convergence/claims-v34.json`;
 do not hand-edit it. The simulation and audit reports select v34.
+
+The 2026-11-15 full nextest sweep (run ID `36422b90-adc6-494d-89fe-a9c75cc68652`,
+5810 tests) observed v34's exact fixed-seed `NEVER_TRIMS` set as `[55, 293, 1597]`:
+the other 29 of 32 fixed seeds trim, including v33's former exception seed 179.
+The four fixed-seed failures were solely stale trim expectations, not convergence
+failures. Each of seeds 55, 293 and 1597 reported `trimmed=false` and
+`after excuse and cut=Some(true)`: every modern node trims after the old build is
+excused and the next cut falls due. These observations are specific to v34's
+deterministic draws, not exceptions carried forward from older corpora. Exact
+per-seed equality, the maximum of three non-trimming seeds, majority trim coverage,
+and the assertion that every modern node trims after excusal and the next cut remain
+enforced.

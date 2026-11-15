@@ -1,6 +1,7 @@
 use super::*;
 use super::identities;
 use crate::model::MissionRunRetryRequest;
+use smallclaims::store::canonical::CANONICAL_ORDER_DESC;
 
 type SubscriptionStartContext<'a> =
     (&'a str, &'a str, Option<&'a Value>, Option<(&'a str, &'a str)>);
@@ -478,11 +479,11 @@ impl Store {
             && let Some((resource, _, _, Some((subscription, request_id)))) = latest_ref
         {
             let latest: Option<String> = transaction.query_row(
-                &canonical_sql("SELECT id FROM claims
+                format!("SELECT id FROM claims
                  WHERE subject=?1 AND kind='subscription.mission-requested'
                    AND json_extract(body, '$.fields.admission')='relevant-changes'
                    AND json_extract(body, '$.fields.resource')=?2
-                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                 ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1").as_str(),
                 params![subscription, resource], |row| row.get(0),
             ).optional().map_err(internal)?;
             if let Some(latest) = latest
