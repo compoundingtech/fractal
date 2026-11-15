@@ -70,16 +70,23 @@ fn indexed_seek_work_does_not_grow_with_other_conversations_or_receipts() {
         assert_eq!(statement.get_status(rusqlite::StatementStatus::FullscanStep),0);
         statement.get_status(rusqlite::StatementStatus::VmStep)
     }
-    let baseline=steps(&store,Some("session/kept"));
     for n in 0..64 {
         store.append_claim(&sent(&format!("message/noise-{n}"),"person/ada","agent/worker","session/noise")).unwrap();
     }
-    assert_eq!(steps(&store,Some("session/kept")),baseline);
+    let small=steps(&store,Some("session/kept"));
+    for n in 64..1024 {
+        store.append_claim(&sent(&format!("message/noise-{n}"),"person/ada","agent/worker","session/noise")).unwrap();
+    }
+    let large=steps(&store,Some("session/kept"));
+    eprintln!("history seek VM steps: 64 neighbors={small}; 1024 neighbors={large}");
+    // Compare populated index ranges: the empty-tree endpoint has a different
+    // constant cursor-exit cost. A scan growing with 16x more history still fails.
+    assert!(large.abs_diff(small)<=2,"unrelated history increased VM work: {small} -> {large}");
     // Receipts cannot create a second accepted input or change its identity/order.
     store.append_claim(&ClaimInput {subject:"message/kept".into(),kind:"message.delivered".into(),
         actor:Some("daemon/runtime".into()),fields:BTreeMap::from([("status".into(),json!("delivered"))]),
         evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
-    assert_eq!(steps(&store,Some("session/kept")),baseline);
+    assert!(steps(&store,Some("session/kept")).abs_diff(large)<=2);
 }
 
 #[test]
