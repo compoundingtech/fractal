@@ -2431,6 +2431,7 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
     }
     fn check(store: &Store, base: &mut Publication<RuntimeRows>) -> bool {
         let (next, changed) = runtimes(store, Some(base)).unwrap().unwrap();
+        *store.fractal.subject_cache.lock().unwrap() = Default::default();
         let (oracle, _) = runtimes(store, None).unwrap().unwrap();
         assert_eq!(next.cut, oracle.cut);
         assert_eq!(next.rows.items, oracle.rows.items);
@@ -2515,8 +2516,9 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
     options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
     store.apply_owned_set(&intent, &options, "runtime-owned", "person/operator").unwrap();
     raw(&store, "agent/garden/meadow", "runtime.observed",
-        json!({"fields":{"runtime_id":"meadow","status":"running"}}));
+        json!({"fields":{"runtime_id":"meadow","status":"stopped"}}));
     let mut base = runtimes(&store, None).unwrap().unwrap().0;
+    assert_eq!(base.rows.items.len(), 1, "a declared stopped agent remains current");
     let prior = crate::store::owned_sets::selected(&store.readers.get(), None).unwrap().remove(0);
     let mut receipt = prior.receipt;
     receipt.previous = Some(format!("{}@{}", prior.id, prior.revision));
@@ -2529,5 +2531,6 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
         json!({"fields":{"revision":revision,"body":receipt}}));
     assert!(crate::store::owned_sets::selected(&store.readers.get(), None).unwrap()[0].blockers.is_empty());
     assert!(check(&store, &mut base));
-    assert_eq!(base.rows.items[0]["desired_revision"], json!(receipt_claim));
+    assert!(base.rows.items.is_empty(), "the implicit stop moves the runtime to history");
+    assert_eq!(store.selected_desired_tokens(&["agent/garden/meadow"]).unwrap()["agent/garden/meadow"], receipt_claim);
 }
