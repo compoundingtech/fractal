@@ -251,3 +251,9 @@ or explicitly selected input into an unprotected workspace.
 Authority links identify native ask subjects (`fractal work show SUBJECT`).
 Successful consent retention for one service does not establish grants for
 other services or authorize a broader production operation list.
+
+### Open implementation obligations
+
+The future helper must deny every operation at runtime while its allowlist is
+empty. Add a test proving that an empty allowlist admits no operation before
+enabling any helper; documentation alone is not enforcement.

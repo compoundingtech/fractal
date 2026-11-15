@@ -35,8 +35,9 @@ On macOS, the installer puts `st3` in `~/Applications/Fractal.app` and links the
 command to that stable app path. Configure an optional persistent signing identity
 before installation using [macOS installation and signing](st3/macos-installation.md).
 The default is ad-hoc signing, which can require renewed OS approvals after an update.
-Native installer and Darwin archive tests run in CI; clean-machine real-app, launchd
-and TCC permission setup remain a separate manual rehearsal.
+Native installer and Darwin archive tests run in CI. Optional voice-consent and
+local certificate-signing flows remain separate manual rehearsals; they do not
+require broad daemon or agent grants.
 
 ## 2. Answer the first-run screen
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Clarify that macOS manual consent rehearsals cover optional voice and local signing, not broad agent grants",
+  "replay": { "status": "none", "detail": "Documentation only; no replay changes." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "No runtime or coordination rule changes. Record the future helper's empty-allowlist deny test obligation." },
+  "compatibility": { "status": "none", "detail": "No CLI, API or runtime behavior changes." },
+  "downtime": { "status": "none", "detail": "No restart, installation or activation." },
+  "manual": { "status": "none", "detail": "Clarifies existing optional voice-consent and local certificate-signing rehearsals; adds no operator action or permission grant." },
+  "recovery": { "status": "none", "detail": "No persistent state is changed." }
+}
