@@ -338,7 +338,7 @@ fn subject_label(world: &World, subject: &str) -> String {
                 mission.step_metadata.get(&step.id)
                     .and_then(|metadata| metadata.title.as_deref())
                     .filter(|title| !title.trim().is_empty())
-                    .unwrap_or("Question for you")
+                    .unwrap_or("a step")
                     .to_owned()
             })
         }).unwrap_or_else(|| "a step".into());
@@ -3689,7 +3689,7 @@ mod tree_tests {
         missions[0].step_metadata.get_mut(&step_id).unwrap().title = None;
         let shown = home_detail(&world, Some(&id), 200, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
-        assert!(shown.contains("Question for you"), "{shown}");
+        assert!(shown.contains("a step"), "{shown}");
         assert!(!shown.contains(opaque_id), "{shown}");
     }
 
