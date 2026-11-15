@@ -313,6 +313,8 @@ mission "orchid" state="ready" {
         vec!["missions", "show", "mission-run/orchid/closed"],
         vec!["missions", "show", "mission-run/orchid/closed", "--json"],
         vec!["missions", "show", "mission-run/orchid/closed", "--follow"],
+        vec!["missions", "runs", "--mission-prefix", "orchid"],
+        vec!["missions", "runs", "--mission-prefix", "orchid", "--json"],
     ] {
         assert_clean(&run(Some(&socket), &args, true).await);
     }

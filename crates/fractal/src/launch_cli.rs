@@ -552,7 +552,7 @@ pub(super) async fn run_mission_view(
         }
         MissionViewCommand::Runs { mission_prefix, active, limit } => {
             run_mission_runs_to(
-                client, &mission_prefix, active, limit, json_output, &mut std::io::stdout(),
+                client, &mission_prefix, active, limit, json_output, &mut cli_output::stdout(),
             ).await
         }
         MissionViewCommand::Ls {
