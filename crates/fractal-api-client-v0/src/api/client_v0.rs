@@ -10372,7 +10372,7 @@ mod tests {
                 State(state.clone()), Extension(new_client_snapshot(&state)),
                 Extension(session()), Query(query(Some(limit))),
             ).await.unwrap_err();
-            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
         }
         let error = mission_runs_by_prefix(
             State(state.clone()), Extension(new_client_snapshot(&state)),

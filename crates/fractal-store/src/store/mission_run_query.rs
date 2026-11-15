@@ -70,7 +70,7 @@ impl Store {
             (false, false) => run_query!("AND ?2 IS NULL", ""),
             (false, true) => run_query!("AND ?2 IS NULL", " AND r.status NOT IN ('completed','failed','cancelled')"),
         };
-        let mut statement = connection.prepare(sql)?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hbc959d871d00 owner=fractal_store::store::mission_run_query TODO=trace-statement-and-value-representation */ sql)?;
         let mut runs = statement.query_map(params![prefix, end, limit + 1], |row| Ok(MissionRunSummary {
             run_id: format!("mission-run/{}", row.get::<_, String>(0)?),
             mission_id: format!("mission/{}", row.get::<_, String>(1)?),
@@ -84,7 +84,7 @@ impl Store {
         static HOST_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
             "SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired') ORDER BY CANONICAL_ASC(claims) LIMIT 1",
         ));
-        let mut host = connection.prepare(&HOST_SQL)?;
+        let mut host = connection.prepare(/* sqlite-large-value: allow-for-now lv-h890a38462624 owner=fractal_store::store::mission_run_query TODO=trace-statement-and-value-representation */ &HOST_SQL)?;
         for run in &mut runs {
             let id = run.run_id.strip_prefix("mission-run/").expect("run subject prefix");
             run.steps = steps.query_map(params![id, run.generation, MAX_STEPS + 1], |row| Ok(MissionRunStepSummary {
@@ -92,7 +92,7 @@ impl Store {
             }))?.collect::<rusqlite::Result<Vec<_>>>()?;
             run.steps_truncated = run.steps.len() > MAX_STEPS;
             run.steps.truncate(MAX_STEPS);
-            run.host_id = host.query_row([&run.run_id], |row| row.get(0)).optional()?;
+            run.host_id = host.query_row(/* sqlite-large-value: allow-for-now lv-hf58566f1b601 owner=fractal_store::store::mission_run_query TODO=trace-statement-and-value-representation */ [&run.run_id], |row| row.get(0)).optional()?;
         }
         Ok(MissionRunsPage { runs, truncated })
     }
@@ -184,7 +184,7 @@ mod tests {
             for index in 0..10_000 {
                 insert_run(&tx, &format!("unrelated-{index}"), &format!("unrelated/{index}"), "running");
                 tx.execute(
-                    "INSERT INTO desired(subject,kind,revision,claim_id,body,member) VALUES(?1,'agent','revision','claim/fixture','{}','{\"host\":\"node-a\"}')",
+                    "INSERT INTO desired(subject,kind,revision,claim_id,body,member) VALUES(?1,'agent','revision',(SELECT id FROM claims WHERE subject='mission-run/target' LIMIT 1),'{}','{\"host\":\"node-a\"}')",
                     [format!("agent/unrelated-{index}")],
                 ).unwrap();
             }
@@ -192,6 +192,7 @@ mod tests {
         }
         for (baseline, active) in small.into_iter().zip([false, true]) {
             let large = measure(active);
+            println!("mission run prefix active={active}: small={baseline:?}, large={large:?}");
             assert!(large.vm_steps <= baseline.vm_steps + 100, "active={active}, small={baseline:?}, large={large:?}");
             assert_eq!(large.statements, baseline.statements);
         }

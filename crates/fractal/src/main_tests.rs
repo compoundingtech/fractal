@@ -1223,12 +1223,12 @@ fn missions_tree_fixture_renders_all_sections() {
 
 #[test]
 fn missions_runs_query_fixture_renders_summaries_and_truncation() {
-    let fixture: Value = serde_json::from_str(include_str!(
+    let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hd8a0024f2dd3 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../tests/fixtures/mission-runs-query.json"
     )).expect("valid mission runs query fixture");
     assert_eq!(
         launch_cli::render_mission_runs_query(&fixture),
-        include_str!("../tests/fixtures/mission-runs-query.txt")
+        /* sqlite-large-value: allow-for-now lv-h0dd9e5195a5e owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/mission-runs-query.txt")
     );
     assert_eq!(
         launch_cli::render_mission_runs_query(&json!({

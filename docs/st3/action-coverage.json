@@ -1893,6 +1893,15 @@
       "verification": "native command dispatcher over a private Unix socket; repeated invocations create distinct linked runs"
     },
     {
+      "command": "st missions runs",
+      "description": "Read bounded run and step summaries for a mission ID prefix, optionally limited to active runs",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::missions_runs_query_requires_prefix_and_bounds_limit",
+        "crates/fractal/src/main_tests.rs::missions_runs_query_fixture_renders_summaries_and_truncation"
+      ],
+      "verification": "CLI parsing and encoded read-only query path; fixture-based human summary, empty result, and truncation rendering"
+    },
+    {
       "command": "st missions show",
       "description": "Explain one mission run, its goals, state, work, and usage",
       "tests": [
