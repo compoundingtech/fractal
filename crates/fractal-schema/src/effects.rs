@@ -282,6 +282,7 @@ mod tests {
         input.insert("recovering_actor".into(), json!("person/example"));
         input.insert("evidence".into(), json!(["decision/example"]));
         assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_ok());
+        assert!(crate::registry().validate_claim("effect/op", KIND_CONFIRMED, &input).is_ok());
         assert!(validate(KIND_UNRESOLVED, "effect/op", &input).is_err());
         input.insert("recovering_actor".into(), json!("agent/example/worker"));
         assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_err());
@@ -290,6 +291,7 @@ mod tests {
         assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_err());
         input.insert("provider_ref".into(), json!("message/example"));
         assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_ok());
+        assert!(crate::registry().validate_claim("effect/op", KIND_CONFIRMED, &input).is_ok());
         input.insert("outcome".into(), json!("confirmed"));
         assert!(validate(KIND_CONFIRMED, "effect/op", &input).is_err());
     }
