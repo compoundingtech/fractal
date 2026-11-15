@@ -1313,7 +1313,7 @@ impl Store {
             return Ok(None);
         }
         let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || {
-            Ok(claim_by_id_tx(connection, &failure.request)?)
+            claim_by_id_tx(connection, &failure.request)
         })? else {
             return Ok(None);
         };
