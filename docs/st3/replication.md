@@ -90,7 +90,10 @@ On Linux and macOS worker-only routes (`/v1/internal/replication/*`, `/v1/intern
 `/v1/internal/seat-freshness/reads`, `/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) compare the
 Unix connector's kernel-observed process generation with the replication worker.
 Services use the supervisor-observed worker; foreground operation uses the explicitly
-enrolled process. An unrelated unbound process is not a worker.
+enrolled process. An unrelated unbound process is not a worker. The daemon pins the
+observed worker's process generation and asks the supervisor (`launchctl`/`systemctl`)
+again only once that generation stops validating: a supervisor replaces its worker
+only after the old process ends, so requests do not spawn service-manager commands.
 
 The optional top-level daemon TOML key `worker_ingress_generation_check` accepts
 exactly `"observe"` or `"enforce"`; omission means `"observe"`. Unknown values fail
