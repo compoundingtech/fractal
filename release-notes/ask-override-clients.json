@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No checkpoint rule changes."},
   "compatibility": {"status": "changed", "detail": "Each client lists the caller's auto-resolved asks with the applied default and offers the ask's other named answers. The override is hidden when the row carries no work.override parameter (the seven-day window closed). Daemons without the read show no section."},
   "downtime": {"status": "none", "detail": "No migration or downtime required."},
-  "manual": {"status": "changed", "detail": "TUI: press o on an Auto-resolved or matching recently-closed row, pick an answer, Enter. Web: Alerts tab, Auto-resolved section. iOS: Now. Every client shows: Your answer replaces the default. Work already done on the default is not undone; <asker> is told."},
+  "manual": {"status": "changed", "detail": "TUI: press o on an Auto-resolved or matching recently-closed row, pick an answer, Enter. Web: Alerts tab, Auto-resolved section. iOS: Now. An answer that asks for changes takes your words first. One override per ask is sent at a time. Every client shows: Your answer replaces the default. Work already done on the default is not undone; <asker> is told."},
   "recovery": {"status": "none", "detail": "A refused override keeps the row and shows the refusal; retrying sends the same action id and key."}
 }
