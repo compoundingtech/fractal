@@ -847,11 +847,11 @@
     },
     {
       "command": "st alerts discuss",
-      "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in Fractal TUI",
+      "description": "Start a durable thread about an Inbox item with its responsible agent",
       "tests": [
-        "crates/fractal/tests/client_v0_cli.rs::attention_discuss_sends_the_message_tui_chat_about_this_sends"
+        "crates/fractal/tests/client_v0_cli.rs::attention_discuss_starts_a_durable_inbox_thread_and_retries_exactly"
       ],
-      "verification": "real CLI over private Unix socket; the agent reads the message with the item named"
+      "verification": "real CLI over private Unix socket; exact Inbox source/episode and responsible agent; durable first message; exact-key replay without duplication; changed input and recipient overrides refused"
     },
     {
       "command": "st alerts dismiss",
