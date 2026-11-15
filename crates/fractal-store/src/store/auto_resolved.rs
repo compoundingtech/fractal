@@ -42,7 +42,8 @@ fn read(connection: &Connection, person: &str, now: u128) -> Result<Value> {
         }
     }
     items.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    if items.len() > ROWS { complete = false; items.truncate(ROWS); }
+    // The cap is the contract's bound, so reaching it, not only passing it, means more rows may exist.
+    if items.len() >= ROWS { complete = false; items.truncate(ROWS); }
     Ok(json!({"items": items.into_iter().map(|(_, _, row)| row).collect::<Vec<_>>(), "complete": complete}))
 }
 
@@ -118,5 +119,32 @@ mod tests {
             assert!(rows[0]["resolved_at"].as_str().unwrap() >= rows[1]["resolved_at"].as_str().unwrap());
         }
         assert!(items[0]["action_parameters"]["work.override"].is_object());
+    }
+
+    #[test]
+    fn exactly_the_row_cap_reports_incomplete() {
+        let store = Store::open_memory("example").unwrap();
+        let last = store.connection.batched(|tx| -> Result<_> {
+            let mut last = None;
+            for n in 0..ROWS {
+                let ask = append_claim_tx(tx, &store.origin, &format!("step-run/example-{n}"), "work.person-asked",
+                    Some("agent/example"), &json!({"fields": {"person": "person/avery", "title": n.to_string()}}), &[], None)?;
+                append_claim_tx(tx, &store.origin, &ask.subject, "work.person-done", Some("daemon/runtime"),
+                    &json!({"fields": {"episode": ask.id, "resolved_by": "deadline", "answer": {"id":"hold","label":"Hold"}}}),
+                    std::slice::from_ref(&ask.id), None)?;
+                last = Some(ask);
+            }
+            Ok(last.expect("at least one ask"))
+        }).unwrap().unwrap();
+        let value = store.auto_resolved_asks("person/avery", now_ms()).unwrap();
+        assert_eq!(value["items"].as_array().unwrap().len(), ROWS);
+        assert_eq!(value["complete"], false);
+        store.connection.batched(|tx| -> Result<_> {
+            append_claim_tx(tx, &store.origin, &last.subject, "work.person-override", Some("person/avery"),
+                &json!({"fields": {"episode": last.id}}), &[], None)
+        }).unwrap().unwrap();
+        let below = store.auto_resolved_asks("person/avery", now_ms()).unwrap();
+        assert_eq!(below["items"].as_array().unwrap().len(), ROWS - 1);
+        assert_eq!(below["complete"], true);
     }
 }
