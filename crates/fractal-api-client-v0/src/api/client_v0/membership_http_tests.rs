@@ -123,6 +123,17 @@ async fn collection_http_errors_and_legacy_wire_shape() {
 
 #[tokio::test]
 async fn collection_http_cursor_survives_more_than_five_minutes() {
+    // Follow read_deadline's process-wide counter isolation: re-exec only this test.
+    // This isolates the clock under both cargo test and nextest.
+    const NAME: &str = concat!(module_path!(), "::collection_http_cursor_survives_more_than_five_minutes");
+    const CHILD: &str = "ST_MEMBERSHIP_CURSOR_CLOCK_TEST";
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env(CHILD, "1").status().unwrap();
+        assert!(status.success());
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let state = test_state_named(root.path(), "http-no-cursor-expiry");
     two_members(&state).await;
@@ -138,7 +149,7 @@ async fn collection_http_cursor_survives_more_than_five_minutes() {
     let (status, legacy) = membership_json(&state, MEMBERSHIP_PATH).await;
     assert_eq!(status, StatusCode::OK);
     let legacy_token = legacy["value"]["page"]["next_cursor"].as_str().unwrap();
-    // Process-wide clock: run with nextest's per-test process isolation, not cargo test.
+    // Only the isolated child changes the process-wide clock.
     // The guard also restores the clock if a request panics before normal cleanup.
     struct RestoreClientClock;
     impl Drop for RestoreClientClock {
