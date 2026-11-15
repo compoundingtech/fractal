@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { overrideRefusal, overrideRequest, overrideRetryable } from './autoResolved';
+import { overrideRefusal, overrideRequest, overrideRetryable, singleOverride, type OverrideAnswer } from './autoResolved';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type AutoResolvedAsk, type AvailabilitySet, type Capabilities, type ConversationSearch, type DirectiveNote, type Glass, type Launch, type LaunchVariant, type Mission, type PersonAvailability, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
@@ -153,6 +153,9 @@ function useAppStore(proof?: FabricProfile) {
   capsRef.current = caps;
   const [availability, setAvailability] = useState<{ person: PersonAvailability | null; note: DirectiveNote | null; issue: string }>(NO_AVAILABILITY);
   const [autoResolved, setAutoResolved] = useState(NO_AUTO_RESOLVED);
+  // Episodes with an override in flight: the ref refuses a second send at once, the state redraws the rows.
+  const overriding = useRef(new Set<string>());
+  const [overridePending, setOverridePending] = useState<ReadonlySet<string>>(new Set());
   // The person's last input, for presence: a touch anywhere in the app (the root view's capture only
   // records its time) or the app coming forward. `presence` is the live connection's reporter.
   const lastInput = useRef<number | null>(foreground.current.active ? Date.now() : null);
@@ -1185,11 +1188,13 @@ function useAppStore(proof?: FabricProfile) {
      * fence, so the snapshot fence carries no revisions; the action ID and key are the same on every try.
      * Accepted or refused, the auto-resolved list is read again: the row leaves once Fractal says so.
      */
-    async override(ask: AutoResolvedAsk, answerId: string) {
+    async override(ask: AutoResolvedAsk, answer: OverrideAnswer) {
       if (!client) return false;
-      const done = await runAction(async () => client.workOverride(overrideRequest(ask, answerId, await fence())), [], overrideRetryable, overrideRefusal);
-      await readAutoResolved();
-      return done;
+      return singleOverride(overriding.current, ask.episode, async () => {
+        const done = await runAction(async () => client.workOverride(overrideRequest(ask, answer, await fence())), [], overrideRetryable, overrideRefusal);
+        await readAutoResolved();
+        return done;
+      }, () => setOverridePending(new Set(overriding.current)));
     },
     /** Mark a message read from Home: it leaves the person's attention. */
     async markRead(item: Attention) {
@@ -1413,7 +1418,7 @@ function useAppStore(proof?: FabricProfile) {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, noteInput,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,

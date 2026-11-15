@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { ActionSheetIOS, Alert, View } from 'react-native';
 import { agentName } from '../agentsView';
-import { AUTO_RESOLVED_TITLE, autoResolvedRows, OVERRIDE_TITLE, overrideCopy, type AutoResolvedRow } from '../autoResolved';
+import { AUTO_RESOLVED_TITLE, autoResolvedRows, autoResolvedVisible, INCOMPLETE_AUTO_RESOLVED, needsWords, OVERRIDE_TITLE, overrideAnswer, overrideCopy, type AutoResolvedRow, type OverrideChoice } from '../autoResolved';
 import { ContextMenu } from '../menu';
 import { useStore } from '../store';
 import { GroupedHeader, GroupedRow, Note } from '../ui';
@@ -15,15 +15,27 @@ export function useAutoResolvedRows(): AutoResolvedRow[] {
   }), [autoResolved.items, data.agents]);
 }
 
-/** The override as an action sheet: the copy every client shows, then the ask's other named answers. One tap sends. */
+/**
+ * The override as an action sheet: the copy every client shows, then the ask's other named answers. One tap
+ * sends; an answer that requests changes first asks what should change, as answering on Now does. Nothing is
+ * offered while an override of the same ask is in flight.
+ */
 export function useOverride() {
-  const { status, busy, actions } = useStore();
+  const { status, busy, actions, overridePending } = useStore();
+  const send = (row: AutoResolvedRow, choice: OverrideChoice, words?: string) => {
+    const answer = overrideAnswer(choice, words);
+    if (typeof answer === 'string') Alert.alert(choice.label, answer);
+    else void actions.override(row.ask, answer);
+  };
   return (row: AutoResolvedRow) => {
     if (status !== 'online') { Alert.alert('Not connected', 'Reconnect to Fractal to answer this.'); return; }
-    if (busy) return;
+    if (busy || overridePending.has(row.ask.episode)) return;
     const { choices } = row;
     ActionSheetIOS.showActionSheetWithOptions({ title: OVERRIDE_TITLE, message: overrideCopy(row.asker), options: [...choices.map(choice => choice.label), 'Cancel'], cancelButtonIndex: choices.length }, index => {
-      if (index < choices.length) void actions.override(row.ask, choices[index].id);
+      const choice = choices[index];
+      if (!choice) return;
+      if (needsWords(choice)) Alert.prompt(choice.label, 'What should change?', text => send(row, choice, text));
+      else send(row, choice);
     });
   };
 }
@@ -31,17 +43,19 @@ export function useOverride() {
 // Asks Fractal resolved by their deadline while the person was away, below what waits on Now: each with
 // the default that applied. While its window is open, a tap gives the person's own answer instead.
 export function AutoResolvedSection({ rows }: { rows: AutoResolvedRow[] }) {
-  const { autoResolved } = useStore();
+  const { autoResolved, overridePending } = useStore();
   const override = useOverride();
-  if (!rows.length && !autoResolved.issue) return null;
+  if (!autoResolvedVisible(rows, autoResolved)) return null;
   return <View>
     <GroupedHeader title={AUTO_RESOLVED_TITLE} count={rows.length} />
     {autoResolved.issue ? <Note tone="warning">{autoResolved.issue}</Note> : null}
-    {rows.map(row => row.choices.length
-      ? <ContextMenu key={row.key} title={row.title} actions={[{ id: 'override', title: OVERRIDE_TITLE, symbol: 'arrow.uturn.backward.circle', run: () => override(row) }]}>
-        <GroupedRow title={row.title} context={row.context} hint="Replaces the default with your answer" onPress={() => override(row)} />
-      </ContextMenu>
-      : <GroupedRow key={row.key} title={row.title} context={row.context} />)}
-    {autoResolved.complete ? null : <Note>Older auto-resolved asks exist beyond these.</Note>}
+    {rows.map(row => overridePending.has(row.ask.episode)
+      ? <GroupedRow key={row.key} title={row.title} context={`${row.context} · Sending your answer…`} />
+      : row.choices.length
+        ? <ContextMenu key={row.key} title={row.title} actions={[{ id: 'override', title: OVERRIDE_TITLE, symbol: 'arrow.uturn.backward.circle', run: () => override(row) }]}>
+          <GroupedRow title={row.title} context={row.context} hint="Replaces the default with your answer" onPress={() => override(row)} />
+        </ContextMenu>
+        : <GroupedRow key={row.key} title={row.title} context={row.context} />)}
+    {autoResolved.complete ? null : <Note tone="warning">{INCOMPLETE_AUTO_RESOLVED}</Note>}
   </View>;
 }

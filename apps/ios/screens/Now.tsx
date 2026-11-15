@@ -109,7 +109,7 @@ export function NowScreen() {
 
 // One attention item: what it asks, who raised it, and what can be done here.
 export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) {
-  const { data, busy, status, actions, hasSynced, loadErrors } = useStore();
+  const { data, busy, status, actions, hasSynced, loadErrors, overridePending } = useStore();
   useMissionsOnFocus();
   const autoRows = useAutoResolvedRows();
   const override = useOverride();
@@ -137,7 +137,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
         {overridable ? <>
           <T dim>Fractal resolved it by its deadline{overridable.ask.default_answer ? ` with the default “${overridable.ask.default_answer.label}”` : ''}.</T>
-          <Button label={OVERRIDE_TITLE} disabled={busy || status !== 'online'} onPress={() => override(overridable)} />
+          <Button label={OVERRIDE_TITLE} disabled={busy || status !== 'online' || overridePending.has(overridable.ask.episode)} onPress={() => override(overridable)} />
         </> : null}
         <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
