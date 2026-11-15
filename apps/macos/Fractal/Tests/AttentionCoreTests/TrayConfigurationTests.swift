@@ -39,4 +39,13 @@ final class TrayConfigurationTests: XCTestCase {
       }
     }
   }
+
+  func testOnlyAReviewBuildDrawsPreviewHistory() throws {
+    XCTAssertFalse(try TrayConfiguration.load(environment: valid).historyPreview)
+    for (value, expected) in [("1", true), ("0", false), ("yes", false), ("", false)] {
+      var environment = valid
+      environment["ATTENTION_TRAY_HISTORY_PREVIEW"] = value
+      XCTAssertEqual(try TrayConfiguration.load(environment: environment).historyPreview, expected, value)
+    }
+  }
 }

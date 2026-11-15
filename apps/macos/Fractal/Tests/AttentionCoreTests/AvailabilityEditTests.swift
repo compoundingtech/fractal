@@ -179,4 +179,6 @@ private actor FakeAvailability: AvailabilityAdapter {
   func reportPresence(_ report: PresenceMachine.Report) async throws -> PresenceAnswer {
     PresenceAnswer(availability: read.availability, reportAgainAt: nil)
   }
+
+  func readAvailabilityHistory(_ request: AvailabilityHistoryRequest) async throws -> AvailabilityHistoryRead { .unsupported }
 }

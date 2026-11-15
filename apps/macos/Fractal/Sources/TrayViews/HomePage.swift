@@ -108,6 +108,8 @@ struct ModuleTile: View {
   var badge: String?
   /// The person just went back from this module's page: VoiceOver returns here.
   var returnsFocus = false
+  /// A wide tile's history strip under its value (H3).
+  var history: AvailabilityHistory?
   let size: Size
   let open: () -> Void
 
@@ -182,6 +184,7 @@ struct ModuleTile: View {
         VStack(alignment: .leading, spacing: 0) {
           Text(title).font(.callout).fontWeight(.semibold)
           Text(value).font(.subheadline).foregroundStyle(.secondary)
+          if let history { TileHistoryStrip(history: history).padding(.top, 3).padding(.trailing, 4) }
         }
         .lineLimit(1)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -199,18 +202,25 @@ struct ModuleTile: View {
 private struct AvailabilityTile: View {
   let model: AttentionModel
   let size: ModuleTile.Size
+  @Environment(\.availabilityHistogram) private var pinned
+  @AppStorage(AvailabilityHistogramStyle.storageKey) private var picked = AvailabilityHistogramStyle.week
 
   var body: some View {
     let availability = model.availability.value?.availability
     let available = availability?.status == .available
+    let read = (pinned ?? picked) == .today ? model.availabilityHistory.value : nil
+    let history = read?.history.flatMap { $0.isEmpty ? nil : $0 }
+    let value = availability.map(Self.value) ?? (model.availability.value == nil ? "Loading…" : "Unknown")
     ModuleTile(
       title: availability?.status.label ?? "Availability",
-      value: availability.map(Self.value) ?? (model.availability.value == nil ? "Loading…" : "Unknown"),
+      // A review build's sample strip says so on the tile too.
+      value: history != nil && read?.isPreview == true ? "\(value) · preview" : value,
       symbol: availability.map { AxisRows.symbol($0.status) } ?? "person.crop.circle",
       isOn: availability == nil ? nil : available,
       toggleHelp: available ? "Set Away until you change it" : "Set Available",
       toggle: { if let availability { AvailabilitySwitch.flip(availability, model) } },
       returnsFocus: model.backFrom == .availability,
+      history: history,
       size: size,
       open: { open(.availability) }
     )

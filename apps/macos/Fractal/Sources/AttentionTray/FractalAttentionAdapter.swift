@@ -12,6 +12,9 @@ struct TrayConfiguration: Sendable {
   let fractalURL: URL
   /// `ATTENTION_SPEECH_SOCKET`: the local speech service; unset leaves speech off.
   let speechSocket: String?
+  /// `ATTENTION_TRAY_HISTORY_PREVIEW=1`: a design-review build. Against a member without the
+  /// availability history read, the page draws a sample week labelled "Preview data".
+  var historyPreview = false
 
   enum ConfigurationError: Error, CustomStringConvertible {
     case missing(String)
@@ -61,9 +64,11 @@ struct TrayConfiguration: Sendable {
     }
     let speechSocket = environment["ATTENTION_SPEECH_SOCKET"].flatMap { $0.isEmpty ? nil : $0 }
     if let speechSocket, !speechSocket.hasPrefix("/") { throw ConfigurationError.relativePath("ATTENTION_SPEECH_SOCKET") }
-    return try Self(
+    var configuration = try Self(
       socketPath: path("ATTENTION_FRACTAL_SOCKET"), person: person,
       fractalURL: url("ATTENTION_FRACTAL_URL"), speechSocket: speechSocket)
+    configuration.historyPreview = environment["ATTENTION_TRAY_HISTORY_PREVIEW"] == "1"
+    return configuration
   }
 }
 
@@ -101,16 +106,20 @@ actor FractalAttentionAdapter: AttentionAdapter {
   static let pageLimit = 100
   let client: FractalClient
   private let fractalURL: URL
+  /// The person a review build's sample history belongs to; nil outside a review build.
+  let historyPreviewPerson: String?
 
   init(configuration: TrayConfiguration, clientName: String) {
     self.init(
       client: FractalClient(localSocketPath: configuration.socketPath, person: configuration.person, client: clientName),
-      fractalURL: configuration.fractalURL)
+      fractalURL: configuration.fractalURL,
+      historyPreviewPerson: configuration.historyPreview ? configuration.person : nil)
   }
 
-  init(client: FractalClient, fractalURL: URL) {
+  init(client: FractalClient, fractalURL: URL, historyPreviewPerson: String? = nil) {
     self.client = client
     self.fractalURL = fractalURL
+    self.historyPreviewPerson = historyPreviewPerson
   }
 
   func readAttention() async throws -> AttentionPage {

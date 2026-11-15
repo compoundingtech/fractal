@@ -18,6 +18,7 @@ struct AvailabilitySection: View {
     } footer: {
       if let availability = model.availability.value?.availability { PresenceFooter(availability: availability) }
     }
+    if model.availability.value != nil { AvailabilityHistorySection(model: model) }
     if let snapshot = model.availability.value {
       PanelSection(title: "Note for Agents", aside: snapshot.note == nil ? "none" : "set") {
         NoteRow(note: snapshot.note, model: model)

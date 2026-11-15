@@ -2,9 +2,10 @@ import Foundation
 import TrayViews
 
 /// The open design questions, each option the real panel at the live scroll limit so the fold
-/// shows: answer placement (D1, D2), panel width (W1 320, W2 336, W3 360 pt) and tile layout
-/// (T1 capsules, T2 Control Center's grid). The shipped panel is D1 · W3 · T1, so T1's renders
-/// are the W renders of the top level.
+/// shows: answer placement (D1, D2), panel width (W1 320, W2 336, W3 360 pt), tile layout
+/// (T1 capsules, T2 Control Center's grid) and the availability histogram (H1–H3,
+/// `AvailabilityHistoryScenarios.swift`). The shipped panel is D1 · W3 · T1 · H1, so T1's
+/// renders are the W renders of the top level.
 struct VariantScenario {
   let scenario: Scenario
   let variant: PanelVariant
@@ -55,7 +56,7 @@ let variantScenarios: [VariantScenario] = {
           prepare: busy.prepare),
         variant: variant(width: width, tiles: .grid)))
   }
-  return all
+  return all + historyVariantScenarios
 }()
 
 /// W1, W2 and W3, narrowest first; W3 is the shipped width.

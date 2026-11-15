@@ -44,6 +44,23 @@ extension FractalAttentionAdapter: AvailabilityAdapter {
     }
   }
 
+  /// The person's own history. A member that predates the read answers an empty 404, which the
+  /// client reports as `unsupported-capability`: the panel says so instead of failing, and a
+  /// review build draws its labelled sample week there.
+  func readAvailabilityHistory(_ request: AvailabilityHistoryRequest) async throws -> AvailabilityHistoryRead {
+    do {
+      return .history(
+        try Self.history(
+          await client.availabilityHistory(
+            from: Self.rfc3339(request.from), to: Self.rfc3339(request.to), bucketSeconds: Int(request.bucketSeconds)
+          ).value))
+    } catch let envelope as ErrorEnvelope where envelope.code == .unsupportedCapability {
+      return historyPreviewPerson.map { .preview(AvailabilityHistoryPreview.sample(request, person: $0)) } ?? .unsupported
+    } catch {
+      throw ReadFailure(error)
+    }
+  }
+
   // MARK: Wire
 
   static func wire(_ report: PresenceMachine.Report) -> PresenceReport {
@@ -91,4 +108,43 @@ extension FractalAttentionAdapter: AvailabilityAdapter {
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter.string(from: date)
   }
+
+  /// Buckets are `bucket_seconds` wide from `start`; the last ends at the period's end. Every
+  /// duration on the wire is whole milliseconds.
+  static func history(_ value: WireAvailabilityHistory) throws -> AttentionCore.AvailabilityHistory {
+    guard let from = date(iso: value.from), let to = date(iso: value.to) else {
+      throw ReadFailure(message: "Fractal returned an availability history without a valid period")
+    }
+    let width = TimeInterval(value.bucketSeconds)
+    let buckets = try value.buckets.map { bucket in
+      guard let start = date(iso: bucket.start) else {
+        throw ReadFailure(message: "Fractal returned an availability bucket without a valid start")
+      }
+      return AttentionCore.AvailabilityHistory.Bucket(
+        start: start, end: min(start.addingTimeInterval(width), to),
+        status: WordSeconds([.available: seconds(bucket.status.available), .away: seconds(bucket.status.away)]),
+        source: WordSeconds([
+          .override: seconds(bucket.statusSource.override), .presence: seconds(bucket.statusSource.presence),
+          .unreported: seconds(bucket.statusSource.unreported),
+        ]),
+        presence: bucket.presence.map {
+          WordSeconds([
+            .present: seconds($0.present), .idle: seconds($0.idle), .locked: seconds($0.locked),
+            .unreported: seconds($0.unreported),
+          ])
+        },
+        interruptions: WordSeconds([
+          .all: seconds(bucket.interruptions.all), .urgent: seconds(bucket.interruptions.urgent),
+          .none: seconds(bucket.interruptions.none),
+        ]),
+        deadlineClock: WordSeconds([
+          .run: seconds(bucket.deadlineClock.run), .holdRoutine: seconds(bucket.deadlineClock.holdRoutine),
+          .holdAll: seconds(bucket.deadlineClock.holdAll),
+        ]))
+    }
+    return AttentionCore.AvailabilityHistory(
+      person: value.person, from: from, to: to, bucketSeconds: width, buckets: buckets)
+  }
+
+  private static func seconds<Milliseconds: BinaryInteger>(_ ms: Milliseconds) -> TimeInterval { TimeInterval(ms) / 1000 }
 }
