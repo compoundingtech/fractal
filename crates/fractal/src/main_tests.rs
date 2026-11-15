@@ -1238,6 +1238,33 @@ fn missions_runs_query_fixture_renders_summaries_and_truncation() {
     );
 }
 
+#[tokio::test]
+async fn missions_runs_query_json_preserves_the_wire_envelope_through_the_client_decoder() {
+    let envelope = json!({
+        "api_version": "fractal.client.v0",
+        "snapshot": {"host_id": "host/orchid", "store_index": 42},
+        "value": {"runs": [], "truncated": false}
+    });
+    let expected = envelope.clone();
+    let app = axum::Router::new().route(
+        "/v1/client/mission-runs",
+        axum::routing::get(move || {
+            let envelope = envelope.clone();
+            async move { axum::Json(envelope) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut output = Vec::new();
+    launch_cli::run_mission_runs_to(&client, "roll/", true, 100, true, &mut output).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&output).unwrap(), expected);
+    output.clear();
+    launch_cli::run_mission_runs_to(&client, "roll/", true, 100, false, &mut output).await.unwrap();
+    assert_eq!(String::from_utf8(output).unwrap(), "MISSION RUNS\n  none\n");
+    server.abort();
+}
+
 #[test]
 fn missions_runs_query_requires_prefix_and_bounds_limit() {
     let cli = Cli::try_parse_from([

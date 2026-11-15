@@ -513,6 +513,24 @@ pub(super) fn render_mission_runs_query(response: &Value) -> String {
     output
 }
 
+pub(super) async fn run_mission_runs_to(
+    client: &Client,
+    mission_prefix: &str,
+    active: bool,
+    limit: u16,
+    json_output: bool,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let response = client.get_envelope(&mission_runs_path(mission_prefix, active, limit)).await?;
+    if json_output {
+        serde_json::to_writer_pretty(&mut *output, &response)?;
+        writeln!(output)?;
+    } else {
+        write!(output, "{}", render_mission_runs_query(&response["value"]))?;
+    }
+    Ok(())
+}
+
 pub(super) async fn run_mission_view(
     client: &Client,
     endpoint: &Endpoint,
@@ -533,15 +551,9 @@ pub(super) async fn run_mission_view(
             }
         }
         MissionViewCommand::Runs { mission_prefix, active, limit } => {
-            let response: Value = client
-                .get(&mission_runs_path(&mission_prefix, active, limit))
-                .await?;
-            if json_output {
-                print_value(&response, true)
-            } else {
-                print!("{}", render_mission_runs_query(&response));
-                Ok(())
-            }
+            run_mission_runs_to(
+                client, &mission_prefix, active, limit, json_output, &mut std::io::stdout(),
+            ).await
         }
         MissionViewCommand::Ls {
             watch,
