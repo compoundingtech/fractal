@@ -158,10 +158,20 @@ mod tests {
     fn prefix_query_cost_does_not_grow_with_unrelated_runs_or_agents() {
         let store = Store::open_memory("node-a").unwrap();
         insert_run(&store.connection.write(), "target", "roll/target", "running");
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            append_claim_record_tx(
+                &tx, "node-origin", "mission-run/target", "mission-run.created",
+                Some("person/operator"), &json!({"fields": {}}), &[], None,
+            ).unwrap();
+            tx.commit().unwrap();
+        }
         let measure = |active| {
             let scope = SqliteWorkScope::start();
             let page = store.mission_runs_by_prefix("roll/", active, 100).unwrap();
             assert_eq!(page.runs.len(), 1);
+            assert_eq!(page.runs[0].host_id.as_deref(), Some("node-origin"));
             let cost = scope.finish();
             assert!(cost.vm_steps > 0, "{cost:?}");
             assert_eq!(cost.fullscan_steps, 0, "{cost:?}");
