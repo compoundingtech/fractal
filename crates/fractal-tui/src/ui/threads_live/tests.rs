@@ -547,7 +547,10 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
 fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     let mut threads = Threads::default();
     enable_editing(&mut threads);
-    let world = super::super::demo::test_world();
+    let mut world = super::super::demo::test_world();
+    let super::super::view::Load::Ready(agents) = &mut world.agents else { panic!() };
+    agents[0].id = "agent/atlas".into();
+    agents[0].name = "Atlas".into();
     let cursor = edit::Cursor::default();
     let mut texts = HashMap::new();
     let inbox = Pane::Home(Some("attention/ask".into()));
@@ -589,9 +592,10 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
             .collect::<Vec<_>>()
     };
     let draft = lines(&threads, &texts);
+    assert!(!draft.join("\n").contains("agent/"), "{draft:?}");
     let slot = draft
         .iter()
-        .position(|line| line == "▾ Worker test · Draft · to agent/atlas")
+        .position(|line| line == "▾ Worker test · Draft · to Atlas")
         .unwrap();
     assert!(
         draft[slot + 1..]
@@ -2769,11 +2773,11 @@ fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            rendered.contains("Fault context · Draft · to agent/atlas"),
+            rendered.contains("Fault context · Draft · to an agent"),
             "{rendered}"
         );
         assert!(!rendered.contains("Replacement title"), "{rendered}");
-        assert!(!rendered.contains("to agent/replacement"), "{rendered}");
+        assert!(!rendered.contains("agent/"), "{rendered}");
     };
     assert_captured(&threads, &home, &texts);
     threads.complete(
