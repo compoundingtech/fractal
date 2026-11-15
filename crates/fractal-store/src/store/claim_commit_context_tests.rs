@@ -312,5 +312,5 @@ fn transaction_local_effect_operation_preserves_first_send_envelope_and_replay()
         assert_eq!(write_counts(tx), before);
         Ok(sent)
     }).unwrap().unwrap();
-    assert_eq!(store.operation_claim(effect_operation.0).unwrap().unwrap().id, sent.id);
+    assert_eq!(store.operation_claim(key).unwrap().unwrap().id, sent.id);
 }
