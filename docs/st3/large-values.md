@@ -94,6 +94,23 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Thread commit-context test inventory
+
+`fractal_store::store::claim_commit_context_tests` owns `lv-hd6a86ab6caec`.
+The test-only `write_counts` reader interpolates one of five fixed table names
+(`claims`, `batches`, `operations`, `expected_claim_signatures`, or
+`local_native_delivery_receipts_v2`) into `SELECT COUNT(*)`. It binds no values,
+returns a scalar `u64`, and writes no inline payloads or keys. The dynamic sink
+remains inventoried because lexical discovery does not resolve the table-name
+loop; the next representation step is to trace that fixed statement source
+rather than exempt arbitrary dynamic SQL. This registration does not prove the
+sizes of values already stored in those tables.
+
+The removed `thread_metadata` INSERT and DELETE sites `lv-hd06b93ec0d26` and
+`lv-hf3b18f858b62` no longer have producers and their exceptions are removed.
+The reviewed proposal changes only these three site records; existing review
+provenance and column declarations remain unchanged.
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds

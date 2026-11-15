@@ -77,7 +77,7 @@ fn retire(store: &Store) -> ClaimRecord {
 fn write_counts(connection: &Connection) -> Vec<u64> {
     ["claims", "batches", "operations", "expected_claim_signatures", "local_native_delivery_receipts_v2"]
         .into_iter()
-        .map(|table| connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap())
+        .map(|table| connection.query_row(/* sqlite-large-value: allow-for-now lv-hd6a86ab6caec owner=fractal_store::store::claim_commit_context_tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap())
         .collect()
 }
 
@@ -312,5 +312,5 @@ fn transaction_local_effect_operation_preserves_first_send_envelope_and_replay()
         assert_eq!(write_counts(tx), before);
         Ok(sent)
     }).unwrap().unwrap();
-    assert_eq!(store.operation_claim(effect_operation.0).unwrap().unwrap().id, sent.id);
+    assert_eq!(store.operation_claim(key).unwrap().unwrap().id, sent.id);
 }
