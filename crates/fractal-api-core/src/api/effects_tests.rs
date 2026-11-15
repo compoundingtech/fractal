@@ -127,6 +127,24 @@ mission "example/report" state="ready" {
     }
 }
 
+#[test]
+fn daemon_capabilities_refuse_unknown_provider_class_and_target_before_admission() {
+    use crate::store::effects::EffectClass;
+    let fixture = Fixture::new();
+    for (provider, class, target, code) in [
+        ("sdk-provider", EffectClass::NativeCoordinated, "agent/example/reader", "effect-provider-unknown"),
+        ("native-message", EffectClass::ProviderIdempotent, "agent/example/reader", "effect-class-mismatch"),
+        ("native-message", EffectClass::NativeCoordinated, "not-a-recipient", "effect-target-mismatch"),
+        ("git.branch-create", EffectClass::ProviderIdempotent, r#"{"repo":"example/repo"}"#, "effect-target-mismatch"),
+    ] {
+        let error = fixture.state.store.admit_effect(fixture.owner(), &fixture.request.from,
+            &fixture.request.from, "digest", provider, class, target).unwrap_err();
+        assert_eq!(error.code, code);
+    }
+    // Refused declarations cannot consume the key or widen native-message capability.
+    fixture.admit();
+}
+
 fn persistent_state(root: &Path, origin: &str) -> AppState {
     let mut state = super::tests::state(root);
     state.store = Arc::new(Store::open(&root.join("graph.db"), origin).unwrap());

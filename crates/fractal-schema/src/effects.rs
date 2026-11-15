@@ -19,6 +19,43 @@ pub enum EffectClass {
     FailClosed,
 }
 
+/// Daemon-owned capabilities. SDK declarations cannot widen this table.
+pub fn provider_class(provider: &str) -> Option<EffectClass> {
+    match provider {
+        "native-message" | "person-ask" | "github.comment" => Some(EffectClass::NativeCoordinated),
+        "git.branch-create" | "git.pr-create" => Some(EffectClass::ProviderIdempotent),
+        _ => None,
+    }
+}
+
+/// Targets are provider identities, not caller-selected capability declarations.
+pub fn validate_provider(provider: &str, class: EffectClass, target: &str) -> Result<(), ValidationError> {
+    let expected = provider_class(provider).ok_or_else(|| {
+        error("effect-provider-unknown", "the daemon has no capability declaration for this provider")
+    })?;
+    if class != expected {
+        return Err(error("effect-class-mismatch", "the effect class differs from the daemon capability"));
+    }
+    let valid = match provider {
+        "native-message" => ["agent/", "person/", "channel/"].iter()
+            .any(|prefix| target.strip_prefix(prefix).is_some_and(|id| !id.trim().is_empty())),
+        "person-ask" => target.strip_prefix("person/").is_some_and(|id| !id.trim().is_empty()),
+        "git.branch-create" | "git.pr-create" => serde_json::from_str::<Value>(target).ok()
+            .is_some_and(|target| ["repo", "head"].iter().all(|field| {
+                target.get(field).and_then(Value::as_str).is_some_and(|value| !value.trim().is_empty())
+            })),
+        "github.comment" => serde_json::from_str::<Value>(target).ok()
+            .is_some_and(|target| target.get("repo").and_then(Value::as_str)
+                .is_some_and(|repo| !repo.trim().is_empty())
+                && target.get("number").and_then(Value::as_u64).is_some_and(|number| number > 0)),
+        _ => false,
+    };
+    if !valid {
+        return Err(error("effect-target-mismatch", "the target does not match the provider capability"));
+    }
+    Ok(())
+}
+
 /// Every phase repeats the immutable identity and admission bindings.
 /// Provider observations are additive; absent metadata is never guessed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

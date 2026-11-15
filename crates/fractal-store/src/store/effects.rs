@@ -142,6 +142,15 @@ impl Store {
 
     pub fn admit_message_effect(&self, owner: &EffectOwner, caller: &str, payload_sender: &str,
         payload_digest: &str, target: &str) -> Result<EffectAdmission, FractalError> {
+        self.admit_effect(owner, caller, payload_sender, payload_digest, "native-message",
+            EffectClass::NativeCoordinated, target)
+    }
+
+    /// All adapters pass through daemon-owned capability validation before admission.
+    pub fn admit_effect(&self, owner: &EffectOwner, caller: &str, payload_sender: &str,
+        payload_digest: &str, provider: &str, class: EffectClass, target: &str) -> Result<EffectAdmission, FractalError> {
+        fractal_schema::effects::validate_provider(provider, class, target)
+            .map_err(|error| FractalError::new(error.code, error.message))?;
         let key = effect_key(owner)?;
         let operation_id = operation_id_for_key(&key);
         let id = format!("effect/{operation_id}");
@@ -163,6 +172,7 @@ impl Store {
                     return Ok(EffectAdmission::Blocked(error));
                 }
                 if original.payload_digest != payload_digest || original.target != target
+                    || original.provider != provider || original.class != class
                     || original.lease_owner != payload_sender
                 {
                     park_tx(tx, self.origin(), &original, &owner.step, "idempotency-mismatch", caller)?;
@@ -181,8 +191,8 @@ impl Store {
                     "first origination requires the verified worker to be the message sender"));
             }
             let record = EffectRecord {
-                effect_id: id, operation_id, provider: "native-message".into(), target: target.into(),
-                payload_digest: payload_digest.into(), class: EffectClass::NativeCoordinated,
+                effect_id: id, operation_id, provider: provider.into(), target: target.into(),
+                payload_digest: payload_digest.into(), class,
                 bound_step_run: owner.step.clone(), bound_attempt: owner.attempt,
                 lease_owner: caller.into(), lease_incarnation: owner.incarnation.clone(),
                 provider_ref: None, result_digest: None, error: None, recovering_actor: None, evidence: Vec::new(),
@@ -195,8 +205,14 @@ impl Store {
             }
             let input = intended_input(&record, &key)?;
             // Do not interpret a conflicted/checkpointed operation as an absent effect.
-            if let Some(claim) = replicated_operation_outcome_tx(tx, &input)? {
-                return Ok(EffectAdmission::Recover(serde_json::from_value(claim.body["fields"].clone()).map_err(internal)?));
+            match replicated_operation_outcome_tx(tx, &input) {
+                Ok(Some(claim)) => return Ok(EffectAdmission::Recover(
+                    serde_json::from_value(claim.body["fields"].clone()).map_err(internal)?)),
+                Ok(None) => {}
+                Err(error) => {
+                    park_tx(tx, self.origin(), &record, &owner.step, error.code, caller)?;
+                    return Ok(EffectAdmission::Blocked(error));
+                }
             }
             let (operation, digest) = claim_operation(&input)?
                 .ok_or_else(|| internal("the effect operation is missing"))?;
