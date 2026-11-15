@@ -636,10 +636,10 @@ impl Store {
         items.retain(|item| item.requested_at_unix_ms <= as_of);
         let mut live = Vec::new();
         for mut item in items {
-            if let Some(run) = item.mission_run.as_deref() {
-                if !person_work::run_live(&connection, run, None, item.kind == "fault")? {
-                    continue;
-                }
+            if let Some(run) = item.mission_run.as_deref()
+                && !person_work::run_live(&connection, run, None, item.kind == "fault")?
+            {
+                continue;
             }
             if item.episode.is_empty() {
                 item.episode = connection

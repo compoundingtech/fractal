@@ -695,12 +695,11 @@ pub fn list_context(
             Some(episode) => query.query_map(params![args[0], args[1], args[2], limit + 1, episode], read),
             None => query.query_map(params![args[0], args[1], args[2], limit + 1], read),
         }.map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
-        if let Some(episode) = qualifier {
-            if let Some(thread) = linked_context_thread(&connection, &person, &key, episode, after)? {
-                if let Err(index) = subjects.binary_search(&thread) {
-                    subjects.insert(index, thread);
-                }
-            }
+        if let Some(episode) = qualifier
+            && let Some(thread) = linked_context_thread(&connection, &person, &key, episode, after)?
+            && let Err(index) = subjects.binary_search(&thread)
+        {
+            subjects.insert(index, thread);
         }
         let has_more = subjects.len() > limit;
         subjects.truncate(limit);

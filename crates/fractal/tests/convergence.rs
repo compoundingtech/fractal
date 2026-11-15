@@ -1928,7 +1928,7 @@ fn typed_thread_metadata_converges_after_replication_and_restart() {
         revision: &renamed_revision,
     }).unwrap();
     let closed_revision = summary(&world.nodes[0].store, person, thread).unwrap().revision;
-    assert_eq!(closed.predecessors, [renamed.id.clone()]);
+    assert_eq!(closed.predecessors, std::slice::from_ref(&renamed.id));
     assert!(world.exchange(0, 1, true) > 0);
     for node in &world.nodes[..2] {
         assert_eq!(summary(&node.store, person, thread).unwrap().revision, closed_revision);
@@ -1987,8 +1987,8 @@ fn causal_thread_successors_override_faster_ancestor_clocks() {
     let retitled_revision = summary(&world.nodes[1].store, person, thread).unwrap().revision;
     assert!(reopened.accepted_at_unix_ms < closed.accepted_at_unix_ms);
     assert!(retitled.accepted_at_unix_ms < renamed.accepted_at_unix_ms);
-    assert_eq!(reopened.predecessors, [closed.id.clone()]);
-    assert_eq!(retitled.predecessors, [reopened.id.clone()]);
+    assert_eq!(reopened.predecessors, std::slice::from_ref(&closed.id));
+    assert_eq!(retitled.predecessors, std::slice::from_ref(&reopened.id));
     assert!(world.exchange(1, 0, true) > 0);
     for restarted in [false, true] {
         if restarted { world.restart(0); world.restart(1); }

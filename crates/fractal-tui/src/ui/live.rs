@@ -387,6 +387,10 @@ impl AnswerTiming {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Worker results transfer owned receipts to the UI without an extra allocation"
+)]
 enum Fetched {
     ThreadWrite(u64, super::threads_live::Receipt),
     ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),

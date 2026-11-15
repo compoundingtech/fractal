@@ -11684,6 +11684,10 @@ fn device_signature_error(code: &'static str, message: impl Into<String>) -> Api
 }
 
 /// Check a device's signature on the message this daemon is about to write, before writing it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Signature verification keeps the authenticated message fields and replay policy explicit"
+)]
 fn check_device_signature(
     state: &AppState,
     signature: &smallclaims::principal::ClaimSignature,

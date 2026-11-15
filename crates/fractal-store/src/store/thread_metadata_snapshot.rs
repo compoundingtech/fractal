@@ -171,8 +171,8 @@ mod tests {
         let title = rename(&store);
         let intermediate = state(&store, "close", true);
         let current = state(&store, "reopen", false);
-        assert_eq!(current.predecessors, [intermediate.id.clone()]);
-        assert_eq!(intermediate.predecessors, [title.id.clone()]);
+        assert_eq!(current.predecessors, std::slice::from_ref(&intermediate.id));
+        assert_eq!(intermediate.predecessors, std::slice::from_ref(&title.id));
         store.connection.batched(|tx| -> anyhow::Result<()> {
             tx.execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&intermediate.id])?;
             Ok(())

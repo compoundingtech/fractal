@@ -108,6 +108,10 @@ pub(super) struct Receipt {
     confirmation: Confirmation,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Retain the owned confirmation inline without allocating another copy of the write outcome"
+)]
 enum Confirmation {
     Applied(Option<Envelope<ThreadSummary>>),
     Rejected,
@@ -855,6 +859,10 @@ impl Threads {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Apply the collection window's snapshot, rows, removals, ordering and paging together"
+    )]
     pub(super) fn window(
         &mut self,
         interest: ThreadInterest,
@@ -1295,6 +1303,10 @@ impl Threads {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "The inline editor needs its host, mode, presentation and existing draft state"
+    )]
     fn editor(
         &self,
         doc: &mut Doc,

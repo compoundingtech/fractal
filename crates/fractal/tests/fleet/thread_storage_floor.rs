@@ -89,9 +89,8 @@ async fn retained_history_and_pairing_survive_upgrade(previous_storage_version: 
     let before = {
         let connection = rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let mut statement = connection.prepare("SELECT id,body,predecessors FROM claims ORDER BY id").unwrap();
-        let rows = statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))
-            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        rows
+        statement.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
     };
     node.binary = PathBuf::from(st3());
     node.start().await;

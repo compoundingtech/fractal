@@ -224,8 +224,10 @@ mod planning_tests {
 
     #[test]
     fn ordinary_window_saturation_pauses_and_releasing_slots_readmits_all_retained_demand() {
-        let mut windows = ThreadWindows::default();
-        windows.desired = details(&["thread/a", "thread/b"]);
+        let mut windows = ThreadWindows {
+            desired: details(&["thread/a", "thread/b"]),
+            ..Default::default()
+        };
         let desired = windows.desired.clone();
         let saturated = plan(&windows.desired, SOCKET_SLOTS);
         assert!(saturated.admitted.is_empty());

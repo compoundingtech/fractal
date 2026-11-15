@@ -51,7 +51,6 @@
       "clippy::type_complexity": 2
     },
     "fractal-store": {
-      "clippy::collapsible_if": 10,
       "clippy::double_ended_iterator_last": 1,
       "clippy::redundant_closure": 1
     },
@@ -64,8 +63,7 @@
       "clippy::manual_checked_ops": 1,
       "clippy::too_many_arguments": 1,
       "clippy::type_complexity": 1,
-      "dead_code": 3,
-      "unused_assignments": 1
+      "dead_code": 3
     },
     "fractal-ui-model": {
       "clippy::field_reassign_with_default": 4

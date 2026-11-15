@@ -293,7 +293,7 @@ impl Store {
                AND (?3 IS NULL OR json_extract(body, '$.fields.code')=?3)
              ORDER BY CANONICAL_DESC(claims) LIMIT 1"), params![subject, incarnation, code], |row| row.get(0)).optional()?;
         id.map(|id| claim_by_id_tx(connection, &id))
-            .transpose().map(Option::flatten).map_err(Into::into)
+            .transpose().map(Option::flatten)
     }
 
     /// Human-question authority is declaration metadata, not credential or graph ownership.
