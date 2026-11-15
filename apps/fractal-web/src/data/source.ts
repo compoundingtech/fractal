@@ -100,6 +100,8 @@ export type Feed<A> =
       readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
       /** Terminal feeds display this source-owned reason; other feeds treat it as diagnostic detail. */
       readonly detail: string
+      /** Fractal's own words for the refusal, shown on their own line under `detail` and never in its place. */
+      readonly explanation?: string
       /** The read error's machine code (for example `not-found`): classification and data-wf-* diagnostics only, never display copy. */
       readonly code?: string
       /** Explicit terminal recovery policy; absence makes no retryability claim. */
@@ -473,17 +475,20 @@ export const waiting: Feed<never> = { _tag: 'Waiting' }
 export const unavailable = ({
   reason,
   detail,
+  explanation,
   code,
   retryable,
 }: {
   readonly reason: 'unauthorized' | 'ungranted' | 'unsupported' | 'failed'
   readonly detail: string
+  readonly explanation?: string | undefined
   readonly code?: string | undefined
   readonly retryable?: boolean | undefined
 }): Feed<never> => ({
   _tag: 'Unavailable',
   reason,
   detail,
+  ...(explanation === undefined ? {} : { explanation }),
   ...(code === undefined ? {} : { code }),
   ...(retryable === undefined ? {} : { retryable }),
 })

@@ -58,7 +58,7 @@ it('keeps the title revision that the person began editing after a concurrent re
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  const rename = vi.fn(async () => 'The title changed. Review the latest title and try again.')
+  const rename = vi.fn(async () => ({ detail: 'The title changed. Review the latest title and try again.' }))
   const render = (title: string, revision: string) => act(async () => {
     root.render(<ThreadPanel thread={{ title, title_revision: revision, state: 'open' }} embedded={false} onRename={rename}>
       Thread contents
@@ -80,6 +80,30 @@ it('keeps the title revision that the person began editing after a concurrent re
     await press('Save')
     expect(rename).toHaveBeenCalledWith('PR #42', 'event/old')
     expect(host.querySelector('[role=alert]')?.textContent).toContain('The title changed')
+  } finally {
+    await act(async () => root.unmount())
+    host.remove()
+  }
+})
+
+it.each([
+  ['with Fractal\'s reason', { detail: "Couldn't close this thread.", explanation: 'The thread owner closed changes.' }],
+  ['without a reason', { detail: "Couldn't close this thread." }],
+] as const)('announces a refused change %s as one alert, the reason on its own line', async (_case, refusal) => {
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  const change = vi.fn(async () => refusal)
+  try {
+    await act(async () => root.render(<ThreadPanel thread={{ title: 'PR #42', title_revision: 'event/one', state: 'open' }} embedded={false} onChangeState={change}>
+      Thread contents
+    </ThreadPanel>))
+    const close = Array.from(host.querySelectorAll('button')).find(button => button.textContent === 'Close thread')
+    await act(async () => close?.click())
+    const alerts = host.querySelectorAll('[role=alert]')
+    expect(alerts).toHaveLength(1)
+    const lines = Array.from(alerts[0]?.children ?? [], line => line.textContent)
+    expect(lines).toEqual('explanation' in refusal ? [refusal.detail, refusal.explanation] : [refusal.detail])
   } finally {
     await act(async () => root.unmount())
     host.remove()

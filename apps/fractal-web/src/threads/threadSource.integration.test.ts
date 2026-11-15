@@ -5,7 +5,7 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi, type MockInstance } from 'vitest'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
 import { credentialExpiredMessage } from '../data/source.ts'
-import { gatewayThreads, type ThreadWatches } from './threadSource.ts'
+import { gatewayThreads, unreachableSend, type ThreadSource, type ThreadWatches } from './threadSource.ts'
 
 const base = fixture.capabilities
 const id = 'thread/thread-one'
@@ -585,4 +585,109 @@ it('does not keep a thread observation after a later read returns a different th
     await vi.waitFor(() => expect(registry.get(detail)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' }))
     expect(recorded(spies)).toBe(true)
   } finally { for (const spy of spies) spy.mockRestore(); stop(); registry.dispose() }
+})
+
+const actionReply = (status: number, message: string) => Response.json({
+  api_version: base.api_version, error_version: 'st3.client.error.v0', request_id: 'request/thread-action',
+  code: status === 403 ? 'forbidden' : status === 422 ? 'invalid-request' : 'http-error', message, retryable: false, details: {},
+}, { status })
+/** A connection holding every thread action, whose writes all receive `reply`; while `down`, the gateway answers nothing. */
+const actionSource = (reply: () => Response) => {
+  const writes: unknown[] = []
+  const state = { down: false }
+  const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (state.down) return actionReply(502, 'Bad gateway')
+    if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, transport: 'local-web', capabilities: [
+      ...base.value.capabilities,
+      { id: 'threads-v1', version: 2, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      ...['thread.start', 'thread.reply', 'thread.rename', 'thread.close', 'thread.reopen'].map(id => ({ id, version: 1, state: 'granted' })),
+    ] } })
+    writes.push(JSON.parse(String(init?.body)))
+    return reply()
+  }
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry)
+  const stop = registry.mount(source.access)
+  return { source, registry, writes, state, dispose: () => { stop(); registry.dispose() } }
+}
+const refusedActions = [
+  ['close', "Couldn't close this thread."],
+  ['reopen', "Couldn't reopen this thread."],
+  ['rename', "Couldn't rename this thread."],
+  ['reply', "Couldn't send your reply."],
+  ['start', "Couldn't start this thread."],
+] as const
+type RefusedAction = typeof refusedActions[number][0]
+/** Perform one action; replies and starts report their refusal without the send result's tag. */
+const perform = async (source: ThreadSource, action: RefusedAction) => {
+  const observation = {
+    summary: Native.decodeUnknownSync(Native.ThreadSummary)(action === 'reopen' ? { ...summary, state: 'closed' } : summary),
+    snapshotId: base.snapshot.id,
+  }
+  if (action === 'close' || action === 'reopen') return source.changeState(observation, action === 'close' ? 'closed' : 'open')
+  if (action === 'rename') return source.rename(observation, 'New title', 'claim/title')
+  const result = action === 'reply'
+    ? await source.reply({ target_id: id, content: 'Please include cancellation.' })
+    : await source.start('ask/review', { agent_id: agent, origin: { source_id: 'step-run/review', episode: 'claim/ask' }, title: 'PR #42', content: 'Can we run the worker test?' })
+  if (result._tag === 'Sent') return undefined
+  return { detail: result.detail, ...(result.explanation === undefined ? {} : { explanation: result.explanation }) }
+}
+
+it.each(refusedActions.flatMap(([action, title]) => [403, 422].map(status => [action, status, title] as const)))(
+  'names a refused %s (%i) and keeps Fractal\'s reason on its own line, never alone or as the access sentence',
+  async (action, status, title) => {
+    const view = actionSource(() => actionReply(status, '  The thread owner stopped accepting changes.  '))
+    try {
+      await vi.waitFor(() => expect(view.registry.get(view.source.access).actions.size).toBe(5))
+      const refusal = await perform(view.source, action)
+      expect(refusal).toStrictEqual({ detail: title, explanation: 'The thread owner stopped accepting changes.' })
+      expect(JSON.stringify(refusal)).not.toContain('no access to threads')
+      expect(view.writes).toHaveLength(1)
+    } finally { view.dispose() }
+  },
+)
+
+it.each(refusedActions)('names a refused %s with its title alone when Fractal gives no reason', async (action, title) => {
+  const view = actionSource(() => actionReply(422, '   '))
+  try {
+    await vi.waitFor(() => expect(view.registry.get(view.source.access).actions.size).toBe(5))
+    expect(await perform(view.source, action)).toStrictEqual({ detail: title })
+  } finally { view.dispose() }
+})
+
+it.each(refusedActions)('keeps the gateway wording for a %s that never reached Fractal', async action => {
+  const view = actionSource(() => actionReply(422, 'unused'))
+  try {
+    await vi.waitFor(() => expect(view.registry.get(view.source.access).actions.size).toBe(5))
+    view.state.down = true
+    expect(await perform(view.source, action)).toStrictEqual({ detail: unreachableSend })
+    expect(view.writes).toHaveLength(0)
+  } finally { view.dispose() }
+})
+
+it.each(['detail', 'messages'] as const)('names the thread when Fractal refuses its %s with 403, keeping Fractal\'s reason', async read => {
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL) => String(input).endsWith('/capabilities') ? readable()
+    : actionReply(403, 'Thread read is no longer granted.'))
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry)
+  const feed = read === 'detail' ? source.detail(id) : source.timeline(id)
+  const stop = registry.mount(feed)
+  try {
+    await vi.waitFor(() => expect(registry.get(feed)).toStrictEqual({
+      _tag: 'Unavailable', reason: 'ungranted', detail: 'You no longer have access to this thread.', explanation: 'Thread read is no longer granted.',
+    }))
+  } finally { stop(); registry.dispose() }
+})
+
+it('keeps the connection sentence, without Fractal\'s words, when it refuses the thread list', async () => {
+  const view = readList()
+  try {
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toMatchObject({ _tag: 'Observed' }))
+    view.state.reply = () => refusal(403, 'forbidden')
+    view.source.reload?.()
+    await vi.waitFor(() => expect(view.registry.get(view.list)).toStrictEqual({
+      _tag: 'Unavailable', reason: 'ungranted', detail: 'This connection has no access to threads.',
+    }))
+  } finally { view.dispose() }
 })

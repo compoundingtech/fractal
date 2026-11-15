@@ -21,6 +21,8 @@ export interface SystemNoticeProps extends DataAttributes {
   readonly title: string
   /** What it means for you, in one line: "Live updates pending". */
   readonly detail?: string
+  /** The source's own words for a refusal: its own line under the statement, inside the same announcement. */
+  readonly explanation?: string
   /** `pane` fills a pane body or side panel; `rail` sits in the sidebar; `inline` is an in-flow row inside a content lane, with no inset. */
   readonly scope?: 'pane' | 'rail' | 'inline'
   /** The state comes from the shared gateway connection, which the connection banner owns: the row names only what it still shows. */
@@ -39,11 +41,15 @@ function LoadingRing() {
 }
 
 /** One quiet system-state row for a pane or the sidebar; `role="status"` sits on the statement, which wraps rather than truncates. */
-export function SystemNotice({ kind, title, detail, scope = 'pane', connection = false, onRetry, ...data }: SystemNoticeProps) {
+export function SystemNotice({ kind, title, detail, explanation, scope = 'pane', connection = false, onRetry, ...data }: SystemNoticeProps) {
+  const statement = connection || detail === undefined ? title : `${title}. ${detail}`
   return <div data-system-state={kind} {...data} {...stylex.props(styles.quiet, scope === 'rail' ? styles.quietRail : scope === 'inline' ? styles.quietInline : styles.quietPane)}>
     <span role="status" {...stylex.props(styles.quietStatus, scope === 'inline' && styles.hug, kind === 'error' && !connection && styles.toneError)}>
       {kind === 'loading' && <LoadingRing />}
-      <span {...stylex.props(styles.lineText, scope === 'inline' && styles.hug)}>{connection || detail === undefined ? title : `${title}. ${detail}`}</span>
+      <span {...stylex.props(styles.lineText, scope === 'inline' && styles.hug)}>{explanation === undefined ? statement : <>
+        <span data-system-state-title="" {...stylex.props(styles.explained)}>{statement}</span>
+        <span data-system-state-explanation="" {...stylex.props(styles.explained, styles.explanation)}>{explanation}</span>
+      </>}</span>
     </span>
     {onRetry !== undefined && !connection && <Button aria-label={`Retry: ${title}`} onPress={onRetry} {...stylex.props(styles.lineButton, styles.focusable)}>Retry</Button>}
   </div>
@@ -95,6 +101,10 @@ const styles = stylex.create({
   quietInline: { paddingInline: 0 },
   quietStatus: { display: 'flex', alignItems: 'center', gap: s.sm, flex: '1 1 0', minWidth: 0 },
   lineText: { display: 'block', flex: '1 1 0', minWidth: 0, overflowWrap: 'anywhere' },
+  /** A refusal's statement and the source's own words each take a line, so neither runs into the other. */
+  explained: { display: 'block' },
+  /** Quoted source wording reads as context under the statement, not as a second statement in its tone. */
+  explanation: { color: ink.fgMuted },
   /** Inline: Retry sits right after the statement instead of at the row's far edge. */
   hug: { flex: '0 1 auto' },
   lineButton: { display: 'inline-flex', alignItems: 'center', height: g.toolRow, paddingInline: s.xs, flexShrink: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, whiteSpace: 'nowrap', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg } },

@@ -298,7 +298,7 @@ function PendingStartPanel({ source, start, onSent }: {
     pendingChange="thread start" retryPending={start.state === 'sending'}
     {...(retry === undefined ? {} : { onRetryChange: async () => {
       const result = await retry(start.draftKey)
-      if (result._tag === 'Refused') return result.detail
+      if (result._tag === 'Refused') return result
       onSent(result.threadId)
       return undefined
     } })}>
@@ -401,7 +401,7 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
         const seen = viewport.capture()
         const anchor = seen.at(-1)
         return anchor === undefined
-          ? Promise.resolve('Scroll to a visible reply before marking it read.')
+          ? Promise.resolve({ detail: 'Scroll to a visible reply before marking it read.' })
           : markRead(observation, anchor, seen)
       },
     })}
@@ -598,6 +598,7 @@ function ReadStatus({ feed, subject, onRetry }: {
 }) {
   if (feed._tag === 'Waiting') return <SystemNotice kind="loading" scope="inline" title={`Loading ${subject}`} />
   return <SystemNotice kind={feed.reason === 'unsupported' ? 'empty' : 'error'} scope="inline" title={feed.detail}
+    {...(feed.explanation === undefined ? {} : { explanation: feed.explanation })}
     {...(feed.reason === 'failed' && onRetry !== undefined ? { onRetry } : {})} />
 }
 
