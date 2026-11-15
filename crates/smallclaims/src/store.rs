@@ -10556,12 +10556,18 @@ pub fn claims_in_order_before_query(same_length: bool) -> String {
     } else {
         "length(claims.accepted_at_unix_ms)<length(?3)"
     };
+    // With length fixed, omit that constant sort key. Keeping it makes SQLite sort
+    // the entire range instead of sorting only each acceptance-millisecond tie.
+    let order = canonical::components("claims").into_iter()
+        .skip(usize::from(same_length))
+        .map(|part| format!("{part} DESC"))
+        .collect::<Vec<_>>().join(", ");
     format!(
         "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind=?2
            AND {bound}
-         ORDER BY {CANONICAL_ORDER_DESC}"
+         ORDER BY {order}"
     )
 }
 

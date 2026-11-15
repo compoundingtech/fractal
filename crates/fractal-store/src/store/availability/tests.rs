@@ -484,6 +484,8 @@ fn historical_window_cost_does_not_grow_with_post_window_claims() {
             let bound = if same_length { "accepted_at_unix_ms<?" } else { "<expr><?" };
             assert!(plan.iter().any(|line| line.contains("claims_subject_kind_accepted_index") && line.contains(bound)),
                 "expected an indexed upper-bound seek: {plan:?}");
+            assert!(!plan.iter().any(|line| line == "USE TEMP B-TREE FOR ORDER BY"),
+                "only acceptance-time ties may be sorted before the prior claim stops the read: {plan:?}");
             eprintln!("availability history plan: {plan:?}; VM steps: {steps}");
         }
         (rows, steps)
