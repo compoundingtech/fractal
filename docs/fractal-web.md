@@ -584,8 +584,9 @@ header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright m
 
 `node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,
 isolated daemon for reviewing Threads; Storybook's `Fractal/App/Inbox threads` stories stay local
-fixtures. `serve` makes a throwaway instance (`threadspreview`, under its own HOME in
-`/var/tmp/fractal-threadspreview`) with `thread_writes = true` and agent/example/manager as the
+fixtures. `serve` makes a throwaway instance (`PREVIEW_INSTANCE`, default `threadspreview`) under
+its own HOME in `PREVIEW_ROOT` (default `/var/tmp/fractal-${PREVIEW_INSTANCE}`), with
+`thread_writes = true` and agent/example/manager as the
 explicit `inbox_fallback_agent`, person/avery, program seats agent/example/atlas and
 agent/example/manager, and one full-control owner device paired through the client gateway. The
 browser's own credential comes from Fractal's browser pairing (`browser_pairing_login` is set for
@@ -595,6 +596,14 @@ avery would from the Inbox, and the browser redeems its one-use key, so the daem
 the human gate of mission `example/release-notes`, whose discussion falls back to the Manager, with
 one thread so the Missions view lists it. Vite then serves the app on `127.0.0.1:5317` through
 `WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`, with the browser's credential.
+
+`PREVIEW_INSTANCE` accepts only nonempty lowercase letters and digits. Its daemon unit is
+`${PREVIEW_INSTANCE}-fractal-up`. For independent previews on one host, use
+`PREVIEW_INSTANCE=threadsweb PREVIEW_PORT=5317` and
+`PREVIEW_INSTANCE=threadsios PREVIEW_PORT=5318`; their default roots and daemon units are disjoint.
+Use the same instance setting for subsequent `offline`, `online`, `status` and `down` commands.
+An explicit `PREVIEW_ROOT` overrides the default; keep overrides distinct between instances and
+name them `fractal-${PREVIEW_INSTANCE}*` so the guarded `down` command can remove them.
 
 The asks name Atlas as their requester through `work ask --as agent/example/atlas`; the seeded
 thread messages are all person-authored, and the program seats never write on their own. The
