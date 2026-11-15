@@ -20,6 +20,8 @@ function compile(name, next, dependencies, file = './screens/Threads.tsx') {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React },
   });
   const exports = {};
+  // Components rendered as children stay inspectable without mounting a second hook scope.
+  dependencies = { ThreadReadIssue: 'ThreadReadIssue', ...dependencies };
   new Function('exports', 'React', ...Object.keys(dependencies), outputText)(exports, React, ...Object.values(dependencies));
   return exports.component;
 }
@@ -117,6 +119,11 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   assert.equal(control.props.accessibilityRole, 'button');
   assert.equal(control.props.accessibilityLabel, 'Reopen thread');
   assert.deepEqual(control.props.accessibilityState, { disabled: true });
+  assert.equal(control.props.accessibilityHint, undefined, 'existing callers retain their default semantics');
+  const contextual = pressable({ label: 'Send', accessibilityLabel: 'Send reply to Review', hint: 'Sends to Review', onPress() {} });
+  assert.equal(contextual.props.accessibilityLabel, 'Send reply to Review');
+  assert.equal(contextual.props.accessibilityHint, 'Sends to Review');
+  assert.deepEqual(contextual.children[0].children, ['Send'], 'spoken context does not change the visible title');
 
   // A row shows an unread dot, the title and Closed; count, state and unread are spoken only.
   const thread = { id: 'thread/one', title: 'Review', state: 'closed', unread: true, message_count: 2 };
@@ -130,6 +137,8 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   assert.equal(row.props.accessibilityRole, 'button');
   assert.equal(row.props.accessibilityLabel, 'Review, 2 messages, closed, unread');
   assert.deepEqual(row.props.accessibilityState, { expanded: false });
+  assert.deepEqual(row.props.accessibilityValue, { text: 'Collapsed' });
+  assert.equal(row.props.accessibilityHint, 'Shows Review');
   assert.equal(row.props.style.minHeight, 44);
   const [dot, title, trailing] = row.children;
   assert.deepEqual([dot.props.style.width, dot.props.style.backgroundColor], [8, 'accent']);
@@ -139,6 +148,8 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   const openRow = threadRow({ title: 'Review', label: 'Review, 1 message, open', expanded: true, toggle() {} });
   assert.equal(openRow.children[0].props.style.backgroundColor, 'transparent', 'read rows keep the 8pt spacer');
   assert.equal(openRow.children[2], null, 'open rows show no trailing state');
+  assert.deepEqual(openRow.props.accessibilityValue, { text: 'Expanded' });
+  assert.equal(openRow.props.accessibilityHint, 'Hides Review');
 
   const state = hooks();
   const page = { items: [thread], snapshots: new Map(), loading: false, live: false, reload() {}, replace() {} };
@@ -154,6 +165,8 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   assert.equal(group.props.accessibilityRole, 'button');
   assert.equal(group.props.accessibilityLabel, 'Threads, 1');
   assert.deepEqual(group.props.accessibilityState, { expanded: false });
+  assert.deepEqual(group.props.accessibilityValue, { text: 'Collapsed' });
+  assert.equal(group.props.accessibilityHint, 'Shows the threads');
   assert.equal(group.props.style.minHeight, 44);
   assert.deepEqual(group.children[0].children[1].children, [' · ', '1'], 'count, not the first thread title');
   assert.deepEqual(group.children[1].children, ['Show']);
@@ -161,6 +174,8 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   let shown = render();
   group = find(shown, 'Pressable');
   assert.deepEqual(group.props.accessibilityState, { expanded: true });
+  assert.deepEqual(group.props.accessibilityValue, { text: 'Expanded' });
+  assert.equal(group.props.accessibilityHint, 'Hides the threads');
   assert.deepEqual(group.children[1].children, ['Hide']);
   assert.equal(button(shown, 'Refresh threads').props.disabled, false, 'an HTTP-only list keeps manual refresh');
   page.live = true;
@@ -169,20 +184,26 @@ test('VoiceOver reads thread rows, the Threads header and thread actions by name
   assert.equal(button(shown, 'Refresh threads'), undefined, 'a followed list refreshes itself');
   assert.ok(button(shown, 'More threads'));
   assert.equal(find(shown, 'Pressable').props.accessibilityLabel, 'Threads, 1 or more');
+  page.issue = 'Updates paused';
+  assert.equal(button(render(), 'Retry').props.accessibilityLabel, 'Retry loading threads');
 
   const body = compile('ThreadBody', 'type Quote', {
     ...hooks(), useCallback: fn => fn, useRef: current => ({ current }), threadEditScope: id => `edit/${id}`,
     useStore: () => ({ actor: 'person/avery', data: { agents: [] }, status: 'online', actions: {},
-      threadActions: new Set(['thread.rename', 'thread.close', 'thread.reopen']) }),
+      threadActions: new Set(['thread.reply', 'thread.rename', 'thread.close', 'thread.reopen']) }),
     useThreadPage: () => ({ items: [], loading: true }), useWindowDimensions: () => ({ width: 400, height: 800 }),
     useSafeAreaInsets: () => ({}), useHeaderHeight: () => 0, useContext: () => 0, BottomTabBarHeightContext: {},
     useNavigation: () => ({}), useThreadViewports: () => [], View: 'View', T: 'T', Button: 'Button',
-    ThreadActionFeedback: 'ThreadActionFeedback',
+    ThreadActionFeedback: 'ThreadActionFeedback', ThreadComposer: 'ThreadComposer',
   });
   const open = body({ client: {}, thread: { ...thread, state: 'open', unread: false }, onOpen() {} });
   assert.equal(button(open, 'Rename').props.disabled, false);
   assert.equal(button(open, 'Close thread').props.disabled, false);
   assert.ok(button(open, 'Open thread'));
+  assert.equal(button(open, 'Rename').props.hint, 'Renames Review');
+  assert.equal(button(open, 'Close thread').props.hint, 'Closes Review');
+  assert.equal(button(open, 'Open thread').props.hint, 'Opens Review');
+  assert.equal(find(open, 'ThreadComposer').props.contextualTitle, 'Review');
   assert.equal(button(open, 'Refresh history').props.disabled, true, 'refresh announces dimmed while history loads');
   assert.equal(button(open, 'Reopen thread'), undefined);
 });
@@ -242,6 +263,7 @@ test('a closed thread explains that replying keeps it closed, and a missing repl
   page.reload = () => { retries++; page.issue = undefined; };
   const retry = button(render(), 'Retry');
   assert.ok(retry, 'timeline errors have an in-place Retry control');
+  assert.equal(retry.props.accessibilityLabel, 'Retry loading Review');
   retry.props.onPress();
   assert.equal(retries, 1);
   assert.equal(button(render(), 'Retry'), undefined, 'successful recovery clears the error control');
@@ -782,13 +804,108 @@ test('Retry re-reads an inline thread page and clears its live error only after 
 });
 
 test('close, reopen and rename refusals put action copy and the server reason in separate Text elements', () => {
-  const feedback = compile('ThreadActionFeedback', 'type ThreadMessage', { View: 'View', T: 'Text', Button: 'Button', theme: {} });
+  const announcements = [];
+  const feedback = compile('ThreadActionFeedback', 'type ThreadMessage', {
+    useEffect: effect => effect(), AccessibilityInfo: { announceForAccessibility: message => announcements.push(message) },
+    View: 'View', T: 'Text', Button: 'Button', theme: {},
+  });
   for (const action of ['close', 'reopen', 'rename']) {
     const tree = feedback({ result: { how: 'failed', action, error: 'This fixture intentionally rejects thread changes.' }, busy: false, onRetry() {} });
     const lines = tree.children.filter(child => child?.type === 'Text');
     assert.equal(lines.length, 2);
     assert.deepEqual(lines.map(line => line.children), [[`Couldn't ${action} this thread.`], ['This fixture intentionally rejects thread changes.']]);
+    assert.equal(announcements.at(-1), `Couldn't ${action} this thread. This fixture intentionally rejects thread changes.`);
     assert.equal(button(tree, 'Retry original change'), undefined, 'a definitive refusal does not gain an automatic/original-request retry');
     assert.equal(findBy(tree, node => node.children?.some(child => typeof child === 'string' && child.includes('You no longer have access'))), undefined);
   }
+});
+
+test('contextual composer names include the thread once while standalone names stay unchanged', () => {
+  const compose = compile('ThreadComposeField', undefined, { View: 'View', Field: 'Field', Button: 'Button' });
+  for (const contextualTitle of [undefined, 'Review', 'Another thread']) {
+    for (const text of ['', 'A reply']) {
+      const tree = compose({ contextualTitle, text, onChange() {}, onSend() {}, enabled: true, canSend: true });
+      const field = find(tree, 'Field');
+      const label = contextualTitle ? `Message ${contextualTitle}` : 'Message thread';
+      assert.equal([field.props.accessibilityLabel, !text ? field.props.placeholder : undefined].filter(Boolean).join(' '), label);
+      assert.equal(field.props.accessibilityLabel, text ? label : undefined);
+      assert.equal(button(tree, 'Send').props.accessibilityLabel, contextualTitle ? `Send reply to ${contextualTitle}` : undefined);
+    }
+  }
+});
+
+test('read issues announce changed text and move focus only for revoked thread access', () => {
+  const announcements = [], focused = [], nativeView = {};
+  let previous, pending;
+  const issue = compile('ThreadReadIssue', 'function ThreadActionFeedback', {
+    useRef: () => ({ current: nativeView }),
+    useEffect: (effect, dependencies) => {
+      if (!previous || dependencies.some((value, index) => value !== previous[index])) pending = effect;
+      previous = dependencies;
+    },
+    AccessibilityInfo: { announceForAccessibility: text => announcements.push(text), setAccessibilityFocus: handle => focused.push(handle) },
+    findNodeHandle: view => { assert.equal(view, nativeView); return 42; },
+    View: 'View', T: 'Text', theme: {},
+  });
+  const render = message => { const tree = issue({ message }); const effect = pending; pending = undefined; effect?.(); return tree; };
+  render('Updates paused');
+  render('Updates paused');
+  assert.deepEqual(announcements, ['Updates paused']);
+  assert.deepEqual(focused, []);
+  const revoked = 'You no longer have access to this thread. The grant was revoked.';
+  const tree = render(revoked);
+  assert.equal(tree.props.accessibilityRole, 'alert');
+  assert.equal(tree.props.accessibilityLabel, revoked);
+  assert.deepEqual(announcements, ['Updates paused', revoked]);
+  assert.deepEqual(focused, [42]);
+  render(revoked);
+  assert.deepEqual(focused, [42], 'unchanged issue text does not steal focus again');
+});
+
+test('composer announces validation issues and a newly applied quote with its sender', () => {
+  const announcements = [], refs = [], effectDependencies = [];
+  let refIndex = 0, effectIndex = 0, effects = [];
+  const state = hooks();
+  const draftCache = { current: new Map() };
+  const composer = compile('ThreadComposer', 'function ThreadComposeField', {
+    ...state, useRef: current => refs[refIndex++] ?? (refs[refIndex - 1] = { current }),
+    useEffect: (effect, dependencies) => {
+      const index = effectIndex++, previous = effectDependencies[index];
+      if (!previous || dependencies.some((value, at) => value !== previous[at])) effects.push(effect);
+      effectDependencies[index] = dependencies;
+    },
+    useFocusEffect() {}, useCallback: fn => fn,
+    useStore: () => ({ actions: {}, draftCache, draftsReady: true, saveDrafts() {}, status: 'online' }),
+    threadDraftKey: id => id, readThreadDraft: raw => raw ? JSON.parse(raw) : { text: '' },
+    threadTextIssue: text => text.startsWith('doc/') ? 'Use message text here.' : undefined,
+    rememberBounded: (cache, key, value) => cache.set(key, value),
+    AccessibilityInfo: { announceForAccessibility: text => announcements.push(text) },
+    theme: {},
+    View: 'View', T: 'Text', Button: 'Button', ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
+  });
+  let props = { thread: { id: 'thread/one' }, canReply: true, selectionVersion: 0 };
+  const render = () => {
+    state.reset(); refIndex = 0; effectIndex = 0; effects = [];
+    const tree = composer(props);
+    effects.forEach(effect => effect());
+    return tree;
+  };
+  find(render(), 'ThreadComposeField').props.onChange('doc/not-message-text');
+  render();
+  render();
+  assert.deepEqual(announcements, ['Use message text here.']);
+  props = { ...props, selectionVersion: 1, selection: { id: 'message/one', from: 'Reviewer', text: 'Original' } };
+  render();
+  render();
+  assert.deepEqual(announcements, ['Use message text here.', 'Replying to Reviewer']);
+});
+
+test('expanded summary Retry names the thread without changing the visible Retry title', () => {
+  const expanded = compile('ExpandedContextThread', 'export function ThreadScreen', {
+    useThreadSummary: () => ({ items: [], issue: 'Updates paused', loading: false, reload() {} }),
+    View: 'View', ContextThreadHeader: 'ContextThreadHeader', ThreadBody: 'ThreadBody', T: 'T', Button: 'Button',
+  });
+  const tree = expanded({ client: {}, initial: { id: 'thread/one', title: 'Review' }, refresh: 0 });
+  assert.equal(button(tree, 'Retry').props.accessibilityLabel, 'Retry loading Review');
+  assert.equal(find(tree, 'ThreadReadIssue').props.message, 'Updates paused');
 });

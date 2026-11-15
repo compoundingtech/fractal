@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode, type Ref } from 'react';
 import * as Crypto from 'expo-crypto';
-import { AccessibilityInfo, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
+import { AccessibilityInfo, findNodeHandle, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { BottomTabBarHeightContext } from '@react-navigation/bottom-tabs';
 import { useHeaderHeight } from '@react-navigation/elements';
@@ -221,6 +221,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
   return <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.mantle }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: show }} onPress={() => setShow(previous => !previous)}
       accessibilityLabel={`${title}, ${threads.length}${page.more ? ' or more' : ''}`}
+      accessibilityValue={{ text: show ? 'Expanded' : 'Collapsed' }} accessibilityHint={show ? 'Hides the threads' : 'Shows the threads'}
       style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12 }}>
       <T numberOfLines={titleLines} style={{ flex: 1 }}><T bold color={theme.accent}>{title}</T><T dim> · {count}</T></T>
       <T dim>{show ? 'Hide' : 'Show'}</T>
@@ -243,7 +244,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
           : <ContextThreadHeader key={thread.id} thread={thread} open={false} toggle={toggle} />;
       })}
       </ThreadViewport>
-      {page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Retry" onPress={page.reload} disabled={page.loading} /></> : null}
+      {page.issue ? <><ThreadReadIssue message={page.issue} /><Button label="Retry" accessibilityLabel="Retry loading threads" onPress={page.reload} disabled={page.loading} /></> : null}
       {!page.live || page.more && !page.issue ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
         {!page.live ? <Button label="Refresh threads" onPress={page.reload} disabled={page.loading} /> : null}
         {page.more && !page.issue ? <Button label="More threads" onPress={page.more} disabled={page.loading} /> : null}
@@ -269,7 +270,7 @@ function ExpandedContextThread({ client, initial, refresh, onSummary, toggle, on
   return <View>
     <ContextThreadHeader thread={thread ?? initial} open toggle={toggle} />
     {thread ? <ThreadBody client={client} thread={thread} onOpen={onOpen} revealComposer={revealComposer} />
-      : page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Retry" onPress={page.reload} disabled={page.loading} /></>
+      : page.issue ? <><ThreadReadIssue message={page.issue} /><Button label="Retry" accessibilityLabel={`Retry loading ${initial.title}`} onPress={page.reload} disabled={page.loading} /></>
       : <T dim>Loading thread…</T>}
   </View>;
 }
@@ -331,7 +332,7 @@ function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, s
     </>;
   }
   const status = issue ? <>
-    <T color={theme.waiting}>{issue}</T>
+    <ThreadReadIssue message={issue} />
     <Button label="Refresh thread" onPress={reload} disabled={loading} />
   </> : <T dim>Loading thread…</T>;
   return frame ? frame(status) : status;
@@ -353,6 +354,7 @@ function ThreadRow({ title, label, unread, trailing, expanded, toggle, bold }: {
   const appearance = useTextAppearance();
   const titleLines = useTitleLines();
   return <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={label} onPress={toggle}
+    accessibilityValue={{ text: expanded ? 'Expanded' : 'Collapsed' }} accessibilityHint={expanded ? `Hides ${title}` : `Shows ${title}`}
     style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
     <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: unread ? appearance.color(theme.accent) : 'transparent' }} />
     <T bold={bold} color={theme.accent} numberOfLines={titleLines} style={{ flex: 1 }}>{title}</T>
@@ -469,7 +471,27 @@ function threadTextIssue(content: string): string | undefined {
   if (utf8Bytes(content) > INLINE_MAX_BYTES) return `Keep the message under ${INLINE_MAX_BYTES.toLocaleString()} UTF-8 bytes.`;
 }
 
+/** Mounted error text is announced on iOS too; Android's live region alone is insufficient. */
+function ThreadReadIssue({ message }: { message: string }) {
+  const target = useRef<View>(null);
+  useEffect(() => {
+    AccessibilityInfo.announceForAccessibility(message);
+    if (message.startsWith('You no longer have access to this thread.')) {
+      const handle = target.current && findNodeHandle(target.current);
+      if (handle != null) AccessibilityInfo.setAccessibilityFocus(handle);
+    }
+  }, [message]);
+  return <View ref={target} accessible accessibilityRole="alert" accessibilityLabel={message} accessibilityLiveRegion="polite">
+    <T color={theme.waiting}>{message}</T>
+  </View>;
+}
+
 function ThreadActionFeedback({ result, busy, onRetry }: { result?: ThreadEditResult; busy: boolean; onRetry: () => void }) {
+  useEffect(() => {
+    if (result?.how === 'failed') AccessibilityInfo.announceForAccessibility(
+      `${result.action ? `Couldn't ${result.action} this thread. ` : ''}${result.error}`,
+    );
+  }, [result]);
   if (result?.how === 'failed') return <View style={{ gap: 6 }}>
     {result.action ? <T color={theme.waiting}>{`Couldn't ${result.action} this thread.`}</T> : null}
     <T color={theme.waiting}>{result.error}</T>
@@ -619,15 +641,15 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
         { id: 'markRead', title: 'Mark visible replies read', run: markVisibleRead },
       ] : []}>{row}</ContextMenu>];
   });
-  const history = page.issue ? <><T color={theme.waiting}>{page.issue}</T><Button label="Retry" onPress={page.reload} disabled={page.loading} /></> : !start && !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null;
+  const history = page.issue ? <><ThreadReadIssue message={page.issue} /><Button label="Retry" accessibilityLabel={`Retry loading ${displayed?.title ?? start?.title ?? 'thread'}`} onPress={page.reload} disabled={page.loading} /></> : !start && !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null;
   const markRead = readCandidates.length ? <Button label="Mark visible replies read" disabled={!editable} onPress={markVisibleRead} /> : null;
   const closedHint = closed ? <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
     <View accessible accessibilityRole="text" accessibilityLabel={canReply ? 'Closed, replying keeps it closed' : 'Closed'} style={{ flex: 1 }}>
       <T dim>{canReply ? 'Closed · replying keeps it closed' : 'Closed'}</T>
     </View>
-    {threadActions.has('thread.reopen') ? <Button label="Reopen thread" disabled={!editable} onPress={changeState} /> : null}
+    {threadActions.has('thread.reopen') ? <Button label="Reopen thread" hint={`Reopens ${displayed?.title}`} disabled={!editable} onPress={changeState} /> : null}
   </View> : null;
-  const composer = canReply || id && threadDeliveries?.has(id) || start ? <ThreadComposer key={start?.cacheKey ?? id} thread={thread} start={start} canReply={canReply}
+  const composer = canReply || id && threadDeliveries?.has(id) || start ? <ThreadComposer key={start?.cacheKey ?? id} thread={thread} start={start} canReply={canReply} contextualTitle={onOpen ? displayed?.title ?? start?.title : undefined}
     selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus} revealComposer={revealComposer}
   /> : null;
   const unavailable = thread && !canReply ? <T dim>Replies aren't available on this connection.</T> : null;
@@ -644,9 +666,9 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer, frame }: {
     if (editFeedback?.how === 'unconfirmed') void runEdit(editFeedback.retry, !!editDelivery);
   }} />;
   const threadButtons = thread ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
-    {threadActions.has('thread.rename') ? <Button label="Rename" onPress={() => setRenameTitle(displayed!.title)} disabled={!editable} /> : null}
-    {!closed && threadActions.has('thread.close') ? <Button label="Close thread" disabled={!editable} onPress={changeState} /> : null}
-    {onOpen ? <Button label="Open thread" onPress={onOpen} /> : null}
+    {threadActions.has('thread.rename') ? <Button label="Rename" hint={`Renames ${displayed!.title}`} onPress={() => setRenameTitle(displayed!.title)} disabled={!editable} /> : null}
+    {!closed && threadActions.has('thread.close') ? <Button label="Close thread" hint={`Closes ${displayed!.title}`} disabled={!editable} onPress={changeState} /> : null}
+    {onOpen ? <Button label="Open thread" hint={`Opens ${displayed!.title}`} onPress={onOpen} /> : null}
     {!page.live ? <Button label="Refresh history" onPress={page.reload} disabled={page.loading || status !== 'online'} /> : null}
   </View> : null;
 
@@ -675,8 +697,8 @@ function readThreadDraft(raw: string | undefined): ThreadDraft {
   }
 }
 
-function ThreadComposer({ thread, start, canReply, selection, selectionVersion, revealComposer }: {
-  thread?: ThreadSummary; start?: ThreadStartDraft; canReply: boolean; selection?: Quote; selectionVersion: number; revealComposer?: (row: View) => void;
+function ThreadComposer({ thread, start, canReply, contextualTitle, selection, selectionVersion, revealComposer }: {
+  thread?: ThreadSummary; start?: ThreadStartDraft; canReply: boolean; contextualTitle?: string; selection?: Quote; selectionVersion: number; revealComposer?: (row: View) => void;
 }) {
   const { actions, draftCache, draftsReady, saveDrafts, status, threadDeliveries } = useStore();
   const input = useRef<TextInput>(null);
@@ -697,6 +719,7 @@ function ThreadComposer({ thread, start, canReply, selection, selectionVersion, 
   const enabled = canReply && status === 'online' && !sending && !delivery;
   const content = draft.text.trim();
   const issue = threadTextIssue(content);
+  useEffect(() => { if (canReply && issue) AccessibilityInfo.announceForAccessibility(issue); }, [canReply, issue]);
 
   function storeDraft(next: ThreadDraft) {
     touched.current = true;
@@ -721,6 +744,7 @@ function ThreadComposer({ thread, start, canReply, selection, selectionVersion, 
     storeDraft({ ...draft, quote: selection });
     input.current?.focus();
     reveal();
+    AccessibilityInfo.announceForAccessibility(`Replying to ${selection.from}`);
     // A selection event, rather than a new render, replaces the draft's quote.
   }, [selectionVersion]);
 
@@ -745,7 +769,7 @@ function ThreadComposer({ thread, start, canReply, selection, selectionVersion, 
       <T dim numberOfLines={1} style={{ flex: 1 }}>Replying to {draft.quote.from} · {draft.quote.text}</T>
       <Button label="Remove quote" disabled={!enabled} onPress={() => storeDraft({ text: draft.text })} />
     </View> : null}
-    {canReply ? <ThreadComposeField inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
+    {canReply ? <ThreadComposeField contextualTitle={contextualTitle} inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
       onSend={() => void send(() => {
         if (thread) return actions.replyToThread(thread, content, draft.quote?.id);
         const target = start!.target ?? `thread/${Crypto.randomUUID()}`;
@@ -760,15 +784,16 @@ function ThreadComposer({ thread, start, canReply, selection, selectionVersion, 
   </View>;
 }
 
-function ThreadComposeField({ inputRef, rowRef, onReveal, text, onChange, onSend, onCancel, enabled, canSend, autoFocus }: {
-  inputRef?: Ref<TextInput>; rowRef?: Ref<View>; onReveal?: () => void; text: string; onChange: (text: string) => void; onSend: () => void;
+function ThreadComposeField({ contextualTitle, inputRef, rowRef, onReveal, text, onChange, onSend, onCancel, enabled, canSend, autoFocus }: {
+  contextualTitle?: string; inputRef?: Ref<TextInput>; rowRef?: Ref<View>; onReveal?: () => void; text: string; onChange: (text: string) => void; onSend: () => void;
   onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean;
 }) {
+  const label = contextualTitle ? `Message ${contextualTitle}` : 'Message thread';
   return <View ref={rowRef} onLayout={onReveal} style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
     {/* iOS appends the placeholder to the label only while empty; keep one name in both states. */}
-    <Field ref={inputRef} onFocus={onReveal} accessibilityLabel={text.length ? 'Message thread' : undefined} placeholder="Message thread" value={text} editable={enabled}
+    <Field ref={inputRef} onFocus={onReveal} accessibilityLabel={text.length ? label : undefined} placeholder={label} value={text} editable={enabled}
       onChangeText={onChange} multiline autoFocus={autoFocus} style={{ flex: 1 }} />
-    <Button label="Send" disabled={!enabled || !canSend} onPress={onSend} />
+    <Button label="Send" accessibilityLabel={contextualTitle ? `Send reply to ${contextualTitle}` : undefined} disabled={!enabled || !canSend} onPress={onSend} />
     {onCancel ? <Button label="Cancel" disabled={!enabled} onPress={onCancel} /> : null}
   </View>;
 }

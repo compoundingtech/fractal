@@ -184,7 +184,8 @@ test('grouped rows expose readable wrapping button labels and shared buttons exp
   assert.equal(prop(header, 'accessibilityRole').text, 'header');
   const button = elements(namedFunction(uiSource, 'Button'), 'Pressable')[0];
   assert.equal(prop(button, 'accessibilityRole').text, 'button');
-  assert.equal(prop(button, 'accessibilityLabel').expression.getText(), 'label');
+  assert.equal(prop(button, 'accessibilityLabel').expression.getText(), 'accessibilityLabel');
+  assert.equal(prop(button, 'accessibilityHint').expression.getText(), 'hint');
   assert.equal(prop(button, 'accessibilityState').expression.getText(), '{ disabled }');
   assert.equal(prop(button, 'disabled').expression.getText(), 'disabled');
 });

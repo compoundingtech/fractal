@@ -112,9 +112,9 @@ export function Note({ children, tone = 'dim' }: { children: ReactNode; tone?: '
   return <T style={styles.note} color={tone === 'warning' ? theme.waiting : tone === 'fault' ? theme.fault : theme.overlay0}>{children}</T>;
 }
 
-export function Button({ label, onPress, disabled = false, color = theme.accent, style }: { label: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
+export function Button({ label, accessibilityLabel = label, hint, onPress, disabled = false, color = theme.accent, style }: { label: string; accessibilityLabel?: string; hint?: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
   const appearance = useTextAppearance();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={hint} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
     <T bold color={color}>{label}</T>
   </Pressable>;
 }
