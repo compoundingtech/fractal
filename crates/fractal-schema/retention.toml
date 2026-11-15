@@ -27,6 +27,10 @@
 
 [kinds]
 "harness.invocation" = { class = "durable" }
+"effect.intended" = { class = "durable" }
+"effect.in-flight" = { class = "durable" }
+"effect.confirmed" = { class = "durable" }
+"effect.unresolved" = { class = "durable" }
 "harness.invocation-artifact" = { class = "durable" }
 "deploy.go" = { class = "durable" }
 "deploy.go-revoked" = { class = "durable" }
