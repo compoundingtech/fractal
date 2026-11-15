@@ -927,6 +927,14 @@ pub fn normalized_record(
     normalized_record_bounded(session, locator, MAX_TIMELINE_BYTES as usize)
 }
 
+/// Read one native record with annotations for an explicitly negotiated semantic reader.
+pub fn normalized_record_with_semantics(
+    session: &ExternalSession,
+    locator: &NativeLocator,
+) -> Result<Vec<Value>> {
+    normalized_record_projection(session, locator, MAX_TIMELINE_BYTES as usize, true)
+}
+
 /// A native record larger than the caller's read budget. The record is refused before its
 /// body is allocated or normalized; callers never fall back to an unbounded read.
 #[derive(Debug)]
@@ -945,6 +953,15 @@ pub fn normalized_record_bounded(
     session: &ExternalSession,
     locator: &NativeLocator,
     max_bytes: usize,
+) -> Result<Vec<Value>> {
+    normalized_record_projection(session, locator, max_bytes, false)
+}
+
+fn normalized_record_projection(
+    session: &ExternalSession,
+    locator: &NativeLocator,
+    max_bytes: usize,
+    with_semantics: bool,
 ) -> Result<Vec<Value>> {
     let mut items = Vec::new();
     match locator {
@@ -985,7 +1002,12 @@ pub fn normalized_record_bounded(
                     );
                 }
             }
-            normalize_native_bytes(
+            let normalize = if with_semantics {
+                normalize_native_bytes_with_semantics
+            } else {
+                normalize_native_bytes
+            };
+            normalize(
                 session.driver,
                 &bytes,
                 *sequence,
@@ -3526,6 +3548,45 @@ mod tests {
                     .any(|item| item["id"] == entry["id"] && item["body"] == entry["body"])
             );
         }
+    }
+
+    #[test]
+    fn normalized_record_semantics_are_explicit_and_keep_legacy_source() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("semantic-record.jsonl");
+        let record = json!({"type":"message","message":{"role":"assistant","content":[
+            {"type":"future","opaque":true},{"type":"text","text":"legacy prose"}
+        ]}});
+        let bytes = format!("{record}\n");
+        fs::write(&path, &bytes).unwrap();
+        let session = transcript_session(ExternalDriver::Omp, &path);
+        let locator = NativeLocator::Jsonl {
+            offset: 0,
+            length: bytes.len() as u64,
+            digest: hex::encode(Sha256::digest(bytes.as_bytes())),
+            sequence: 100,
+            timestamp: String::new(),
+            line_index: 0,
+        };
+        let legacy = normalized_record(&session, &locator).unwrap();
+        assert_eq!(legacy, normalized_record_bounded(&session, &locator, bytes.len()).unwrap());
+        assert!(normalized_record_bounded(&session, &locator, bytes.len() - 1).is_err());
+        let mut annotated = normalized_record_with_semantics(&session, &locator).unwrap();
+        assert!(annotated.iter().flat_map(|item| item["body"]["blocks"].as_array()
+            .into_iter().flatten()).any(|block| block.get("semantic").is_some()));
+        for item in &mut annotated {
+            if let Some(blocks) = item.get_mut("body").and_then(|body| body.get_mut("blocks"))
+                .and_then(Value::as_array_mut)
+            {
+                for block in blocks {
+                    block.as_object_mut().unwrap().remove("semantic");
+                }
+            }
+        }
+        assert_eq!(legacy, annotated);
+        fs::write(&path, "{}\n").unwrap();
+        assert!(normalized_record(&session, &locator).is_err());
+        assert!(normalized_record_with_semantics(&session, &locator).is_err());
     }
 
     #[test]

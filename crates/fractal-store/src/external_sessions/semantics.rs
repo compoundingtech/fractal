@@ -2,7 +2,7 @@ use super::ExternalDriver;
 use crate::transcript_semantics::{Category, PROJECTION_REVISION, classify};
 use serde_json::{Value, json};
 
-/// Owner-local annotations are removed unless the reader negotiates semantic projection.
+/// Owner-cache annotations are added only by the explicit semantic normalizers.
 pub(super) fn annotate(driver: ExternalDriver, record: &Value, sequence: u64, items: &mut [Value]) {
     let root = classify(driver.as_str(), record, None);
     let source_id = format!("native-{sequence}/source");
@@ -10,7 +10,8 @@ pub(super) fn annotate(driver: ExternalDriver, record: &Value, sequence: u64, it
     for item in items {
         let error = item["type"] == "error";
         let part = native_part(driver, record, sequence, item["sequence"].as_u64());
-        let Some(blocks) = item["body"]["blocks"].as_array_mut() else { continue };
+        let Some(blocks) = item.get_mut("body").and_then(|body| body.get_mut("blocks"))
+            .and_then(Value::as_array_mut) else { continue };
         for block in blocks {
             let category = match block["kind"].as_str().unwrap_or("") {
                 "source_record" => Category::InternalActivity,
@@ -110,12 +111,88 @@ fn usage(record: &Value, assistant: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::external_sessions::normalize_native_line;
+    use crate::external_sessions::{
+        normalize_native_bytes, normalize_native_bytes_with_semantics,
+        normalize_native_line, normalize_native_line_with_semantics,
+    };
 
     fn normalized(record: Value) -> Vec<Value> {
         let mut items = Vec::new();
-        normalize_native_line(ExternalDriver::Omp, &record, 100, "2026-10-04T00:00:00Z", &mut items);
+        normalize_native_line_with_semantics(ExternalDriver::Omp, &record, 100, "2026-10-04T00:00:00Z", &mut items);
         items
+    }
+
+    fn remove_annotations(items: &mut [Value]) {
+        for item in items {
+            if let Some(blocks) = item.get_mut("body").and_then(|body| body.get_mut("blocks"))
+                .and_then(Value::as_array_mut)
+            {
+                for block in blocks {
+                    assert!(block.as_object_mut().unwrap().remove("semantic").is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_projection_is_explicit_and_preserves_every_legacy_field() {
+        for (driver, record) in [
+            (ExternalDriver::Omp, json!({"type":"message","message":{"role":"assistant",
+                "content":[{"type":"future","payload":{"opaque":true}},
+                    {"type":"text","text":"legacy prose"}]}})),
+            (ExternalDriver::Pi, json!({"type":"model_usage","usage":{"input":3}})),
+            (ExternalDriver::Claude, json!({"type":"assistant","message":{"role":"assistant",
+                "content":[{"type":"text","text":"legacy prose"}]}})),
+            (ExternalDriver::Codex, json!({"type":"response_item","payload":{"type":"message",
+                "role":"assistant","content":[{"type":"output_text","text":"legacy prose"}]}})),
+        ] {
+            let mut legacy = Vec::new();
+            normalize_native_line(driver, &record, 100, "", &mut legacy);
+            let mut semantic = Vec::new();
+            normalize_native_line_with_semantics(driver, &record, 100, "", &mut semantic);
+            assert!(!semantic.is_empty());
+            remove_annotations(&mut semantic);
+            assert_eq!(legacy, semantic);
+            if driver == ExternalDriver::Omp {
+                let unknown = legacy.iter().find(|item| item["sequence"] == 101).unwrap();
+                assert_eq!(unknown["body"]["text"],
+                    format!("[unrecognized omp content block `future`]\n{}",
+                        json!({"raw":record["message"]["content"][0]})));
+                assert_eq!(unknown["body"]["blocks"][0]["kind"], "unknown");
+                assert_eq!(unknown["body"]["blocks"][0]["payload"]["raw"],
+                    record["message"]["content"][0]);
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_projection_byte_opt_in_preserves_legacy_recovery_and_preview() {
+        for bytes in [
+            b"{torn\n".as_slice(),
+            b"{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"future\"}]}}\n".as_slice(),
+            b"{torn{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":\"recovered\"}}\n".as_slice(),
+        ] {
+            for preview in [false, true] {
+                let mut legacy = Vec::new();
+                normalize_native_bytes(ExternalDriver::Omp, bytes, 100, "", 0, preview, &mut legacy);
+                let mut semantic = Vec::new();
+                normalize_native_bytes_with_semantics(ExternalDriver::Omp, bytes, 100, "", 0, preview, &mut semantic);
+                remove_annotations(&mut semantic);
+                assert_eq!(legacy, semantic);
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_projection_does_not_insert_absent_blocks() {
+        let mut items = vec![json!({"type":"content","sequence":101,
+            "body":{"media_type":"text/plain","text":"legacy prose"}})];
+        let legacy = items.clone();
+        annotate(ExternalDriver::Omp, &json!({"type":"message","message":{
+            "role":"assistant","content":[{"type":"text","text":"legacy prose"}]}}),
+            100, &mut items);
+        assert_eq!(items, legacy);
+        assert!(items[0]["body"].get("blocks").is_none());
     }
 
     #[test]
@@ -163,7 +240,7 @@ mod tests {
     #[test]
     fn semantic_projection_malformed_source_is_diagnostic_and_usage_attaches_once() {
         let mut malformed = Vec::new();
-        crate::external_sessions::normalize_native_bytes(ExternalDriver::Omp, b"{torn\n",
+        normalize_native_bytes_with_semantics(ExternalDriver::Omp, b"{torn\n",
             100, "2026-10-04T00:00:00Z", 0, false, &mut malformed);
         assert_eq!(malformed[0]["body"]["blocks"][0]["semantic"]["category"], "source_diagnostic");
         assert_eq!(malformed[0]["body"]["blocks"][0]["payload"]["text"], "{torn\n");
@@ -192,7 +269,7 @@ mod tests {
                 "content":[{"text":"malformed data"},{"type":"text","text":"actual prose"}]}}), "source_diagnostic"),
         ] {
             let mut items = Vec::new();
-            normalize_native_line(driver, &record, 100, "2026-10-04T00:00:00Z", &mut items);
+            normalize_native_line_with_semantics(driver, &record, 100, "2026-10-04T00:00:00Z", &mut items);
             let part = items.iter().find(|item| item["sequence"] == 101).unwrap();
             assert_eq!(part["body"]["blocks"][0]["semantic"]["category"], expected);
             assert_eq!(part["body"]["blocks"][0]["semantic"]["disposition"],

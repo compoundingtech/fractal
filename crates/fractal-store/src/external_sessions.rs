@@ -439,7 +439,7 @@ impl FoldedLine {
         // Cached locators and diagnostics carry a stable fold ordinal, not an index
         // that needs rewriting whenever the bounded window slides.
         self.items.clear();
-        normalize_native_bytes(
+        normalize_native_bytes_with_semantics(
             driver,
             &self.bytes,
             sequence,
@@ -933,6 +933,21 @@ pub fn normalize_native_line(
             item["_delivery_correlation"] = correlation.clone();
         }
     }
+}
+
+/// Normalize a native record with owner-local semantic annotations.
+///
+/// The direct legacy normalizer deliberately leaves these fields absent. Cached folds
+/// retain annotations so a negotiated reader can select the semantic projection.
+pub fn normalize_native_line_with_semantics(
+    driver: ExternalDriver,
+    value: &Value,
+    sequence: u64,
+    fallback_timestamp: &str,
+    items: &mut Vec<Value>,
+) {
+    let first = items.len();
+    normalize_native_line(driver, value, sequence, fallback_timestamp, items);
     semantics::annotate(driver, value, sequence, &mut items[first..]);
 }
 
@@ -1127,9 +1142,40 @@ pub fn normalize_native_bytes(
     preview: bool,
     items: &mut Vec<Value>,
 ) {
+    normalize_native_bytes_projection(driver, bytes, sequence, timestamp, line_index, preview, false, items);
+}
+
+/// Normalize native bytes for an annotated owner cache or an explicitly semantic reader.
+pub fn normalize_native_bytes_with_semantics(
+    driver: ExternalDriver,
+    bytes: &[u8],
+    sequence: u64,
+    timestamp: &str,
+    line_index: usize,
+    preview: bool,
+    items: &mut Vec<Value>,
+) {
+    normalize_native_bytes_projection(driver, bytes, sequence, timestamp, line_index, preview, true, items);
+}
+
+fn normalize_native_bytes_projection(
+    driver: ExternalDriver,
+    bytes: &[u8],
+    sequence: u64,
+    timestamp: &str,
+    line_index: usize,
+    preview: bool,
+    with_semantics: bool,
+    items: &mut Vec<Value>,
+) {
+    let normalize = if with_semantics {
+        normalize_native_line_with_semantics
+    } else {
+        normalize_native_line
+    };
     let first = items.len();
     match parse_native_record(bytes, preview) {
-        Ok(value) => normalize_native_line(driver, &value, sequence, timestamp, items),
+        Ok(value) => normalize(driver, &value, sequence, timestamp, items),
         Err(error) => {
             let recovered = std::str::from_utf8(bytes)
                 .ok()
@@ -1154,10 +1200,12 @@ pub fn normalize_native_bytes(
                 .as_array_mut()
                 .unwrap()
                 .insert(0, raw_bytes_block(sequence, driver.as_str(), kept));
-            semantics::annotate(driver, &Value::Null, sequence, std::slice::from_mut(&mut item));
+            if with_semantics {
+                semantics::annotate(driver, &Value::Null, sequence, std::slice::from_mut(&mut item));
+            }
             items.push(item);
             if let Some(value) = recovered {
-                normalize_native_line(driver, &value, sequence.saturating_add(1), timestamp, items);
+                normalize(driver, &value, sequence.saturating_add(1), timestamp, items);
             }
         }
     }
