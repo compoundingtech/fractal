@@ -83,7 +83,7 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
               ? <>
                 {row.item.attention_kind === 'harness-prompt'
                   ? <PromptAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} context="Inbox" paused={paused === true} agentNames={agentNames} {...(onAnswer === undefined ? {} : { onAnswer })} />
-                  : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} context="Inbox" paused={paused === true} agentNames={agentNames} {...(onAct === undefined ? {} : { onAct })} />
+                  : <AnswerAlert key={row.id} alert={row.item} density="full" now={now} onBegin={advance} focusRef={card} onOpenRef={onOpenRef} opensRef={isOpenableRef} context="Inbox" paused={paused === true} agentNames={agentNames} {...(onAct === undefined ? {} : { onAct })} />}
                 <LiveInboxThreads alert={row.item} onOpenThread={onOpenRef} />
               </>
               : <div {...stylex.props(styles.gone)}>
