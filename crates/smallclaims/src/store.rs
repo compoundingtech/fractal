@@ -6527,10 +6527,10 @@ impl Store {
         let connection = self.readers.get();
         let end = end.to_string();
         // SQLite cannot seek a row-value inequality whose first element is an indexed
-        // expression. Seek equal-width timestamps first, then shorter ones; these disjoint
-        // ranges concatenate to the same numeric newest-first order.
+        // expression. Acceptance times are canonical decimal strings: seek equal-width
+        // timestamps first, then shorter ones, preserving numeric newest-first order.
         for same_length in [true, false] {
-            let mut statement = connection.prepare_cached(&claims_in_order_before_query(same_length))?;
+            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h95abb0715157 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &claims_in_order_before_query(same_length))?;
             let mut rows = statement.query(params![subject, kind, end])?;
             while let Some(row) = rows.next()? {
                 if !visit(&claim_from_row(row)?) {

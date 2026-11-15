@@ -478,7 +478,7 @@ fn historical_window_cost_does_not_grow_with_post_window_claims() {
         let connection = store.readers.get();
         for same_length in [true, false] {
             let query = claims_in_order_before_query(same_length);
-            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap()
+            let plan = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf753ba3355f1 owner=fractal_store::store::availability::tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {query}")).unwrap()
                 .query_map(rusqlite::params![ADA, STATUS_KIND, end.to_string()], |row| row.get::<_, String>(3))
                 .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             let bound = if same_length { "accepted_at_unix_ms<?" } else { "<expr><?" };
