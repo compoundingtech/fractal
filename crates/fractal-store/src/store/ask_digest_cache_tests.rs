@@ -176,3 +176,44 @@ fn duplicate_authenticated_date_indexes_every_emissions_reported_ids() {
     }).unwrap().unwrap();
     assert_eq!(count(&owner, "local_ask_digest_emitted"), 2);
 }
+
+#[test]
+fn missing_bound_incarnation_sleeps_even_when_an_older_key_is_known() {
+    let (owner, other, _) = setup();
+    sync(&other, &owner);
+    let next_key = key();
+    let creation = owner.connection.batched(|tx| -> Result<_> {
+        let selected = current_desired_row_tx(tx, crate::notice_owner::SUBJECT)?.unwrap();
+        let prior = claim_by_id_tx(tx, &selected.claim_id)?.unwrap();
+        let mut body = prior.body;
+        let children = body["desired"]["children"].as_array_mut().unwrap();
+        children.iter_mut().find(|child| child["name"] == "member-key").unwrap()["arguments"] = json!([next_key.public()]);
+        let declaration = append_claim_tx(tx, &owner.origin, crate::notice_owner::SUBJECT,
+            "intent.desired", Some("person/example"), &body, &[prior.id], None)?;
+        Ok(source(tx, &owner.origin, &declaration.id, "person/example", "new-incarnation-resolution"))
+    }).unwrap().unwrap();
+    let membership = owner.fleet_membership().unwrap();
+    assert!(membership.incarnations().any(|incarnation| incarnation.name == owner.origin));
+    assert!(!membership.incarnations().any(|incarnation| incarnation.member_key == next_key.public()));
+    settle_cache(&owner);
+    assert_eq!(count(&owner, "local_ask_digest_deferred"), 1);
+    assert_eq!(count(&owner, "local_ask_digest_sources"), 0);
+    owner.connection.batched(|tx| -> Result<()> {
+        assert!(!ingest(tx)?);
+        Ok(())
+    }).unwrap().unwrap();
+    // The missing admission arrives independently; fleet generation wakes the
+    // sleeping source despite another incarnation having been known throughout.
+    crate::store::fleet_admission_tests::admit(&other, &owner.origin, &next_key, "invite", None);
+    sync(&other, &owner);
+    settle_cache(&owner);
+    assert_eq!(count(&owner, "local_ask_digest_deferred"), 0);
+    assert_eq!(count(&owner, "local_ask_digest_sources"), 1);
+    assert_eq!(count(&owner, "local_ask_digest_source_history"), 1);
+    owner.connection.batched(|tx| -> Result<()> {
+        assert!(notice_authority::authenticated_digest_source(tx, &creation)?);
+        assert!(index_source_page(tx)?);
+        Ok(())
+    }).unwrap().unwrap();
+    assert_eq!(count(&owner, "local_ask_digest_emitted"), 1);
+}

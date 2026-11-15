@@ -388,7 +388,8 @@ pub(super) fn digest_source_authority(connection: &Connection, claim: &ClaimReco
                 && let Ok(bound) = notice_owner::parse(&desired.desired) {
                 let membership = fleet_membership_tx(connection)?;
                 if position.origin == bound.member
-                    && matches!(membership.state(position.origin), MemberState::NotMember) {
+                    && !membership.incarnations().any(|incarnation|
+                        incarnation.name == bound.member && incarnation.member_key == bound.member_key) {
                     return Ok(DigestSourceAuthority::Deferred("fleet-membership".into()));
                 }
             }
