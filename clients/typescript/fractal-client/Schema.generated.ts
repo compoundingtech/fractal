@@ -1216,7 +1216,7 @@ export const HarnessInventoryQuery = /*#__PURE__*/ (() => Schema.Struct({
 export type HarnessInventoryQuery = typeof HarnessInventoryQuery.Type
 export type HarnessInventoryQueryEncoded = typeof HarnessInventoryQuery.Encoded
 
-export const NoticeActor = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|person)/[^\\s]+$", "u"), "agent", "person").annotate({ identifier: "NoticeActor" }))()
+export const NoticeActor = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^(?:(?:agent|person)/[^\\s]+|daemon/runtime)$", "u"))).pipe(Schema.brand("st3/NoticeActor")).annotate({ identifier: "NoticeActor" }))()
 export type NoticeActor = typeof NoticeActor.Type
 export type NoticeActorEncoded = typeof NoticeActor.Encoded
 
@@ -1239,21 +1239,61 @@ export const NoticePerson = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:pers
 export type NoticePerson = typeof NoticePerson.Type
 export type NoticePersonEncoded = typeof NoticePerson.Encoded
 
-/** Execution-context provenance; repository and cwd are informational, never authenticated sender evidence. */
-export const NoticeSource = /*#__PURE__*/ (() => Schema.Struct({
-  "agent": optionalKey(NoticeAgent),
-  "cwd": optionalKey(Schema.String),
-  "host": subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host"),
-  "pty": optionalKey(subjectRef(new RegExp("^(?:pty)/[^\\s]+$", "u"), "pty")),
-  "repo": optionalKey(Schema.String)
-}).annotate({ identifier: "NoticeSource", description: "Execution-context provenance; repository and cwd are informational, never authenticated sender evidence." }))()
-export type NoticeSource = typeof NoticeSource.Type
-export type NoticeSourceEncoded = typeof NoticeSource.Encoded
+export const NoticeDigestOverride = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Schema.String.check(Schema.isMinCodePoints(1)),
+  "target_id": Schema.String.check(Schema.isMinCodePoints(1))
+}).annotate({ identifier: "NoticeDigestOverride" }))()
+export type NoticeDigestOverride = typeof NoticeDigestOverride.Type
+export type NoticeDigestOverrideEncoded = typeof NoticeDigestOverride.Encoded
+
+export const NoticeDigestActions = /*#__PURE__*/ (() => Schema.Struct({
+  "work.override": NoticeDigestOverride
+}).annotate({ identifier: "NoticeDigestActions" }))()
+export type NoticeDigestActions = typeof NoticeDigestActions.Type
+export type NoticeDigestActionsEncoded = typeof NoticeDigestActions.Encoded
+
+export const NoticeDigestDefaultAnswer = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String.check(Schema.isMinCodePoints(1)),
+  "label": Schema.String.check(Schema.isMinCodePoints(1))
+}).annotate({ identifier: "NoticeDigestDefaultAnswer" }))()
+export type NoticeDigestDefaultAnswer = typeof NoticeDigestDefaultAnswer.Type
+export type NoticeDigestDefaultAnswerEncoded = typeof NoticeDigestDefaultAnswer.Encoded
 
 /** RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission. */
 export const NoticeTimestamp = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$", "u"))).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })).check(isLosslessInstant).pipe(Schema.decodeTo(LosslessTimestamp, losslessFromIso)).annotate({ identifier: "NoticeTimestamp", description: "RFC3339 UTC instant. A snooze action additionally requires a future deadline at admission." }))()
 export type NoticeTimestamp = typeof NoticeTimestamp.Type
 export type NoticeTimestampEncoded = typeof NoticeTimestamp.Encoded
+
+/** An automatically resolved ask. Override parameters are omitted after the seven-day override window; absent optional fields are never null. */
+export const NoticeDigestRow = /*#__PURE__*/ (() => Schema.Struct({
+  "action_parameters": optionalKey(NoticeDigestActions),
+  "default_answer": optionalKey(NoticeDigestDefaultAnswer),
+  "episode": Schema.String.check(Schema.isMinCodePoints(1)),
+  "requester_id": Schema.String.check(Schema.isMinCodePoints(1)),
+  "resolution_id": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
+  "resolved_at": NoticeTimestamp,
+  "target_id": Schema.String.check(Schema.isMinCodePoints(1)),
+  "title": Schema.String.check(Schema.isMinCodePoints(1))
+}).annotate({ identifier: "NoticeDigestRow", description: "An automatically resolved ask. Override parameters are omitted after the seven-day override window; absent optional fields are never null." }))()
+export type NoticeDigestRow = typeof NoticeDigestRow.Type
+export type NoticeDigestRowEncoded = typeof NoticeDigestRow.Encoded
+
+/** Execution-context provenance and optional native daemon digest details; repository and cwd are informational, never authenticated sender evidence. */
+export const NoticeSource = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": optionalKey(NoticeAgent),
+  "covered_through": optionalKey(NoticeTimestamp),
+  "cwd": optionalKey(Schema.String),
+  "digest": optionalKey(Schema.Array(NoticeDigestRow).check(Schema.isMaxLength(128))),
+  "digest_count": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^(?:0|[1-9][0-9]*)$", "u")))),
+  /** Immutable native document root of a reverse-linked JSONL fragment chain. Each document contains data and an optional previous exact document reference. Concatenate data in chain creation order, then decode one lossless digest row per line. */
+  "digest_document": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}$", "u")))).annotate({ description: "Immutable native document root of a reverse-linked JSONL fragment chain. Each document contains data and an optional previous exact document reference. Concatenate data in chain creation order, then decode one lossless digest row per line." }),
+  "host": subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host"),
+  "owner_claim": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u")))),
+  "pty": optionalKey(subjectRef(new RegExp("^(?:pty)/[^\\s]+$", "u"), "pty")),
+  "repo": optionalKey(Schema.String)
+}).annotate({ identifier: "NoticeSource", description: "Execution-context provenance and optional native daemon digest details; repository and cwd are informational, never authenticated sender evidence." }))()
+export type NoticeSource = typeof NoticeSource.Type
+export type NoticeSourceEncoded = typeof NoticeSource.Encoded
 
 /** Immutable producer input. Lengths count Unicode characters. Admission additionally caps serialized claim fields at 65536 UTF-8 bytes; JSON Schema cannot express an encoded-object byte budget. Logical identity is (authenticated producer, dedupe_key). Informational even at confirm urgency; an answer requires a native ask. */
 export const NoticeCreated = /*#__PURE__*/ (() => Schema.Struct({
@@ -1285,7 +1325,7 @@ export const NoticeDelivery = /*#__PURE__*/ (() => Schema.Union([
 export type NoticeDelivery = typeof NoticeDelivery.Type
 export type NoticeDeliveryEncoded = typeof NoticeDelivery.Encoded
 
-export const NoticeId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).pipe(Schema.brand("st3/NoticeId")).annotate({ identifier: "NoticeId" }))()
+export const NoticeId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/snapshot/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$", "u"))).pipe(Schema.brand("st3/NoticeId")).annotate({ identifier: "NoticeId" }))()
 export type NoticeId = typeof NoticeId.Type
 export type NoticeIdEncoded = typeof NoticeId.Encoded
 
@@ -1328,7 +1368,7 @@ export const NoticeSeenParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type NoticeSeenParameters = typeof NoticeSeenParameters.Type
 export type NoticeSeenParametersEncoded = typeof NoticeSeenParameters.Encoded
 
-export const NoticeSourceId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).pipe(Schema.brand("st3/NoticeSourceId")).annotate({ identifier: "NoticeSourceId" }))()
+export const NoticeSourceId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^custom/attention/source/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$", "u"))).pipe(Schema.brand("st3/NoticeSourceId")).annotate({ identifier: "NoticeSourceId" }))()
 export type NoticeSourceId = typeof NoticeSourceId.Type
 export type NoticeSourceIdEncoded = typeof NoticeSourceId.Encoded
 

@@ -2,6 +2,27 @@
 
 An effect identifies one immutable outward action across attempts, replacement runs and hosts. Its key is the pair `(mission subject, author key)`, not a run, attempt, incarnation or clock. The operation ID is `operation_id_for_key` of the namespaced encoded pair; durable receipts live on the dedicated `effect/<operation-id>` subject. The bound step-run is evidence, not identity.
 
+## Provider capabilities
+
+The daemon owns the capability table; SDK declarations cannot widen it. Unknown
+providers are refused with `effect-provider-unknown` before admission. A declared
+provider's class and target must match its built-in capability.
+
+| Provider | Class | Target |
+| --- | --- | --- |
+| `native-message` | `native-coordinated` | Agent, person or channel subject |
+| `person-ask` | `native-coordinated` | Person subject |
+| `github.comment` | `native-coordinated` | JSON object with `repo` and positive `number` |
+| `git.branch-create`, `git.pr-create` | `provider-idempotent` | JSON object with nonempty `repo` and `head` |
+
+A capability declaration is not an adapter implementation. Only
+`provider-idempotent` permits a provider adapter to re-issue an operation.
+Native messages remain **native-coordinated**: keyed readback never grants a
+second send. This is intentionally stricter than treating message idempotency as
+permission to re-originate. A visible operation conflict parks the effect in the
+admission transaction, before any outward action.
+
+
 ## Native messages
 
 `POST /v1/messages` opts in with an `owner` object containing `mission`, `key`, `step`, `attempt` and `incarnation`. The authenticated caller must be the worker holding that exact live step-run lease. Its incarnation is also verified through the existing helper-launcher process provenance check: a claimed incarnation alone is not authority. First origination additionally requires the verified caller to equal the message's `from`. Unattested callers and stale leases are refused before admission. Program-run authority is not admitted by this endpoint.

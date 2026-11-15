@@ -3181,6 +3181,31 @@ export type NoticeDelivery = ({
   surface: "tray" | "speech" | "push" | "log";
 });
 
+export type NoticeDigestActions = {
+  "work.override": NoticeDigestOverride;
+};
+
+export type NoticeDigestDefaultAnswer = {
+  id: string;
+  label: string;
+};
+
+export type NoticeDigestOverride = {
+  episode: string;
+  target_id: string;
+};
+
+export type NoticeDigestRow = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  requester_id: string;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: string;
+  title: string;
+};
+
 export type NoticeDismissParameters = {
   notice_id: NoticeId;
 };
@@ -3254,8 +3279,13 @@ export type NoticeSnoozeParameters = {
 
 export type NoticeSource = {
   agent?: NoticeAgent;
+  covered_through?: NoticeTimestamp;
   cwd?: string;
+  digest?: Array<NoticeDigestRow>;
+  digest_count?: string;
+  digest_document?: string;
   host: string;
+  owner_claim?: string;
   pty?: string;
   repo?: string;
 };

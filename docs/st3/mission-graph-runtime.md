@@ -1212,7 +1212,39 @@ none.
 [asks]
 deadlines = true           # off by default; turn on once every member runs this build
 default_deadline = "24h"   # 1m to 30d
+digest_at = "09:00"        # daily auto-resolution digest, strict local HH:MM
+digest_timezone = "UTC"    # fleet fallback IANA timezone, e.g. Europe/Berlin
 ```
+
+The daily auto-resolution digest uses `digest_at` (default `09:00`) in
+`digest_timezone` (default `UTC`). Person declarations and availability records do not
+currently store a timezone, and there was no fleet timezone setting; this explicit fleet
+fallback supplies it rather than using the daemon host's timezone. Configure the same IANA
+zone on fleet members. Both settings reload without a restart; an invalid time or timezone
+keeps the previously installed digest policy (an invalid timezone also refuses startup).
+Each local date's digest becomes due at its exact local boundary, including across
+23-hour and 25-hour DST days. Replicated `covered_through` records the actual prior
+boundary; reloading the time or timezone selects only the next boundary, never
+reinterprets the already-covered instants. After downtime the owner catches up missed
+nonempty dates even before today's wake. Resolution claim identities prevent repeats;
+late-replicated, previously unreported resolutions are carried into the next unissued
+date rather than lost behind a frozen source. Empty dates write nothing.
+A missing local minute advances to the first real minute after it; a repeated minute
+uses its first instant. The reconciler arms the next local boundary rather than polling.
+Arrival discovery, history indexing and large-day staging use bounded 128-item pages
+with immediate work continuations; rebuildable local indexes avoid rescanning lifetime
+ask history on empty days. A future digest for one person never blocks another
+person's due digest. Historical owner declarations and same-writer supersession fences
+preserve eligible prior-owner history; sources awaiting replicated owner dependencies
+are retried when those dependencies arrive rather than forgotten.
+
+Digest notices are informational views derived from replicated graph data. Existing
+replica envelopes have no cross-writer causal frontier, so they cannot prove whether
+a former owner had imported another writer's handover before emitting a source.
+Readers therefore show at most one digest per person and date, preferring a source
+written by the currently bound owner and then the lowest claim ID. An offline former
+owner's late emission may remain hidden history, but cannot create a second visible
+notice. No cross-writer causal authority proof is claimed.
 
 At the deadline the member that took the ask writes `work.person-done` as `daemon/runtime` with
 `resolved_by: "deadline"`. The ask leaves the person's home and its origin resumes as it would
