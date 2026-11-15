@@ -1069,7 +1069,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             .iter()
             .find(|candidate| &candidate.id == mission)
             .map(|candidate| candidate.title.clone())
-            .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+            .unwrap_or_else(|| "a mission".into());
         link(&mut card, "mission  ", &label, mission);
     }
     // The step that waits on this ask, and what it is for: what answering lets go on.
@@ -1988,7 +1988,7 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
             .iter()
             .find(|candidate| &candidate.id == mission)
             .map(|candidate| candidate.title.clone())
-            .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+            .unwrap_or_else(|| "a mission".into());
         link(
             &mut doc,
             "   mission ",
@@ -2117,14 +2117,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
                     format!("   {}", text::truncate(&progress, width.saturating_sub(4))),
                     theme::soft(),
                 )],
-                None => vec![span(
-                    format!(
-                        "   {} · {}",
-                        mission.id.trim_start_matches("mission/"),
-                        mission.age
-                    ),
-                    theme::dim(),
-                )],
+                None => vec![span(format!("   {}", mission.age), theme::dim())],
             },
             children: Vec::new(),
         });
@@ -3028,7 +3021,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
                 .iter()
                 .find(|candidate| &candidate.id == mission)
                 .map(|candidate| candidate.title.clone())
-                .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+                .unwrap_or_else(|| "a mission".into());
             doc.field("doing", &format!("{title} › {step}"), width, theme::text());
         }
         doc.field(
@@ -3191,7 +3184,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
                 .iter()
                 .find(|candidate| &candidate.id == mission)
                 .map(|candidate| candidate.title.clone())
-                .unwrap_or_else(|| mission.trim_start_matches("mission/").to_owned());
+                .unwrap_or_else(|| "a mission".into());
             link(&mut doc, "", &format!("{title} › {step}"), mission);
             if let Some(goal) = &details.goal {
                 doc.lines(text::wrap(
@@ -3457,7 +3450,7 @@ pub fn missions_tree(world: &World, spinner: &'static str, system: bool) -> List
                 mission.id.clone(),
                 vec![
                     span(format!("{glyph} "), theme::strong(color)),
-                    span(path.last().cloned().unwrap_or_default(), theme::bold()),
+                    span(mission.title.clone(), theme::bold()),
                 ],
                 vec![span(
                     format!("{} {done}/{total}", human_mission_label(mission)),
@@ -3722,6 +3715,33 @@ mod tree_tests {
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
         assert!(shown.contains("a step"), "{shown}");
         assert!(!shown.contains(opaque_id), "{shown}");
+    }
+
+    #[test]
+    fn inbox_unresolved_missions_use_neutral_labels_and_keep_navigation_ids() {
+        let hash = "d415892ea7a1dab11e6ba7ed22a8eb13";
+        let mission_id = format!("mission/person-ask/{hash}");
+        for missions in [Load::Ready(Vec::new()), Load::Loading, Load::Failed("Unavailable".into())] {
+            let mut world = crate::ui::demo::world();
+            world.missions = missions;
+            let Load::Ready(items) = &mut world.attention else { panic!() };
+            let item = &mut items[0];
+            item.mission = Some(mission_id.clone());
+            item.related.clear();
+            item.blocked = None;
+            let id = item.id.clone();
+            let drafts = Drafts {
+                text: None, cursor: 0, editing: false, confirm: None,
+                answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
+                form: Default::default(),
+            };
+            let doc = home_detail(&world, Some(&id), 200, &drafts);
+            let shown = doc.lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+            assert!(shown.contains("mission  a mission"), "{shown}");
+            assert!(!shown.contains(&mission_id), "{shown}");
+            assert!(!shown.to_ascii_lowercase().contains(hash), "{shown}");
+            assert!(doc.targets.iter().any(|target| target.hit == Hit::Peek(mission_id.clone())));
+        }
     }
 
     #[test]
