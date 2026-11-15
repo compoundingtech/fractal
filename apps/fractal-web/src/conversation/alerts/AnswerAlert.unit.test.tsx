@@ -406,6 +406,69 @@ describe('gatewayAlertActions', () => {
     })
     expect(workDone).toHaveBeenCalledTimes(1)
   })
+
+  describe('auto-resolved asks', () => {
+    const ask = {
+      resolution_id: 'a'.repeat(64), title: 'Merge the parser change?', requester_id: 'agent/example/atlas', resolved_at: '2026-10-14T10:00:00Z',
+      target_id: 'step-run/example/build', episode: 'claim/example', default_answer: { id: 'hold', label: 'Hold' },
+      action_parameters: { 'work.override': { target_id: 'step-run/example/build', episode: 'claim/example' } },
+    }
+    const list = (items: readonly object[]) => vi.fn(async () => ({ snapshot: { id: 'snapshot/now' }, value: { items, complete: true } }))
+    const refusal = (code: string, message: string) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message, retryable: false, details: {} } as never, code === 'forbidden' ? 403 : 409)
+
+    it('reads the person\'s auto-resolved asks, and treats a session with none of its own as absent', async () => {
+      expect(await gatewayAlertActions({ autoResolvedList: list([ask]) } as unknown as FractalClient).autoResolved()).toEqual({ _tag: 'Observed', asks: [ask], complete: true })
+      const agent = gatewayAlertActions({ autoResolvedList: vi.fn(async () => { throw refusal('forbidden', 'only a person reads its asks') }) } as unknown as FractalClient)
+      expect(await agent.autoResolved()).toMatchObject({ _tag: 'Unavailable', reason: 'absent' })
+      const broken = gatewayAlertActions({ autoResolvedList: vi.fn(async () => { throw new TypeError('network') }) } as unknown as FractalClient)
+      expect(await broken.autoResolved()).toMatchObject({ _tag: 'Unavailable', reason: 'failed' })
+    })
+
+    it('overrides once, fenced on a fresh read, with an action id and key a retry replays', async () => {
+      const workOverride = vi.fn(async (_request: unknown) => ({ value: { status: 'accepted' } }))
+      const port = gatewayAlertActions({ autoResolvedList: list([ask]), workOverride } as unknown as FractalClient)
+      expect(await port.override({ ask, action: { type: 'work.override', answer: { id: 'merge' } } })).toEqual({ _tag: 'Sent' })
+      expect(workOverride.mock.calls[0]![0]).toEqual({
+        id: 'action/person-override:claim/example:merge',
+        idempotency_key: 'person-override:claim/example:merge',
+        fence: { snapshot_id: 'snapshot/now', subject_revisions: {} },
+        parameters: { target_id: 'step-run/example/build', episode: 'claim/example', answer: { id: 'merge' } },
+      })
+    })
+
+    it('carries the person\'s words with a request for changes', async () => {
+      const workOverride = vi.fn(async (_request: unknown) => ({ value: { status: 'accepted' } }))
+      const port = gatewayAlertActions({ autoResolvedList: list([ask]), workOverride } as unknown as FractalClient)
+      expect(await port.override({ ask, action: { type: 'work.override', answer: { id: 'change', text: 'Credit the parser fix.' } } })).toEqual({ _tag: 'Sent' })
+      expect(workOverride.mock.calls[0]![0]).toMatchObject({
+        idempotency_key: 'person-override:claim/example:change',
+        parameters: { target_id: 'step-run/example/build', episode: 'claim/example', answer: { id: 'change', text: 'Credit the parser fix.' } },
+      })
+    })
+
+    it('sends nothing once Fractal no longer offers the override', async () => {
+      const workOverride = vi.fn()
+      const { action_parameters: _closed, ...expired } = ask
+      for (const items of [[], [expired], [{ ...ask, action_parameters: { 'work.override': { ...ask.action_parameters['work.override'], episode: 'claim/other' } } }]]) {
+        const port = gatewayAlertActions({ autoResolvedList: list(items), workOverride } as unknown as FractalClient)
+        expect(await port.override({ ask, action: { type: 'work.override', answer: { id: 'merge' } } })).toEqual({ _tag: 'Refused', detail: 'This can no longer be overridden.' })
+      }
+      expect(workOverride).not.toHaveBeenCalled()
+    })
+
+    it('says why Fractal refused an override, and never sends an unconfirmed one again', async () => {
+      const stale = gatewayAlertActions({ autoResolvedList: list([ask]), workOverride: vi.fn(async () => { throw refusal('stale-fence', 'the override window closed') }) } as unknown as FractalClient)
+      expect(await stale.override({ ask, action: { type: 'work.override', answer: { id: 'merge' } } })).toMatchObject({ _tag: 'Refused', detail: expect.stringMatching(/\.$/) })
+      const rejected = gatewayAlertActions({ autoResolvedList: list([ask]), workOverride: vi.fn(async () => ({ value: { status: 'rejected' } })) } as unknown as FractalClient)
+      expect(await rejected.override({ ask, action: { type: 'work.override', answer: { id: 'merge' } } })).toEqual({ _tag: 'Refused', detail: 'Fractal did not take this answer.' })
+      const workOverride = vi.fn(async () => { throw new TypeError('network') })
+      const lost = gatewayAlertActions({ autoResolvedList: list([ask]), workOverride } as unknown as FractalClient)
+      expect(await lost.override({ ask, action: { type: 'work.override', answer: { id: 'merge' } } })).toEqual({
+        _tag: 'Refused', detail: 'The answer could not be confirmed; check the ask before answering again. It was not sent again.',
+      })
+      expect(workOverride).toHaveBeenCalledTimes(1)
+    })
+  })
 })
 
 describe('served sidebar prompts', () => {
