@@ -5,7 +5,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Button, Input, Label, TextField } from 'react-aria-components'
 import type { ThreadListQuery } from '@fractal/client'
-import type { Attention, ThreadMessageEvent, ThreadSummary, ThreadTimelinePage } from '@fractal/client/schema/read'
+import type { Attention, ThreadMessageEvent, ThreadSummary } from '@fractal/client/schema/read'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -68,23 +68,32 @@ function useGatewayLive(): boolean | undefined {
 }
 
 /**
- * An open thread's own reads (its detail and newest messages) can go stale while its section's list stays live.
- * The thread reports that here, so the section's one "Updates paused" marker covers it and offers Retry.
+ * An open thread's own reads (its detail and every message page it shows) can go stale while its section's list
+ * stays live. Each mounted read registers here on its own while it is stale, and withdraws when it is live again or
+ * unmounts, so the section's one "Updates paused" marker covers exactly what is on screen and offers Retry.
  */
-const StaleThreadReads = React.createContext<((threadId: string) => () => void) | undefined>(undefined)
+const StaleThreadReads = React.createContext<((read: string) => () => void) | undefined>(undefined)
 
-function useStaleThreadReads(): readonly [boolean, (threadId: string) => () => void] {
+function useStaleThreadReads(): readonly [boolean, (read: string) => () => void] {
   const [stale, setStale] = React.useState<ReadonlySet<string>>(() => new Set())
-  const report = React.useCallback((threadId: string) => {
-    setStale(current => current.has(threadId) ? current : new Set(current).add(threadId))
+  const report = React.useCallback((read: string) => {
+    setStale(current => current.has(read) ? current : new Set(current).add(read))
     return () => setStale(current => {
-      if (!current.has(threadId)) return current
+      if (!current.has(read)) return current
       const next = new Set(current)
-      next.delete(threadId)
+      next.delete(read)
       return next
     })
   }, [])
   return [stale.size > 0, report]
+}
+
+/** Registers this mounted read with its section while its observation is stale. */
+function useReportStale(feed: Feed<unknown>) {
+  const report = React.useContext(StaleThreadReads)
+  const read = React.useId()
+  const stale = feed._tag === 'Observed' && feed.freshness === 'stale'
+  React.useEffect(() => stale && report !== undefined ? report(read) : undefined, [stale, report, read])
 }
 
 /**
@@ -318,7 +327,7 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
 }) {
   const { read, upgradeRequired, unknown, failure } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
-  // The thread reports its own detail and newest messages going stale; embedded, its section carries the marker.
+  // The thread reports its own detail and each message page going stale; embedded, its section carries the marker.
   const [threadReadsStale, reportStale] = useStaleThreadReads()
   const paused = useUpdatesPaused(threadReadsStale)
   // A thread in its own tab keeps its status in the thread's measure, where its heading would be.
@@ -344,7 +353,6 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
 
 const noPendingChange = Atom.make<string | undefined>(undefined)
 const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
-const idleTimeline = Atom.make<Feed<ThreadTimelinePage>>(waiting)
 const noPendingStarts = Atom.make<readonly RetainedThreadStart[]>([])
 
 function LiveThread({ source, thread, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
@@ -366,11 +374,7 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
     : detail._tag === 'Unavailable' && detail.code === 'not-found' ? <SystemNotice kind="empty" scope="inline" title="Fractal no longer has this thread." />
     : <ReadStatus feed={detail} subject="thread" onRetry={source.reload} />
   const summary = observation?.summary ?? thread
-  // Same page the timeline shows; a stale one keeps its messages, and the section says updates paused.
-  const timeline = useAtomValue(observation === undefined ? idleTimeline : source.timeline(thread.id))
-  const readsStale = (detail._tag === 'Observed' && detail.freshness === 'stale') || (timeline._tag === 'Observed' && timeline.freshness === 'stale')
-  const reportStale = React.useContext(StaleThreadReads)
-  React.useEffect(() => readsStale && reportStale !== undefined ? reportStale(thread.id) : undefined, [readsStale, reportStale, thread.id])
+  useReportStale(detail)
   const agent = useAgent(summary.agent_id)
   const agentName = agent._tag === 'Observed' ? agent.value?.name : undefined
   const retryChange = source.retryChange
@@ -541,6 +545,8 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
   readonly onQuote: Quote
 }) {
   const feed = useAtomValue(source.timeline(threadId, cursor))
+  // Each page, the earlier ones included, keeps its last messages when it goes stale and says so to the section.
+  useReportStale(feed)
   const { actor } = useAtomValue(source.access)
   const now = useNow()
   const [showOlder, setShowOlder] = React.useState(false)

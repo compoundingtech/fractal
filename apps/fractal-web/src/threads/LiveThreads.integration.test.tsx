@@ -194,6 +194,54 @@ it('marks a thread in its own tab paused with Retry when its messages later fail
   } finally { silence.mockRestore(); await view.dispose() }
 })
 
+it.each(['recovers through Retry', 'closes while stale'] as const)('marks an Inbox item paused when only an earlier message page later fails, and clears it once that page %s', async (path) => {
+  let earlierDown = false
+  const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const message = (id: string, content: string, minute: number) => ({ kind: 'message', id, actor_id: agent, content,
+    accepted_at_unix_ms: Date.parse(`2026-11-01T11:0${minute}:00Z`), thread_quote_id: null })
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    reply: url => {
+      if (url.pathname.endsWith('/threads')) return page(url.searchParams.get('recently_closed') === 'true' ? [] : [row('thread/one', 'Release checklist')])
+      if (!url.pathname.endsWith('/timeline')) return Response.json({ ...base, value: row('thread/one', 'Release checklist') })
+      if (url.searchParams.get('cursor') !== 'older') return Response.json({ ...base, value: { items: [message('message/newest', 'The checklist is complete.', 3)], next_cursor: 'older' } })
+      return earlierDown ? refusal(504, 'gateway-timeout') : page([message('message/earliest', 'Starting the checklist now.', 1)])
+    },
+  })
+  const heading = () => view.host.querySelector('h3')
+  const earlierReads = () => view.requests.filter(url => url.pathname.endsWith('/timeline') && url.searchParams.get('cursor') === 'older').length
+  try {
+    const header = () => view.host.querySelector<HTMLButtonElement>('[data-thread-panel][aria-label="Release checklist"] button')
+    await vi.waitFor(() => expect(header()).not.toBeNull())
+    if (header()?.getAttribute('aria-expanded') !== 'true') await act(async () => header()?.click())
+    await vi.waitFor(() => expect(view.button('Load earlier messages')).toBeDefined())
+    await act(async () => view.button('Load earlier messages')?.click())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Starting the checklist now.'))
+    expect(earlierReads()).toBe(1)
+    // Every thread read runs again; only the earlier page fails, while the newest page, the list and the gateway stay live.
+    earlierDown = true
+    await act(async () => view.threads.reload?.())
+    await vi.waitFor(() => expect(heading()?.getAttribute('aria-label')).toBe('Threads, 1, updates paused'))
+    expect(earlierReads()).toBe(2)
+    expect(view.host.textContent).toContain('Starting the checklist now.')
+    expect(view.button('Retry: Updates paused')).toBeDefined()
+    if (path === 'recovers through Retry') {
+      earlierDown = false
+      await act(async () => view.button('Retry: Updates paused')?.click())
+      await vi.waitFor(() => expect(heading()?.getAttribute('aria-label')).toBe('Threads, 1'))
+      // Retry read the failed earlier page again.
+      expect(earlierReads()).toBe(3)
+      expect(view.host.textContent).toContain('Starting the checklist now.')
+    } else {
+      // Closing the row unmounts the stale page, which withdraws its own report.
+      await act(async () => header()?.click())
+      await vi.waitFor(() => expect(heading()?.getAttribute('aria-label')).toBe('Threads, 1'))
+      expect(view.host.textContent).not.toContain('Starting the checklist now.')
+    }
+    expect(view.host.querySelectorAll('[data-threads-paused]')).toHaveLength(0)
+    expect(view.button('Retry: Updates paused')).toBeUndefined()
+  } finally { silence.mockRestore(); await view.dispose() }
+})
+
 it('names an agent by its short name, never its id, while the roster has no row for it', async () => {
   // The mounted roster holds no agents, so every agent read is unavailable.
   const view = await mount(<LiveInboxThreads alert={ask} />, { actions: ['thread.start'], reply: () => page([]) })
