@@ -303,12 +303,13 @@ test('mutable thread fixture acknowledges close, closed reply, reopen and rename
   assert.equal(reply.thread_quote_id, 'message/action-preview');
   assert.equal((await client.threadGet(before.value.id)).value.state, 'closed', 'reply does not reopen');
 
-  const reopenRequest = { ...closeRequest, id: 'action/fixture-reopen', idempotency_key: 'fixture-thread-reopen-0001', fence: { snapshot_id: replied.snapshot.id, subject_revisions: {} } };
+  const afterReply = await client.threadGet(before.value.id);
+  const reopenRequest = { ...closeRequest, id: 'action/fixture-reopen', idempotency_key: 'fixture-thread-reopen-0001', fence: { snapshot_id: replied.snapshot.id, subject_revisions: { [before.value.id]: afterReply.value.revision } } };
   const reopened = await actionReceiptCheck({ kind: 'metadata', actionId: reopenRequest.id, targetId: before.value.id })(() => client.threadReopen(reopenRequest));
   assert.equal((await client.threadGet(before.value.id)).value.state, 'open');
   const current = (await client.threadGet(before.value.id)).value;
   const renameRequest = {
-    id: 'action/fixture-rename', idempotency_key: 'fixture-thread-rename-0001', fence: { snapshot_id: reopened.snapshot.id, subject_revisions: {} },
+    id: 'action/fixture-rename', idempotency_key: 'fixture-thread-rename-0001', fence: { snapshot_id: reopened.snapshot.id, subject_revisions: { [current.id]: current.revision } },
     parameters: { target_id: current.id, title: 'Renamed writable fixture', title_revision: current.title_revision },
   };
   const renamed = await actionReceiptCheck({ kind: 'metadata', actionId: renameRequest.id, targetId: current.id })(() => client.threadRename(renameRequest));
@@ -322,7 +323,9 @@ test('mutable thread fixture acknowledges close, closed reply, reopen and rename
     assert.equal(error.status, 409);
     assert.equal(error.response.code, 'stale-fence');
     assert.equal(error.response.retryable, false);
-    assert.ok(notApplied(error), 'stale rename is a typed definitive refusal');
+    assert.ok(notApplied(error), 'the SDK classifies a stale-fence code as a definitive refusal');
+    assert.equal(error.response.applied, undefined);
+    assert.deepEqual(error.response.details, {});
     decodeUnknownSync(ErrorEnvelope, 'strict')(error.response);
     return true;
   });
@@ -331,9 +334,12 @@ test('mutable thread fixture acknowledges close, closed reply, reopen and rename
   const rejected = (await client.threadGet('thread/rejected-preview')).value;
   const edits = new ThreadEdits(() => {}, error => error.message);
   const refusal = edits.run(rejected, { kind: 'close' }, () => client.threadClose({
-    ...closeRequest, id: 'action/fixture-rejected', idempotency_key: 'fixture-thread-rejected-0001', parameters: { target_id: rejected.id },
+    ...closeRequest, id: 'action/fixture-rejected', idempotency_key: 'fixture-thread-rejected-0001',
+    fence: { snapshot_id: before.snapshot.id, subject_revisions: { [rejected.id]: rejected.revision } }, parameters: { target_id: rejected.id },
   }).then(() => ({ how: 'sent' })).catch(error => {
-    assert.ok(error instanceof ClientError && error.status === 403 && notApplied(error));
+    assert.ok(error instanceof ClientError && error.status === 403);
+    assert.equal(error.response.applied, undefined);
+    assert.deepEqual(error.response.details, {});
     throw error;
   }));
   assert.equal(edits.project(rejected).state, 'closed', 'the fixture can exercise immediate optimistic presentation');
@@ -359,7 +365,8 @@ test('fixture state controls expose empty, retryable error, offline, revoked gra
   const invalidError = decodeUnknownSync(ErrorEnvelope, 'strict')(await invalidControl.json());
   assert.equal(invalidError.code, 'validation-failed');
   assert.equal(invalidError.retryable, false);
-  assert.equal(invalidError.applied, 'none');
+  assert.equal(invalidError.applied, undefined);
+  assert.deepEqual(invalidError.details, {});
   assert.equal((await (await fetch(`${baseUrl}/__fixture/threads`)).json()).state, controls.state);
   let socket = new WebSocket(`${baseUrl.replace('http:', 'ws:')}/v1/client/collections`);
   t.after(() => socket.terminate());
@@ -491,15 +498,18 @@ test('fixture reset restores mutations, receipts, scenarios and live windows wit
   const initialOlder = (await client.threadGet('thread/older-page')).value;
   const close = {
     id: 'action/reset-close', idempotency_key: 'fixture-reset-close-0001',
-    fence: { snapshot_id: initial.snapshot.id, subject_revisions: {} }, parameters: { target_id: initial.value.id },
+    fence: { snapshot_id: initial.snapshot.id, subject_revisions: { [initial.value.id]: initial.value.revision } }, parameters: { target_id: initial.value.id },
   };
   await client.threadClose(close);
+  const afterClose = await client.threadGet(initial.value.id);
   await client.threadRename({
-    id: 'action/reset-rename', idempotency_key: 'fixture-reset-rename-0001', fence: close.fence,
+    id: 'action/reset-rename', idempotency_key: 'fixture-reset-rename-0001',
+    fence: { snapshot_id: afterClose.snapshot.id, subject_revisions: { [initial.value.id]: afterClose.value.revision } },
     parameters: { target_id: initial.value.id, title_revision: initial.value.title_revision, title: 'Will be reset' },
   });
   await client.threadReply({
-    id: 'action/reset-reply', idempotency_key: 'fixture-reset-reply-0001', fence: close.fence,
+    id: 'action/reset-reply', idempotency_key: 'fixture-reset-reply-0001',
+    fence: { snapshot_id: initial.snapshot.id, subject_revisions: {} },
     parameters: { target_id: initial.value.id, content: 'Will be removed by reset' },
   });
   await controlThreads(baseUrl, { update: 'older-live' });
@@ -571,4 +581,114 @@ test('mutable demo pairing binds the phone signing key and sends a verifiably si
   const reply = (await client.threadTimeline(thread.value.id)).value.items[0];
   assert.equal(reply.id, message.subject);
   assert.equal(reply.thread_quote_id, fields.thread_quote_id);
+});
+
+test('mutable thread metadata enforces snapshot, subject and lifecycle fences', { timeout: 15000 }, async t => {
+  const baseUrl = await startGateway(t, { capture: true, scenario: 'thread-actions' });
+  const client = new FractalClient({ baseUrl, credential: async () => 'demo-credential' });
+  const initial = await client.threadGet('thread/action-preview');
+  let sequence = 0;
+  const request = (fence, parameters = { target_id: initial.value.id }) => ({
+    id: `action/fence-${++sequence}`, idempotency_key: `fixture-fence-${sequence}-0001`, fence, parameters,
+  });
+  const fence = { snapshot_id: initial.snapshot.id, subject_revisions: { [initial.value.id]: initial.value.revision } };
+  const refuses = (status, code) => error => {
+    assert.ok(error instanceof ClientError);
+    assert.equal(error.status, status);
+    assert.equal(error.response.code, code);
+    assert.equal(error.response.applied, undefined);
+    assert.deepEqual(error.response.details, {});
+    return true;
+  };
+  for (const subject_revisions of [{}, { ...fence.subject_revisions, 'thread/other': 'claim/other' }]) {
+    await assert.rejects(client.threadClose(request({ ...fence, subject_revisions })), refuses(422, 'validation-failed'));
+  }
+  for (const snapshot_id of ['snapshot/invalid', `snapshot/another-host/${initial.snapshot.store_index}/fixture`,
+    `snapshot/${initial.snapshot.host_id}/${initial.snapshot.store_index + 999}/fixture`]) {
+    await assert.rejects(client.threadClose(request({ ...fence, snapshot_id })), refuses(409, 'stale-fence'));
+  }
+  await assert.rejects(client.threadReopen(request(fence)), refuses(409, 'stale-fence'));
+  await client.threadClose(request(fence));
+  await assert.rejects(client.threadReopen(request(fence)), refuses(409, 'stale-fence'));
+  const closed = await client.threadGet(initial.value.id);
+  const currentFence = { ...fence, subject_revisions: { [initial.value.id]: closed.value.revision } };
+  await assert.rejects(client.threadClose(request(currentFence)), refuses(409, 'stale-fence'));
+  await client.threadReopen(request(currentFence));
+  assert.equal((await client.threadGet(initial.value.id)).value.state, 'open', 'an older same-host snapshot remains valid with the current subject revision');
+  await assert.rejects(client.threadReply(request(fence, { target_id: initial.value.id, content: 'Invalid subject fence' })), refuses(422, 'validation-failed'));
+  for (const body of ['{', JSON.stringify({ type: 'thread.close' })]) {
+    const result = await fetch(`${baseUrl}/v1/client/actions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    assert.equal(result.status, 422);
+    assert.equal(decodeUnknownSync(ErrorEnvelope, 'strict')(await result.json()).code, 'validation-failed');
+  }
+});
+
+test('mutable timeline pages are limited, scoped and pinned through their head snapshot', { timeout: 15000 }, async t => {
+  const baseUrl = await startGateway(t, { capture: true, scenario: 'thread-actions' });
+  const client = new FractalClient({ baseUrl, credential: async () => 'demo-credential' });
+  const initial = await client.threadGet('thread/action-preview');
+  const reply = index => client.threadReply({
+    id: `action/page-${index}`, idempotency_key: `fixture-page-${index}-0001`,
+    fence: { snapshot_id: initial.snapshot.id, subject_revisions: {} },
+    parameters: { target_id: initial.value.id, content: `Timeline pagination message ${index}` },
+  });
+  for (let index = 0; index < 55; index++) await reply(index);
+  const read = async (id, query = '') => {
+    const result = await fetch(`${baseUrl}/v1/client/threads/${encodeURIComponent(id.slice(7))}/timeline${query}`);
+    assert.equal(result.status, 200);
+    const envelope = await result.json();
+    decodeUnknownSync(Schema.Struct({ ...Envelope.fields, value: ThreadTimelinePage }), 'strict')(envelope);
+    return envelope.value;
+  };
+  const first = await read(initial.value.id);
+  assert.equal(first.items.length, 40);
+  assert.ok(first.next_cursor);
+  assert.equal((await read(initial.value.id, '?limit=200')).items.length, 50);
+  assert.equal((await read(initial.value.id, '?limit=25')).items.length, 25);
+  await reply(56);
+  const older = await read(initial.value.id, `?cursor=${encodeURIComponent(first.next_cursor)}`);
+  assert.equal(older.items.length, 16);
+  assert.equal(older.next_cursor, null);
+  const ids = [...first.items, ...older.items].map(item => item.id);
+  assert.equal(new Set(ids).size, 56);
+  assert.ok(!older.items.some(item => item.content === 'Timeline pagination message 56'));
+  for (const [id, cursor] of [['thread/quoted-preview', first.next_cursor],
+    [initial.value.id, first.next_cursor.replace(/:\d+:/, ':999999:')],
+    [initial.value.id, first.next_cursor.replace(/:[^:]+$/, ':message/missing')]]) {
+    const result = await fetch(`${baseUrl}/v1/client/threads/${encodeURIComponent(id.slice(7))}/timeline?cursor=${encodeURIComponent(cursor)}`);
+    assert.equal(result.status, 422);
+    assert.equal(decodeUnknownSync(ErrorEnvelope, 'strict')(await result.json()).code, 'validation-failed');
+  }
+});
+
+test('recently closed subscriptions remove a reopened thread and admit its replacement', { timeout: 15000 }, async t => {
+  const baseUrl = await startGateway(t, { capture: true, scenario: 'thread-actions' });
+  const client = new FractalClient({ baseUrl, credential: async () => 'demo-credential' });
+  const initial = await client.threadGet('thread/action-preview');
+  await client.threadClose({
+    id: 'action/window-close', idempotency_key: 'fixture-window-close-0001',
+    fence: { snapshot_id: initial.snapshot.id, subject_revisions: { [initial.value.id]: initial.value.revision } },
+    parameters: { target_id: initial.value.id },
+  });
+  const socket = new WebSocket(`${baseUrl.replace('http:', 'ws:')}/v1/client/collections`);
+  t.after(() => socket.terminate());
+  await once(socket, 'open');
+  const firstFrame = nextThreadFrame(socket, frame => frame.id === 'closed-window');
+  socket.send(JSON.stringify({ kind: 'subscribe', id: 'closed-window', collection: 'threads', thread_context: { recently_closed: true }, limit: 1 }));
+  const first = await firstFrame;
+  assert.equal(first.items.length, 1);
+  const selected = await client.threadGet(first.items[0].id);
+  const changedFrame = nextThreadFrame(socket, frame => frame.id === 'closed-window');
+  await client.threadReopen({
+    id: 'action/window-reopen', idempotency_key: 'fixture-window-reopen-0001',
+    fence: { snapshot_id: selected.snapshot.id, subject_revisions: { [selected.value.id]: selected.value.revision } },
+    parameters: { target_id: selected.value.id },
+  });
+  const changed = await changedFrame;
+  assert.equal(changed.kind, 'changes');
+  assert.deepEqual(changed.removes, [selected.value.id]);
+  assert.equal(changed.upserts.length, 1);
+  assert.notEqual(changed.upserts[0].id, selected.value.id);
+  assert.deepEqual(changed.order, changed.upserts.map(item => item.id));
+  assert.equal(changed.has_more, false);
 });

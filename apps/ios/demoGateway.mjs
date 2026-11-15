@@ -80,6 +80,8 @@ const fixtureStates = ['empty', 'error', 'offline', 'revoked', 'quoted', 'ready'
 let fixtureState = 'ready', fixtureRevision = 1;
 const fixtureConnections = new Map();
 const fixtureReceipts = new Map();
+const fixtureWindows = new WeakMap();
+const fixtureEventPositions = new WeakMap();
 if (mutableThreads) {
   const added = [
     ['action-preview', 'Writable thread — fixture'],
@@ -118,15 +120,32 @@ const threadEnvelope = async (value, valueSchema = ThreadSummary) => {
   const base = await (await replay.fetch('http://demo/v1/client/capabilities')).json();
   // EnvelopeOf<T> uses the generated metadata with this endpoint's typed value,
   // not the legacy resource Envelope.value union (which excludes thread pages).
-  const snapshot = mutableThreads ? { ...base.snapshot, id: `snapshot/threads-fixture-${revision}`, store_index: base.snapshot.store_index + revision } : base.snapshot;
-  return checked(Schema.Struct({ ...Envelope.fields, value: valueSchema }), { ...base, snapshot, value });
+  const snapshot = mutableThreads ? { ...base.snapshot, id: `snapshot/${base.snapshot.host_id}/${base.snapshot.store_index + revision}/threads-fixture`, store_index: base.snapshot.store_index + revision } : base.snapshot;
+  const payload = value.kind === 'action-result' ? { ...value, snapshot_id: snapshot.id } : value;
+  return checked(Schema.Struct({ ...Envelope.fields, value: valueSchema }), { ...base, snapshot, value: payload });
 };
 const fixtureWindow = command => {
   const all = command.collection === 'threads'
     ? command.subject ? summaries.filter(item => item.id === command.subject) : contextThreads(command.thread_context)
     : timelines.get(command.subject) ?? [];
-  const limit = command.limit ?? 200;
+  const limit = mutableThreads ? Math.max(1, Math.min(50, command.limit ?? 40)) : command.limit ?? 200;
   return { items: all.slice(0, limit), hasMore: mutableThreads && all.length > limit };
+};
+const timelinePage = (id, cursor, requestedLimit) => {
+  const scope = createHash('sha256').update(`${person}:${id}`).digest('hex');
+  let through = fixtureRevision, anchor;
+  if (cursor !== null) {
+    const match = /^([^:]+):(\d+):(.+)$/.exec(cursor);
+    if (!match || match[1] !== scope || Number(match[2]) < 1 || Number(match[2]) > fixtureRevision) return null;
+    through = Number(match[2]);
+    anchor = match[3];
+  }
+  const all = (timelines.get(id) ?? []).filter(event => (fixtureEventPositions.get(event) ?? 1) <= through);
+  const offset = anchor === undefined ? 0 : all.findIndex(event => event.id === anchor) + 1;
+  if (anchor !== undefined && offset === 0) return null;
+  const limit = Math.max(1, Math.min(50, requestedLimit ?? 40));
+  const items = all.slice(offset, offset + limit);
+  return { items, next_cursor: offset + items.length < all.length ? `${scope}:${through}:${items.at(-1).id}` : null };
 };
 const sendFixtureWindow = async (ws, command, changedId) => {
   if (ws.readyState !== WebSocket.OPEN) return;
@@ -140,13 +159,17 @@ const sendFixtureWindow = async (ws, command, changedId) => {
     return;
   }
   const { items, hasMore } = fixtureWindow(command);
-  if (changedId && command.collection === 'threads' && !items.some(item => item.id === changedId)) return;
   if (changedId && command.collection === 'thread-timeline' && command.subject !== changedId) return;
   const { snapshot } = await threadEnvelope(thread);
   if (ws.readyState !== WebSocket.OPEN || !fixtureConnections.get(ws)?.has(command.id)) return;
-  const frame = changedId && command.collection === 'threads' ? {
-    kind: 'changes', upserts: items.filter(item => item.id === changedId), removes: [],
+  const previous = fixtureWindows.get(command);
+  const frame = changedId && command.collection === 'threads' && previous ? {
+    kind: 'changes',
+    upserts: items.filter(item => previous.items.find(old => old.id === item.id) !== item),
+    removes: previous.items.filter(item => !items.some(current => current.id === item.id)).map(item => item.id),
   } : { kind: 'snapshot', items };
+  if (frame.kind === 'changes' && frame.upserts.length === 0 && frame.removes.length === 0 && previous.hasMore === hasMore) return;
+  fixtureWindows.set(command, { items, hasMore });
   ws.send(JSON.stringify(checked(CollectionFrame, {
     ...frame, id: command.id, collection: command.collection, snapshot,
     order: items.map(item => item.id), has_more: hasMore,
@@ -236,7 +259,7 @@ const server = http.createServer(async (request, response) => {
       response.writeHead(status, { 'content-type': 'application/json' });
       response.end(JSON.stringify(checked(ErrorEnvelope, {
         api_version: API_VERSION, error_version: 'st3.client.error.v0', request_id: requestId,
-        code, message, retryable: status >= 500, applied: 'none', details: { applied: 'none' },
+        code, message, retryable: status >= 500, details: {},
       })));
     };
     if (mutableThreads && url.pathname === '/__fixture/threads') {
@@ -283,9 +306,23 @@ const server = http.createServer(async (request, response) => {
       const chunks = [];
       for await (const chunk of request) chunks.push(chunk);
       const body = Buffer.concat(chunks);
-      const raw = JSON.parse(body.toString('utf8'));
-      if (['thread.close', 'thread.reopen', 'thread.rename', 'thread.reply'].includes(raw.type)) {
-        const action = checked(ActionRequest, raw);
+      let raw;
+      try { raw = JSON.parse(body.toString('utf8')); }
+      catch { fail(422, 'validation-failed', 'The action request is not valid JSON.'); return; }
+      if (['thread.close', 'thread.reopen', 'thread.rename', 'thread.reply'].includes(raw?.type)) {
+        let action;
+        try { action = checked(ActionRequest, raw); }
+        catch { fail(422, 'validation-failed', 'The thread action request is invalid.'); return; }
+        const { snapshot } = await threadEnvelope(thread);
+        const snapshotFence = /^snapshot\/(.+)\/(\d+)\/[^/]+$/.exec(action.fence.snapshot_id);
+        if (!snapshotFence || snapshotFence[1] !== snapshot.host_id.replace(/\s/g, '-') || Number(snapshotFence[2]) > snapshot.store_index) {
+          fail(409, 'stale-fence', 'The client snapshot belongs to another host or a future store position.', action.id); return;
+        }
+        const revisions = action.fence.subject_revisions;
+        if (action.type === 'thread.reply' ? Object.keys(revisions).length !== 0 :
+          Object.keys(revisions).length !== 1 || !Object.hasOwn(revisions, action.parameters.target_id)) {
+          fail(422, 'validation-failed', action.type === 'thread.reply' ? 'Thread messages use their typed origin or quote fence.' : 'Thread metadata requires exactly the target subject revision.', action.id); return;
+        }
         if (fixtureState === 'revoked' || action.parameters.target_id === 'thread/rejected-preview') {
           fail(403, 'forbidden', fixtureState === 'revoked' ? 'Fixture thread grant was revoked.' : 'This fixture intentionally rejects thread changes.', action.id);
           return;
@@ -294,6 +331,12 @@ const server = http.createServer(async (request, response) => {
         const index = summaries.findIndex(item => item.id === action.parameters.target_id);
         if (index < 0) { fail(404, 'not-found', 'No such fixture thread.', action.id); return; }
         const selected = summaries[index];
+        if (action.type !== 'thread.reply' && revisions[selected.id] !== selected.revision) {
+          fail(409, 'stale-fence', 'The thread changed after the supplied subject revision.', action.id); return;
+        }
+        if ((action.type === 'thread.close' && selected.state === 'closed') || (action.type === 'thread.reopen' && selected.state === 'open')) {
+          fail(409, 'stale-fence', 'The thread is already in the requested state.', action.id); return;
+        }
         if (action.type === 'thread.rename' && action.parameters.title_revision !== selected.title_revision) {
           fail(409, 'stale-fence', 'The fixture title changed. Refresh and rename again.', action.id);
           return;
@@ -320,12 +363,12 @@ const server = http.createServer(async (request, response) => {
           event = checked(ThreadTimelineEvent, { kind: action.type === 'thread.close' ? 'thread.closed' : 'thread.reopened',
             id: claim, actor_id: person, accepted_at_unix_ms: fixtureNow + fixtureRevision * 1000 });
         }
+        fixtureEventPositions.set(event, fixtureRevision);
         timelines.set(selected.id, [event, ...timelines.get(selected.id)]);
         const receipt = await threadEnvelope({
           kind: 'action-result', action_id: action.id, operation_id: `operation/thread-fixture-${fixtureRevision}`,
           status: 'completed', affected_ids: action.type === 'thread.reply' ? [selected.id, event.id] : [selected.id],
           ...(action.type === 'thread.reply' ? {} : { metadata_claim_id: claim }),
-          snapshot_id: `snapshot/threads-fixture-${fixtureRevision}`,
         }, ActionResult);
         fixtureReceipts.set(action.id, receipt);
         send(receipt);
@@ -395,8 +438,10 @@ const server = http.createServer(async (request, response) => {
       if (route[0] === 'threads' && selected) {
         if (route.length === 2) { send(await threadEnvelope(selected)); return; }
         if (route.length === 3 && route[2] === 'timeline') {
-          const items = url.searchParams.has('cursor') ? [] : timelines.get(selected.id);
-          send(await threadEnvelope({ items: items.slice(0, Number(url.searchParams.get('limit') ?? 200)), next_cursor: null }, ThreadTimelinePage));
+          const page = mutableThreads ? timelinePage(selected.id, url.searchParams.get('cursor'), url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined) :
+            { items: url.searchParams.has('cursor') ? [] : timelines.get(selected.id).slice(0, Number(url.searchParams.get('limit') ?? 200)), next_cursor: null };
+          if (!page) { fail(422, 'validation-failed', 'The timeline cursor is invalid for this thread.'); return; }
+          send(await threadEnvelope(page, ThreadTimelinePage));
           return;
         }
       }

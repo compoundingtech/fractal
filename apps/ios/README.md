@@ -6,6 +6,8 @@ Status, compatibility and connection notices call the daemon Fractal. An “olde
 
 The TypeScript human error helpers match Rust's explicit `human()` / `human_message()` renderers through `fixtures/clients/plain-errors-v1.json`. Rust's legacy `plain()` / `plain_message()` wording is retained for gate reports, because those report strings also enter durable claims and gate-check JSON. The CLI resolves one presentation mode per process: native drivers and exec-gate subprocesses keep stable error and stream-resync wording; other CLI output uses human wording. Neither human path mutates the original error envelope.
 
+The opt-in `thread-actions` demo fixture follows the f468b660 thread contract: metadata actions require the current target revision and a same-host, nonfuture snapshot; redundant lifecycle changes are stale fences. Timeline continuations are thread/person-scoped and pinned to their initial append position (40 events by default, at most 50). Collection deltas remove threads leaving a window and admit replacement rows. Refusal envelopes retain the live server's empty details without adding an `applied` disposition. These checks make the fixture useful for UI previews, not a replacement for live-server conformance testing.
+
 ## Connect
 
 1. On a trusted Fractal machine, begin device pairing for the intended person with `fractal devices pair --as person/ada --full-control "iPhone"` if this trusted device should send messages and use mission/work, runtime, and terminal controls. Without `--full-control`, pairing intentionally grants the limited default projection, glasses, arrangement, terminal-output, attention, and launch scopes; an existing limited device must be re-paired to gain controls.
