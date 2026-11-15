@@ -85,12 +85,14 @@ test.each([
 
 test.each([
   { id: 'agent/example/atlas', name: 'Atlas', shown: 'Atlas' },
-  // The daemon labels a seat that declares no name by its path; that path is not a name.
-  { id: 'agent/example/atlas', name: 'example/atlas', shown: 'atlas' },
-  { id: 'agent/example/atlas', name: 'agent/example/atlas', shown: 'atlas' },
+  { id: 'agent/example/atlas', name: 'atlas', shown: 'atlas' },
+  // The daemon labels a seat that declares no name by its id without agent/; that is no name.
+  { id: 'agent/example/atlas', name: 'example/atlas', shown: 'An agent' },
+  { id: 'agent/example/atlas', name: 'agent/example/atlas', shown: 'An agent' },
+  { id: 'agent/example/d415892ea7a1dab11e6ba7ed22a8eb13', name: 'example/d415892ea7a1dab11e6ba7ed22a8eb13', shown: 'An agent' },
   // Fractal's own reconciler reads as Fractal whatever it declares.
   { id: 'agent/st3/reconciler', name: 'Reconciler', shown: 'Fractal' },
-] as const)('names a roster row "$name" as $shown, never by its id or path', ({ id, name, shown }) => {
+] as const)('names a roster row "$name" as $shown, never by its id', ({ id, name, shown }) => {
   const row = openAgent(decodeUnknownSync(Agent, 'strict')({
     kind: 'agent', id, name, host_id: 'host/example', runtime_ids: [], reachability: 'reachable',
     state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z',

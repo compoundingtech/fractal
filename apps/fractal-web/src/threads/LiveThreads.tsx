@@ -10,7 +10,7 @@ import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAgent, useDataSource, useGatewaySync, useNow } from '../data/react.tsx'
-import { agentDisplayName } from '../data/agentName.ts'
+import { agentDisplayName, nameInSentence } from '../data/agentName.ts'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
@@ -184,7 +184,7 @@ export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonl
 /** The agent's display name, with the exact id only as the title: never a guessed role, never the id as text. */
 function AgentName({ id }: { readonly id: string }) {
   const agent = useAgent(id)
-  return <span title={id}>{agentDisplayName({ id, name: agent._tag === 'Observed' ? agent.value?.name : undefined })}</span>
+  return <span title={id}>{nameInSentence(agentDisplayName({ id, name: agent._tag === 'Observed' ? agent.value?.name : undefined }))}</span>
 }
 
 function InboxThreadsContent({ source, agent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
@@ -383,7 +383,7 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
     {...(retryChange === undefined ? {} : { onRetryChange: () => retryChange(thread.id) })}
     embedded={embedded} inList={inList} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
     {...(opensInTab && onOpenThread !== undefined ? { onActivate: () => onOpenThread(thread.id) } : {})}
-    {...(embedded || agentName === undefined ? {} : { origin: <>With <span title={summary.agent_id}>{agentName}</span></> })}
+    {...(embedded || agentName === undefined ? {} : { origin: <>With <span title={summary.agent_id}>{nameInSentence(agentName)}</span></> })}
     {...(summary.message_count === undefined ? {} : { messageCount: summary.message_count })}
     unread={summary.unread === true}
     {...(onOpenThread === undefined || opensInTab ? {} : { onOpenInTab: () => onOpenThread(thread.id) })}
@@ -574,7 +574,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
           <div {...stylex.props(styles.eventHeader)}>
             <strong title={sender === 'You' ? undefined : event.actor_id}>{sender}</strong>
             {time}
-            {onQuote === undefined ? null : <Button aria-label={`Reply to ${sender}`} onPress={() => onQuote(event, sender)} {...stylex.props(styles.reply)}>Reply</Button>}
+            {onQuote === undefined ? null : <Button aria-label={`Reply to ${nameInSentence(sender)}`} onPress={() => onQuote(event, nameInSentence(sender))} {...stylex.props(styles.reply)}>Reply</Button>}
           </div>
           {quotedId === undefined ? null
             : <blockquote {...stylex.props(styles.quote)}>{quoted?.content.slice(0, 160) ?? 'Reply to an earlier message'}</blockquote>}

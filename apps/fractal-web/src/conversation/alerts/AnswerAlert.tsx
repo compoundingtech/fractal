@@ -11,6 +11,7 @@ import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../..
 import { DecisionMore, type DecisionSubject } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionMore.tsx'
 import type { IconName } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
+import { nameInSentence } from '../../data/agentName.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
@@ -231,7 +232,7 @@ export const AnswerAlert = ({
     {...(choices === null ? {} : {
       words: {
         value: words,
-        label: from === undefined ? 'Your answer' : `Your answer to ${from}`,
+        label: from === undefined ? 'Your answer' : `Your answer to ${nameInSentence(from)}`,
         placeholder: answer?.words === 'required' ? 'What should it do instead?' : parts.words !== undefined ? 'Or tell it something else…' : choices.some((choice) => choice.words === 'optional') ? 'Add a note (optional)…' : 'Or tell it something else…',
         onChange: (value: string) => store.setWords(alert.id, value),
       },

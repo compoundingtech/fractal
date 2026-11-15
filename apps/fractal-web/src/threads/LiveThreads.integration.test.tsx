@@ -22,6 +22,9 @@ vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const base = fixture.capabilities
 const agent = 'agent/example/atlas'
+/** A roster row for `id`, as Fractal serves it with its effective `name`. */
+const seat = (id: string, name: string) => decodeNative(AgentRow)({ kind: 'agent', id, name, host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable',
+  state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })
 const row = (id: string, title: string, state = 'open') => ({
   id, agent_id: agent, title, title_revision: 'claim/title', revision: 'claim/current', state, message_count: 1, unread: false,
 })
@@ -272,16 +275,16 @@ it.each(['recovers through Retry', 'closes while stale'] as const)('marks an Inb
   } finally { silence.mockRestore(); await view.dispose() }
 })
 
-it('names an agent by its short name, never its id, while the roster has no row for it', async () => {
+it('names an agent the roster has no row for as an agent, never by its id', async () => {
   // The mounted roster holds no agents, so every agent read is unavailable.
   const view = await mount(<LiveInboxThreads alert={ask} />, { actions: ['thread.start'], reply: () => page([]) })
   try {
-    await vi.waitFor(() => expect(view.host.textContent).toContain('Ask atlas about this item without answering it.'))
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Ask an agent about this item without answering it.'))
     await act(async () => view.button('Start thread')?.click())
-    expect(view.host.textContent).toContain('To atlas')
+    expect(view.host.textContent).toContain('To an agent')
     expect(view.host.textContent).not.toContain(agent)
     // The exact id stays available as the name's title.
-    expect([...view.host.querySelectorAll('[title]')].map(each => [each.textContent, each.getAttribute('title')])).toContainEqual(['atlas', agent])
+    expect([...view.host.querySelectorAll('[title]')].map(each => [each.textContent, each.getAttribute('title')])).toContainEqual(['an agent', agent])
   } finally { await view.dispose() }
 })
 
@@ -449,6 +452,7 @@ it('titles a first send from its first line when a sibling thread already uses t
       }
       return url.pathname.endsWith('/threads') && url.searchParams.get('recently_closed') !== 'true' ? page([row('thread/one', 'Release checklist')]) : page([])
     },
+    agents: [seat(agent, 'atlas')],
   })
   try {
     await vi.waitFor(() => expect(view.button('Start thread')).toBeDefined())
@@ -481,7 +485,7 @@ it('replaces the composer with a read-only note and keeps lifecycle changes to o
   } finally { await view.dispose() }
 })
 
-it('names thread senders without their ids: an unobserved agent by its short name, Fractal machinery as Fractal', async () => {
+it('names thread senders without their ids: an unobserved agent as An agent, Fractal machinery as Fractal', async () => {
   const reconciler = 'agent/st3/reconciler'
   const view = await mount(<LiveThreadPane threadId="thread/one" />, {
     reply: url => url.pathname.endsWith('/timeline') ? page([
@@ -495,7 +499,7 @@ it('names thread senders without their ids: an unobserved agent by its short nam
     await vi.waitFor(() => expect(view.host.textContent).toContain('Delivery retried.'))
     const senders = [...view.host.querySelectorAll('ol > li > div > strong')].map(each => [each.textContent, each.getAttribute('title')])
     expect(senders).toEqual([
-      ['worker-tests', 'agent/build-host-a/worker-tests'],
+      ['An agent', 'agent/build-host-a/worker-tests'],
       ['Fractal', reconciler],
       ['Fractal', 'daemon/runtime'],
     ])
@@ -505,28 +509,31 @@ it('names thread senders without their ids: an unobserved agent by its short nam
 })
 
 it.each([
+  // A served name is shown as declared, a slug included.
+  { id: agent, name: 'atlas', shown: 'atlas', hidden: 'example/atlas' },
   // The roster names the reconciler like any seat; it still reads as Fractal, as in the terminal app.
-  { id: 'agent/st3/reconciler', name: 'Reconciler', shown: 'Fractal' },
-  // The daemon labels a seat that declares no name by its path; that path is not a name.
-  { id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests', shown: 'worker-tests' },
-])('names an observed thread agent $name as $shown in the thread origin and as its sender, with the id only as the title', async ({ id, name, shown }) => {
+  { id: 'agent/st3/reconciler', name: 'Reconciler', shown: 'Fractal', hidden: 'Reconciler' },
+  // The daemon labels a seat that declares no name by its id without agent/; that is no name, opaque ids included.
+  { id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests', shown: 'An agent', hidden: 'worker-tests' },
+  { id: 'agent/example/d415892ea7a1dab11e6ba7ed22a8eb13', name: 'example/d415892ea7a1dab11e6ba7ed22a8eb13', shown: 'An agent', hidden: 'd415892e' },
+])('names an observed thread agent $name as $shown in the thread origin and as its sender, with the id only as the title', async ({ id, name, shown, hidden }) => {
+  const inSentence = shown === 'An agent' ? 'an agent' : shown
   const view = await mount(<LiveThreadPane threadId="thread/one" />, {
-    agents: [decodeNative(AgentRow)({ kind: 'agent', id, name, host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable',
-      state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })],
+    agents: [seat(id, name)],
     reply: url => url.pathname.endsWith('/timeline') ? page([
       { kind: 'thread.renamed', id: 'event/renamed', actor_id: id, previous_title: 'Checklist', title: 'Release checklist', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z') },
       { kind: 'message', id: 'message/first', actor_id: id, content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
     ]) : Response.json({ ...base, value: { ...row('thread/one', 'Release checklist'), agent_id: id } }),
   })
   try {
-    await vi.waitFor(() => expect(view.host.querySelector('[data-thread-origin]')?.textContent).toBe(`With ${shown}`))
+    await vi.waitFor(() => expect(view.host.querySelector('[data-thread-origin]')?.textContent).toBe(`With ${inSentence}`))
     expect(view.host.querySelector('[data-thread-origin] [title]')?.getAttribute('title')).toBe(id)
     await vi.waitFor(() => expect(view.host.textContent).toContain('The checklist is complete.'))
     const sender = view.host.querySelector('ol > li > div > strong')
     expect(sender?.textContent).toBe(shown)
     expect(sender?.getAttribute('title')).toBe(id)
     expect(view.host.querySelector('[data-thread-event="thread.renamed"]')?.textContent).toMatch(new RegExp(`^${shown} renamed it to`))
-    expect(view.host.textContent).not.toContain(name)
+    expect(view.host.textContent).not.toContain(hidden)
   } finally { await view.dispose() }
 })
 

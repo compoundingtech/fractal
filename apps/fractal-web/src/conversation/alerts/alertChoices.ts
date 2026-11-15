@@ -120,7 +120,7 @@ export const webLink = (url: string | undefined): string | undefined => {
 
 /**
  * A name read from an id: Fractal for its own machinery (the daemon and the st3 reconciler), checked first; an agent's
- * served name through the shared formatter, else its short name; a person's short name. Step, mission and custom ids
+ * served name through the shared formatter, which reads an agent with no name as An agent; a person's short name. Step, mission and custom ids
  * are addresses, not names.
  */
 const actorName = (id: string, served?: string): string | undefined =>

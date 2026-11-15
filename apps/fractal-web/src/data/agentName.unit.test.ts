@@ -1,27 +1,36 @@
 import { describe, expect, it } from 'vitest'
 
-import { agentDisplayName, isFractalMachinery, shortAgentName } from './agentName.ts'
+import { agentDisplayName, isFractalMachinery, nameInSentence } from './agentName.ts'
 
 const id = 'agent/example/atlas'
+const opaque = 'agent/example/d415892ea7a1dab11e6ba7ed22a8eb13'
 
 describe('agent display names', () => {
-  it('shows a real roster name as declared', () => {
+  it('shows a served name as declared, slugs included', () => {
+    expect(agentDisplayName({ id, name: 'atlas' })).toBe('atlas')
     expect(agentDisplayName({ id, name: 'Atlas' })).toBe('Atlas')
+    expect(agentDisplayName({ id, name: 'Manager' })).toBe('Manager')
     expect(agentDisplayName({ id, name: 'Atlas/Manager' })).toBe('Atlas/Manager')
+    expect(agentDisplayName({ id: opaque, name: 'd415892e' })).toBe('d415892e')
   })
 
-  it('never shows the id, or the id without agent/, as a name', () => {
-    for (const name of [undefined, '', '  ', id, 'example/atlas', ' example/atlas ']) {
-      const shown = agentDisplayName({ id, name })
-      expect(shown).toBe('atlas')
-      expect(shown).not.toContain('/')
+  it('reads an agent with no name as An agent, never as any part of its id', () => {
+    for (const name of [undefined, '', '  ']) {
+      expect(agentDisplayName({ id, name })).toBe('An agent')
+      expect(agentDisplayName({ id: opaque, name })).toBe('An agent')
     }
-    expect(agentDisplayName({ id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests' })).toBe('worker-tests')
   })
 
-  it('shortens to the last segment', () => {
-    expect(shortAgentName(id)).toBe('atlas')
-    expect(shortAgentName('agent/manager/')).toBe('manager')
+  it('treats the fallback forms Fractal serves for a seat without a name as no name', () => {
+    for (const name of [id, 'example/atlas', ' example/atlas ']) expect(agentDisplayName({ id, name })).toBe('An agent')
+    for (const name of [opaque, 'example/d415892ea7a1dab11e6ba7ed22a8eb13']) expect(agentDisplayName({ id: opaque, name })).toBe('An agent')
+    expect(agentDisplayName({ id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests' })).toBe('An agent')
+  })
+
+  it('lowercases only the unnamed form inside a sentence', () => {
+    expect(nameInSentence(agentDisplayName({ id }))).toBe('an agent')
+    expect(nameInSentence(agentDisplayName({ id, name: 'Atlas' }))).toBe('Atlas')
+    expect(nameInSentence(agentDisplayName({ id: 'agent/st3/reconciler' }))).toBe('Fractal')
   })
 
   // Mirrors is_fractal in crates/fractal-ui-model/src/attention.rs.
