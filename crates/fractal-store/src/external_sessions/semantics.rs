@@ -195,7 +195,8 @@ mod tests {
             normalize_native_line(driver, &record, 100, "2026-10-04T00:00:00Z", &mut items);
             let part = items.iter().find(|item| item["sequence"] == 101).unwrap();
             assert_eq!(part["body"]["blocks"][0]["semantic"]["category"], expected);
-            assert_ne!(part["body"]["blocks"][0]["semantic"]["disposition"], "reading_lane");
+            assert_eq!(part["body"]["blocks"][0]["semantic"]["disposition"],
+                if expected == "unknown" { "inspector" } else { "reading_lane" });
             let prose = items.iter().find(|item| item["sequence"] == 102).unwrap();
             assert_eq!(prose["body"]["blocks"][0]["semantic"]["category"], "conversation");
             assert!(items.iter().flat_map(|item| item["body"]["blocks"].as_array().unwrap())
