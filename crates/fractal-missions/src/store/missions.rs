@@ -943,7 +943,10 @@ fn set_mission_run_state_tx(
             return Ok(false);
         }
     }
-    if (current_phase.starts_with("cleanup-") && phase != "terminal")
+    // Cleanup cannot move backwards, but it can park in its current phase while
+    // durable evidence prevents terminalization.
+    if (current_phase.starts_with("cleanup-") && phase != "terminal"
+        && !(phase == current_phase && status == "blocked"))
         || (current_phase == "final-cancelled"
             && !matches!(phase, "final-cancelled" | "cleanup-cancelled" | "terminal"))
     {
