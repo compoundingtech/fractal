@@ -9907,6 +9907,7 @@ mod tests {
             mission.step_metadata.insert(
                 id,
                 fractal_ui_model::missions::StepMetadata {
+                    title: None,
                     blocked_reason: None,
                     last_progress: Some("Tests pass; opening the PR".into()),
                     nudged: None,
