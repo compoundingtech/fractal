@@ -137,8 +137,11 @@ reads keep their existing snapshot reductions.
 OTel metrics `st.runtime_list.publication.age` (gauge, seconds) and
 `st.runtime_list.rebuild.duration` (histogram, seconds) distinguish stale publications
 from slow rebuild attempts. Publication age is absent until a complete list is available;
-rebuild duration includes failed attempts. The background rebuild still reduces the full
-runtime collection; publication removes that work from ordinary list requests.
+rebuild duration includes failed attempts. After the initial full fold, the refresher scans
+only claims since its last cut and reduces affected runtime subjects. Claims on a runtime
+subject (including reserved kinds that hide it), its declaration, and its owning run or
+generation can change its row. Unrelated commits advance the cut without reducing,
+copying, or hashing runtime rows; subscribers are notified only when rows change.
 
 ```sh
 fractal missions ls --all

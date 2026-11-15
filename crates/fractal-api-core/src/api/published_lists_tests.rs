@@ -2223,7 +2223,7 @@ fn work_refresher() -> Refresher<WorkRows> {
     }
 }
 
-/// The runtimes fold has no change check: no local claim cuts its pause.
+/// Runtime commits are coalesced on the ordinary pause, without a local-commit hold.
 fn runtimes_refresher() -> Refresher<crate::store::runtime_list::RuntimeRows> {
     Refresher {
         list: |store| store.published_runtime_list(), name: "runtimes", label: "runtimes/refresh", fold: fold_runtimes,
@@ -2411,4 +2411,70 @@ async fn every_refresher_on_a_store_shares_one_look_at_each_commit() {
     // Once every holder is gone, the next one starts a scanner of its own.
     drop((holders, waiting));
     assert_eq!(store.local_commits("test", local_commits::every_local_claim(&store)).looks(), 0);
+}
+
+#[test]
+fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_flips() {
+    use crate::api::client_v0::published_runtimes::fold as runtimes;
+    use crate::store::published_list::Publication;
+    use crate::store::runtime_list::RuntimeRows;
+    fn check(store: &Store, base: &mut Publication<RuntimeRows>) -> bool {
+        let (next, changed) = runtimes(store, Some(base)).unwrap().unwrap();
+        let (oracle, _) = runtimes(store, None).unwrap().unwrap();
+        assert_eq!(next.cut, oracle.cut);
+        assert_eq!(next.rows.items, oracle.rows.items);
+        assert_eq!(next.rows.digest, oracle.rows.digest);
+        assert_eq!(next.rows.time_unix_ms, oracle.rows.time_unix_ms);
+        assert_eq!(changed, next.rows.items != base.rows.items);
+        *base = next;
+        changed
+    }
+    for reverse in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("graph.db"), "cedar").unwrap();
+        mission(&store, "garden/runtime");
+        let run = start(&store, "garden/runtime", "runtime-1");
+        let (_, owned) = step(&run, "plant");
+        let subjects = if reverse {
+            vec![owned.as_str(), "agent/cedar.z", "agent/cedar.a"]
+        } else {
+            vec!["agent/cedar.a", "agent/cedar.z", owned.as_str()]
+        };
+        let mut base = runtimes(&store, None).unwrap().unwrap().0;
+        for status in ["running", "stopped", "running"] {
+            for subject in &subjects {
+                store.append_claim(&crate::model::ClaimInput {
+                    subject: (*subject).into(), kind: "runtime.observed".into(), actor: None,
+                    fields: BTreeMap::from([
+                        ("runtime_id".into(), json!(subject)),
+                        ("status".into(), json!(status)),
+                        ("terminal".into(), json!(true)),
+                    ]),
+                    evidence: vec![], expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                assert_eq!(store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap(),
+                    BTreeSet::from([(*subject).to_owned()]));
+                check(&store, &mut base);
+                let items = Arc::clone(&base.rows.items);
+                crate::test_support::note_local_claim(&store, "message/unrelated-runtime");
+                assert!(store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap().is_empty());
+                assert!(!check(&store, &mut base));
+                assert!(Arc::ptr_eq(&items, &base.rows.items), "unrelated commits do not fold or copy rows");
+            }
+        }
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("test")).unwrap();
+        check(&store, &mut base);
+        assert!(!base.rows.items.iter().any(|row| row["owner_id"] == owned));
+        // Model old-peer history below today's reserved-kind write admission, just as
+        // the native publication visibility fixtures do.
+        let hidden = store.connection.batched(|tx| -> anyhow::Result<_> {
+            let claim = crate::store::append_claim_tx(tx, store.origin(), "agent/cedar.a",
+                "runtime.observed", None, &json!({"fields":{"status":"running"}}), &[], None)?;
+            tx.execute("UPDATE claims SET kind='custom.attention.notice-created' WHERE id=?1", [&claim.id])?;
+            Ok(claim)
+        }).unwrap().unwrap();
+        store.committed_index.fetch_max(hidden.store_index, std::sync::atomic::Ordering::Release);
+        check(&store, &mut base);
+        assert!(!base.rows.items.iter().any(|row| row["owner_id"] == "agent/cedar.a"));
+    }
 }
