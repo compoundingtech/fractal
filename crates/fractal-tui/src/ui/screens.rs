@@ -329,7 +329,7 @@ pub struct Drafts<'a> {
     pub form: super::alerts::FormState<'a>,
 }
 
-fn subject_label(world: &World, subject: &str) -> String {
+pub(super) fn subject_label(world: &World, subject: &str) -> String {
     if subject.starts_with("agent/") {
         return world.agents.items().iter().find(|agent| agent.id == subject)
             .map_or_else(|| "an agent".into(), |agent| agent.name.clone());
