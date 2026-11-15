@@ -1,7 +1,15 @@
 //! Bounded prefix reads for automation; no mission, agent or roster fold.
 use super::*;
 
-const RUN_COLUMNS: &str = "SELECT r.id,r.mission_id,g.revision,r.status,r.phase,r.created_at_unix_ms,r.updated_at_unix_ms,r.current_generation_id FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id";
+macro_rules! run_query {
+    ($end:literal, $active:literal) => {
+        concat!(
+            "SELECT r.id,r.mission_id,g.revision,r.status,r.phase,r.created_at_unix_ms,r.updated_at_unix_ms,r.current_generation_id FROM mission_runs r JOIN run_generations g ON g.id=r.current_generation_id WHERE r.mission_id>=?1 ",
+            $end, $active,
+            " ORDER BY r.mission_id,r.created_at_unix_ms DESC,r.id DESC LIMIT ?3"
+        )
+    };
+}
 const MAX_STEPS: usize = 500;
 
 #[derive(Debug, Serialize)]
@@ -37,7 +45,9 @@ pub struct MissionRunStepSummary {
 // last incrementable scalar, dropping its suffix, to form an exclusive prefix end.
 fn prefix_end(prefix: &str) -> Option<String> {
     for (offset, ch) in prefix.char_indices().rev() {
-        if let Some(next) = (u32::from(ch) + 1..=0x10ffff).find_map(char::from_u32) {
+        let next = u32::from(ch) + 1;
+        let next = if next == 0xd800 { 0xe000 } else { next };
+        if let Some(next) = char::from_u32(next) {
             let mut end = prefix[..offset].to_owned();
             end.push(next);
             return Some(end);
@@ -54,10 +64,13 @@ impl Store {
         let prefix = prefix.strip_prefix("mission/").unwrap_or(prefix);
         let end = prefix_end(prefix);
         let connection = self.readers.get();
-        let sql = format!("{RUN_COLUMNS} WHERE r.mission_id>=?1 {} {} ORDER BY r.mission_id,r.created_at_unix_ms DESC,r.id DESC LIMIT ?3",
-            if end.is_some() { "AND r.mission_id<?2" } else { "AND ?2 IS NULL" },
-            if active { "AND r.status NOT IN ('completed','failed','cancelled')" } else { "" });
-        let mut statement = connection.prepare(&sql)?;
+        let sql = match (end.is_some(), active) {
+            (true, false) => run_query!("AND r.mission_id<?2", ""),
+            (true, true) => run_query!("AND r.mission_id<?2", " AND r.status NOT IN ('completed','failed','cancelled')"),
+            (false, false) => run_query!("AND ?2 IS NULL", ""),
+            (false, true) => run_query!("AND ?2 IS NULL", " AND r.status NOT IN ('completed','failed','cancelled')"),
+        };
+        let mut statement = connection.prepare(sql)?;
         let mut runs = statement.query_map(params![prefix, end, limit + 1], |row| Ok(MissionRunSummary {
             run_id: format!("mission-run/{}", row.get::<_, String>(0)?),
             mission_id: format!("mission/{}", row.get::<_, String>(1)?),
@@ -68,8 +81,10 @@ impl Store {
         let truncated = runs.len() > limit;
         runs.truncate(limit);
         let mut steps = connection.prepare("SELECT subject,status FROM step_runs WHERE run_id=?1 AND generation_id=?2 ORDER BY step_path LIMIT ?3")?;
-        let host_sql = canonical_sql("SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired') ORDER BY CANONICAL_ASC(claims) LIMIT 1");
-        let mut host = connection.prepare(&host_sql)?;
+        static HOST_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
+            "SELECT origin FROM claims WHERE subject=?1 AND kind='mission-run.created' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired') ORDER BY CANONICAL_ASC(claims) LIMIT 1",
+        ));
+        let mut host = connection.prepare(&HOST_SQL)?;
         for run in &mut runs {
             let id = run.run_id.strip_prefix("mission-run/").expect("run subject prefix");
             run.steps = steps.query_map(params![id, run.generation, MAX_STEPS + 1], |row| Ok(MissionRunStepSummary {

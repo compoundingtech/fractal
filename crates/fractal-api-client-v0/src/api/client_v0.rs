@@ -4273,7 +4273,7 @@ pub struct MissionRunsQuery {
 /// Prefix-indexed automation read, deliberately independent of the fleet tree.
 pub async fn mission_runs_by_prefix(
     State(state): State<AppState>,
-    Extension(snapshot): Extension<ClientSnapshot>,
+    Extension(_snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
     Query(query): Query<MissionRunsQuery>,
 ) -> Result<Json<Value>, ApiError> {
@@ -4284,12 +4284,16 @@ pub async fn mission_runs_by_prefix(
         )));
     }
     let store = state.store.clone();
-    let page = super::blocking_store(move || {
-        store.mission_runs_by_prefix(
-            &query.mission_prefix,
-            query.active,
-            query.limit.unwrap_or(100),
-        )
+    let (snapshot, page) = super::blocking_store(move || {
+        store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&state, index);
+            let page = store.mission_runs_by_prefix(
+                &query.mission_prefix,
+                query.active,
+                query.limit.unwrap_or(100),
+            )?;
+            Ok((snapshot, page))
+        })
     }).await?;
     Ok(Json(json!({ "snapshot": snapshot, "value": page })))
 }
@@ -10350,6 +10354,33 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt as _;
     use std::sync::Barrier;
+
+    #[tokio::test]
+    async fn mission_runs_prefix_read_requires_scope_and_bounds_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = || ClientSession::for_tests_scoped("person/operator", "person/operator", &["read.projections"]);
+        let query = |limit| MissionRunsQuery { mission_prefix: "roll/".into(), active: true, limit };
+        let Json(response) = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session()), Query(query(None)),
+        ).await.unwrap();
+        assert_eq!(response["value"], json!({"runs": [], "truncated": false}));
+        assert!(response["snapshot"].is_object());
+        for limit in [0, 501] {
+            let error = mission_runs_by_prefix(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session()), Query(query(Some(limit))),
+            ).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        }
+        let error = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(ClientSession::for_tests_scoped("person/operator", "person/operator", &[])),
+            Query(query(None)),
+        ).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn published_runtimes_refresher_publishes_after_commits() {
