@@ -1077,6 +1077,10 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/missions", "/v1/client/missions"),
     get("GET /v1/client/missions-tree", "/v1/client/missions-tree"),
     get(
+        "GET /v1/client/mission-runs",
+        "/v1/client/mission-runs?mission_prefix=cost%2F&active=true&limit=10",
+    ),
+    get(
         "GET /v1/client/missions/{*id}",
         "/v1/client/missions/{mission}",
     ),
