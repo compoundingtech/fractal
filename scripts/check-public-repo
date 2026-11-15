@@ -26,12 +26,9 @@ HOME = re.compile(r"/(?:home|Users)/([A-Za-z][A-Za-z0-9_.-]*)")
 # Reserved invented homes used by public examples and clean-machine fixtures.
 EXAMPLE_HOMES = {"example", "ada"}
 PERSON_NAME = r"([A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)"
-# A principal starts at a token boundary. Scan conservatively after any encoded
-# byte without decoding: encoded quotes and URL separators must not hide references.
-# English compounds containing the person prefix are not principal references.
-PERSON_START = r"(?:(?<![A-Za-z0-9_-])|(?<=%[0-9A-Fa-f]{2}))"
-PERSON = re.compile(PERSON_START + "person" + r"/" + PERSON_NAME)
-ENCODED_PERSON = re.compile(PERSON_START + "person" + r"%2[fF]" + PERSON_NAME)
+PERSON = re.compile("person" + r"/" + PERSON_NAME)
+ENCODED_PERSON = re.compile("person" + r"%2[fF]" + PERSON_NAME)
+ENCODED_PERSON_BOUNDARY = re.compile(r"%(?:25)*[0-9A-Fa-f]{2}")
 # Default mission authority specifically requires fleet/PROJECT identities. These tests
 # use the reserved invented fixture- project prefix; other fleet seats remain forbidden.
 FLEET_AGENT = re.compile("agent" + r"/fleet/(?!fixture-)[A-Za-z0-9_./-]+")
@@ -84,6 +81,24 @@ def tracked_files():
     return sorted(set(Path(path.decode()) for path in paths.split(b"\0") if path))
 
 
+def person_matches(pattern, line):
+    # A rejected compound can overlap a later real principal; do not consume it.
+    start = 0
+    while match := pattern.search(line, start):
+        yield match
+        start = match.start() + 1
+
+
+def person_boundary(line, start):
+    # English compounds containing the person prefix are not principal references.
+    if start == 0 or line[start - 1] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-":
+        return True
+    # Retain references after encoded bytes at any nesting depth without decoding
+    # or rewriting the input. Only the final percent-prefixed token is examined.
+    escaped = line.rfind("%", 0, start)
+    return escaped >= 0 and ENCODED_PERSON_BOUNDARY.fullmatch(line, escaped, start) is not None
+
+
 def findings(path, content):
     name = path.as_posix()
     if PRIVATE_CONFIGURATION_REPO.search(name):
@@ -103,11 +118,11 @@ def findings(path, content):
         for match in HOME.finditer(line):
             if match.group(1) not in EXAMPLE_HOMES:
                 reasons.append("personal home path")
-        for match in PERSON.finditer(line):
-            if match.group(1) not in EXAMPLE_PEOPLE:
+        for match in person_matches(PERSON, line):
+            if person_boundary(line, match.start()) and match.group(1) not in EXAMPLE_PEOPLE:
                 reasons.append("unlisted person ID")
-        for match in ENCODED_PERSON.finditer(line):
-            if match.group(1) not in EXAMPLE_PEOPLE:
+        for match in person_matches(ENCODED_PERSON, line):
+            if person_boundary(line, match.start()) and match.group(1) not in EXAMPLE_PEOPLE:
                 reasons.append("unlisted encoded person ID")
         if FLEET_AGENT.search(line) or ENCODED_FLEET_AGENT.search(line):
             reasons.append("internal fleet agent ID")

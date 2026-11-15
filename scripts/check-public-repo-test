@@ -38,6 +38,24 @@ class PublicRepositoryCheck(unittest.TestCase):
                 with self.subTest(wrapper=wrapper, reference=reference):
                     self.assertTrue(self.findings(wrapper + reference))
 
+    def test_nested_encoded_wrappers_cannot_hide_principal_references(self):
+        for depth in [1, 2, 3, 8, 64, 1024]:
+            for byte in ['22', '27', '28', '3A', '2F', '41', '2D']:
+                for separator in ['/', '%2F', '%2f']:
+                    reference = 'person' + separator + 'unknown-fixture'
+                    with self.subTest(depth=depth, byte=byte, separator=separator):
+                        self.assertTrue(self.findings('%' + '25' * depth + byte + reference))
+
+    def test_compound_candidates_do_not_hide_overlapping_principal_references(self):
+        for first_separator in ['/', '%2F', '%2f']:
+            for second_separator in ['/', '%2F', '%2f']:
+                for name_prefix in ['', 'another.']:
+                    reference = ('per-' + 'person' + first_separator + name_prefix
+                                 + 'person' + second_separator + 'unknown-fixture')
+                    for prefix in ['', 'https://example.invalid/']:
+                        with self.subTest(reference=reference, prefix=prefix):
+                            self.assertTrue(self.findings(prefix + reference))
+
     def test_reserved_authorization_fixture_principals(self):
         for name in ['another', 'foreign', 'outsider', 'private', 'reader-floor']:
             for reference in [f'person/{name}', f'person%2F{name}']:
