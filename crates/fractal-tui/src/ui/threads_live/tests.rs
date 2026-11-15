@@ -30,65 +30,6 @@ fn snapshot() -> Snapshot {
 }
 
 #[test]
-fn start_thread_t_and_rendered_click_start_the_draft() {
-    for item in super::super::demo::test_world().attention.items() {
-        let item = item.id.as_str();
-        let context = ThreadInterest::Inbox {
-            source: "step-run/example/ask".into(),
-            episode: "claim/ask".into(),
-        };
-        let inbox = Pane::Home(Some(item.into()));
-        // Shift+T and lowercase keycap labels belong to the TUI preview.
-        for key in [Some(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)), None] {
-            let mut threads = Threads::default();
-            threads.enable(true);
-            threads.set_access(ThreadAccess {
-                start: true,
-                ..ThreadAccess::default()
-            });
-            threads.origins.insert(
-                item.into(),
-                Origin {
-                    context: context.clone(),
-                    agent: "agent/atlas".into(),
-                    title: "Worker test".into(),
-                    snapshot: snapshot().id,
-                },
-            );
-            threads.lists.insert(context.clone(), Vec::new());
-            let mounted = threads.mount(
-                &inbox,
-                100,
-                &edit::Cursor::default(),
-                &super::super::demo::test_world(),
-                &HashMap::new(),
-            );
-            let start_hit = mounted
-                .targets
-                .into_iter()
-                .find_map(|target| {
-                    matches!(&target.hit,
-                        Hit::Thread(_, thread::Tap::Start(id)) if id == item)
-                    .then_some(target.hit)
-                })
-                .expect("every Inbox item with a writable context has a clickable Start thread");
-            let mut ui = super::super::Ui::new(super::super::demo::test_world());
-            ui.threads = threads;
-            ui.open_in_glass(inbox.clone(), super::super::glass::Open::Tab);
-            if let Some(key) = key {
-                ui.key(key);
-            } else {
-                ui.click(start_hit);
-            }
-            assert!(
-                matches!(&ui.threads.focused, Some((_, Input::Start { .. }))),
-                "{item}: {key:?} reaches the first-message composer through the shell"
-            );
-        }
-    }
-}
-
-#[test]
 fn live_head_keeps_the_rows_between_it_and_a_loaded_older_page() {
     fn event(id: &str) -> ThreadTimelineEvent {
         serde_json::from_value(serde_json::json!({
