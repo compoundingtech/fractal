@@ -3163,7 +3163,7 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["missions", "tree"],
         vec!["missions", "show", &run.subject],
         vec!["missions", "queued", WORKER],
-        vec!["attention", "ls", "--as", PERSON],
+        vec!["alerts", "ls", "--as", PERSON],
         vec![
             "budgets", "attention", "mission/example/inspect",
             "--as", WORKER, "--person", PERSON, "--at", "0",
@@ -4559,7 +4559,7 @@ async fn cli_person_asks_updates_done_cancel_and_retired_attention_survive_resta
         daemon.restart().await;
         cli_value(
             daemon
-                .cli(PERSON, &["attention", "show", step, "--as", PERSON])
+                .cli(PERSON, &["alerts", "show", step, "--as", PERSON])
                 .await,
         );
         cli_value(
@@ -4615,19 +4615,7 @@ async fn cli_person_asks_updates_done_cancel_and_retired_attention_survive_resta
     }
     for arguments in [
         vec![
-            "attention",
-            "request",
-            "--for",
-            PERSON,
-            "--title",
-            "Retired",
-            "--reason",
-            "Use work ask.",
-            "--as",
-            WORKER,
-        ],
-        vec![
-            "attention",
+            "alerts",
             "resolve",
             "attention/retired",
             "--outcome",
@@ -4636,7 +4624,7 @@ async fn cli_person_asks_updates_done_cancel_and_retired_attention_survive_resta
             PERSON,
         ],
         vec![
-            "attention",
+            "alerts",
             "withdraw",
             "attention/retired",
             "--reason",
@@ -6076,7 +6064,7 @@ mission "example/review" state="ready" {{
                 .cli(
                     PERSON,
                     &[
-                        "attention",
+                        "alerts",
                         kind,
                         &target,
                         "--as",

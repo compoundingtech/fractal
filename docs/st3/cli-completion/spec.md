@@ -100,7 +100,7 @@ at most 96 characters (longer text ends with `…`). Quoted titles are at most 4
 | `missions start --after`, `missions cancel`, `agents queue move` run/`--before`/`--after`, `work revise` | run | `MissionRun { unfinished_only: true }` |
 | `missions outcome`, `work revision show`, `work revision generations`, `now --owner-run`, `trace --owner-run` | run | `MissionRun { unfinished_only: false }` |
 | `missions requests` | subscription | `Subscription` |
-| `work show, done`, `work ask --step`, `alerts request --step` | step | `Work(Any)` |
+| `work show, done`, `work ask --step` | step | `Work(Any)` |
 | `work claim`, `work wake` | step | `Work(Ready)` |
 | `work retry` | step | `Work(Failed)` |
 | `work renew, progress, complete, fail, release, extend, publish-mission` | step | `Work(Claimed)` |
@@ -112,7 +112,7 @@ at most 96 characters (longer text ends with `…`). Quoted titles are at most 4
 | `lanes show, join, leave, move, mark, approve` | lane | `Lane` |
 | `launch show, preview, submit, compare, propose, revise, approve, approve-and-start, run, question, answer, cancel` | session | `Launch` |
 | `devices revoke` | device | `Device` |
-| every `--as` with a person parser, `alerts request --for`, `work ask --for`, `work update --for` | person | `Person` |
+| every `--as` with a person parser, `work ask --for`, `work update --for` | person | `Person` |
 | every other `--as`, `conversations send --from`, `conversations reply --from`, `conversations ls` identity and `--sender` | actor | `Actor` |
 
 `work claim, renew, progress, complete, fail, release` share one argument struct; each subcommand
@@ -121,7 +121,7 @@ replaces the struct's `Work(Any)` completer with its own through `mut_arg`.
 These arguments have no entity completer:
 
 - Arguments that name any subject kind: `subject show`, `trace`, `trace wait`, `claim`,
-  `claims ls --subject` and `--subject-prefix`, `schema`, `alerts request --target`, and review targets.
+  `claims ls --subject` and `--subject-prefix`, `schema`, and review targets.
 - Arguments whose candidates depend on another argument on the same line: lane entries, launch
   variants and decisions, mission requests, and revision proposals. The completion engine passes
   a completer only the word being completed.

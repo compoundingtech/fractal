@@ -1298,8 +1298,9 @@ waiting episode. `source_kind`, `episode`, `source_id`, `priority`, `requested_a
 retired, or replaced sources disappear before cleanup; a failed run can retain its own fault.
 Pending held subscription requests are not attention sources. Historical `attention.*` claims
 remain audit data. `attention.resolve` returns `attention-migrated`; capabilities mark
-that client action unsupported. The raw resolve and withdraw routes support only the
-narrow source adapters in [person delegation](../person-delegation.md).
+that client action unsupported. `GET /v1/attention` remains available; creation uses
+`fractal work ask` or `fractal work update`, not `POST /v1/attention`. The raw resolve and
+withdraw routes support only the narrow source adapters in [person delegation](../person-delegation.md).
 
 `GET /v1/client/attention?history=true` (also `/alerts`) and
 `GET /v1/client/now?history=true` without `actor` or `owner_run` now return **only closed

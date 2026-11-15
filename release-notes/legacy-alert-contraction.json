@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove the attention CLI alias and retired alert creation mutation.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or backfill."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or stored identity changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, retention or fleet coordination rule changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional daemon startup work or service interruption; timings were not measured."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No stored-data conversion to undo; roll forward with canonical CLI callers."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Use alerts instead of attention and work ask/work update instead of alerts request. POST /v1/attention is removed. Attention READ endpoints, durable IDs, historical claims and modern resolve/withdraw source actions remain."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Migrate CLI callers before upgrading; requires canonical external callers from the dotfiles #9299 prerequisite stack. No data migration is needed."
+  }
+}

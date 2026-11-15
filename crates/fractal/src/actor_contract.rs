@@ -192,12 +192,9 @@ mod tests {
     #[test]
     fn actor_contract_records_real_command_aliases() {
         let value = generate(super::super::command_graph());
-        assert_eq!(value["contract"]["aliases"]["st alerts"], json!(["attention"]));
+        assert!(value["contract"]["aliases"].get("st alerts").is_none());
         assert_eq!(value["contract"]["aliases"]["st changes list"], json!(["ls"]));
-        for (alias, canonical) in [
-            ("attention ls", "alerts ls"),
-            ("changes ls", "changes list"),
-        ] {
+        for (alias, canonical) in [("changes ls", "changes list")] {
             // `changes list` needs a repository, so supply it with the alias.
             let mut argv = vec!["st"];
             argv.extend(alias.split_whitespace());
