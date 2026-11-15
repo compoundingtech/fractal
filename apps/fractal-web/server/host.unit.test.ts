@@ -82,7 +82,7 @@ describe('readHostConfig', () => {
     WF_ST_GATEWAY: 'unix:/run/example/st3-client.sock', WF_ST_AUTHORIZATION_FILE: '/secrets/web-bearer', WF_DIST: '/srv/web',
   }
   const secret = (text: string, mode = 0o100600, uid = 1000) => ({
-    readText: (path: string) => { if (path === '/secrets/web-bearer') return text; throw new Error(path) },
+    readText: (path: string) => { if (path === '/secrets/web-bearer') return text; if (path === '/secrets/tag-bearer') return 'synthetic-tag-token'; throw new Error(path) },
     owner: () => ({ mode, uid }),
   })
   const files = secret('synthetic-token\n')
@@ -90,7 +90,7 @@ describe('readHostConfig', () => {
   it('reads the bearer from its file and defaults to a loopback listener', () => {
     expect(readHostConfig(env, files, 1000)).toEqual({
       dist: '/srv/web', host: '127.0.0.1', port: 7411, origin, logins: ['robin@example.com', 'blair@example.com'], tags: [],
-      socketPath: '/run/example/st3-client.sock', authorization: ['Bearer', 'synthetic-token'].join(' '), deploymentId: 'atlas.example.ts.net:8443',
+      socketPath: '/run/example/st3-client.sock', authorization: ['Bearer', 'synthetic-token'].join(' '), tagAuthorization: undefined, deploymentId: 'atlas.example.ts.net:8443',
     })
   })
 
@@ -100,9 +100,22 @@ describe('readHostConfig', () => {
   })
 
   it('parses optional comma-separated tag allowlists and requires tag prefixes', () => {
-    expect(readHostConfig({ ...env, WF_TAILNET_TAGS: ' tag:dev-host, tag:preview ' }, files, 1000).tags).toEqual(['tag:dev-host', 'tag:preview'])
+    expect(readHostConfig({ ...env, WF_TAILNET_TAGS: ' tag:dev-host, tag:preview ', WF_TAG_AUTHORIZATION_FILE: '/secrets/tag-bearer' }, files, 1000).tags).toEqual(['tag:dev-host', 'tag:preview'])
     expect(readHostConfig({ ...env, WF_TAILNET_TAGS: ' , ' }, files, 1000).tags).toEqual([])
     expect(() => readHostConfig({ ...env, WF_TAILNET_TAGS: 'dev-host' }, files, 1000)).toThrow(/WF_TAILNET_TAGS/)
+  })
+
+  it('requires a distinct valid private tag credential when tags are enabled, with no person fallback', () => {
+    const tagged = { ...env, WF_TAILNET_TAGS: 'tag:dev-host', WF_TAG_AUTHORIZATION_FILE: '/secrets/tag-bearer' }
+    expect(readHostConfig(tagged, files, 1000).tagAuthorization).toBe(['Bearer', 'synthetic-tag-token'].join(' '))
+    expect(() => readHostConfig({ ...tagged, WF_TAG_AUTHORIZATION_FILE: undefined }, files, 1000)).toThrow(/WF_TAG_AUTHORIZATION_FILE/)
+    expect(() => readHostConfig({ ...tagged, WF_TAG_AUTHORIZATION_FILE: '/absent' }, files, 1000)).toThrow()
+    expect(() => readHostConfig({ ...tagged, WF_TAG_AUTHORIZATION_FILE: env.WF_ST_AUTHORIZATION_FILE }, files, 1000)).toThrow(/dedicated/)
+    for (const [mode, owner] of [[0o100640, 1000], [0o100600, 0]]) {
+      expect(() => readHostConfig(tagged, { ...files, owner: path => path === '/secrets/tag-bearer' ? { mode: mode!, uid: owner! } : files.owner() }, 1000)).toThrow(/WF_TAG_AUTHORIZATION_FILE/)
+    }
+    for (const text of ['', 'two tokens'])
+      expect(() => readHostConfig(tagged, { ...files, readText: path => path === '/secrets/tag-bearer' ? text : files.readText(path) }, 1000)).toThrow(/WF_TAG_AUTHORIZATION_FILE/)
   })
 
   it('refuses a non-loopback listener, an invalid port, no logins and a malformed bearer', () => {

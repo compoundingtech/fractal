@@ -209,21 +209,37 @@ all `tailscale-*` headers before forwarding HTTP or WebSocket requests to the da
 
 Admission requires an exact configured login OR an exact configured tag. Both
 identity headers present is ambiguous and always refused, even if one is allowed.
-The decision and admission log retain the identity's kind (`login` or `tag`) and
-the value that matched; tags never become person logins. Host and Origin checks
+The decision retains the identity's kind (`login` or `tag`) and matching value;
+the info log records kind plus tag value or a stable SHA-256 hash of the login,
+never the person's email. Tags never become person logins. Host and Origin checks
 are identical for both: canonical or listener Host, exact published browser
 Origin, mandatory Origin for upgrades and unsafe methods. Origin-less GET/HEAD
 also require absent, `same-origin`, or `none` Sec-Fetch-Site.
 
 Tagged readers receive preview access only: GET/HEAD and the
 `/v1/client/collections/stream` read WebSocket. Pairing, non-read HTTP and all
-other upgrades are refused. Tags always use `WF_ST_AUTHORIZATION_FILE`, never a
-browser cookie's paired or limited-scope grant. **When enabling tags, this file
-must contain a read-only preview credential (`read.*` and `terminal.read`, no
-write/control scopes).** The daemon enforces frame authorization with that
-credential; the publisher tunnels frames without parsing them. Browser pairing
-remains login-only. Revoking the preview credential also revokes tagged reads;
-there is no fallback to a browser grant.
+other upgrades are refused. Tags always use their dedicated
+`WF_TAG_AUTHORIZATION_FILE`, never the person's `WF_ST_AUTHORIZATION_FILE` bearer
+or a browser cookie's paired or limited-scope grant. The tag grant must contain
+**`read.*` scopes only**, such as `read.arrangements`, `read.glasses` and
+`read.projections`: no write, control, pairing or `terminal.*` scopes, including
+`terminal.read`. The publisher refuses startup if tags are enabled without a
+valid private tag credential file, or if it holds the person credential.
+
+Before creating the listener, the publisher authenticates with the tag credential
+and reads `GET /v1/client/capabilities`. The daemon advertises every scope with
+its granted/ungranted state (route: `crates/fractal-api-core/src/api.rs:661`;
+handler: `:2777-2802`; scope catalog and advertisement:
+`crates/fractal-api-core/src/api/client_v0.rs:321-341,661-670`). Startup fails for
+authentication/transport/invalid-response errors, absent read grants, or any
+granted write/control/pairing/terminal scope. Non-scope feature capabilities,
+such as `collections`, are not grant scopes.
+
+The daemon enforces frame authorization with that read-only credential; the
+publisher tunnels frames without parsing them. Browser pairing remains
+login-only. `adopt-browser-pairing` revokes only the person's preview credential;
+tagged readers keep their own independently revocable grant. There is no
+fallback to the person credential or a browser grant.
 
 ```sh
 pnpm --dir apps/fractal-web build            # writes dist/web, including build-identity.json
@@ -267,8 +283,10 @@ installer record alone does not prove that the daemon restarted with those asset
 The settings:
 
 - `WF_ST_GATEWAY` names Fractal's paired client gateway socket, never the privileged `fractal.sock`.
-- `WF_ST_AUTHORIZATION_FILE` holds the publisher's preview bearer. It must be read-only when tags are enabled.
-  The host refuses to start unless the file belongs to its user and nobody else can read it.
+- `WF_ST_AUTHORIZATION_FILE` holds the person's preview bearer.
+- `WF_TAG_AUTHORIZATION_FILE` holds a different, dedicated read-only tag-reader bearer;
+  required when `WF_TAILNET_TAGS` is nonempty. Both credential files must belong to
+  the publisher user and be readable by nobody else (`chmod 600`).
 - `WF_TAILNET_LOGINS` is a required comma-separated person-login allowlist.
 - `WF_TAILNET_TAGS` is an optional comma-separated tag allowlist, for example `tag:dev-host`.
   Values must include `tag:`; unset or empty admits no tags.

@@ -1,11 +1,12 @@
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { resolve } from 'node:path'
 import type { Duplex } from 'node:stream'
 import { Cause, Context, Effect, Exit, Fiber, Layer, Schema, Scope, Tracer } from 'effect'
 import { completedResponse, reject } from './boundary.mts'
 import { createContentSecurityPolicy } from './csp.mts'
-import { browserPath, clientRoute, Gateway } from './gateway.mts'
+import { browserPath, clientRoute, Gateway, type GatewayOptions } from './gateway.mts'
 import { RuntimeIdentity, StaticAssets } from './static.mts'
 import { requestSpanOptions } from './tracing.mts'
 import { handlePairing, pairingRoute, type BrowserPairingOptions } from './pairing.mts'
@@ -23,13 +24,16 @@ const tagPreviewRoute = (req: IncomingMessage): boolean => {
   return req.headers.upgrade === undefined || path === '/v1/client/collections/stream'
 }
 const identityLog = (admission: Admission) => typeof admission === 'object'
-  ? Effect.logInfo('Publisher admission').pipe(Effect.annotateLogs({ 'identity.kind': admission.kind, 'identity.value': admission.value }))
+  ? Effect.logInfo('Publisher admission').pipe(Effect.annotateLogs({
+    'identity.kind': admission.kind,
+    'identity.value': admission.kind === 'tag' ? admission.value : createHash('sha256').update(admission.value).digest('hex'),
+  }))
   : Effect.void
 /** The host supplies authentication/CSRF policy; no deployment identity is assumed. */
 export interface MiddlewareOptions {
   readonly server: Server
   readonly admit: (request: IncomingMessage) => Admission | Promise<Admission>
-  readonly gateway: { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly timeoutMs: number }
+  readonly gateway: GatewayOptions
   readonly tracer: Tracer.Tracer
   readonly pairing?: BrowserPairingOptions
   /** Explicit cross-origin HTTP collectors; the gateway itself is always same-origin. */

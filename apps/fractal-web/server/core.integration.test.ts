@@ -12,12 +12,14 @@ import { brotliCompressSync } from 'node:zlib'
 import { Option, Tracer } from 'effect'
 import { createFractalWebMiddleware, createFractalWebServer } from './core.mts'
 import type { FractalWebServer, MiddlewareOptions } from './core.mts'
-import { tailnetAdmissionDecision } from './host.mts'
+import { startHost, tailnetAdmissionDecision } from './host.mts'
+import { checkTagAuthorization } from './tagAuthorization.mts'
 import { cleanHeaders, clientRoute, upgradeClientHeaders } from './gateway.mts'
 import { traceparent } from './tracing.mts'
 // Assembled so the source itself never carries a literal bearer credential pair.
 const gatewayAuthorization = 'Bearer' + ' fx-auth'
 const browserAuthorization = 'Bearer' + ' fx-input'
+const tagAuthorization = 'Bearer' + ' fx-tag-reader'
 const browserTraceId = '4bf92f3577b34da6a3ce929d0e0e4736'
 const browserSpanId = '00f067aa0ba902b7'
 const browserTraceparent = `00-${browserTraceId}-${browserSpanId}-01`
@@ -33,6 +35,8 @@ const fixture = async (
   admit: MiddlewareOptions['admit'] = () => true,
   responseBody: string | Buffer = '{"paired":true}',
   responseHeaders: OutgoingHttpHeaders = { 'content-type': 'application/json' },
+  tagCredential: string = tagAuthorization,
+  responseStatus = 200,
 ) => {
   const root = await mkdtemp(join(tmpdir(), 'fractal-server-test-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
@@ -49,7 +53,7 @@ const fixture = async (
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(Buffer.from(chunk))
     received.push({ path: req.url ?? '', auth: req.headers.authorization, cookie: req.headers.cookie, origin: req.headers.origin, baggage: req.headers.baggage, trace: req.headers.traceparent, state: req.headers.tracestate, host: req.headers.host, body: Buffer.concat(chunks).toString('utf8') })
-    res.writeHead(200, { 'content-length': Buffer.byteLength(responseBody), ...responseHeaders }); res.end(responseBody)
+    res.writeHead(responseStatus, { 'content-length': Buffer.byteLength(responseBody), ...responseHeaders }); res.end(responseBody)
   })().catch(() => res.destroy()) })
   gateway.on('upgrade', (req, socket, head) => {
     sockets.add(socket)
@@ -66,7 +70,7 @@ const fixture = async (
   const spans: Tracer.Span[] = []
   const tracer = Tracer.make({ span: (options) => { const span = new Tracer.NativeSpan(options); spans.push(span); return span } })
   const app: FractalWebServer = createFractalWebServer({ dist, host: '127.0.0.1', port: 0, admit, tracer,
-    gateway: { socketPath, host: 'paired-gateway', authorization: gatewayAuthorization, timeoutMs: 1000 },
+    gateway: { socketPath, host: 'paired-gateway', authorization: gatewayAuthorization, tagAuthorization: tagCredential, timeoutMs: 1000 },
     identity: { deploymentId: 'fixture-build', buildIdentity: { baseVersion: '1.0.0', displayVersion: '1.0.0-test', machineVersion: '1.0.0+test', sourceKind: 'local', dirty: false } },
   })
   app.listen()
@@ -74,7 +78,7 @@ const fixture = async (
   cleanups.push(() => app.close())
   const address = app.server.address()
   if (address === null || typeof address === 'string') throw new TypeError('Fixture listener is missing')
-  return { root, app, gateway, port: address.port, base: `http://127.0.0.1:${address.port}`, received, spans, sockets }
+  return { root, app, gateway, socketPath, port: address.port, base: `http://127.0.0.1:${address.port}`, received, spans, sockets }
 }
 const openUpgrade = async (port: number, path: string, headers: Record<string, string> = {}): Promise<string> => {
   const socket = connect(port, '127.0.0.1')
@@ -96,7 +100,7 @@ const openUpgrade = async (port: number, path: string, headers: Record<string, s
   return reply
 }
 
-it('admits tagged HTTP reads and collections upgrades using only the preview credential', async () => {
+it('admits tagged HTTP reads and collections upgrades using only the dedicated tag credential', async () => {
   const origin = 'https://preview.example'
   let listener: string | undefined
   const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => listener }))
@@ -105,7 +109,7 @@ it('admits tagged HTTP reads and collections upgrades using only the preview cre
   expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(200)
   expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('101')
   expect(setup.received).toHaveLength(2)
-  for (const received of setup.received) expect(received.auth).toBe(gatewayAuthorization)
+  for (const received of setup.received) expect(received.auth).toBe(tagAuthorization)
 })
 
 it('keeps person login upgrades and paired-browser credential selection', async () => {
@@ -117,6 +121,50 @@ it('keeps person login upgrades and paired-browser credential selection', async 
   expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(200)
   expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('101')
   for (const received of setup.received) expect(received.auth).toBe(`Bearer ${'a'.repeat(43)}`)
+})
+
+it('never falls back to the person credential if a tag credential is unavailable', async () => {
+  const setup = await fixture(() => ({ kind: 'tag', value: 'tag:dev-host' }), undefined, undefined, '')
+  expect((await fetch(`${setup.base}/v1/client/capabilities`)).status).toBe(403)
+  expect(await openUpgrade(setup.port, '/v1/client/collections/stream')).toContain('403')
+  expect(setup.received).toHaveLength(0)
+})
+
+it.each(['write.notes', 'control.messages', 'control.pairing', 'terminal.read', 'terminal.control', 'pairing.create'])('refuses startup with a tag credential granting %s', async scope => {
+  const body = JSON.stringify({ api_version: 'st3.client.v0', value: { kind: 'capabilities', capabilities: [
+    { id: 'read.projections', state: 'granted' }, { id: scope, state: 'granted' },
+  ] } })
+  const setup = await fixture(undefined, body)
+  await expect(startHost({ dist: setup.root, host: '127.0.0.1', port: 0, origin: 'https://preview.example',
+    logins: ['robin@example.com'], tags: ['tag:dev-host'], socketPath: setup.socketPath,
+    authorization: gatewayAuthorization, tagAuthorization, deploymentId: 'fixture' })).rejects.toThrow(/read\.\* scopes only/)
+  expect(setup.received[0]?.auth).toBe(tagAuthorization)
+  expect(setup.received[0]?.path).toBe('/v1/client/capabilities')
+})
+
+it('introspects read-only tag scopes with the dedicated credential', async () => {
+  const setup = await fixture(undefined, JSON.stringify({ api_version: 'st3.client.v0', value: { kind: 'capabilities', capabilities: [
+    ...['read.arrangements', 'read.glasses', 'read.projections'].map(id => ({ id, state: 'granted' })),
+    { id: 'control.pairing', state: 'ungranted' }, { id: 'collections', state: 'granted' },
+  ] } }))
+  await expect(checkTagAuthorization({ socketPath: setup.socketPath, host: 'fixture', authorization: gatewayAuthorization, tagAuthorization, timeoutMs: 1000 })).resolves.toBeUndefined()
+  expect(setup.received[0]?.auth).toBe(tagAuthorization)
+})
+
+it.each(['not json', '{}', JSON.stringify({ api_version: 'st3.client.v0', value: { kind: 'capabilities', capabilities: [] } })])('refuses invalid tag capability introspection (%s)', async body => {
+  const setup = await fixture(undefined, body)
+  await expect(checkTagAuthorization({ socketPath: setup.socketPath, host: 'fixture', authorization: gatewayAuthorization, tagAuthorization, timeoutMs: 1000 })).rejects.toThrow()
+})
+
+it.each([401, 403, 500])('refuses rejected tag capability introspection (HTTP %s)', async status => {
+  const setup = await fixture(undefined, '{}', undefined, undefined, status)
+  await expect(checkTagAuthorization({ socketPath: setup.socketPath, host: 'fixture', authorization: gatewayAuthorization, tagAuthorization, timeoutMs: 1000 })).rejects.toThrow(/capabilities check failed/)
+})
+
+it('refuses unavailable tag capability transport without using the person credential', async () => {
+  const setup = await fixture()
+  await expect(checkTagAuthorization({ socketPath: `${setup.socketPath}.absent`, host: 'fixture', authorization: gatewayAuthorization, tagAuthorization, timeoutMs: 1000 })).rejects.toThrow()
+  expect(setup.received).toHaveLength(0)
 })
 
 it('refuses tag pairing, write HTTP and non-read upgrade paths before the gateway', async () => {
@@ -137,6 +185,7 @@ it('refuses tag pairing, write HTTP and non-read upgrade paths before the gatewa
 it.each([
   {}, { 'tailscale-node-tags': 'tag:unknown' }, { 'tailscale-user-login': 'unknown@example.com' },
   { 'tailscale-node-tags': 'tag:dev-host', 'tailscale-user-login': 'unknown@example.com' },
+  { 'tailscale-node-tags': 'tag:dev-host', 'tailscale-user-login': 'robin@example.com' },
 ])('refuses unknown, missing and ambiguous identity on HTTP and upgrades (%j)', async identity => {
   const origin = 'https://preview.example'
   let listener: string | undefined
