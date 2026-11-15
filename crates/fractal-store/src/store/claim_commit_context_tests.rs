@@ -1,7 +1,7 @@
 use super::*;
 
 const PERSON: &str = "person/avery";
-const AGENT: &str = "agent/reviewer";
+const AGENT: &str = "agent/commit-context.reviewer";
 const THREAD: &str = "thread/commit-context";
 const EXISTING_MESSAGE: &str = "message/commit-context-existing";
 
@@ -312,5 +312,5 @@ fn transaction_local_effect_operation_preserves_first_send_envelope_and_replay()
         assert_eq!(write_counts(tx), before);
         Ok(sent)
     }).unwrap().unwrap();
-    assert_eq!(store.operation_claim(key).unwrap().unwrap().id, sent.id);
+    assert_eq!(store.operation_claim(effect_operation.0).unwrap().unwrap().id, sent.id);
 }
