@@ -12,7 +12,9 @@ import { credentialExpiredMessage, observed, unavailable, waiting, type Attachme
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { ConversationItem } from '../conversation/model.ts'
+import { fixtureSidebarState } from '../shell/sidebar/state.ts'
 import { LiveAgentWorkspace, type WorkspaceNavigation } from '../web/LiveAgentWorkspace.tsx'
+import { alertPaneId, workspaceHref } from '../web/workspaceView.ts'
 import type { ThreadDraft, ThreadSource } from './threadSource.ts'
 import { threadClockSkewEvents } from '../../../../clients/typescript/fractal-scenarios/src/index.ts'
 
@@ -59,11 +61,11 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     Native.decodeUnknownSync(Native.ThreadMessageEvent)({
       kind: 'message', id, actor_id: author, accepted_at_unix_ms: now + minutes * 60_000, content, thread_quote_id: quote ?? null,
     })
-  const summaries = Atom.make<readonly Native.ThreadSummary[]>(scenario === 'empty' || scenario === 'custom-source' ? [] : [
+  const summaries = Atom.keepAlive(Atom.make<readonly Native.ThreadSummary[]>(scenario === 'empty' || scenario === 'custom-source' ? [] : [
     summary(existingId, existing, 'open', 3, true), summary(closedId, 'Rollout notes', 'closed', 1, false),
     ...(scenario === 'multiple' ? [summary('thread/cancellation', 'Cancellation behavior', 'open', 1, false)] : []),
-  ])
-  const history = Atom.make<Readonly<Record<string, readonly Native.ThreadTimelineEvent[]>>>({
+  ]))
+  const history = Atom.keepAlive(Atom.make<Readonly<Record<string, readonly Native.ThreadTimelineEvent[]>>>({
     [existingId]: [
       ...(scenario === 'clock-skew' ? threadClockSkewEvents(now, actor).map(event => Native.decodeUnknownSync(Native.ThreadTimelineEvent)(event)) : []),
       message('message/review-ready', agentRef, -2, 'Worker tests pass on Linux. The macOS job is still running.'),
@@ -77,8 +79,9 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
       message('message/rollout-notes', actor, -40, 'Keep the original rollout plan in the release notes.'),
     ],
     'thread/cancellation': [message('message/cancellation', agentRef, -5, 'Cancellation keeps the original attempt fenced. Should we cover the retry case too?')],
-  })
-  const origins = Atom.make<Readonly<Record<string, string>>>({ [existingId]: originSource, [closedId]: originSource, 'thread/cancellation': originSource })
+  }))
+  const origins = Atom.keepAlive(Atom.make<Readonly<Record<string, string>>>({ [existingId]: originSource, [closedId]: originSource, 'thread/cancellation': originSource }))
+  const currentThread = Atom.keepAlive(Atom.make<string | undefined>(scenario === 'empty' || scenario === 'custom-source' ? undefined : scenario === 'closed' ? closedId : existingId))
   const drafts = Atom.family((_id: string) => Atom.keepAlive(Atom.make<ThreadDraft>({ content: '' })))
   const update = (id: string, edit: (row: Native.ThreadSummary) => Native.ThreadSummary) =>
     registry.set(summaries, registry.get(summaries).map(row => row.id === id ? edit(row) : row))
@@ -120,6 +123,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
       registry.set(summaries, [...registry.get(summaries), summary(id, input.title, 'open', 0, false)])
       registry.set(origins, { ...registry.get(origins), [id]: input.origin.source_id })
       append(id, input.content)
+      registry.set(currentThread, id)
       return { _tag: 'Sent', threadId: id }
     },
     reply: async input => { append(input.target_id, input.content, input.thread_quote_id); return { _tag: 'Sent', threadId: input.target_id } },
@@ -185,25 +189,43 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
       },
     } }),
   }
-  return { agentRef, registry, source }
+  return { agentRef, registry, source, currentThread }
 }
 
 type Args = { readonly placement: 'inbox' | 'tab'; readonly connection: 'local' | 'read-only'; readonly scenario: Scenario; readonly ordering?: 'timestamp' | 'action' }
 
-function ThreadWorkspace({ placement, connection, scenario, ordering }: Args) {
-  const [fixture] = React.useState(() => createThreadStory(connection === 'read-only', scenario, ordering))
-  const [navigation] = React.useState<WorkspaceNavigation>(() => {
-    let location = `/w/${fixture.agentRef}${placement === 'tab' ? `?open=${encodeURIComponent((scenario === 'closed' ? closedId : existingId) + ':detail')}` : ''}`
-    const listeners = new Set<() => void>()
-    return {
-      getLocation: () => location,
-      subscribe: callback => { listeners.add(callback); return () => { listeners.delete(callback) } },
-      navigate: href => { location = href; for (const notify of listeners) notify() },
-    }
-  })
+function createThreadScene({ placement, connection, scenario, ordering = 'timestamp' }: Args) {
+  const fixture = createThreadStory(connection === 'read-only', scenario, ordering)
+  const href = (surface: Args['placement']) => {
+    const thread = fixture.registry.get(fixture.currentThread)
+    return workspaceHref(fixture.agentRef, surface === 'tab' && thread !== undefined
+      ? `${thread}:detail` : alertPaneId('attention/review'), '')
+  }
+  let location = href(placement)
+  const listeners = new Set<() => void>()
+  const navigation: WorkspaceNavigation = {
+    getLocation: () => location,
+    subscribe: callback => { listeners.add(callback); return () => { listeners.delete(callback) } },
+    navigate: next => { location = next; for (const notify of listeners) notify() },
+  }
+  const show = (surface: Args['placement']) => {
+    fixture.registry.set(fixtureSidebarState(fixture.source.gateway ?? fixture.source.mode).tab,
+      surface === 'inbox' || fixture.registry.get(fixture.currentThread) === undefined ? 'alerts' : 'agents')
+    navigation.navigate(href(surface))
+  }
+  show(placement)
+  return { fixture, navigation, show, placement, scenario, ordering }
+}
+
+function ThreadScene({ scene: { fixture, navigation } }: { readonly scene: ReturnType<typeof createThreadScene> }) {
   return <DataSourceProvider source={fixture.source} registry={fixture.registry}>
     <LiveAgentWorkspace navigation={navigation} persistGeometry={false} />
   </DataSourceProvider>
+}
+
+function ThreadWorkspace(args: Args) {
+  const [scene] = React.useState(() => createThreadScene(args))
+  return <ThreadScene scene={scene} />
 }
 
 // A harness around the production workspace, not a module suite: the spaced title keeps it out of the
@@ -370,22 +392,33 @@ export const CloseConfirmation: Story = {
 
 /** Local review controls inject fixtures into the production workspace. */
 function LatestPreviewHarness() {
-  const [placement, setPlacement] = React.useState<'inbox' | 'tab'>('inbox')
-  const [scenario, setScenario] = React.useState<Scenario>('custom-source')
-  const [ordering, setOrdering] = React.useState<'timestamp' | 'action'>('timestamp')
+  const [scene, setScene] = React.useState(() => createThreadScene({ placement: 'inbox', connection: 'local', scenario: 'custom-source' }))
+  const { placement, scenario, ordering, fixture } = scene
+  const currentThread = React.useSyncExternalStore(
+    React.useCallback((notify: () => void) => fixture.registry.subscribe(fixture.currentThread, notify), [fixture]),
+    React.useCallback(() => fixture.registry.get(fixture.currentThread), [fixture]),
+  )
+  const chooseScenario = (next: Scenario, nextOrdering = ordering) => setScene(createThreadScene({
+    placement: next === 'custom-source' ? 'inbox' : next === 'clock-skew' ? 'tab' : placement,
+    connection: 'local', scenario: next, ordering: nextOrdering,
+  }))
   const segment = { display: 'flex', gap: 4, alignItems: 'center' } as const
   const radio = { padding: '6px 12px', border: '1px solid currentColor', borderRadius: 5, cursor: 'pointer' } as const
   const radioStyle = ({ isSelected, isFocusVisible }: { isSelected: boolean; isFocusVisible: boolean }) => ({ ...radio, background: isSelected ? '#303b4a' : 'transparent', color: isSelected ? '#fff' : 'inherit', outline: isFocusVisible ? '2px solid #609cff' : undefined })
   return <div data-latest-thread-preview="" style={{ height: '100dvh', display: 'grid', gridTemplateRows: 'auto auto minmax(0, 1fr)', minHeight: 0, overflow: 'hidden', background: '#101317', color: '#e7edf5', fontFamily: 'system-ui, sans-serif' }}>
     <style>{'[data-latest-thread-preview] [data-testid="live-agent-workspace"] { height: 100% !important; min-height: 0; }'}</style>
     <div style={{ padding: 12, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-      <RadioGroup aria-label="Preview surface" orientation="horizontal" value={scenario === 'clock-skew' ? 'tab' : placement} onChange={value => { setPlacement(value as typeof placement); if (value === 'tab' && scenario === 'custom-source') setScenario('existing') }} style={segment}>
-        <Radio isDisabled={scenario === 'clock-skew'} value="inbox" style={radioStyle}>Inbox</Radio><Radio value="tab" style={radioStyle}>Thread tab</Radio>
+      <RadioGroup aria-label="Preview surface" orientation="horizontal" value={placement} onChange={value => {
+        const next = value as typeof placement
+        scene.show(next)
+        setScene({ ...scene, placement: next })
+      }} style={segment}>
+        <Radio isDisabled={scenario === 'clock-skew'} value="inbox" style={radioStyle}>Inbox</Radio><Radio isDisabled={currentThread === undefined} value="tab" style={radioStyle}>Thread tab</Radio>
       </RadioGroup>
-      <RadioGroup aria-label="Preview scenario" orientation="horizontal" value={scenario} onChange={value => { setScenario(value as Scenario); if (value === 'custom-source') setPlacement('inbox') }} style={segment}>
+      <RadioGroup aria-label="Preview scenario" orientation="horizontal" value={scenario} onChange={value => chooseScenario(value as Scenario)} style={segment}>
         <Radio value="custom-source" style={radioStyle}>Inbox source</Radio><Radio value="existing" style={radioStyle}>Conversation</Radio><Radio value="clock-skew" style={radioStyle}>Close → Reopen with clock skew</Radio>
       </RadioGroup>
-      {scenario !== 'clock-skew' ? null : <RadioGroup aria-label="Fixture ordering" orientation="horizontal" value={ordering} onChange={value => setOrdering(value as typeof ordering)} style={segment}>
+      {scenario !== 'clock-skew' ? null : <RadioGroup aria-label="Fixture ordering" orientation="horizontal" value={ordering} onChange={value => chooseScenario(scenario, value as typeof ordering)} style={segment}>
         <Radio value="timestamp" style={radioStyle}>Timestamp</Radio><Radio value="action" style={radioStyle}>Action order</Radio>
       </RadioGroup>}
     </div>
@@ -393,8 +426,40 @@ function LatestPreviewHarness() {
       ? `Fixture comparison: Close at 12:59, then Reopen at 12:58 (clock skew). ${ordering === 'timestamp' ? 'Timestamp order shows Reopen → Close; authoritative state Open.' : 'Action order shows Close → Reopen; authoritative state Open.'} Only timeline presentation differs; the later Reopen keeps the thread open in both fixtures. Production ordering is unchanged.`
       : 'Local fixtures in the real Fractal workspace. Conversation and thread text sends update local fixture state only; no daemon connection or device pairing is represented.'}</p>
     <div style={{ minHeight: 0, minWidth: 0, overflow: 'hidden', position: 'relative' }}>
-      <ThreadWorkspace key={`${placement}:${scenario}:${ordering}`} placement={scenario === 'clock-skew' ? 'tab' : placement} connection="local" scenario={scenario} ordering={ordering} />
+      <ThreadScene key={`${scenario}:${ordering}`} scene={scene} />
     </div>
   </div>
 }
-export const LatestPreview: Story = { render: () => <LatestPreviewHarness />, play: AllStates.play }
+export const LatestPreview: Story = {
+  render: () => <LatestPreviewHarness />,
+  play: async ({ canvasElement }) => {
+    delete canvasElement.dataset.threadPreviewProof
+    const canvas = within(canvasElement)
+    const scenarios = within(await canvas.findByRole('radiogroup', { name: 'Preview scenario' }))
+    const surfaces = within(canvas.getByRole('radiogroup', { name: 'Preview surface' }))
+    await userEvent.click(scenarios.getByRole('radio', { name: 'Conversation' }))
+    await userEvent.click(scenarios.getByRole('radio', { name: 'Inbox source' }))
+    await canvas.findByTestId('alert-details', {}, { timeout: 60_000 })
+    await expect(canvas.getByRole('tab', { name: /^Alerts\b/ })).toHaveAttribute('aria-selected', 'true')
+    await expect(surfaces.getByRole('radio', { name: 'Thread tab' })).toBeDisabled()
+    await userEvent.click(await canvas.findByRole('button', { name: 'Start thread' }))
+    await userEvent.type(await canvas.findByRole('textbox', { name: 'Message' }), 'Verify cancellation before merge.')
+    await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
+    await canvas.findByText('Verify cancellation before merge.', { exact: true })
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Message' }), 'Keep this draft across views.')
+    await userEvent.click(surfaces.getByRole('radio', { name: 'Thread tab' }))
+    await canvas.findByText('Verify cancellation before merge.', { exact: true })
+    await expect(canvas.getByRole('textbox', { name: 'Message' })).toHaveValue('Keep this draft across views.')
+    await userEvent.click(surfaces.getByRole('radio', { name: 'Inbox' }))
+    await canvas.findByTestId('alert-details')
+    const group = await canvas.findByRole('button', { name: /^Worker report ready.*1 message/ })
+    if (group.getAttribute('aria-expanded') === 'false') await userEvent.click(group)
+    await canvas.findByText('Verify cancellation before merge.', { exact: true })
+    await expect(canvas.getByRole('textbox', { name: 'Message' })).toHaveValue('Keep this draft across views.')
+    // Leave the review at the explicit Inbox starting scene after exercising persistence.
+    await userEvent.click(scenarios.getByRole('radio', { name: 'Conversation' }))
+    await userEvent.click(scenarios.getByRole('radio', { name: 'Inbox source' }))
+    await canvas.findByRole('button', { name: 'Start thread' })
+    canvasElement.dataset.threadPreviewProof = 'passed'
+  },
+}
