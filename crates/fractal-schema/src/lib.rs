@@ -4547,6 +4547,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("lease_owner", required_string()),
             ("lease_incarnation", required_string()),
             ("recovering_actor", string()),
+            ("resolution", enumeration(&["human"])),
+            ("outcome", enumeration(&["abandoned"])),
             ("provider_ref", string()),
             ("result_digest", string()),
             ("error", string()),
