@@ -179,6 +179,8 @@ fn membership_page_generation_is_transactional_and_survives_reopen() {
     let path = root.path().join("claims.sqlite3");
     let store = Store::open(&path, "membership-page-generation").unwrap();
     create(&store);
+    let lifetime = store.ordered_membership_lifetime();
+    assert_eq!(lifetime, store.ordered_membership_lifetime());
     let before = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
     assert!(before.items.is_empty());
     {
@@ -204,6 +206,27 @@ fn membership_page_generation_is_transactional_and_survives_reopen() {
     drop(store);
     let reopened = Store::open(&path, "membership-page-generation").unwrap();
     assert_eq!(reopened.ordered_membership_page(CONTAINER, None, 1).unwrap().generation, rebuilt.generation);
+    assert_ne!(reopened.ordered_membership_lifetime(), lifetime);
+}
+
+#[test]
+fn membership_lifetime_changes_on_same_index_restore() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let backup = root.path().join("backup.sqlite3");
+    let store = Store::open(&path, "membership-restore").unwrap();
+    create(&store);
+    let before = store.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    let lifetime = store.ordered_membership_lifetime();
+    store.connection.write().execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    std::fs::copy(&path, &backup).unwrap();
+    drop(store);
+    std::fs::copy(&backup, &path).unwrap();
+    let restored = Store::open(&path, "membership-restore").unwrap();
+    let after = restored.ordered_membership_page(CONTAINER, None, 1).unwrap();
+    assert_eq!((after.store_index, after.generation, after.state),
+        (before.store_index, before.generation, before.state));
+    assert_ne!(restored.ordered_membership_lifetime(), lifetime);
 }
 
 #[test]
