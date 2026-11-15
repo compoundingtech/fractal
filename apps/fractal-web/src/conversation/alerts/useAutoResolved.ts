@@ -2,9 +2,9 @@ import type { AutoResolvedAsk } from '@fractal/client'
 import * as React from 'react'
 
 import { useAttention, useDataSource, useGrants } from '../../data/react.tsx'
-import type { AlertActionResult, AutoResolvedRead } from './alert-action-port.ts'
+import type { AlertActionResult, AutoResolvedRead, OverrideAction } from './alert-action-port.ts'
 
-export type Override = (ask: AutoResolvedAsk, answerId: string) => Promise<AlertActionResult>
+export type Override = (ask: AutoResolvedAsk, answer: OverrideAction['answer']) => Promise<AlertActionResult>
 
 /**
  * The asks a default answered at their deadline, read when the surface opens, whenever the attention collection changes
@@ -25,8 +25,8 @@ export const useAutoResolved = (): { readonly read?: AutoResolvedRead; readonly 
     void port.autoResolved().then((next) => { if (current) setRead(next) })
     return () => { current = false }
   }, [port, collection, accepted])
-  const onOverride: Override | undefined = port === undefined || grants.actions !== 'granted' ? undefined : (ask, answerId) =>
-    port.override({ ask, action: { type: 'work.override', answer: { id: answerId } } }).then((result) => {
+  const onOverride: Override | undefined = port === undefined || grants.actions !== 'granted' ? undefined : (ask, answer) =>
+    port.override({ ask, action: { type: 'work.override', answer } }).then((result) => {
       if (result._tag === 'Sent') setAccepted((count) => count + 1)
       return result
     })

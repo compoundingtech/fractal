@@ -30,8 +30,8 @@ export type AlertAction =
   | { readonly type: 'launch.approve' | 'launch.cancel' }
   | { readonly type: 'launch.revise'; readonly feedback: string }
 
-/** The person's own named answer in place of the default that answered an ask at its deadline. */
-export type OverrideAction = { readonly type: 'work.override'; readonly answer: { readonly id: string } }
+/** The person's own named answer in place of the default that answered an ask at its deadline; a request for changes carries their words. */
+export type OverrideAction = { readonly type: 'work.override'; readonly answer: { readonly id: string; readonly text?: string } }
 
 /** The asks a default answered at their deadline, as Fractal serves them to the person they asked. */
 export type AutoResolvedRead =
@@ -207,7 +207,7 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
         id: `action/${key}`,
         idempotency_key: key,
         fence: { snapshot_id: read.snapshot.id, subject_revisions: {} },
-        parameters: { target_id: offered.target_id, episode: offered.episode, answer: { id: action.answer.id } },
+        parameters: { target_id: offered.target_id, episode: offered.episode, answer: action.answer },
       })
       return response.value.status === 'rejected'
         ? refused('Fractal did not take this answer.')

@@ -436,6 +436,16 @@ describe('gatewayAlertActions', () => {
       })
     })
 
+    it('carries the person\'s words with a request for changes', async () => {
+      const workOverride = vi.fn(async (_request: unknown) => ({ value: { status: 'accepted' } }))
+      const port = gatewayAlertActions({ autoResolvedList: list([ask]), workOverride } as unknown as FractalClient)
+      expect(await port.override({ ask, action: { type: 'work.override', answer: { id: 'change', text: 'Credit the parser fix.' } } })).toEqual({ _tag: 'Sent' })
+      expect(workOverride.mock.calls[0]![0]).toMatchObject({
+        idempotency_key: 'person-override:claim/example:change',
+        parameters: { target_id: 'step-run/example/build', episode: 'claim/example', answer: { id: 'change', text: 'Credit the parser fix.' } },
+      })
+    })
+
     it('sends nothing once Fractal no longer offers the override', async () => {
       const workOverride = vi.fn()
       const { action_parameters: _closed, ...expired } = ask
