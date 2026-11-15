@@ -10,7 +10,7 @@ import type { ConversationContentRef } from '../../../clients/typescript/fractal
 import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConversationContent } from '@fractal/views';
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
-import { Banners } from '../chrome';
+import { Banners, useRefresh } from '../chrome';
 import { quality, readPositions } from '../qualityNative';
 import { seenTail } from '../readPosition';
 import rules from '../../../fixtures/clients/conversation-style.json';
@@ -103,6 +103,9 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const [now, setNow] = useState(() => Date.now());
   // Asking Fractal again: true from the moment the phone starts following this conversation until Fractal sends it.
   const [refreshing, setRefreshing] = useState(true);
+  // Native pull to refresh, like every host screen; it also reloads the agent's thread group.
+  // Its own spinner state is separate from `refreshing`, which tracks the conversation follow.
+  const pullRefresh = useRefresh();
   // The entry whose text is open for selecting in place: a long press selects it, any part of it can be copied.
   const [selecting, setSelecting] = useState<string | null>(null);
   useEffect(() => {
@@ -438,7 +441,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     {header ? <View style={strip}><T dim>{header}</T></View> : null}
     {agent ? <>
       <AlertsStrip agentId={agent.id} />
-      <AgentThreads agentId={agent.id} openThread={id => navigation.navigate('Thread', { id })} />
+      <AgentThreads agentId={agent.id} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
     </> : null}
     {issue ? <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry} style={strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now, stopped)}</T></Pressable> : null}
     {!unresolved && !issue ? <Freshness refreshing={refreshing} loaded={loaded} lastFrame={lastFrame} /> : null}
@@ -452,6 +455,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       ref={list}
       onViewableItemsChanged={visibleEntries.current}
       inverted
+      refreshControl={pullRefresh}
       data={rows}
       extraData={selecting}
       keyExtractor={row => row.kind === 'entry' ? row.entry.id : row.kind === 'call' ? `call:${row.entry.id}` : row.kind === 'bundle' ? row.id : row.kind === 'pending' ? row.pending.id : 'older'}

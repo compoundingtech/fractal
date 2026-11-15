@@ -43,6 +43,7 @@ import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
 import { approveRenewal, pendingRenewals, renewalResponseValue, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
+import { ThreadEdits, threadRefusalMessage, type ThreadEdit, type ThreadEditResult } from './threadEdits';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -83,6 +84,15 @@ export function errorText(error: unknown): string {
     if (refused) return refused;
   }
   return plainError(error);
+}
+
+export function threadReadErrorText(error: unknown): string {
+  return error instanceof ClientError && error.response.code === 'forbidden'
+    ? threadRefusalMessage(error.response.message) : errorText(error);
+}
+
+export function threadActionErrorText(error: unknown): string {
+  return error instanceof ClientError ? error.response.message : errorText(error);
 }
 
 async function readPhoneSigning(profileKey: string): Promise<PhoneSigning | undefined> {
@@ -143,11 +153,6 @@ export function threadStartScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'e
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
 type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult>; start?: ThreadStartPresentation };
-type ThreadEdit = { kind: 'rename'; title: string } | { kind: 'close' | 'reopen' };
-export type ThreadEditResult =
-  | { how: 'sent' }
-  | { how: 'failed'; error: string }
-  | { how: 'unconfirmed'; retry: () => Promise<ThreadEditResult> };
 
 function actionId() { return `action/ios-${Crypto.randomUUID()}`; }
 function sentAs(outcome: DeliveryOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: sendRefusal(outcome.error) } : outcome; }
@@ -362,6 +367,16 @@ function useAppStore(proof?: FabricProfile) {
   const [threadDeliveryRevision, setThreadDeliveryRevision] = useState(0);
   const deliveriesByClient = useRef(new WeakMap<FractalClient, Map<string, ThreadDelivery>>());
   const threadDeliveries = useMemo(() => threadClient && new Map(deliveriesByClient.current.get(threadClient)), [threadClient, threadDeliveryRevision]);
+  const editsByClient = useRef(new WeakMap<FractalClient, ThreadEdits>());
+  const threadEdits = useMemo(() => {
+    if (!threadClient) return undefined;
+    let edits = editsByClient.current.get(threadClient);
+    if (!edits) {
+      edits = new ThreadEdits(() => setThreadDeliveryRevision(previous => previous + 1), threadActionErrorText);
+      editsByClient.current.set(threadClient, edits);
+    }
+    return edits;
+  }, [threadClient]);
   const threadConnection = useRef(threadClient);
   threadConnection.current = threadClient;
   const pushIssuer = selected.route.kind === 'fabric' && fabricMember && !fabricMember.device ? memberProfileKey(fabricMember) : PROFILE_KEY;
@@ -963,6 +978,7 @@ function useAppStore(proof?: FabricProfile) {
     const readFence = async () => { ensureOriginalConnection(); return fence(revisions); };
     // Build signed fields once. Every retry retains the same key, signature and nonce.
     let submit: ((request: ThreadRequest) => Promise<void>) | undefined;
+    let acceptedSnapshot: Snapshot | undefined;
     const finish = (result: DeliveryOutcome<BoundAction<ThreadRequest>>): ThreadEditResult => {
       if (result.how === 'unconfirmed') {
         return { how: 'unconfirmed', retry: async () => finish(await resendBoundAction(result.request)) };
@@ -970,7 +986,7 @@ function useAppStore(proof?: FabricProfile) {
       if (result.how === 'sent' || (result.error instanceof ClientError && result.error.status === 409)) {
         setThreadRefresh(previous => previous + 1);
       }
-      return result.how === 'sent' ? result : { how: 'failed', error: errorText(result.error) };
+      return result.how === 'sent' ? { ...result, snapshot: acceptedSnapshot } : { how: 'failed', error: threadActionErrorText(result.error) };
     };
     return finish(await sendBoundAction(member, {
       build: async () => {
@@ -980,7 +996,7 @@ function useAppStore(proof?: FabricProfile) {
           const confirm = actionReceiptCheck(prepared.readMessageIds
             ? { kind: 'read', actionId: id, readMessageIds: prepared.readMessageIds }
             : prepared.messageId ? { kind: 'message', actionId: id, targetId, messageId: prepared.messageId } : { kind: 'metadata', actionId: id, targetId });
-          submit = async request => { await confirm(() => prepared.send(request)); };
+          submit = async request => { acceptedSnapshot = (await confirm(() => prepared.send(request))).snapshot; };
         }
         return { id, idempotency_key: id, fence: await readFence() };
       },
@@ -1008,7 +1024,7 @@ function useAppStore(proof?: FabricProfile) {
       setThreadDeliveryRevision(previous => previous + 1);
       let result: ThreadEditResult;
       try { result = await operation(); }
-      catch (error) { result = { how: 'failed', error: errorText(error) }; }
+      catch (error) { result = { how: 'failed', error: threadActionErrorText(error) }; }
       if (result.how === 'unconfirmed') {
         const original = result.retry;
         const retry = () => active.get(scope)?.retry === retry ? run(original) : Promise.resolve(result);
@@ -1026,15 +1042,16 @@ function useAppStore(proof?: FabricProfile) {
 
   const actions = {
     editThread(thread: ThreadSummary, edit: ThreadEdit): Promise<ThreadEditResult> {
+      if (!threadEdits) return Promise.resolve({ how: 'failed', error: 'This connection cannot perform that thread action.' });
       const parameters = { target_id: thread.id };
-      return trackThreadDelivery(threadEditScope(thread.id), thread.id, () => submitThreadAction(thread.id, edit.kind, { [thread.id]: thread.revision }, async member => ({ send: request => {
+      return trackThreadDelivery(threadEditScope(thread.id), thread.id, () => threadEdits.run(thread, edit, () => submitThreadAction(thread.id, edit.kind, { [thread.id]: thread.revision }, async member => ({ send: request => {
         if (edit.kind === 'rename') {
           return member.threadRename({ ...request, parameters: { ...parameters, title: edit.title, title_revision: thread.title_revision } });
         }
         return edit.kind === 'close'
           ? member.threadClose({ ...request, parameters })
           : member.threadReopen({ ...request, parameters });
-      } })));
+      } }))));
     },
     markThreadRead(thread: ThreadSummary, visibleIds: readonly string[]): Promise<ThreadEditResult> {
       const [through] = visibleIds;
@@ -1046,6 +1063,10 @@ function useAppStore(proof?: FabricProfile) {
           ...request, parameters: { target_id: thread.id, through_message_id: through, seen_message_ids: seen },
         }),
       }));
+    },
+    /** Reload every mounted thread reader, as pull to refresh does. */
+    refreshThreads() {
+      setThreadRefresh(previous => previous + 1);
     },
     startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
       const signingProfile = signingKeyRef.current;
@@ -1499,7 +1520,7 @@ function useAppStore(proof?: FabricProfile) {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
-    gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, loadLists, watchLists, inventoryGranted, actions,
+    gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, threadEdits, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
