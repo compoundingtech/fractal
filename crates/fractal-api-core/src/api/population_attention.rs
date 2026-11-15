@@ -188,7 +188,7 @@ mission "example/report" state="ready" {
             }, "effect-unresolved").unwrap();
         }
         let now = u128::MAX;
-        store.read_snapshot(|| -> anyhow::Result<()> {
+        store.read_snapshot(|_| -> anyhow::Result<()> {
             let (items, _) = store.attention_collection_snapshot(None, now)?;
             let cards: Vec<_> = items.iter().filter(|item| item.kind == "effect-unresolved").collect();
             assert_eq!(cards.len(), 1, "one real person card per unresolved episode");
