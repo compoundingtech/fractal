@@ -12132,11 +12132,19 @@ fn publish_admission_watch(
     store: &Store,
     policies: &[(&str, &str)],
 ) -> Vec<(String, crate::model::SubscriptionSpec)> {
+    publish_admission_watch_for_mission(store, policies, "admission-review")
+}
+
+fn publish_admission_watch_for_mission(
+    store: &Store,
+    policies: &[(&str, &str)],
+    mission: &str,
+) -> Vec<(String, crate::model::SubscriptionSpec)> {
     let subscriptions = policies.iter().map(|(name, policy)| format!(
         r#"subscription "{name}" {{
   observer "observer/admission-repo"; on "pull_requests"
   delivery "mission" {{
-    mission "admission-review"; resource "source"; workspace "/srv/reviews"
+    mission "{mission}"; resource "source"; workspace "/srv/reviews"
     {policy}
   }}
 }}"#,
@@ -12146,7 +12154,7 @@ resource "admission-repo" {{ kind "vcs.repository" }}
 observer "admission-repo" {{
   resource "resource/admission-repo"; provider "github.repository"; locator "acme/garden"; field "pull_requests"; field "comments"
 }}
-mission "admission-review" state="ready" {{
+mission "{mission}" state="ready" {{
   goal "Evaluate the observed pull request."
   input "source" kind="resource"
   step "evaluate" {{ agentless }}
@@ -13443,19 +13451,15 @@ fn relevant_admission_preserves_each_mission_frontier_when_a_subscription_switch
     let mut subscriptions = publish_admission_watch(
         &store, &[("relevant", r#"admission "relevant-changes""#)],
     );
-    publish_mission(&store, r#"version 2
-mission "admission-other" state="ready" {
-  goal "Evaluate another responsibility."
-  input "source" kind="resource"
-  step "evaluate" { agentless }
-}"#, "admission-other");
     observe_admission_pulls(&store, &subscriptions, json!([]));
     let mut pull = admission_pull();
     observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
     pull["body_digest"] = json!("body-b");
     observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
     let previous = admission_requests(&store, "relevant")[1].body["fields"]["delivery_key"].clone();
-    subscriptions[0].1.mission = Some("admission-other".into());
+    subscriptions = publish_admission_watch_for_mission(
+        &store, &[("relevant", r#"admission "relevant-changes""#)], "admission-other",
+    );
     pull["body_digest"] = json!("body-c");
     observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
     assert_eq!(admission_requests(&store, "relevant").len(), 3);
@@ -13464,7 +13468,9 @@ mission "admission-other" state="ready" {
     store.rebuild_claim_projections().unwrap();
     let replica = Store::open_memory("replica").unwrap();
     replicate_fully(&store, &replica);
-    subscriptions[0].1.mission = Some("admission-review".into());
+    subscriptions = publish_admission_watch_for_mission(
+        &replica, &[("relevant", r#"admission "relevant-changes""#)], "admission-review",
+    );
     pull["body_digest"] = json!("body-a");
     observe_admission_pulls(&replica, &subscriptions, json!([pull.clone()]));
     observe_admission_pulls(&replica, &subscriptions, json!([pull]));
