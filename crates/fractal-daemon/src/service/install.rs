@@ -25,10 +25,19 @@ impl Commands for NativeCommands<'_> {
     }
 
     fn output(&mut self, arguments: &[&str]) -> Result<Output> {
-        super::host_command(self.0)
-            .args(arguments)
-            .output()
-            .with_context(|| format!("run {} {}", self.0, arguments.join(" ")))
+        let mut command = super::host_command(self.0);
+        command.args(arguments);
+        #[cfg(target_os = "linux")]
+        if self.0 == "systemctl" {
+            let output = fractal_runtime::systemd::output(&mut command)
+                .with_context(|| format!("run {} {}", self.0, arguments.join(" ")))?;
+            if output.status.success() && arguments.iter().any(|argument| matches!(*argument,
+                "start" | "stop" | "restart" | "enable" | "disable" | "daemon-reload")) {
+                fractal_runtime::systemd::invalidate();
+            }
+            return Ok(output);
+        }
+        command.output().with_context(|| format!("run {} {}", self.0, arguments.join(" ")))
     }
 }
 

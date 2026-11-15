@@ -155,7 +155,51 @@ impl Node {
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
         // Private supervisor evidence, including replacement workers; never consult host services.
         for (tool, script) in [
-            ("systemctl", "#!/bin/sh\ncase \"$*\" in\n*MainPID*) cat \"$HOME/../worker.pid\";;\n*'show st3-replication.service '*) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n*' show '*) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\n';;\n*) exit 1;;\nesac\n"),
+            ("systemctl", r#"#!/bin/sh
+exec python3 - "$@" <<'PY'
+import json, os, pathlib, subprocess, sys
+REAL_SYSTEMCTL = None
+args = sys.argv[1:]
+worker = 'st3-replication.service'
+pid = pathlib.Path(os.environ['HOME']).parent / 'worker.pid'
+def worker_pid():
+    return pid.read_text().strip() if pid.exists() else '0'
+def properties(name):
+    return f'Id={name}\nLoadState=loaded\nActiveState=active\nSubState=running\nMainPID={worker_pid()}\nControlGroup=\n'
+names = [a for a in args if a.endswith(('.service', '.scope', '.slice')) and '*' not in a]
+if 'list-units' in args:
+    rows = []
+    if REAL_SYSTEMCTL:
+        scope_args = [a for a in args if not a.endswith('.service')]
+        result = subprocess.run([REAL_SYSTEMCTL, *scope_args], capture_output=True, text=True)
+        if result.returncode:
+            sys.stderr.write(result.stderr)
+            sys.exit(result.returncode)
+        rows = [row for row in json.loads(result.stdout) if row['unit'].endswith(('.scope', '.slice'))]
+    rows.append({'unit':worker, 'load':'loaded', 'active':'active', 'sub':'running'})
+    print(json.dumps(rows))
+elif 'show' in args:
+    if '--value' in args and any('MainPID' in a for a in args):
+        print(worker_pid() if worker in names else '0')
+    else:
+        if worker in names:
+            print(properties(worker))
+        scopes = [name for name in names if name.endswith(('.scope', '.slice'))]
+        if scopes and REAL_SYSTEMCTL:
+            options = [a for a in args if a not in names]
+            result = subprocess.run([REAL_SYSTEMCTL, *options, *scopes], capture_output=True, text=True)
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            sys.exit(result.returncode)
+        for name in names:
+            if name != worker and name not in scopes:
+                print(f'Id={name}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlGroup=\n')
+elif REAL_SYSTEMCTL and ('show-environment' in args or any(a.endswith(('.scope', '.slice')) for a in args)):
+    os.execv(REAL_SYSTEMCTL, [REAL_SYSTEMCTL, *args])
+else:
+    sys.exit(1)
+PY
+"#),
             ("launchctl", "#!/bin/sh\ncase \"$*\" in\n*com.compoundingtech.st3.replication*) printf 'state = running\\npid = '; cat \"$HOME/../worker.pid\";;\n*) exit 1;;\nesac\n"),
         ] {
             let mut script = script.to_owned();
@@ -163,9 +207,8 @@ impl Node {
                 && let Ok(real) = fractal_runtime::resolve_executable(tool, &std::env::vars().collect())
             {
                 // Preserve user-scope isolation without consulting real fleet service units.
-                script = script.replace("case \"$*\" in\n", &format!(
-                    "case \"$*\" in\n*'.scope'*|*show-environment*) exec '{}' \"$@\";;\n",
-                    real.to_string_lossy().replace('\'', "'\\''")));
+                script = script.replace("REAL_SYSTEMCTL = None", &format!(
+                    "REAL_SYSTEMCTL = {:?}", real.to_string_lossy()));
             }
             let path = root.join("bin").join(tool);
             fs::write(&path, script).unwrap();
@@ -1385,12 +1428,15 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
         &manager,
         format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
-if [ "$2" != show ]; then exit 9; fi
-if [ "$3" = st3.service ]; then
-    printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
-else
-    printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
-fi
+case "$2" in
+list-units)
+    printf '%s\n' '[{{"unit":"st3.service","load":"loaded","active":"active","sub":"running"}}]'
+    ;;
+show)
+    printf '%s\n' 'Id=st3.service' 'LoadState=loaded' 'ActiveState=active' 'SubState=running' 'MainPID=0' 'ControlGroup='
+    ;;
+*) exit 9;;
+esac
 "#, log.display()),
     ).unwrap();
     fs::set_permissions(manager, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1413,7 +1459,7 @@ fi
         );
         let calls = fs::read_to_string(log).unwrap();
         assert!(
-            calls.lines().all(|line| line.starts_with("--user show ")),
+            calls.lines().all(|line| line.starts_with("--user show ") || line.starts_with("--user list-units ")),
             "admission preconditions may inspect services but must never mutate them: {calls}"
         );
         assert_eq!(
