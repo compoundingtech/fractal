@@ -122,21 +122,44 @@ async fn collection_http_errors_and_legacy_wire_shape() {
 }
 
 #[tokio::test]
-#[ignore = "wall-clock acceptance: takes more than the legacy five-minute TTL"]
 async fn collection_http_cursor_survives_more_than_five_minutes() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state_named(root.path(), "http-no-cursor-expiry");
     two_members(&state).await;
     let path = format!("{MEMBERSHIP_PATH}&paging_contract=collection-v1");
-    let (_, first) = membership_json(&state, &path).await;
+    let (status, first) = membership_json(&state, &path).await;
+    assert_eq!(status, StatusCode::OK);
     let token = first["value"]["page"]["next_cursor"].as_str().unwrap();
-    let started = std::time::Instant::now();
-    tokio::time::sleep(std::time::Duration::from_millis(CLIENT_PAGE_TTL_MS as u64 + 1_000)).await;
-    assert!(started.elapsed().as_millis() > CLIENT_PAGE_TTL_MS);
+    assert!(first["value"]["page"]["cursor_expires_at"].is_null());
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.strip_prefix("membership-v1/").unwrap()).unwrap();
+    let payload: Value = serde_json::from_slice(&payload).unwrap();
+    assert!(payload.get("expires").is_none());
+    let (status, legacy) = membership_json(&state, MEMBERSHIP_PATH).await;
+    assert_eq!(status, StatusCode::OK);
+    let legacy_token = legacy["value"]["page"]["next_cursor"].as_str().unwrap();
+    // Process-wide clock: run with nextest's per-test process isolation, not cargo test.
+    // The guard also restores the clock if a request panics before normal cleanup.
+    struct RestoreClientClock;
+    impl Drop for RestoreClientClock {
+        fn drop(&mut self) {
+            fractal_api_core::test_support::skew_client_clock(0);
+        }
+    }
+    let restore_clock = RestoreClientClock;
+    let before = client_now_ms();
+    fractal_api_core::test_support::skew_client_clock(CLIENT_PAGE_TTL_MS as u64 + 1_000);
+    let elapsed = client_now_ms().saturating_sub(before);
     let (status, last) = membership_json(&state, &format!("{path}&cursor={token}")).await;
+    let (legacy_status, legacy_error) = membership_json(&state,
+        &format!("{MEMBERSHIP_PATH}&cursor={legacy_token}")).await;
+    drop(restore_clock);
+    assert!(elapsed > CLIENT_PAGE_TTL_MS);
     assert_eq!(status, StatusCode::OK);
     assert_eq!(first["value"]["membership"], last["value"]["membership"]);
     assert_eq!(last["value"]["items"][0]["member"], "resource/b");
+    assert_eq!(legacy_status, StatusCode::GONE);
+    assert_eq!(legacy_error["code"], "page-cursor-expired");
 }
 
 #[tokio::test]
