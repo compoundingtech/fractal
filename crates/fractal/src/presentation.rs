@@ -1794,6 +1794,20 @@ mod tests {
     }
 
     #[test]
+    fn mission_show_retry_retirement_blockage_names_operator_recovery() {
+        let mut blocked = step("step-run/demo-generation/build", "build", "blocked");
+        blocked.attempt = 2;
+        let reason = "waiting for previous attempt resource retirement; cancel the mission run or release/recover the retained resource custody";
+        blocked.blocked_reason = Some(reason.into());
+        let selected = run("mission-run/demo/run", None, vec![blocked]);
+        let rendered = render_mission_run_page(
+            &selected, std::slice::from_ref(&selected), OutputStyle::plain(), 3_000,
+        );
+        assert!(rendered.contains(&format!("    reason: {reason}\n")), "{rendered}");
+        assert_eq!(serde_json::to_value(selected).unwrap()["steps"][0]["blocked_reason"], reason);
+    }
+
+    #[test]
     fn work_detail_displays_assistant_answer_attribution() {
         let mut work = step("step-run/demo/build", "build", "ready");
         work.person_answers.push(fractal_daemon::model::PersonAnswerView {

@@ -2,6 +2,7 @@
 use super::*;
 use crate::store::resource_membership::{Admission, Coverage, Grant, LaneRequest, Membership, Owner};
 use serde::Deserialize;
+pub(super) const RETRY_RETIREMENT_FAULT_SCOPE: &str = "program/retry-resource-retirement";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -521,7 +522,15 @@ mission "retry-child" state="ready" {{
             parent: None, mission_capacity: None };
         let (result, reads) = smallclaims::touched::record(|| reconciler.dispatch_program(
             &retried, &step, &retried.steps[0], step.spec.program.as_ref().unwrap()));
-        assert!(!result.unwrap());
+        assert!(result.unwrap(), "the retirement wait must publish its blocked state");
+        let blocked = store.step_run(&retried.steps[0].subject).unwrap().unwrap();
+        assert_eq!(blocked.status, "blocked");
+        let reason = blocked.blocked_reason.as_deref().unwrap();
+        assert!(reason.contains("previous attempt resource retirement"));
+        assert!(reason.contains("cancel the mission run or release/recover the retained resource custody"));
+        let attention = store.operational_attention_items(None, now_ms() + FAULT_ATTENTION_AFTER_MS + 1).unwrap();
+        assert!(attention.iter().any(|item| item.subject == blocked.subject && item.detail.contains(reason)),
+            "an indefinite resource retirement wait must name the recovery path in attention");
         assert!(reconciler.program_engine.get().is_none(), "retry must not reach the program host");
         assert!(reads.contains(&child.subject), "child completion must wake the retry barrier");
         assert_eq!(store.resource_membership_for_grant(&grant).unwrap().state, "retiring");
@@ -535,6 +544,100 @@ mission "retry-child" state="ready" {{
         assert_eq!(store.resource_membership_for_grant(&grant).unwrap().state, "retired");
         assert!(matches!(store.request_resource_membership(&next, Fit::default(), 3).unwrap(),
             Admission::Admitted(_)));
+    }
+
+    #[test]
+    fn retry_resource_wait_expires_finally_even_if_custody_retires_before_the_next_dispatch() {
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+        }
+        let _clock = Clock;
+        const START: u128 = 1_800_000_000_000;
+        for retire_before_dispatch in [false, true] {
+            smallclaims::store::set_thread_clock(Some(START));
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            store.set_write_clock_at(START).unwrap();
+            let bundle = store.put_blob(b"export default {}").unwrap();
+            super::super::tests::apply_source(&store, &format!(r#"version 2
+mission "retry-window" state="ready" {{
+  goal "Expire while old custody is retained."
+  step "work" {{
+    program "/unused.mjs" sha256="{bundle}"
+    retry {{ attempts 3; within "1s"; }}
+  }}
+}}
+mission "window-child" state="ready" {{
+  goal "Retain custody until cancellation settles."
+  step "work" {{ agentless }}
+}}"#), "retry-window-source");
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "retry-window".into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                idempotency_key: "retry-window-run".into(),
+            }).unwrap();
+            let subject = &run.steps[0].subject;
+            store.set_step_state(subject, "ready", None).unwrap();
+            let runtime = Arc::new(NativeRuntime::new(root.path(), None, Path::new("unused-pty")));
+            let reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+            reconciler.ensure_resource_authority().unwrap();
+            let old = LaneRequest {
+                id: "uncertain-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
+                capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+                owner: Owner { run: run.subject.clone(), step: subject.clone(), attempt: 1,
+                    invocation: Some("program:scope".into()) },
+            };
+            let Admission::Admitted(grant) = store.request_resource_membership(&old, Fit::default(), START as u64).unwrap()
+                else { panic!("first attempt must admit"); };
+            let child = if retire_before_dispatch {
+                let child = store.mission_run_subject_for_idempotency_key("window-child");
+                store.attach_resource_child(&grant, &old.owner, &child).unwrap();
+                Some(store.create_mission_run(&crate::model::MissionRunRequest {
+                    mission: "window-child".into(), revision: None, workspace: root.path().display().to_string(),
+                    requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                    idempotency_key: "window-child".into(),
+                }).unwrap())
+            } else {
+                // Interrupted preparation retains uncertain custody indefinitely.
+                store.prepare_resource_membership(&grant, "unknown-root").unwrap();
+                None
+            };
+            store.set_step_state(subject, "failed", Some("transient")).unwrap();
+            assert!(store.retry_step(subject, "retry", 0).unwrap());
+            let run = store.mission_run(&run.subject).unwrap().unwrap();
+            let mission = store.mission_spec("retry-window", None).unwrap().unwrap();
+            let step = RuntimeStep { spec: &mission.steps["work"], dependency_prefix: String::new(),
+                parent: None, mission_capacity: None };
+            let (result, due) = smallclaims::touched::record_due(|| reconciler.dispatch_program(
+                &run, &step, &run.steps[0], step.spec.program.as_ref().unwrap()));
+            assert!(result.unwrap());
+            assert_eq!(due, Some(START + 1_001), "window expiry must wake even without resource events");
+            let blocked = store.step_run(subject).unwrap().unwrap();
+            assert_eq!(blocked.status, "blocked");
+            let reason = blocked.blocked_reason.as_deref().unwrap();
+            assert!(reason.contains("cancel the mission run or release/recover"));
+            if let Some(child) = child {
+                // Child completion races with the policy deadline: even successful
+                // retirement must not admit this expired retry.
+                store.set_mission_run_state(&child.subject, "cancelled", "terminal", Some("process exited")).unwrap();
+            } else {
+                assert!(reason.contains("uncertain"));
+            }
+            smallclaims::store::set_thread_clock(Some(START + 1_001));
+            store.set_write_clock_at(START + 1_001).unwrap();
+            let run = store.mission_run(&run.subject).unwrap().unwrap();
+            assert!(reconciler.dispatch_program(
+                &run, &step, &run.steps[0], step.spec.program.as_ref().unwrap()).unwrap());
+            let expired = store.step_run(subject).unwrap().unwrap();
+            assert_eq!(expired.status, "failed");
+            assert!(expired.blocked_reason.as_deref().unwrap().contains("retry policy window expired"));
+            assert!(reconciler.failed_step_is_final(&run, step.spec, &expired).unwrap());
+            assert!(reconciler.program_engine.get().is_none(), "an expired retry must never dispatch");
+            assert!(store.reconcile_fault(subject, RETRY_RETIREMENT_FAULT_SCOPE).unwrap().is_none());
+            assert_eq!(store.resource_membership_for_grant(&grant).unwrap().state,
+                if retire_before_dispatch { "retired" } else { "uncertain" });
+        }
     }
 
     #[test]

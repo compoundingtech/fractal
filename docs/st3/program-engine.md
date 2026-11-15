@@ -220,6 +220,16 @@ the retry's due time is necessary but is not proof that the previous attempt
 released its resources. Re-admission receives the new attempt's ownership identity,
 so stale cleanup cannot retire the successor's resources.
 
+The policy window continues to run while retirement is pending. Its deadline wakes
+the blocked retry even if no child exits and no custody event arrives. A retry whose
+window expires during that wait fails finally instead of starting, even when the
+old scope finishes retirement at the same wake. A pending or uncertain retirement
+sets the step to `blocked`, with a reason visible in `missions show` naming the
+operator recovery path: cancel the mission run, or release/recover the retained
+resource custody. A persistent retirement wait also raises the standard reconcile
+fault in operator attention; successful retirement, window expiry, or leaving the
+active run closes that fault.
+
 External `flock` tickets are kernel-held locks owned by the effect process (and
 any descendants retaining its file descriptor), not native resource-lane memberships.
 They are released by process exit/closing the last lock descriptor. Scheduling a

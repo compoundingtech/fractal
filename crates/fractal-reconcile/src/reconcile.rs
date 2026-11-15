@@ -11156,7 +11156,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "mission-run" | FIRST_READINESS_FAULT_SCOPE | run_report::REPORT_FAULT_SCOPE => {
                     !active.contains(subject)
                 }
-                "step" | crate::program_journal::STALLED_FAULT_SCOPE | crate::program_journal::HOST_FAULT_SCOPE => {
+                "step" | crate::program_journal::STALLED_FAULT_SCOPE | crate::program_journal::HOST_FAULT_SCOPE
+                    | program_resources::RETRY_RETIREMENT_FAULT_SCOPE => {
                     !active_steps.contains(subject)
                 }
                 _ => false,
@@ -15275,9 +15276,31 @@ impl<R: RuntimeControl> Reconciler<R> {
         view: &crate::model::StepRunView,
         program: &crate::model::ProgramSpec,
     ) -> Result<bool> {
-        if !self.retire_previous_step_resources(&run.subject, view)? {
-            return Ok(false);
+        const RETIREMENT_WAIT: &str = "waiting for previous attempt resource retirement";
+        let waiting = view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with(RETIREMENT_WAIT));
+        let retirement = self.retire_previous_step_resources(&run.subject, view);
+        if (waiting || !matches!(retirement, Ok(true))) && self.step_retry_window_expired(step.spec, view)? {
+            self.record_fault(&view.subject, program_resources::RETRY_RETIREMENT_FAULT_SCOPE, Ok(()))?;
+            return self.store.set_step_state(&view.subject, "failed",
+                Some("the retry policy window expired while waiting for previous attempt resource retirement"));
         }
+        if !matches!(retirement, Ok(true)) {
+            if let Some(window) = step.spec.retry.window_ms
+                && let Some(anchor) = self.store.first_step_attempt_started_at(&view.subject)?
+            {
+                // Window expiry must wake this wait even if custody never changes.
+                smallclaims::touched::note_due(anchor.saturating_add(u128::from(window)).saturating_add(1));
+            }
+            let detail = retirement.err().map(|error| format!(": {error:#}")).unwrap_or_default();
+            let reason = format!(
+                "{RETIREMENT_WAIT}{detail}; cancel the mission run or release/recover the retained resource custody"
+            );
+            self.record_fault(&view.subject, program_resources::RETRY_RETIREMENT_FAULT_SCOPE,
+                Err(anyhow::anyhow!("{reason}")))?;
+            return self.store.set_step_state(&view.subject, "blocked", Some(&reason));
+        }
+        self.record_fault(&view.subject, program_resources::RETRY_RETIREMENT_FAULT_SCOPE, Ok(()))?;
+        let changed = waiting && self.store.set_step_state(&view.subject, "working", None)?;
         let dispatch = program::Dispatch {
             step: view.subject.clone(),
             attempt: view.attempt,
@@ -15287,14 +15310,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             env: run_variables(run, step, view).into_iter().filter(|(name, _)| name.starts_with("ST_")).collect(),
             cwd: run.workspace.clone(),
         };
-        match self.program_engine().dispatch(dispatch)? {
+        Ok(changed | match self.program_engine().dispatch(dispatch)? {
             // A step that left this attempt already says why in its state.
-            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => Ok(false),
+            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => false,
             // The step keeps its state; `reconcile_program_faults` raises `program/host` from
             // `ProgramEngine::host_fault` and dispatches it again at a deadline.
-            program::Dispatched::HostDown(_) => Ok(false),
-            program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason)),
-        }
+            program::Dispatched::HostDown(_) => false,
+            program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason))?,
+        })
     }
 
     /// Start or resolve what the programs of `run` wait on (§6). It runs inside the run's

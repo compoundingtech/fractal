@@ -7,5 +7,5 @@
   "compatibility": {"status": "changed", "detail": "Retry admission rejoins the lane queue with a new attempt identity. Existing retry policy fields and failure classification remain unchanged."},
   "downtime": {"status": "none", "detail": "No restart or data migration is required."},
   "manual": {"status": "none", "detail": "External flock tickets are outside native lane custody and must be released by the owning process exiting."},
-  "recovery": {"status": "changed", "detail": "Pending or uncertain retirement retains custody and blocks retry dispatch until execution roots and linked children have terminated."}
+  "recovery": {"status": "changed", "detail": "Pending or uncertain retirement retains custody and blocks retry dispatch until execution roots and linked children have terminated. Retirement waits remain bounded by the retry policy window and expose actionable blocked reasons and operator attention."}
 }
