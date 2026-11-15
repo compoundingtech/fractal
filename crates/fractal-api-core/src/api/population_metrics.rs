@@ -675,7 +675,7 @@ mod tests {
         let occupied = BTreeMap::from([(bucket("working", "unattributed"), 17), (bucket("unknown", "unattributed"), 30)]);
         summary.publish(occupied, attention(), Instant::now(), 123).unwrap();
         assert_eq!(summary.buckets.values().map(|(count, _, _)| count).sum::<u64>(), 47);
-        assert_eq!(summary.attention.len(), 11);
+        assert_eq!(summary.attention.len(), super::super::population_attention::KINDS.len());
         assert!(summary.attention.iter().all(|(_, count)| *count == 0));
         assert_eq!(summary.last_success, Some(123));
     }

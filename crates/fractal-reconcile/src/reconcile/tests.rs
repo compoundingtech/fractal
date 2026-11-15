@@ -73,8 +73,12 @@ mission "example/report" state="ready" {
         }
 
         fn commit_message(&self) -> crate::model::ClaimRecord {
+            self.commit_message_at("message/example-report")
+        }
+
+        fn commit_message_at(&self, subject: &str) -> crate::model::ClaimRecord {
             self.store.append_claim(&ClaimInput {
-                subject: "message/example-report".into(), kind: "message.sent".into(),
+                subject: subject.into(), kind: "message.sent".into(),
                 actor: Some(WORKER.into()),
                 fields: BTreeMap::from([("from".into(), json!(WORKER)),
                     ("to".into(), json!("agent/example/reader")),
@@ -119,7 +123,7 @@ mission "example/report" state="ready" {
         for index in 0..16 {
             fixture.owner.key = format!("report-ready-{index}");
             let effect = fixture.admit();
-            let message = fixture.commit_message();
+            let message = fixture.commit_message_at(&format!("message/example-report-{index}"));
             fixture.store.confirm_message_effect(&effect, &message, WORKER).unwrap();
             completed.push(effect.effect_id);
         }

@@ -720,7 +720,7 @@ mod tests {
         let incremental = Incremental::default();
         incremental.observe(&feed).unwrap();
         incremental.evaluated("effect/completed",
-            BTreeSet::from(["effect/completed".into(), "operation/send".into()]), None);
+            BTreeSet::from(["effect/completed".into(), "operation:send".into()]), None);
         incremental.evaluated("effect/pending",
             BTreeSet::from(["effect/pending".into(), "step-run/work".into()]), Some(100));
         feed.0.lock().unwrap().push(change("unrelated/x", "example.changed", None, "{}"));

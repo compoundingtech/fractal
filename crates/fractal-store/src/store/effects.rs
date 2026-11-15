@@ -704,6 +704,7 @@ mod tests {
                 resolved.outcome = outcome.map(str::to_owned);
                 resolved.recovering_actor = Some("person/example".into());
                 resolved.provider_ref = outcome.is_none().then(|| "message/example-observed".into());
+                resolved.evidence = vec!["claim/example-human-observation".into()];
                 append_effect_tx(&tx, store.origin(), KIND_CONFIRMED, &resolved).unwrap();
                 tx.commit().unwrap();
             }
