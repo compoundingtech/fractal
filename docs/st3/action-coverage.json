@@ -494,7 +494,7 @@
       "command": "st effects resolve",
       "description": "Explicitly confirm or abandon an unresolved effect with authenticated person authority and evidence",
       "tests": [
-        "crates/fractal/src/effects_cli.rs::tests::resolution_requires_explicit_outcome_and_confirmation_evidence",
+        "crates/fractal/src/effects_cli.rs::resolution_requires_explicit_outcome_and_confirmation_evidence",
         "crates/fractal-api-core/src/api/effects_tests.rs::effect_routes_authenticate_person_authority_and_return_standard_receipts"
       ],
       "verification": "CLI outcome and evidence parsing; real daemon person authorization and durable resolution"
