@@ -534,6 +534,17 @@ they inspect unknown JSON only explicitly. Unsupported readers are refused befor
 an incompatible wire response. Removing legacy paths requires the supported-reader
 matrix and all-surface conformance vectors above.
 
+Until a reader opts in, normalization and wire preparation preserve the existing
+legacy values exactly, including omitted optional fields and unknown-block payload
+continuations. Semantic annotations are an explicit normalization mode: the owner
+fold selects it, while raw source rereads default to the legacy mode. Legacy
+preparation removes annotations **before** clipping and continuation selection, not
+after them. Mutable optional-field lookup must not insert `null`.
+Owner-authenticated content references record their selected projection (omitted
+for legacy references), so a relayed source read reconstructs the same semantic
+metadata without changing unnegotiated source values or read budgets.
+
+
 ## Collection timeline frames
 
 The terminal UI (`fractal-feed`) and phone (`apps/ios/feed.ts`) subscribe to a conversation on
