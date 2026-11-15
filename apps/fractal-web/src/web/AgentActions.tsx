@@ -34,13 +34,13 @@ export const agentActions = (agent: { readonly state?: string; readonly activity
       : []),
     ...(running
       ? ([
-          { key: 'restart', label: 'Restart', what: 'a new process for the same seat, on its declaration', confirm: true },
+          { key: 'restart', label: 'Restart', what: 'a new process for the same agent, on its declaration', confirm: true },
           { key: 'suspend', label: 'Suspend', what: 'stop at a quiet moment, keeping its session to resume', confirm: true },
           { key: 'retire', label: 'Retire', what: 'stop it and take it off the lists; start brings it back', confirm: true },
         ] as const)
       : ([
           { key: 'start', label: 'Start', what: 'start it again on its declaration', confirm: false },
-          { key: 'resume', label: 'Resume', what: 'resume a suspended seat on the same session', confirm: false },
+          { key: 'resume', label: 'Resume', what: 'resume a suspended agent on the same session', confirm: false },
         ] as const)),
     { key: 'copy', label: 'Copy id', what: 'copy its id to the clipboard', confirm: false },
   ]

@@ -34,6 +34,13 @@ describe('agentActions', () => {
     expect(agentActions({ state: 'running', activity: 'working' }).filter((row) => row.confirm).map((row) => row.key))
       .toEqual(['restart', 'suspend', 'retire'])
   })
+
+  it('says agent, never seat, in what each action does', () => {
+    const rows = [...agentActions({ state: 'running', activity: 'working' }), ...agentActions({ state: 'stopped' })]
+    for (const row of rows) expect(row.what).not.toMatch(/\bseats?\b/i)
+    expect(rows.find((row) => row.key === 'restart')?.what).toBe('a new process for the same agent, on its declaration')
+    expect(rows.find((row) => row.key === 'resume')?.what).toBe('resume a suspended agent on the same session')
+  })
 })
 
 describe('gatewayAgentControls', () => {

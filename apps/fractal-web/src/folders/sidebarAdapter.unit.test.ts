@@ -226,7 +226,10 @@ describe('sidebar matrix operations', () => {
   it('Mouse drop refuses cross-partition gaps, group targets and gaps between shared seats', () => {
     const doc = setup()
     for (const intent of [move(a, { _tag: 'After', sibling: 'alpha.two' }), move('alpha.two', { _tag: 'Before', sibling: child }), move(a, { _tag: 'Unfiled' }), move(a, { _tag: 'Before', sibling: 'host:alpha' }), move('alpha.two', { _tag: 'After', sibling: 'beta.one' }), move('alpha.two', { _tag: 'Before', sibling: 'alpha.one' })]) {
-      expect(canDrop(doc, intent)).toHaveProperty('refused')
+      const verdict = canDrop(doc, intent)
+      expect(verdict).toHaveProperty('refused')
+      // The sentence is shown to the person: it says agent, never seat.
+      expect('refused' in verdict ? verdict.refused : '').not.toMatch(/\bseats?\b/i)
       expect(operationsForMove(doc, intent)).toEqual([])
     }
   })

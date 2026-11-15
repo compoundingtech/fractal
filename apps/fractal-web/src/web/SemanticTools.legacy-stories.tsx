@@ -31,7 +31,7 @@ export const AllStates: Story = { play: async ({ canvasElement }) => {
   await expect(row('example/wait')).toHaveAttribute('data-call-kind', 'wait')
   await expect(within(row('example/wait')).getByTestId('wait-row')).toHaveTextContent('Wait finished')
   await expect(row('example/message')).toHaveAttribute('data-call-kind', 'message')
-  await expect(within(row('example/message')).getByTestId('outgoing-message-card')).toHaveTextContent('→ 2 seats')
+  await expect(within(row('example/message')).getByTestId('outgoing-message-card')).toHaveTextContent('→ 2 agents')
   await expect(within(row('example/message')).getByTestId('outgoing-message-card')).toHaveTextContent('Reviewer · queued')
   const send = within(row('example/send')).getByTestId('outgoing-message-card')
   await expect(row('example/send')).toHaveAttribute('data-call-kind', 'message')

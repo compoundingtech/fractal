@@ -111,7 +111,7 @@ const planMove = (doc: SidebarDocument, move: SidebarMove): MovePlan | { refused
     if (item.kind === 'agent') {
       const rows = doc.roster.filter((seat) => seat.subject === sibling?.id)
       const edge = target._tag === 'Before' ? rows[0] : rows.at(-1)
-      if (edge?.id !== target.sibling) return { refused: 'Move between agents, not between seats of one agent.' }
+      if (edge?.id !== target.sibling) return { refused: 'Move between agents, not between the rows of one agent.' }
     }
   }
   if (item.kind === 'folder' && wouldCycle(doc, item.id, parent)) return { refused: 'A folder cannot go inside itself or its subfolders.' }
