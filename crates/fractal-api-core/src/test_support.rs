@@ -79,3 +79,55 @@ pub fn replicate(from: &crate::store::Store, to: &crate::store::Store) {
     to.apply_replication_repairs().unwrap();
     assert!(to.project_replication_backlog().unwrap());
 }
+
+/// Only the fixture executable initializes the process-local login shell. Even a production
+/// executable built with `test-support` cannot select this ingress behavior using a header,
+/// environment variable, config setting, or executable name.
+#[cfg(feature = "test-support")]
+pub(crate) fn fixture_agent_router(
+    app: axum::Router,
+    store: std::sync::Arc<crate::store::Store>,
+) -> axum::Router {
+    if login_shell().is_none() {
+        return app;
+    }
+    app.layer(axum::middleware::from_fn_with_state(store, bind_fixture_agent))
+}
+
+#[cfg(feature = "test-support")]
+async fn bind_fixture_agent(
+    axum::extract::State(store): axum::extract::State<std::sync::Arc<crate::store::Store>>,
+    mut request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use crate::SeatsStoreCore as _;
+
+    if let Some(agent) = request.headers().get(crate::api::client_v0::LOCAL_PERSON_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|actor| actor.starts_with("agent/"))
+        .map(str::to_owned)
+    {
+        let subject = agent.clone();
+        let declared = tokio::task::spawn_blocking(move || {
+            store.desired_subjects_named(&[subject]).map(|subjects| {
+                subjects.iter().any(|subject| subject.kind == "agent")
+            })
+        }).await;
+        match declared {
+            Ok(Ok(true)) => {
+                request.extensions_mut().insert(crate::api::BoundAgent(agent.clone()));
+                request.extensions_mut().insert(crate::api::HarnessAncestry::Bound(agent));
+            }
+            Ok(Ok(false)) => return (
+                axum::http::StatusCode::FORBIDDEN,
+                "fixture identity must name a declared agent",
+            ).into_response(),
+            _ => return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot resolve fixture agent declaration",
+            ).into_response(),
+        }
+    }
+    next.run(request).await
+}
