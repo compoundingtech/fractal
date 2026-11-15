@@ -235,6 +235,7 @@
     mod program_engine;
     mod program_faults;
     mod program_children;
+    mod native_retry;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};

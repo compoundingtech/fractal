@@ -29,6 +29,7 @@ import {
   PersonReferenceSchema,
   type OmpSchema,
   resource,
+  RetrySchema,
   schedule,
   step,
   StepSchema,
@@ -780,6 +781,85 @@ describe('mission step decoding', () => {
     expect(decoded.steps[1]).toEqual({ id: 'finish' })
     expect(emit([mission(decoded)])).toBe(emit([mission(input)]))
     expect(emit([mission(decoded)])).toContain('loop "poll"')
+  })
+})
+
+describe('native retry policies', () => {
+  it('retains legacy attempts and zero backoff without new KDL fields', () => {
+    const retry = { attempts: 100, backoff: '0s' }
+    expect(Schema.decodeSync(RetrySchema)(retry)).toEqual({ attempts: 100, backoff: '0ms' })
+    expect(emit([step({ id: 'work', agentless: true, retry })])).toBe(
+      [
+        'version 2',
+        'step "work" {',
+        '  agentless',
+        '  retry {',
+        '    attempts 100',
+        '    backoff "0ms"',
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+    )
+  })
+
+  it('normalizes and emits a schedule, window and typed error tags alongside backoff', () => {
+    const retry = {
+      attempts: 5,
+      backoff: '1 second',
+      delays: ['2 minutes', '10m', '30m'],
+      within: '2 hours',
+      on: ['HostUnavailable', 'SlotLost'],
+    } as const
+    const decoded = Schema.decodeSync(RetrySchema)(retry)
+    expect(decoded).toEqual({
+      attempts: 5,
+      backoff: '1000ms',
+      delays: ['120000ms', '600000ms', '1800000ms'],
+      within: '7200000ms',
+      on: ['HostUnavailable', 'SlotLost'],
+    })
+    const kdl = emit([step({ id: 'work', agentless: true, retry })])
+    expect(kdl).toContain(
+      [
+        '  retry {',
+        '    attempts 5',
+        '    backoff "1s"',
+        '    delays "2m" "10m" "30m"',
+        '    within "2h"',
+        '    on "HostUnavailable" "SlotLost"',
+        '  }',
+      ].join('\n'),
+    )
+    expect(emit([step({ id: 'work', agentless: true, retry: decoded })])).toBe(kdl)
+  })
+
+  it('omits empty schedules and tag lists to retain retry-all defaults', () => {
+    expect(
+      emit([step({ id: 'work', agentless: true, retry: { attempts: 1, delays: [], on: [] } })]),
+    ).toBe(emit([step({ id: 'work', agentless: true, retry: { attempts: 1 } })]))
+  })
+
+  it.each([0, -1, 101, 1.5])('rejects invalid total attempts %j', (attempts) => {
+    expect(() => Schema.decodeUnknownSync(RetrySchema)({ attempts })).toThrow()
+  })
+
+  it.each(['0ms', '0s', '-1m', '1.5h', '', '45', 45])(
+    'rejects invalid positive retry durations %j',
+    (duration) => {
+      expect(() =>
+        Schema.decodeUnknownSync(RetrySchema)({ attempts: 4, delays: ['2m', duration] }),
+      ).toThrow()
+      expect(() =>
+        Schema.decodeUnknownSync(RetrySchema)({ attempts: 4, within: duration }),
+      ).toThrow()
+    },
+  )
+
+  it('rejects empty error tags', () => {
+    expect(() =>
+      Schema.decodeUnknownSync(RetrySchema)({ attempts: 4, on: [''] }),
+    ).toThrow()
   })
 })
 

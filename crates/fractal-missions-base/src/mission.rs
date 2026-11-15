@@ -933,6 +933,7 @@ fn parse_loop_group(
         retry: RetrySpec {
             attempts: rounds as u32,
             backoff_ms: 0,
+            ..RetrySpec::default()
         },
         finally: false,
         work_selector: Some(WorkSelector::Agentless),
@@ -2629,10 +2630,51 @@ fn parse_retry(node: &KdlNode) -> Result<RetrySpec, FractalError> {
         .map(|value| parse_duration(&value))
         .transpose()?
         .unwrap_or(0);
+    let schedule_ms = retry_strings(body, "delays")?
+        .iter()
+        .map(|value| positive_retry_duration(value, "delay"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let window_ms = unique_named_child(body, "within")?
+        .map(plain_string)
+        .transpose()?
+        .map(|value| positive_retry_duration(&value, "window"))
+        .transpose()?;
+    let on_error_tags = retry_strings(body, "on")?;
     Ok(RetrySpec {
         attempts: attempts as u32,
         backoff_ms,
+        schedule_ms,
+        window_ms,
+        on_error_tags,
     })
+}
+
+fn retry_strings(body: &KdlDocument, name: &str) -> Result<Vec<String>, FractalError> {
+    let Some(node) = unique_named_child(body, name)? else {
+        return Ok(Vec::new());
+    };
+    reject_type(node)?;
+    ensure_only_properties(node, &[])?;
+    ensure_no_children(node)?;
+    let values = positional_strings(node)?;
+    if values.is_empty() {
+        return Err(FractalError::new(
+            "invalid-value-count",
+            format!("`{name}` needs at least one string"),
+        ));
+    }
+    Ok(values)
+}
+
+fn positive_retry_duration(value: &str, field: &str) -> Result<u64, FractalError> {
+    let ms = parse_duration(value)?;
+    if ms == 0 {
+        return Err(FractalError::new(
+            "invalid-retry-duration",
+            format!("retry {field} must be positive"),
+        ));
+    }
+    Ok(ms)
 }
 
 fn validate_dependencies(

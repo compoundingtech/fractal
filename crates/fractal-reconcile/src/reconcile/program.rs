@@ -1023,7 +1023,13 @@ impl ProgramEngine {
                         ("failed", Some(format!("the program's result could not be journaled: {error}")))
                     }
                 },
-                _ => ("failed", Some(failure_reason(&exit["error"]))),
+                _ => match self.write_journal(step, attempt, program, RESULT_KEY, "failed", &json!({"error": exit["error"]}), None) {
+                    Ok(_) => ("failed", Some(failure_reason(&exit["error"]))),
+                    Err(error) => {
+                        trace.failed();
+                        ("failed", Some(format!("the program's failure could not be journaled: {error}")))
+                    }
+                },
             };
             self.store.set_step_state_unless_terminal(step, status, reason.as_deref())?;
             Ok(status)

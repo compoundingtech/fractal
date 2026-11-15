@@ -257,6 +257,47 @@ pub(super) async fn run_work(
                 .await?;
             print_value(&result, json_output)
         }
+        WorkCommand::Override(args) => {
+            reject_foreign_agent_actor(&args.actor)?;
+            let subject = if args.subject.starts_with("step-run/") {
+                args.subject
+            } else {
+                format!("step-run/{}", args.subject)
+            };
+            let episode = match args.episode {
+                Some(episode) => episode,
+                None => {
+                    let page: ClaimsPage = client
+                        .get(&format!(
+                            "/v1/claims?subject={}&kind=work.person-asked&order=desc&limit=1",
+                            urlencoding::encode(&subject)
+                        ))
+                        .await?;
+                    page.claims.into_iter().next()
+                        .context("this work item has no person ask to override")?.id
+                }
+            };
+            let result: StepRunView = client
+                .post(
+                    "/v1/work/override",
+                    &PersonStepResponse {
+                        delegation: None,
+                        subject,
+                        actor: args.actor,
+                        summary: args.summary.unwrap_or_default(),
+                        evidence: Vec::new(),
+                        idempotency_key: format!("person-override:{episode}:{}", args.answer),
+                        episode: Some(episode),
+                        answer: Some(fractal_daemon::person_request::AnswerInput {
+                            id: Some(args.answer),
+                            text: args.text,
+                            option_notes: Vec::new(),
+                        }),
+                    },
+                )
+                .await?;
+            print_value(&result, json_output)
+        }
 
         WorkCommand::Ls {
             watch,
