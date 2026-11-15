@@ -10,19 +10,20 @@ use std::time::{Duration, Instant};
 const TIMEOUT: Duration = Duration::from_secs(3);
 const EXIT_POLL: Duration = Duration::from_millis(10);
 
-/// Capture launchctl's output within three seconds, including pipe EOF.
+/// Apply a three-second launchctl RPC deadline, then kill and reap on timeout.
 ///
 /// Standard input is closed; stdout and stderr are captured independently.
-/// A timeout returns `io::ErrorKind::TimedOut` after killing and reaping the
-/// child. All other runner errors also kill and reap it. No reader threads can
-/// remain blocked by descendants retaining inherited output descriptors.
+/// At the deadline, publish unresponsive health before killing and reaping the
+/// child, then return `io::ErrorKind::TimedOut`. Reaping may outlast the deadline.
+/// All other runner errors also kill and reap it. No reader threads can remain
+/// blocked by descendants retaining inherited output descriptors.
 /// The shared launchd health gate may return `WouldBlock` without spawning.
 pub fn output(command: &mut Command) -> io::Result<Output> {
-    super::launchd_health::run(|| {
+    super::launchd_health::run(|publish_timeout| {
         let deadline = Instant::now() + TIMEOUT;
         output_with_remaining(command, |_| {
             Ok(deadline.saturating_duration_since(Instant::now()))
-        })
+        }, publish_timeout)
     })
 }
 
@@ -31,6 +32,7 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 fn output_with_remaining(
     command: &mut Command,
     mut remaining: impl FnMut(&Child) -> io::Result<Duration>,
+    publish_timeout: impl Fn(),
 ) -> io::Result<Output> {
     let mut child = ReapOnDrop(
         command
@@ -52,6 +54,7 @@ fn output_with_remaining(
     loop {
         let time_left = remaining(&child.0)?;
         if time_left.is_zero() {
+            publish_timeout();
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "launchctl exceeded its three-second deadline",
@@ -175,7 +178,7 @@ mod tests {
         let deadline = Instant::now() + TIMEOUT;
         output_with_remaining(command, |_| {
             Ok(deadline.saturating_duration_since(Instant::now()))
-        })
+        }, || {})
     }
 
     fn assert_reaped(pid: u32) {
@@ -212,14 +215,24 @@ mod tests {
     #[test]
     fn timeout_kills_and_reaps_actual_child() {
         let (_directory, mut command) = fake_launchctl("while :; do :; done");
-        let mut pid = None;
+        let pid = std::cell::Cell::new(None);
+        let published = std::cell::Cell::new(false);
         let error = output_with_remaining(&mut command, |child| {
-            pid = Some(child.id());
+            pid.set(Some(child.id()));
             Ok(Duration::ZERO)
+        }, || {
+            let mut status = 0;
+            // SAFETY: status is writable and the runner still owns this child.
+            // WNOHANG proves publication precedes both killing and reaping.
+            assert_eq!(unsafe {
+                libc::waitpid(i32::try_from(pid.get().unwrap()).unwrap(), &mut status, libc::WNOHANG)
+            }, 0);
+            published.set(true);
         })
         .unwrap_err();
+        assert!(published.get());
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert_reaped(pid.unwrap());
+        assert_reaped(pid.get().unwrap());
     }
 
     #[test]
@@ -229,7 +242,7 @@ mod tests {
         let error = output_with_remaining(&mut command, |child| {
             pid = Some(child.id());
             Err(io::Error::other("injected runner failure"))
-        })
+        }, || {})
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_reaped(pid.unwrap());

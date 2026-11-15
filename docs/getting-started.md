@@ -229,20 +229,24 @@ For an upgrade, `fractal service install` refreshes definitions and restarts ser
 Coordinate that restart with active work and any continuous health checks. Replacing
 archive files alone does not restart running services.
 
-On macOS every `launchctl` RPC has a three-second deadline, including installation
-and migration commands. This is a local supervisor RPC, not a network operation;
-three seconds allows transient scheduling delays without letting a stalled GUI
-domain retain children indefinitely. A timed-out child is killed and reaped.
+On macOS every `launchctl` RPC has a three-second deadline, then kill and reap
+on timeout, including installation and migration commands. This is a local
+supervisor RPC, not a network operation; three seconds allows transient scheduling
+delays before cleanup starts. Reaping may take longer than the RPC deadline.
 Each process admits at most one launchctl invocation at a time; overlapping
-callers skip the probe rather than spawning or queuing another child.
+callers skip the probe rather than spawning or queuing another child. Cleanup
+retains that admission until the child has been reaped.
 
-After a timeout, the daemon's `/v1/health` response includes `service_manager`
-with `reason: "launchd-unresponsive"`, `since_unix_ms`, `retry_after_unix_ms` and
-`consecutive_timeouts`. Health reads expose the recorded state without waiting
-for an in-flight RPC. Further requests skip launchctl until a monotonic backoff
-expires: 5, 10, 20, 40, then at most 60 seconds after each completed timeout.
-The next completed RPC clears the failure, including a service-not-found reply.
-This bounds resource use; it does not claim to repair the underlying launchd stall.
+At the deadline, before kill and reap, the daemon publishes `service_manager`
+in `/v1/health` with `reason: "launchd-unresponsive"`, `since_unix_ms`,
+`retry_after_unix_ms` and `consecutive_timeouts`. Health reads expose this state
+even while cleanup waits. Further requests skip launchctl until both cleanup
+finishes and a monotonic backoff expires: 5, 10, 20, 40, then at most 60 seconds
+from each deadline. The next completed RPC clears the failure, including a
+service-not-found reply. An unwound observation does not permanently wedge
+admission; subsequent callers recover poisoned locks and can probe again.
+This bounds subprocess fan-out; it does not bound kernel reap latency or claim
+to repair the underlying launchd stall.
 
 State lives in `~/.local/state/st3`. The local API uses a Unix socket. On Linux it
 normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/fractal.sock` linking to it; on macOS

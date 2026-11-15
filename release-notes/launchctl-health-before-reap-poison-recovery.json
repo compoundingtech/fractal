@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Publish stalled launchd health before child cleanup and recover probe admission after an unwind.",
+  "replay": {"status": "none", "detail": "No claim format or replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "launchctl has a three-second RPC deadline, then kill and reap on timeout; kernel reap latency is not bounded by that deadline. The daemon publishes launchd-unresponsive health at the deadline, before cleanup can block. Single-flight admission remains held through cleanup. Backoff is measured from the deadline. Poisoned admission and health locks are recovered rather than wedging future observations until restart."},
+  "downtime": {"status": "changed", "detail": "Restart the daemon to activate early health publication and poison recovery; no state migration is required."},
+  "manual": {"status": "none", "detail": "No new configuration. Linux tests cover publication before cleanup, single-flight retention, kill and reap, and unwind recovery. Real macOS launchd stalls and stuck kernel reaping are not exercised."},
+  "recovery": {"status": "none", "detail": "Responsive launchd clears the failure on the next admitted completed RPC. A stuck reap retains the one owned child and admission while health remains readable."}
+}
