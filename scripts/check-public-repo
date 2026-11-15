@@ -26,8 +26,12 @@ HOME = re.compile(r"/(?:home|Users)/([A-Za-z][A-Za-z0-9_.-]*)")
 # Reserved invented homes used by public examples and clean-machine fixtures.
 EXAMPLE_HOMES = {"example", "ada"}
 PERSON_NAME = r"([A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)"
-PERSON = re.compile("person" + r"/" + PERSON_NAME)
-ENCODED_PERSON = re.compile("person" + r"%2[fF]" + PERSON_NAME)
+# A principal starts at a token boundary. Scan conservatively after any encoded
+# byte without decoding: encoded quotes and URL separators must not hide references.
+# English compounds such as per-person/per-message are not principal references.
+PERSON_START = r"(?:(?<![A-Za-z0-9_-])|(?<=%[0-9A-Fa-f]{2}))"
+PERSON = re.compile(PERSON_START + "person" + r"/" + PERSON_NAME)
+ENCODED_PERSON = re.compile(PERSON_START + "person" + r"%2[fF]" + PERSON_NAME)
 # Default mission authority specifically requires fleet/PROJECT identities. These tests
 # use the reserved invented fixture- project prefix; other fleet seats remain forbidden.
 FLEET_AGENT = re.compile("agent" + r"/fleet/(?!fixture-)[A-Za-z0-9_./-]+")
@@ -67,6 +71,7 @@ mission step operator-one queue-operator bench-operator two source a any other s
 migration-reviewer uninstall sender recipient first-reviewer fleet-tester device
 release-smoke owner eval-attention robin lichen visitor blair demo pat wrong-local-actor probe
 discord- discord-404 discord-606
+another foreign outsider private reader-floor
 """.split())
 # Canonical principal grammar fixture exercises hyphen, underscore and dot together.
 EXAMPLE_PEOPLE.add("operator-2_name.test")
