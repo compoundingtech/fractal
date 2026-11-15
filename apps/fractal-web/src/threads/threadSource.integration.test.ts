@@ -1,5 +1,6 @@
 import * as Native from '@fractal/client/schema/read'
 import { FractalClient } from '@fractal/client'
+import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi, type MockInstance } from 'vitest'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
@@ -179,6 +180,36 @@ it('offers metadata edits but omits the unsigned composer on paired web transpor
     stop()
     registry.dispose()
   }
+})
+
+it('keeps access unknown while capabilities are unanswered and reads them again once the connection is live', async () => {
+  let reachable = false
+  const fetchImpl = vi.fn(async () => {
+    if (!reachable) throw new TypeError('Failed to fetch')
+    return Response.json({ ...base, value: { ...base.value, transport: 'local-web', capabilities: [
+      ...base.value.capabilities,
+      { id: 'threads-v1', version: 2, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+    ] } })
+  })
+  const live = Atom.make(false)
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry, undefined, live)
+  const stop = registry.mount(source.access)
+  try {
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled())
+    // A cold load while offline has no answer yet; that is not a connection without threads.
+    await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({ read: false, unknown: true }))
+    reachable = true
+    registry.set(live, true)
+    await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({ read: true }))
+    expect(registry.get(source.access)).not.toHaveProperty('unknown')
+    // Losing the connection again keeps the observed answer instead of reading or forgetting it.
+    const reads = fetchImpl.mock.calls.length
+    registry.set(live, false)
+    expect(registry.get(source.access)).toMatchObject({ read: true })
+    expect(fetchImpl).toHaveBeenCalledTimes(reads)
+  } finally { stop(); registry.dispose() }
 })
 
 it('observes exact summary receipt updates without a write grant or a follow-up HTTP read', async () => {

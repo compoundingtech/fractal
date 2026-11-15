@@ -1276,7 +1276,7 @@ export const liveSource = ({
           }).pipe(Stream.runForEach(event => Effect.sync(() => receive(event))))))
           return () => { runtime.runFork(Fiber.interrupt(fiber)) }
         },
-      }),
+      }, transportLive),
       objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,

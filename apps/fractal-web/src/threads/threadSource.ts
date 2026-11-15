@@ -34,7 +34,17 @@ export interface RetainedThreadStart {
   readonly parameters: ThreadStartIntent
 }
 
-type ThreadAccess = { readonly read: boolean; readonly inboxOrigins?: boolean; readonly upgradeRequired?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
+type ThreadAccess = {
+  readonly read: boolean
+  readonly inboxOrigins?: boolean
+  readonly upgradeRequired?: boolean
+  readonly actions: ReadonlySet<string>
+  readonly actor?: string
+  /** Fractal has not answered which thread operations this connection holds: `read: false` is a default, not a refusal. */
+  readonly unknown?: true
+  /** Fractal refused the capabilities read itself, for example a revoked browser credential. */
+  readonly refusal?: Feed<never>
+}
 
 export interface ThreadSource {
   readonly access: Atom.Atom<ThreadAccess>
@@ -70,6 +80,7 @@ const canSendUnsignedThread = (caps: Pick<Native.Capabilities, 'transport' | 'ca
   )
 
 const noAccess: ThreadAccess = { read: false, actions: new Set() }
+const unknownAccess: ThreadAccess = { ...noAccess, unknown: true }
 // A revoked or expired browser credential needs pairing again; a missing grant does not.
 const refused = (error: unknown): Feed<never> => {
   const reason = clientReadAuthorization(error) ?? 'failed'
@@ -81,8 +92,12 @@ const refused = (error: unknown): Feed<never> => {
   })
 }
 
-export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches): ThreadSource {
+/** `transportLive`, when given, re-reads access each time the gateway connection is live again, as grants do. */
+export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches, transportLive?: Atom.Atom<boolean>): ThreadSource {
+  let observedAccess: ThreadAccess | undefined
   const access = Atom.make<ThreadAccess>(get => {
+    // While disconnected the last answer stands; a read that failed then is retried once the connection is live.
+    if (transportLive !== undefined && !get(transportLive) && observedAccess !== undefined) return observedAccess
     const abort = new AbortController()
     get.addFinalizer(() => abort.abort())
     void client.capabilities({ signal: abort.signal }).then(({ value }) => {
@@ -96,10 +111,16 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        get.setSelf({ read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor })
+        observedAccess = { read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor }
+        get.setSelf(observedAccess)
       }
-    }).catch(() => { if (!abort.signal.aborted) get.setSelf(noAccess) })
-    return noAccess
+    }).catch(error => {
+      if (abort.signal.aborted) return
+      // An unanswered read leaves access unknown; only Fractal's refusal of the credential is a refusal.
+      if (clientReadAuthorization(error) === undefined) get.setSelf(observedAccess ?? unknownAccess)
+      else get.setSelf(observedAccess = { ...noAccess, refusal: refused(error) })
+    })
+    return observedAccess ?? unknownAccess
   })
   const titles = Atom.keepAlive(Atom.make<ReadonlyMap<string, string>>(new Map()))
   const rememberTitles = (items: readonly ThreadSummary[]) => {

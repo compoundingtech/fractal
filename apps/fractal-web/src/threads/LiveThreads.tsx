@@ -283,13 +283,16 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
   readonly embedded?: boolean
   readonly focusComposer?: FocusComposer
 }) {
-  const { read, upgradeRequired } = useAtomValue(source.access)
+  const { read, upgradeRequired, unknown, refusal } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
   const paused = useUpdatesPaused(detail._tag === 'Observed' && detail.freshness === 'stale')
   // A thread in its own tab keeps its status in the thread's measure, where its heading would be.
   const status = (notice: React.ReactNode) => embedded ? notice : <div {...stylex.props(styles.dedicatedNotice)}>{notice}</div>
   if (upgradeRequired) return status(<ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="thread" />)
-  if (!read) return status(<p>This connection does not support threads.</p>)
+  // Until Fractal answers which operations this connection holds, the thread is still loading, not unsupported.
+  if (!read) return status(refusal !== undefined && refusal._tag !== 'Observed' ? <ReadStatus feed={refusal} subject="thread" />
+    : unknown ? <ReadStatus feed={{ _tag: 'Waiting' }} subject="thread" />
+    : <p>This connection does not support threads.</p>)
   // Reading again cannot bring back a thread Fractal says does not exist.
   if (detail._tag === 'Unavailable' && detail.code === 'not-found') return status(<SystemNotice kind="empty" scope="inline" title="Fractal has no thread at this link." />)
   if (detail._tag !== 'Observed') return status(<ReadStatus feed={detail} subject="thread" onRetry={source.reload} />)
