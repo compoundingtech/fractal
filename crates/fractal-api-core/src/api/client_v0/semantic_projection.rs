@@ -4,7 +4,12 @@ use serde_json::{Value, json};
 /// Select the negotiated semantic lane without changing owner-retained native records.
 pub(super) fn prepare(item: &mut Value, enabled: bool) {
     if !enabled {
-        if let Some(blocks) = item["body"]["blocks"].as_array_mut() {
+        // Mutable indexing would insert `blocks: null` into legacy message bodies.
+        // Optional non-null wire fields must stay absent when they were not supplied.
+        if let Some(blocks) = item.get_mut("body")
+            .and_then(|body| body.get_mut("blocks"))
+            .and_then(Value::as_array_mut)
+        {
             for block in blocks {
                 if let Some(block) = block.as_object_mut() { block.remove("semantic"); }
             }
@@ -62,6 +67,45 @@ pub(super) fn prepare(item: &mut Value, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_preparation_preserves_absent_optional_fields_and_opaque_values() {
+        for original in [
+            json!({"id":"missing-body","type":"future"}),
+            json!({"id":"message","type":"message","body":{"text":"hello"}}),
+            json!({"id":"content","type":"content","body":{"media_type":"text/plain","text":"legacy"}}),
+            json!({"id":"opaque","type":"future","body":{"raw":{"type":"future","parts":[{"text":"unchanged"}]}}}),
+            json!({"id":"scalar","type":"future","body":"opaque"}),
+        ] {
+            let expected = serde_json::to_vec(&original).unwrap();
+            let mut item = original;
+            prepare(&mut item, false);
+            prepare(&mut item, false);
+            assert_eq!(serde_json::to_vec(&item).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn legacy_relay_finalization_preserves_optional_fields_without_semantics() {
+        let mut session = crate::api::client_v0::ClientSession::for_tests(
+            "person/example", "person/example", "unix",
+        );
+        // Blocks are independently negotiated; enabling them does not enable semantics.
+        session.conversation_blocks = true;
+        let original = json!({"items":[
+            {"id":"message","type":"message","body":{"text":"hello"}},
+            {"id":"content","type":"content","body":{"media_type":"text/plain","text":"legacy"}},
+            {"id":"opaque","type":"future","body":{"raw":{"parts":[{"type":"future"}]}}}
+        ],"next_cursor":"owner-cursor"});
+        let expected = serde_json::to_vec(&original).unwrap();
+        let mut relayed = original;
+        super::super::legacy(&mut relayed, &session);
+        super::super::legacy(&mut relayed, &session);
+        assert_eq!(serde_json::to_vec(&relayed).unwrap(), expected);
+        for item in relayed["items"].as_array().unwrap() {
+            assert!(item["body"].get("blocks").is_none());
+        }
+    }
 
     #[test]
     fn semantic_projection_capability_isolation_and_mixed_text() {

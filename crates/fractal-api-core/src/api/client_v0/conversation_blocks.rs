@@ -230,6 +230,9 @@ pub struct ContentLocator {
     pub image: bool,
     pub native: Value,
     pub shape: String,
+    /// The owner-authenticated reference retains its projection across relayed raw reads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conversation_semantics: bool,
 }
 
 /// A digest of an entry's structure: its kind and its blocks. A timeline entry may be a bounded
@@ -269,6 +272,8 @@ pub fn reference(
             .is_some_and(|value| image(value) && !external_image(value)),
         native: item["_source"].clone(),
         shape: shape(item),
+        conversation_semantics: item["body"]["blocks"].as_array().is_some_and(|blocks|
+            blocks.iter().any(|block| block.get("semantic").is_some())),
     };
     let key = aead::LessSafeKey::new(
         aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &*REF_KEY).expect("owner reference key"),
@@ -752,6 +757,11 @@ pub fn prepare_one(
         && watched == session_id
     {
         *count += 1;
+    }
+    // Optional semantic metadata must not participate in legacy clipping or replace its
+    // payload continuations. Strip it before taking the immutable source for preparation.
+    if !session.conversation_semantics {
+        semantic_projection::prepare(item, false);
     }
     let original = item.clone();
     // The fold holds oversized native records as bounded previews; their long values reach

@@ -20,7 +20,12 @@ fn located_value(source: &ExternalSession, locator: &ContentLocator) -> Result<V
         return Err(invalidated());
     }
     let native = serde_json::from_value(locator.native.clone()).map_err(|_| invalidated())?;
-    crate::external_sessions::normalized_record(source, &native)
+    let values = if locator.conversation_semantics {
+        crate::external_sessions::normalized_record_with_semantics(source, &native)
+    } else {
+        crate::external_sessions::normalized_record(source, &native)
+    };
+    values
         .map_err(|_| invalidated())?
         .into_iter()
         .find(|item| {
@@ -353,6 +358,31 @@ mod tests {
             updated_at_unix_ms: 0,
             process: None,
         }
+    }
+
+    #[test]
+    fn semantic_annotations_never_retarget_legacy_payloads_and_explicit_refs_keep_their_projection() {
+        let root=tempfile::tempdir().unwrap();
+        let raw=json!({"type":"future","huge":"x".repeat(VALUE_BYTES*2)});
+        let native=fixture(root.path(),json!([raw.clone()]));
+        let timeline=crate::external_sessions::LineTimeline::acquire(&native);
+        let items=timeline.hold().read(&native).unwrap();
+        let source_item=items.iter().find(|item| item["body"]["blocks"][0]["kind"]=="unknown").unwrap();
+        let pointer="/body/blocks/0/semantic";
+        let token=reference(&native,&basis(&native).unwrap(),&native.id,source_item,pointer);
+        let selected=locator(&token,&native.id).unwrap();
+        assert!(selected.conversation_semantics);
+        assert_eq!(located_value(&native,&selected).unwrap(),source_item.pointer(pointer).unwrap().clone());
+        let mut session=ClientSession::local(Some("person/example")).unwrap();
+        session.conversation_blocks=true;
+        let legacy=read(&native,&session,&native.id).unwrap();
+        let block=legacy.iter().flat_map(|item| item["body"]["blocks"].as_array().unwrap())
+            .find(|block| block["kind"]=="unknown").unwrap();
+        let selected=locator(block["continuation"]["ref"].as_str().unwrap(),&native.id).unwrap();
+        assert!(!selected.conversation_semantics);
+        assert!(serde_json::to_value(&selected).unwrap().get("conversation_semantics").is_none());
+        assert_eq!(selected.pointer,"/body/blocks/0/payload");
+        assert_eq!(located_value(&native,&selected).unwrap(),json!({"raw":raw}));
     }
 
     #[test]
