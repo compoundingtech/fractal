@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "Adds effect by-key read and explicit resolution endpoints, effects status/resolve CLI commands, and additive run-view effect observations. Absent optional wire fields are omitted."},
   "downtime": {"status": "none", "detail": "No startup migration."},
   "manual": {"status": "none", "detail": "Unresolved effects require an authenticated person to confirm the result with evidence or explicitly abandon it; timeouts never transfer origination authority."},
-  "recovery": {"status": "none", "detail": "Unresolved episodes surface once in attention and faults, and remain fenced until covered by explicit human resolution."}
+  "recovery": {"status": "none", "detail": "Unresolved episodes surface once in attention, population metrics and faults, and remain fenced until covered by explicit human resolution. Recovery follows changed effects and lease deadlines after one startup rebuild, and rechecks human resolution under the run fence before conflict parking."}
 }

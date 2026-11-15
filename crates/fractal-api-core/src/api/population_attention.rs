@@ -3,12 +3,12 @@
 use super::{AttentionItemView, Store};
 use std::collections::HashSet;
 
-pub const KINDS: [&str; 11] = [
+pub const KINDS: [&str; 12] = [
     "person-step", "human-gate", "launch-approval", "unread-message", "agent-request",
-    "revision-approval", "harness-login", "harness-prompt", "fault", "model-drift", "unattributed",
+    "revision-approval", "harness-login", "harness-prompt", "fault", "model-drift", "effect-unresolved", "unattributed",
 ];
 
-pub type Counts = [(&'static str, u64); 11];
+pub type Counts = [(&'static str, u64); KINDS.len()];
 
 /// Call inside the population refresher's `Store::read_snapshot`, alongside the population
 /// fold. No independent cut, timeout, mailbox read or fault collection is introduced here.
@@ -125,6 +125,83 @@ mod tests {
         assert_eq!(deadline, None);
     }
 
+    #[test]
+    fn unresolved_effect_card_folds_under_its_run_creation_owner() {
+        use crate::{AttentionSnapshotStore as _, MissionsStore as _};
+        use crate::model::{AttentionRequest, ClaimInput, EffectOwner, MissionRunRequest, WorkRequest};
+        use crate::store::effects::EffectAdmission;
+        use std::collections::BTreeMap;
+
+        let store = Store::open_memory("example").unwrap();
+        store.bind_fleet("population-effect-fixture").unwrap();
+        let intent = crate::graph::parse_intent(r#"version 2
+agent "example/worker" { workspace "/tmp"; harness "claude" {} }
+mission "example/report" state="ready" {
+  goal "Report once."
+  step "report" {
+    available-to "agent/example/worker"
+    goal "Send the report."
+  }
+}
+"#, "example").unwrap();
+        store.apply_internal(&intent, "population-effect-fixture").unwrap();
+        let run = store.create_mission_run(&MissionRunRequest {
+            mission: "example/report".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/reviewer".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "population-effect-run".into(),
+        }).unwrap();
+        let step = &run.steps[0].subject;
+        let actor = "agent/example/worker";
+        let incarnation = "population-effect-worker:one";
+        store.set_step_state(step, "ready", None).unwrap();
+        let claimed = store.work_action(step, "claim", &WorkRequest {
+            wait_ms: None, actor: Some(actor.into()), incarnation: Some(incarnation.into()),
+            summary: None, reason: None, evidence: vec![],
+            idempotency_key: "population-effect-claim".into(),
+        }).unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", BTreeMap::from([("status".into(), json!("running")), ("incarnation_id".into(), json!(incarnation))])),
+            ("harness.observed", BTreeMap::from([("state".into(), json!("working")), ("driver".into(), json!("claude")), ("incarnation_id".into(), json!(incarnation))])),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: actor.into(), kind: kind.into(), actor: Some(actor.into()), fields,
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let owner = EffectOwner {
+            mission: "example/report".into(), key: "report-ready".into(),
+            step: step.clone(), attempt: claimed.attempt, incarnation: incarnation.into(),
+        };
+        let EffectAdmission::Originate(effect) = store.admit_message_effect(
+            &owner, actor, actor, "report-payload-digest", "person/reviewer",
+        ).unwrap() else { panic!("first local admission must originate") };
+        store.unresolved_message_effect(&effect, "delivery cannot be established", actor).unwrap();
+        let step = store.step_run(step).unwrap().unwrap();
+        let episode = format!("effect-unresolved:{}", effect.effect_id);
+        for _ in 0..2 {
+            store.record_runtime_failure(&episode, &AttentionRequest {
+                reviewer: actor.into(), title: "Native effect requires resolution".into(),
+                reason: "Delivery cannot be established; no second send is permitted.".into(),
+                severity: "error".into(),
+                targets: vec![step.run.clone(), step.generation.clone(), effect.effect_id.clone(), step.subject.clone()],
+                actor: "daemon/runtime".into(), idempotency_key: episode.clone(),
+            }, "effect-unresolved").unwrap();
+        }
+        let now = u128::MAX;
+        store.read_snapshot(|| -> anyhow::Result<()> {
+            let (items, _) = store.attention_collection_snapshot(None, now)?;
+            let cards: Vec<_> = items.iter().filter(|item| item.kind == "effect-unresolved").collect();
+            assert_eq!(cards.len(), 1, "one real person card per unresolved episode");
+            assert_eq!(cards[0].person, "person/reviewer");
+            assert_eq!(cards[0].mission_run.as_deref(), Some(step.run.as_str()));
+            assert_eq!(store.attention_source_origins(&cards)?, ["example"]);
+            let (counts, _) = summarize_with_deadline(&store, now)?;
+            assert_eq!(counts.iter().find(|(kind, _)| *kind == "effect-unresolved"), Some(&("effect-unresolved", 1)));
+            assert_eq!(counts.iter().find(|(kind, _)| *kind == "unattributed"), Some(&("unattributed", 0)));
+            Ok(())
+        }).unwrap();
+    }
+
     fn item(kind: &str, source: &str, person: &str, episode: &str) -> AttentionItemView {
         serde_json::from_value(json!({
             "kind": kind, "subject": source, "person": person, "episode": episode,
@@ -172,7 +249,7 @@ mod tests {
         assert_eq!(remote.iter().map(|(_, count)| count).sum::<u64>(), 2);
         assert_eq!(local[2], ("launch-approval", 1));
         assert_eq!(remote[1], ("human-gate", 1));
-        assert_eq!(remote[10], ("unattributed", 1));
+        assert_eq!(remote[11], ("unattributed", 1));
     }
 
     #[test]
@@ -184,7 +261,7 @@ mod tests {
             item("model-drift", "agent/a", "person/a", "drift"),
         ];
         let counts = count_items(&rows, "local", |_| Ok("local".into())).unwrap();
-        assert_eq!(counts[10], ("unattributed", 1));
+        assert_eq!(counts[11], ("unattributed", 1));
         assert_eq!(counts[9], ("model-drift", 1));
         assert_eq!(counts[8], ("fault", 1));
         assert_eq!(counts[4], ("agent-request", 1));

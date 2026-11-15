@@ -1512,6 +1512,8 @@ pub struct Reconciler<R = NativeRuntime> {
     pub incremental: crate::incremental::Incremental,
     /// How far [`Self::observe_stream`] has read the messages shard; `None` until the first pass.
     stream_seen: Mutex<Option<crate::store::messages_shard::mailbox_reads::StreamPosition>>,
+    /// Independent effect feed cursor; `None` bootstraps durable subjects once.
+    effect_seen: Mutex<Option<(u64, i64)>>,
     /// Fail a pass that makes a correction an incremental pass would have missed (tests).
     strict_incremental: bool,
     /// Skip items nothing changed for, between periodic full passes. Off in test reconcilers,
@@ -1778,6 +1780,7 @@ impl Reconciler<NativeRuntime> {
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
             stream_seen: Default::default(),
+            effect_seen: Default::default(),
             strict_incremental: false,
             skip_unneeded: std::env::var("ST3_INCREMENTAL").as_deref() != Ok("off"),
             session_starts: Arc::new(Mutex::new(HashMap::new())),
@@ -2001,6 +2004,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             gate_poll_runtimes: Arc::new(Mutex::new(BTreeSet::new())),
             incremental: Default::default(),
             stream_seen: Default::default(),
+            effect_seen: Default::default(),
             strict_incremental: true,
             skip_unneeded: false,
             session_starts: Arc::new(Mutex::new(HashMap::new())),
@@ -3003,6 +3007,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.skip_unneeded
                 .then(|| self.incremental.next_due(""))
                 .flatten(),
+            // Effects remain incremental even when diagnostic full passes are enabled.
+            self.incremental.next_due("effect/"),
             read("deadline/work-wakes", &|| {
                 if self.skip_unneeded {
                     Ok(None)
@@ -3221,9 +3227,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::note_due(now_ms() + 5_000);
         }
         self.observe_member_admission()?;
-        // Recovery is readback-only: late conflicts and dead leases never transfer send authority.
-        self.store.reconcile_effects()?;
-        self.raise_unresolved_effects()?;
         // Start completion can mutate the runtime-observation fence. Capture before
         // it can read the shared snapshot, so pre-completion evidence cannot later
         // be presented to planning as a post-completion observation.
@@ -3251,6 +3254,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{:?}", self.store.publication_cache_epoch()),
         );
         drop(observe_span);
+        // Recovery is readback-only; use per-effect changes and lease deadlines,
+        // never a full durable-history walk on unrelated daemon wakes.
+        self.reconcile_effects()?;
         let mut _runners_span = crate::reconcile_telemetry::phase("pass/gate-runners");
         let gate_runners = self.gate_runners()?;
         _runners_span.items(gate_runners.len());
@@ -11655,30 +11661,58 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.evaluate_mission_run(run, &mission)
     }
 
-    fn raise_unresolved_effects(&self) -> Result<()> {
-        for effect in self.store.unresolved_effects()? {
-            let Some(step) = self.store.step_run(&effect.bound_step_run)? else { continue };
-            let episode = format!("effect-unresolved:{}", effect.effect_id);
-            // Durable episode identity survives both daemon restart and lease churn.
-            self.store.record_runtime_failure(
-                &episode,
-                &AttentionRequest {
-                    reviewer: effect.lease_owner.clone(),
-                    title: "Native effect requires resolution".into(),
-                    reason: format!(
-                        "{} waits on {}: {}. No second send will be attempted. A person must confirm delivery or explicitly abandon the effect.",
-                        step.run, effect.effect_id,
-                        effect.error.as_deref().unwrap_or("delivery cannot be established"),
-                    ),
-                    severity: "error".into(),
-                    targets: vec![step.run.clone(), step.generation.clone(),
-                        effect.effect_id.clone(), step.subject.clone()],
-                    actor: RECONCILER_ACTOR.into(),
-                    idempotency_key: episode.clone(),
-                },
-                "effect-unresolved",
-            )?;
+    fn reconcile_effects(&self) -> Result<()> {
+        let mut cursor = self.effect_seen.lock().unwrap_or_else(PoisonError::into_inner);
+        // Capture the feed boundary before bootstrap/evaluation: concurrent writes
+        // are still observed next pass, after their dependencies have registered.
+        let feed = self.incremental.readers_since(&self.store, *cursor, "effect/")?;
+        let mut subjects = self.incremental.needed_items("effect/", now_ms());
+        if cursor.is_none() {
+            subjects.extend(self.store.effect_subjects()?);
         }
+        subjects.extend(feed.readers);
+        subjects.extend(feed.unseen);
+        for subject in subjects {
+            let ((result, due), reads) = smallclaims::touched::record(|| {
+                smallclaims::touched::record_due(|| -> Result<()> {
+                    self.store.reconcile_effect(&subject)?;
+                    if let Some((state, effect)) = self.store.effect_state(&subject)?
+                        && state == "unresolved"
+                    {
+                        self.raise_unresolved_effect(&effect)?;
+                    }
+                    Ok(())
+                })
+            });
+            result?;
+            self.incremental.evaluated(&subject, reads, due);
+        }
+        *cursor = Some(feed.cursor);
+        Ok(())
+    }
+
+    fn raise_unresolved_effect(&self, effect: &crate::store::effects::EffectRecord) -> Result<()> {
+        let Some(step) = self.store.step_run(&effect.bound_step_run)? else { return Ok(()) };
+        let episode = format!("effect-unresolved:{}", effect.effect_id);
+        // Durable episode identity survives both daemon restart and lease churn.
+        self.store.record_runtime_failure(
+            &episode,
+            &AttentionRequest {
+                reviewer: effect.lease_owner.clone(),
+                title: "Native effect requires resolution".into(),
+                reason: format!(
+                    "{} waits on {}: {}. No second send will be attempted. A person must confirm delivery or explicitly abandon the effect.",
+                    step.run, effect.effect_id,
+                    effect.error.as_deref().unwrap_or("delivery cannot be established"),
+                ),
+                severity: "error".into(),
+                targets: vec![step.run.clone(), step.generation.clone(),
+                    effect.effect_id.clone(), step.subject.clone()],
+                actor: RECONCILER_ACTOR.into(),
+                idempotency_key: episode.clone(),
+            },
+            "effect-unresolved",
+        )?;
         Ok(())
     }
 

@@ -219,6 +219,7 @@ fn operation_conflicted_tx(tx: &Connection, operation: &str) -> Result<bool, Fra
 impl Store {
     /// Effective wire state, including causal human resolution, not arrival order.
     pub fn effect_state(&self, subject: &str) -> Result<Option<(String, EffectRecord)>, FractalError> {
+        smallclaims::touched::note_read(|| subject.to_owned());
         Ok(latest_tx(&self.readers.get(), subject)?.map(|(kind, record)| {
             let state = record.outcome.clone().unwrap_or_else(||
                 kind.strip_prefix("effect.").unwrap_or(&kind).to_owned());
@@ -243,21 +244,6 @@ impl Store {
                 kind.strip_prefix("effect.").unwrap_or(&kind).to_owned()), record))),
             Ok(None) => None, Err(error) => Some(Err(error)),
         }).collect()
-    }
-
-    pub fn unresolved_effects(&self) -> Result<Vec<EffectRecord>, FractalError> {
-        let subjects = {
-            let connection = self.readers.get();
-            let mut statement = connection.prepare_cached(
-                "SELECT DISTINCT subject FROM claims WHERE kind='effect.unresolved'").map_err(internal)?;
-            statement.query_map([], |row| row.get::<_, String>(0)).map_err(internal)?
-                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
-        };
-        let mut records = Vec::new();
-        for subject in subjects {
-            if let Some((state, record)) = self.effect_state(&subject)? && state == "unresolved" { records.push(record); }
-        }
-        Ok(records)
     }
 
     /// The caller supplies server-established person authority, never the request actor alone.
@@ -328,61 +314,87 @@ impl Store {
         })
     }
 
-    /// Recovery is observation only. Native effects never gain new send authority.
-    pub fn reconcile_effects(&self) -> Result<bool, FractalError> {
-        let subjects = {
-            let connection = self.readers.get();
-            let mut statement = connection.prepare_cached(
-                "SELECT DISTINCT subject FROM claims WHERE kind IN ('effect.intended','effect.in-flight')").map_err(internal)?;
-            statement.query_map([], |row| row.get::<_, String>(0)).map_err(internal)?
-                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
-        };
-        let mut changed = false;
-        for subject in subjects {
-            let Some((state, record)) = self.effect_state(&subject)? else { continue };
-            if state == "unresolved" || record.resolution.as_deref() == Some("human") { continue; }
-            let conflict = operation_conflicted_tx(&self.readers.get(), &record.operation_id)?;
-            if conflict {
-                self.with_run_fence(&record.bound_step_run, |tx|
-                    park_tx(tx, self.origin(), &record, &record.bound_step_run, "idempotency-conflict", "daemon/runtime"))?;
-                changed = true;
-                continue;
+    /// Bootstrap the incremental effect index once after daemon startup. Confirmed
+    /// effects still register operation dependencies to catch late writer conflicts.
+    pub fn effect_subjects(&self) -> Result<Vec<String>, FractalError> {
+        smallclaims::touched::note_read(|| "effect-history".into());
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind IN
+             ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved')").map_err(internal)?;
+        let subjects = statement.query_map([], |row| row.get::<_, String>(0)).map_err(internal)?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
+        Ok(subjects)
+    }
+
+    fn park_conflicted_effect(&self, record: &EffectRecord) -> Result<bool, FractalError> {
+        self.with_run_fence(&record.bound_step_run, |tx| {
+            // The reader snapshot can predate a person's resolution while we
+            // wait for the fence. Never recreate that settled episode.
+            let Some((kind, current)) = latest_tx(tx, &record.effect_id)? else { return Ok(false) };
+            if kind == KIND_UNRESOLVED || current.resolution.as_deref() == Some("human") {
+                return Ok(false);
             }
-            if state == "confirmed" { continue; }
-            let live = {
-                let connection = self.readers.get();
-                connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM step_runs WHERE subject=?1 AND attempt=?2
-                     AND lease_owner=?3 AND lease_incarnation=?4
-                     AND CAST(lease_expires_at_unix_ms AS INTEGER)>CAST(?5 AS INTEGER)
-                     AND status IN ('claimed','working','submitted'))",
-                    params![record.bound_step_run,record.bound_attempt,record.lease_owner,record.lease_incarnation,now_ms().to_string()],
-                    |row| row.get::<_, bool>(0)).map_err(internal)?
-                    && work_incarnation_live(&connection, &record.lease_owner, &record.lease_incarnation).map_err(internal)?
-            };
-            if live { continue; }
-            if record.provider == "native-message" {
-                let key = format!("native-effect-message/{}", record.operation_id);
-                if operation_conflicted_tx(&self.readers.get(), &operation_id_for_key(&key))? {
-                    self.unresolved_message_effect(&record, "idempotency-conflict", "daemon/runtime")?;
-                    changed = true;
-                    continue;
-                }
-                match self.operation_claim(&key).map_err(internal)? {
-                    Some(message) => {
-                        if let Err(error) = self.confirm_message_effect(&record, &message, "daemon/runtime") {
-                            if error.code != "effect-evidence-mismatch" { return Err(error); }
-                            self.unresolved_message_effect(&record, error.code, "daemon/runtime")?;
-                        }
-                    }
-                    None => { self.unresolved_message_effect(&record, "delivery-unknown", "daemon/runtime")?; }
-                }
-            } else {
-                self.unresolved_message_effect(&record, "provider-readback-unavailable", "daemon/runtime")?;
-            }
-            changed = true;
+            if !operation_conflicted_tx(tx, &current.operation_id)? { return Ok(false); }
+            park_tx(tx, self.origin(), &current, &current.bound_step_run,
+                "idempotency-conflict", "daemon/runtime")?;
+            Ok(true)
+        })
+    }
+
+    /// Readback-only recovery of one changed or due effect; never grants send authority.
+    /// Reads and lease expiry are registered with the existing incremental scheduler.
+    pub fn reconcile_effect(&self, subject: &str) -> Result<bool, FractalError> {
+        let Some((state, record)) = self.effect_state(subject)? else { return Ok(false) };
+        if state == "unresolved" || record.resolution.as_deref() == Some("human") { return Ok(false); }
+        smallclaims::touched::note_read(|| format!("operation:{}", record.operation_id));
+        if operation_conflicted_tx(&self.readers.get(), &record.operation_id)? {
+            return self.park_conflicted_effect(&record);
         }
-        Ok(changed)
+        if state == "confirmed" { return Ok(false); }
+        smallclaims::touched::note_read(|| record.bound_step_run.clone());
+        smallclaims::touched::note_read(|| record.lease_owner.clone());
+        smallclaims::touched::note_read(|| format!("actor:{}", record.lease_owner));
+        if record.provider == "native-message" {
+            smallclaims::touched::note_read(|| format!("operation:{}",
+                operation_id_for_key(&format!("native-effect-message/{}", record.operation_id))));
+        }
+        let expiry = {
+            let connection = self.readers.get();
+            let expiry: Option<String> = connection.query_row(
+                "SELECT lease_expires_at_unix_ms FROM step_runs WHERE subject=?1 AND attempt=?2
+                 AND lease_owner=?3 AND lease_incarnation=?4
+                 AND CAST(lease_expires_at_unix_ms AS INTEGER)>CAST(?5 AS INTEGER)
+                 AND status IN ('claimed','working','submitted')",
+                params![record.bound_step_run,record.bound_attempt,record.lease_owner,record.lease_incarnation,now_ms().to_string()],
+                |row| row.get(0)).optional().map_err(internal)?;
+            if expiry.is_some()
+                && work_incarnation_live(&connection, &record.lease_owner, &record.lease_incarnation).map_err(internal)?
+            { expiry } else { None }
+        };
+        if let Some(expiry) = expiry {
+            smallclaims::touched::note_due(expiry.parse::<u128>().map_err(internal)?);
+            return Ok(false);
+        }
+        if record.provider == "native-message" {
+            let key = format!("native-effect-message/{}", record.operation_id);
+            if operation_conflicted_tx(&self.readers.get(), &operation_id_for_key(&key))? {
+                self.unresolved_message_effect(&record, "idempotency-conflict", "daemon/runtime")?;
+                return Ok(true);
+            }
+            match self.operation_claim(&key).map_err(internal)? {
+                Some(message) => {
+                    if let Err(error) = self.confirm_message_effect(&record, &message, "daemon/runtime") {
+                        if error.code != "effect-evidence-mismatch" { return Err(error); }
+                        self.unresolved_message_effect(&record, error.code, "daemon/runtime")?;
+                    }
+                }
+                None => { self.unresolved_message_effect(&record, "delivery-unknown", "daemon/runtime")?; }
+            }
+        } else {
+            self.unresolved_message_effect(&record, "provider-readback-unavailable", "daemon/runtime")?;
+        }
+        Ok(true)
     }
 
     pub fn step_has_unresolved_effect(&self, step: &str) -> Result<bool, FractalError> {
@@ -662,4 +674,47 @@ mod tests {
         tx.commit().unwrap();
         assert!(store.operation_claim(&native_message_key(&owner).unwrap()).unwrap().is_none());
     }
+    #[test]
+    fn stale_conflict_snapshot_cannot_repark_a_human_resolved_episode() {
+        for outcome in [None, Some("abandoned")] {
+            let store = Store::open_memory("example").unwrap();
+            let owner = owner();
+            let key = effect_key(&owner).unwrap();
+            let operation_id = operation_id_for_key(&key);
+            let stale = EffectRecord {
+                effect_id: format!("effect/{operation_id}"), operation_id,
+                provider: "native-message".into(), target: "agent/example/recipient".into(),
+                payload_digest: "digest-example".into(), class: EffectClass::NativeCoordinated,
+                bound_step_run: owner.step.clone(), bound_attempt: owner.attempt,
+                lease_owner: "agent/example/worker".into(), lease_incarnation: owner.incarnation.clone(),
+                provider_ref: None, result_digest: None, error: None, recovering_actor: None,
+                resolution: None, outcome: None, evidence: vec![],
+            };
+            store.append_claim(&intended_input(&stale, &key).unwrap()).unwrap();
+            {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                tx.execute("UPDATE operations SET state='conflict' WHERE id=?1", [&stale.operation_id]).unwrap();
+                assert!(operation_conflicted_tx(&tx, &stale.operation_id).unwrap());
+                let mut unresolved = stale.clone();
+                unresolved.error = Some("idempotency-conflict".into());
+                append_effect_tx(&tx, store.origin(), KIND_UNRESOLVED, &unresolved).unwrap();
+                let mut resolved = stale.clone();
+                resolved.resolution = Some("human".into());
+                resolved.outcome = outcome.map(str::to_owned);
+                resolved.recovering_actor = Some("person/example".into());
+                resolved.provider_ref = outcome.is_none().then(|| "message/example-observed".into());
+                append_effect_tx(&tx, store.origin(), KIND_CONFIRMED, &resolved).unwrap();
+                tx.commit().unwrap();
+            }
+            // The record was read before the other transaction parked and a person
+            // resolved it. Resume exactly the fenced branch with that stale input.
+            assert!(!store.park_conflicted_effect(&stale).unwrap());
+            assert!(!store.reconcile_effect(&stale.effect_id).unwrap());
+            assert_eq!(store.effect_state(&stale.effect_id).unwrap().unwrap().0,
+                outcome.unwrap_or("confirmed"));
+            assert_eq!(store.claims_for(&stale.effect_id, Some(KIND_UNRESOLVED)).unwrap().len(), 1);
+        }
+    }
+
 }

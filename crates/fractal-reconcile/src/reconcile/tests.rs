@@ -86,8 +86,7 @@ mission "example/report" state="ready" {
         }
 
         fn converge(&self) {
-            self.store.reconcile_effects().unwrap();
-            self.reconciler.raise_unresolved_effects().unwrap();
+            self.reconciler.reconcile_effects().unwrap();
         }
 
         fn restart(self) -> Self {
@@ -111,6 +110,80 @@ mission "example/report" state="ready" {
             assert_eq!(faults.iter().filter(|fault| fault.item.kind == "effect-unresolved"
                 && fault.item.person == WORKER).count(), 1);
         }
+    }
+
+    #[test]
+    fn unrelated_wakes_do_not_read_completed_effect_history() {
+        let mut fixture = Fixture::new("example-origin");
+        let mut completed = Vec::new();
+        for index in 0..16 {
+            fixture.owner.key = format!("report-ready-{index}");
+            let effect = fixture.admit();
+            let message = fixture.commit_message();
+            fixture.store.confirm_message_effect(&effect, &message, WORKER).unwrap();
+            completed.push(effect.effect_id);
+        }
+        let ((), bootstrap) = smallclaims::touched::record(|| fixture.converge());
+        assert!(bootstrap.contains("effect-history"));
+        assert!(completed.iter().all(|effect| bootstrap.contains(effect)));
+        for index in 0..3 {
+            fixture.store.append_claim(&ClaimInput {
+                subject: format!("unrelated/{index}"), kind: "example.changed".into(), actor: None,
+                fields: BTreeMap::new(), evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+            assert!(!reads.contains("effect-history"));
+            assert!(completed.iter().all(|effect| !reads.contains(effect)), "{reads:?}");
+        }
+    }
+
+    #[test]
+    fn live_effect_records_lease_deadline_and_due_wake_rechecks_only_that_effect() {
+        let fixture = Fixture::new("example-origin");
+        let effect = fixture.admit();
+        fixture.converge();
+        let due = fixture.reconciler.incremental.due_of(&effect.effect_id).unwrap();
+        let step = fixture.store.step_run(&effect.bound_step_run).unwrap().unwrap();
+        assert_eq!(Some(due), step.claim_expires_at_unix_ms);
+        assert_eq!(fixture.reconciler.incremental.next_due("effect/"), Some(due));
+        // Drive the scheduler's due boundary without sleeping or changing any graph
+        // input. The real lease is still live, so readback must re-arm it, not send.
+        let reads = fixture.reconciler.incremental.reads_of(&effect.effect_id);
+        fixture.reconciler.incremental.evaluated(&effect.effect_id, reads, Some(0));
+        let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+        assert!(reads.contains(&effect.effect_id));
+        assert!(!reads.contains("effect-history"));
+        assert_eq!(fixture.reconciler.incremental.due_of(&effect.effect_id), Some(due));
+        assert_eq!(fixture.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "intended");
+        assert!(fixture.store.latest_claim("message/example-report", Some("message.sent")).unwrap().is_none());
+    }
+
+    #[test]
+    fn effects_created_after_bootstrap_and_changed_runtime_raise_one_episode() {
+        let fixture = Fixture::new("example-origin");
+        fixture.converge();
+        let effect = fixture.admit();
+        fixture.converge();
+        assert!(fixture.reconciler.incremental.reads_of(&effect.effect_id).contains(WORKER));
+        fixture.runtime("stopped", INCARNATION);
+        fixture.converge();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        let ((), reads) = smallclaims::touched::record(|| fixture.converge());
+        assert!(!reads.contains("effect-history"));
+        assert!(!reads.contains(&effect.effect_id));
+    }
+
+    #[test]
+    fn unresolved_episode_arriving_after_bootstrap_is_discovered_once() {
+        let fixture = Fixture::new("example-origin");
+        fixture.converge();
+        let effect = fixture.admit();
+        fixture.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
+        fixture.converge();
+        fixture.assert_one_episode(&effect);
     }
 
     #[test]
@@ -216,6 +289,9 @@ mission "example/report" state="ready" {
         first.store.confirm_message_effect(&effect, &message, WORKER).unwrap();
         first.store.set_step_state(&first.owner.step, "completed", None).unwrap();
         first.store.set_mission_run_state(&first.run.id, "completed", "terminal", None).unwrap();
+        // Register the completed effect before replication: late operation changes,
+        // not a fresh full-history bootstrap, must invalidate this success.
+        first.converge();
         for _ in 0..100 {
             let exchange = second.store.export_replication_exchange(FLEET,
                 &first.store.replication_inventory().unwrap()).unwrap();

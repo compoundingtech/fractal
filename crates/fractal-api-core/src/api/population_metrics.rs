@@ -428,10 +428,8 @@ mod tests {
         Bucket { driver: "unattributed".into(), kind: "unattributed", repo: "unattributed".into(),
             state, reason, has_work: false }
     }
-    fn attention() -> [(&'static str, u64); 11] {
-        [("person-step", 0), ("human-gate", 0), ("launch-approval", 0), ("unread-message", 0),
-         ("agent-request", 0), ("revision-approval", 0), ("harness-login", 0),
-         ("harness-prompt", 0), ("fault", 0), ("model-drift", 0), ("unattributed", 0)]
+    fn attention() -> Attention {
+        super::super::population_attention::KINDS.map(|kind| (kind, 0))
     }
 
     #[tokio::test(start_paused = true)]

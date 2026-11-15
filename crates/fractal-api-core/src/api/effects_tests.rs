@@ -694,7 +694,7 @@ async fn human_confirmation_and_abandonment_release_fences_without_changing_inte
         else { assert!(encoded["record"].get("provider_ref").is_none()); }
         assert!(encoded["record"].get("error").is_none());
         fixture.restart();
-        assert!(!fixture.state.store.reconcile_effects().unwrap());
+        assert!(!fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
         assert_eq!(fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap().0, expected);
         assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.intended")).unwrap()[0].id, intent[0].id);
         assert_message_count(&fixture.state, 0);
@@ -744,10 +744,10 @@ fn recovery_after_restart_and_lease_churn_never_implicitly_resolves_an_episode()
     let effect = fixture.admit();
     fixture.state.store.effect_in_flight(&effect).unwrap();
     fixture.replace_attempt();
-    assert!(fixture.state.store.reconcile_effects().unwrap());
+    assert!(fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
     fixture.assert_parked(&effect);
     fixture.restart();
-    assert!(!fixture.state.store.reconcile_effects().unwrap());
+    assert!(!fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
     fixture.state.store.unresolved_message_effect(&effect, "still-unknown", "daemon/runtime").unwrap();
     fixture.assert_parked(&effect);
     assert_eq!(fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "unresolved");
@@ -770,7 +770,6 @@ async fn human_resolution_does_not_clear_a_concurrent_unseen_unresolved_episode(
     replicate(&peer, &fixture.state);
     assert_eq!(fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "unresolved");
     assert!(fixture.state.store.step_has_unresolved_effect(&effect.bound_step_run).unwrap());
-    assert!(!fixture.state.store.unresolved_effects().unwrap().is_empty());
     assert_message_count(&fixture.state, 0);
 }
 
@@ -810,12 +809,12 @@ fn dead_original_lease_recovers_committed_native_message_only_by_key() {
     fixture.state.store.effect_in_flight(&effect).unwrap();
     let receipt = fixture.seed_message();
     fixture.replace_attempt();
-    assert!(fixture.state.store.reconcile_effects().unwrap());
+    assert!(fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
     let (state, record) = fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap();
     assert_eq!(state, "confirmed");
     assert_eq!(record.provider_ref.as_deref(), Some(receipt.message.subject.as_str()));
     assert_eq!(record.lease_incarnation, effect.lease_incarnation);
     assert!(record.resolution.is_none());
-    assert!(!fixture.state.store.reconcile_effects().unwrap());
+    assert!(!fixture.state.store.reconcile_effect(&effect.effect_id).unwrap());
     assert_message_count(&fixture.state, 1);
 }

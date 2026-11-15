@@ -61,7 +61,9 @@ Confirmation proves the native message committed, not that a recipient read it. 
 An unresolved effect waits like a broken gate: reconciliation does not acquire
 origination authority through lease expiry, restart or elapsed time. The owning
 agent receives one `effect-unresolved:<effect-subject>` fault episode and the
-person sees one attention item. The run view's `effects` block identifies each
+person sees one `effect-unresolved` attention item. Population attention counts
+publish that item only on the enclosing run's canonical creation-origin host,
+not on every replica that reads it. The run view's `effects` block identifies each
 effect, its state and any observed `provider_ref`.
 
 Read an effect by its full stable key:

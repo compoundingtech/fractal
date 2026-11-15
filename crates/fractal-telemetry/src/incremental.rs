@@ -126,6 +126,13 @@ struct Item {
 /// key a read notes for subjects it cannot name in advance.
 pub fn change_keys(change: &Change) -> Vec<String> {
     let mut keys = vec![change.subject.clone(), format!("kind:{}", change.kind)];
+    // Operation receipts may arrive on different subjects (including a conflicting
+    // writer's message). Readers depend on the operation, not its chosen subject.
+    if let Ok(body) = serde_json::from_str::<Value>(&change.body)
+        && let Some(operation) = body.pointer("/_operation/id").and_then(Value::as_str)
+    {
+        keys.push(format!("operation:{operation}"));
+    }
     if let Some(actor) = &change.actor {
         keys.push(format!("actor:{actor}"));
     }
@@ -489,6 +496,20 @@ impl Incremental {
             .is_none_or(|item| item.dirty || item.due.is_some_and(|due| due <= now))
     }
 
+    /// Registered items in this section that changed or reached their deadline.
+    /// This walks only the in-memory index, never the durable subject history.
+    pub fn needed_items(&self, prefix: &str, now: u128) -> BTreeSet<String> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .items
+            .iter()
+            .filter(|(name, item)| name.starts_with(prefix)
+                && (item.dirty || item.due.is_some_and(|due| due <= now)))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     /// The items named with `prefix` that read something the feed has after `cursor`, and the
     /// subjects named with `prefix` that the feed changed and no evaluation has recorded yet;
     /// see [`FeedReaders`]. With no cursor it starts where the passes' own reading of the feed
@@ -692,6 +713,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn effect_items_follow_operation_changes_and_lease_deadlines_not_unrelated_wakes() {
+        let feed = Feed(Mutex::new(Vec::new()));
+        let incremental = Incremental::default();
+        incremental.observe(&feed).unwrap();
+        incremental.evaluated("effect/completed",
+            BTreeSet::from(["effect/completed".into(), "operation/send".into()]), None);
+        incremental.evaluated("effect/pending",
+            BTreeSet::from(["effect/pending".into(), "step-run/work".into()]), Some(100));
+        feed.0.lock().unwrap().push(change("unrelated/x", "example.changed", None, "{}"));
+        incremental.observe(&feed).unwrap();
+        assert!(incremental.needed_items("effect/", 99).is_empty());
+        assert_eq!(incremental.needed_items("effect/", 100),
+            BTreeSet::from(["effect/pending".to_owned()]));
+        // A conflicting operation receipt need not use the effect's own subject.
+        feed.0.lock().unwrap().push(change("message/another-writer", "message.sent", None,
+            r#"{"fields":{"to":"agent/other"},"_operation":{"id":"send"}}"#));
+        let changed = incremental.readers_since(&feed, None, "effect/").unwrap();
+        assert_eq!(changed.readers, ["effect/completed"]);
+        incremental.observe(&feed).unwrap();
+        assert_eq!(incremental.needed_items("effect/", 99),
+            BTreeSet::from(["effect/completed".to_owned()]));
+    }
 
     #[test]
     fn a_watch_subject_names_its_thread_and_seat() {

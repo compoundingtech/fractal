@@ -597,7 +597,7 @@ impl Store {
                         sources.insert((run, "mission-run.created"));
                     }
                 }
-                "human-gate" | "revision-approval" => {
+                "human-gate" | "revision-approval" | "effect-unresolved" => {
                     if let Some(run) = run_subject(item) {
                         sources.insert((run, "mission-run.created"));
                     }
@@ -675,7 +675,7 @@ impl Store {
                         owner(Some(ask))
                     } else { run_origin() }
                 }
-                "human-gate" | "revision-approval" => run_origin(),
+                "human-gate" | "revision-approval" | "effect-unresolved" => run_origin(),
                 "launch-approval" => source(&item.subject, "planning-session.started")
                     .map(|(origin, _)| origin.clone()),
                 "harness-login" | "harness-prompt" | model_drift::MODEL_DRIFT_ATTENTION_KIND => member_origin(&item.subject),
@@ -1769,7 +1769,7 @@ mod population_attention_ownership_tests {
             let store = Store::open_memory(reader).unwrap();
             source_claim(&store, "source-host", "mission-run/example", "mission-run.created", "person/reviewer");
             source_claim(&store, "later-writer", "mission-run/example", "mission-run.state", "person/reviewer");
-            for kind in ["person-step", "human-gate", "revision-approval", "fault"] {
+            for kind in ["person-step", "human-gate", "revision-approval", "effect-unresolved", "fault"] {
                 assert_eq!(
                     store.attention_source_origin(&item(kind, "step-run/source", Some("mission-run/example"))).unwrap(),
                     "source-host",
