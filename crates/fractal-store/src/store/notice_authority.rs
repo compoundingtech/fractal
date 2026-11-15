@@ -4,7 +4,8 @@
 //! the claim's origin member and writer sequence checked against the binding. A missing,
 //! conflicted, invalid or ended binding fails closed, with no election. Ordinary producer
 //! sources never depend on the binding; daemon-owned digest sources do.
-//! Payload timestamps and declaration hashes are deliberately never authority evidence here.
+//! Digest emission history pins its exact owner declaration and checks the historical member
+//! window; current ownership still fences every new local source and snapshot write.
 use super::*;
 use crate::fleet::MemberState;
 use crate::notice_owner::{self, NoticeOwner};
@@ -121,7 +122,7 @@ pub(super) fn owner(connection: &Connection) -> Result<(NoticeOwner, crate::flee
 }
 
 /// Install only the compiled reviewed notice manifests, without borrowing a person's identity.
-/// The runtime registration exception in the fold is restricted to these pins and this owner.
+/// The fold's runtime registration exception admits only these exact compiled pins.
 pub(super) fn ensure_digest_registrations_tx(tx: &Transaction<'_>, origin: &str) -> Result<()> {
     validate_owner_writer(tx, notice::RUNTIME_ACTOR, Some(Position::next(tx, origin)?))?;
     custom::flush(tx)?;
@@ -166,8 +167,8 @@ pub(super) fn validate(
                 "notices unavailable: source creation conflict");
         }
         if subject.starts_with(notice::DIGEST_SOURCE_PREFIX) {
-            validate_digest_source(subject, actor, fields)?;
-            return validate_owner_writer(connection, actor, position);
+            validate_digest_source(connection, subject, actor, fields)?;
+            return validate_digest_writer(connection, actor, fields, position);
         }
         return validate_source(actor, fields);
     }
@@ -187,7 +188,8 @@ pub(super) fn validate(
     notice::validate_registration(&source_manifest, &source_hash)?;
     anyhow::ensure!(source_fields.get("_registration").and_then(Value::as_str) == Some(source_hash.as_str()),
         "notices unavailable: source registration mismatch");
-    let source_history = custom::claims(connection, source_id)?;
+    let mut source_history = custom::claims(connection, source_id)?;
+    retain_authenticated_digest_sources(connection, source_id, &mut source_history)?;
     let mut creations = source_history.iter().filter(|claim| claim.kind == source_manifest.creation_kind);
     anyhow::ensure!(creations.next().is_some_and(|claim| claim.id == source.id) && creations.next().is_none(),
         "notices unavailable: conflicting or ineligible source creation");
@@ -197,8 +199,9 @@ pub(super) fn validate(
     let producer = source.actor.as_deref().ok_or_else(|| unavailable("missing source author"))?;
     fractal_schema::custom::validate_fields(&source_manifest.claims[&source.kind], &source_fields)?;
     if source_id.starts_with(notice::DIGEST_SOURCE_PREFIX) {
-        validate_digest_source(source_id, producer, &source_fields)?;
-        validate_owner_writer(connection, producer, Some(Position::written(connection, &source)?))?;
+        validate_digest_source(connection, source_id, producer, &source_fields)?;
+        anyhow::ensure!(authenticated_digest_source(connection, &source)?,
+            "notices unavailable: unauthenticated digest source");
         anyhow::ensure!(subject.strip_prefix(notice::DIGEST_SNAPSHOT_PREFIX)
             == source_id.strip_prefix(notice::DIGEST_SOURCE_PREFIX),
             "notices unavailable: digest snapshot identity differs from its source");
@@ -236,7 +239,92 @@ pub(super) fn validate_owner_writer(connection: &Connection, actor: &str, positi
     Ok(())
 }
 
-fn validate_digest_source(subject: &str, actor: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+/// Bind new emissions to the selected declaration before they enter immutable history.
+pub(super) fn pin_digest_owner(
+    tx: &Transaction<'_>, origin: &str, fields: &mut BTreeMap<String, Value>,
+) -> Result<()> {
+    validate_owner_writer(tx, notice::RUNTIME_ACTOR, Some(Position::next(tx, origin)?))?;
+    let declaration = current_desired_row_tx(tx, notice_owner::SUBJECT)?
+        .ok_or_else(|| unavailable("missing notice-owner declaration"))?;
+    let source = fields.get_mut("source").and_then(Value::as_object_mut)
+        .ok_or_else(|| unavailable("missing digest source metadata"))?;
+    anyhow::ensure!(source.get("owner_claim").is_none_or(|value| value.as_str() == Some(&declaration.claim_id)),
+        "notices unavailable: digest pins another owner declaration");
+    source.insert("owner_claim".into(), json!(declaration.claim_id));
+    Ok(())
+}
+
+fn validate_digest_writer(
+    connection: &Connection, actor: &str, fields: &BTreeMap<String, Value>, position: Option<Position<'_>>,
+) -> Result<()> {
+    let id = fields.get("source").and_then(|source| source.get("owner_claim")).and_then(Value::as_str)
+        .ok_or_else(|| unavailable("only the bound notice owner's daemon writes daemon notices: missing owner claim"))?;
+    let declaration = claim_by_id_tx(connection, id)?
+        .filter(|claim| claim.subject == notice_owner::SUBJECT && claim.kind == "intent.desired")
+        .ok_or_else(|| unavailable("owner declaration is unavailable"))?;
+    let repaired: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND state='repaired')",
+        [id], |row| row.get(0),
+    )?;
+    anyhow::ensure!(!repaired, "notices unavailable: owner declaration was repaired");
+    let position = position.ok_or_else(|| unavailable("missing digest writer position"))?;
+    if declaration.origin == position.origin {
+        anyhow::ensure!(Position::written(connection, &declaration)?.sequence <= position.sequence,
+            "notices unavailable: owner declaration follows the digest emission");
+    }
+    let desired: DesiredSubject = serde_json::from_value(declaration.body)?;
+    anyhow::ensure!(desired.subject == notice_owner::SUBJECT && desired.kind == notice_owner::KIND,
+        "notices unavailable: invalid owner declaration identity");
+    let bound = notice_owner::parse(&desired.desired).map_err(anyhow::Error::new)?;
+    let membership = fleet_membership_tx(connection)?;
+    anyhow::ensure!(actor == notice::RUNTIME_ACTOR && position.origin == bound.member
+        && membership.keys_for(position.origin, position.sequence).contains(&bound.member_key),
+        "notices unavailable: only the bound notice owner's daemon writes daemon notices");
+    Ok(())
+}
+
+/// Authenticate immutable emissions independently of today's owner. Raw claim existence,
+/// daemon actor names and payload host strings are not emission evidence.
+pub(super) fn authenticated_digest_source(connection: &Connection, claim: &ClaimRecord) -> Result<bool> {
+    if !claim.subject.starts_with(notice::DIGEST_SOURCE_PREFIX)
+        || claim.kind != "custom.attention.notice-created" {
+        return Ok(false);
+    }
+    let repaired: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND state='repaired')",
+        [&claim.id], |row| row.get(0),
+    )?;
+    if repaired { return Ok(false); }
+    let fields = custom::fields(claim);
+    let manifest = &notice::manifests()[0];
+    if fields.get("_registration").and_then(Value::as_str) != Some(notice::HASHES[0])
+        || fractal_schema::custom::validate_fields(&manifest.claims[&claim.kind], &fields).is_err()
+        || validate_digest_identity(&claim.subject, claim.actor.as_deref().unwrap_or_default(), &fields).is_err() {
+        return Ok(false);
+    }
+    let position = Position::written(connection, claim)?;
+    match validate_digest_writer(connection, claim.actor.as_deref().unwrap_or_default(), &fields, Some(position)) {
+        Ok(()) => Ok(true),
+        Err(error) if error.downcast_ref::<rusqlite::Error>().is_some() => Err(error),
+        Err(_) => Ok(false),
+    }
+}
+
+pub(super) fn retain_authenticated_digest_sources(
+    connection: &Connection, subject: &str, history: &mut Vec<ClaimRecord>,
+) -> Result<()> {
+    if subject.starts_with(notice::DIGEST_SOURCE_PREFIX) {
+        let mut failure = None;
+        history.retain(|claim| match authenticated_digest_source(connection, claim) {
+            Ok(authenticated) => authenticated,
+            Err(error) => { failure = Some(error); false }
+        });
+        if let Some(error) = failure { return Err(error); }
+    }
+    Ok(())
+}
+
+fn validate_digest_identity(subject: &str, actor: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
     anyhow::ensure!(actor == notice::RUNTIME_ACTOR && !fields.contains_key("producer"),
         "notices unavailable: digest sources are daemon-owned without a producer field");
     let recipient = fields.get("recipient").and_then(Value::as_str)
@@ -248,14 +336,39 @@ fn validate_digest_source(subject: &str, actor: &str, fields: &BTreeMap<String, 
     anyhow::ensure!(date.len() == 10 && date.bytes().enumerate().all(|(index, byte)|
         if index == 4 || index == 7 { byte == b'-' } else { byte.is_ascii_digit() }),
         "notices unavailable: digest identity needs a local date");
-    let rows = fields.get("source").and_then(|source| source.get("digest")).and_then(Value::as_array)
+    Ok(())
+}
+
+fn validate_digest_source(connection: &Connection, subject: &str, actor: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+    validate_digest_identity(subject, actor, fields)?;
+    let source = fields.get("source").ok_or_else(|| unavailable("digest source needs metadata"))?;
+    anyhow::ensure!(source.get("digest").is_some() || source.get("digest_document").is_some(),
+        "notices unavailable: digest source needs digest rows");
+    if let Some(reference) = source.get("digest_document").and_then(Value::as_str) {
+        anyhow::ensure!(source.get("digest").is_none(), "notices unavailable: digest has two payloads");
+        let (name, hash) = split_document_ref(reference)?;
+        anyhow::ensure!(name == format!("doc/ask-digest/{hash}")
+            && source.get("digest_count").and_then(Value::as_str).and_then(|count| count.parse::<u64>().ok()).is_some(),
+            "notices unavailable: invalid digest document reference or count");
+        let bytes: Vec<u8> = connection.query_row(
+            "SELECT b.bytes FROM documents d JOIN blobs b ON b.hash=d.hash WHERE d.name=?1 AND d.hash=?2 AND length(b.bytes)<65536",
+            params![name, hash], |row| row.get(0),
+        )?;
+        anyhow::ensure!(bytes.len() < 64 * 1024 && hex::encode(Sha256::digest(&bytes)) == hash,
+            "notices unavailable: invalid digest backing root");
+        // Every chunk is immutable and checked by the bounded payload reader. Walking all
+        // rows here would turn final source admission into unbounded writer work.
+        return Ok(());
+    }
+    let rows = source.get("digest").and_then(Value::as_array)
         .ok_or_else(|| unavailable("digest source needs digest rows"))?;
+    anyhow::ensure!(rows.len() <= 128, "notices unavailable: inline digest exceeds row bound");
     for row in rows {
         let row = row.as_object().ok_or_else(|| unavailable("digest row must be an object"))?;
         anyhow::ensure!(row.keys().all(|key| matches!(key.as_str(),
-            "title" | "requester_id" | "default_answer" | "resolved_at" | "target_id" | "episode" | "action_parameters")),
+            "resolution_id" | "title" | "requester_id" | "default_answer" | "resolved_at" | "target_id" | "episode" | "action_parameters")),
             "notices unavailable: unknown digest row field");
-        for field in ["title", "requester_id", "resolved_at", "target_id", "episode"] {
+        for field in ["resolution_id", "title", "requester_id", "resolved_at", "target_id", "episode"] {
             anyhow::ensure!(row.get(field).and_then(Value::as_str).is_some_and(|value| !value.is_empty()),
                 "notices unavailable: digest row needs {field}");
         }

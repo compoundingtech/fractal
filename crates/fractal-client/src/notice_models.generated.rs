@@ -507,6 +507,7 @@ pub struct NoticeDigestRow {
     pub default_answer: Option<NoticeDigestRowDefaultAnswer>,
     pub episode: NoticeDigestRowEpisode,
     pub requester_id: NoticeDigestRowRequesterId,
+    pub resolution_id: NoticeDigestRowResolutionId,
     pub resolved_at: NoticeDigestRowResolvedAt,
     pub target_id: NoticeDigestRowTargetId,
     pub title: NoticeDigestRowTitle,
@@ -533,6 +534,21 @@ impl TryFrom<String> for NoticeDigestRowRequesterId {
     fn try_from(value: String) -> Result<Self, String> {
         if value.is_empty() {
             return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestRowResolutionId(pub String);
+impl TryFrom<String> for NoticeDigestRowResolutionId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^[0-9a-f]{64}$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
         }
         Ok(Self(value))
     }
@@ -1039,6 +1055,12 @@ pub struct NoticeSource {
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
+    pub covered_through: Option<NoticeSourceCoveredThrough>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cwd: Option<NoticeSourceCwd>,
     #[serde(
         default,
@@ -1046,7 +1068,25 @@ pub struct NoticeSource {
         skip_serializing_if = "Option::is_none"
     )]
     pub digest: Option<NoticeSourceDigest>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub digest_count: Option<NoticeSourceDigestCount>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub digest_document: Option<NoticeSourceDigestDocument>,
     pub host: NoticeSourceHost,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub owner_claim: Option<NoticeSourceOwnerClaim>,
     #[serde(
         default,
         deserialize_with = "present",
@@ -1061,6 +1101,7 @@ pub struct NoticeSource {
     pub repo: Option<NoticeSourceRepo>,
 }
 pub type NoticeSourceAgent = NoticeAgent;
+pub type NoticeSourceCoveredThrough = NoticeTimestamp;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct NoticeSourceCwd(pub String);
@@ -1076,10 +1117,44 @@ pub struct NoticeSourceDigest(pub Vec<NoticeSourceDigestItem>);
 impl TryFrom<Vec<NoticeSourceDigestItem>> for NoticeSourceDigest {
     type Error = String;
     fn try_from(value: Vec<NoticeSourceDigestItem>) -> Result<Self, String> {
+        if !(value.len() <= 128) {
+            return Err("maxItems".into());
+        }
         Ok(Self(value))
     }
 }
 pub type NoticeSourceDigestItem = NoticeDigestRow;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSourceDigestCount(pub String);
+impl TryFrom<String> for NoticeSourceDigestCount {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^(?:0|[1-9][0-9]*)$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSourceDigestDocument(pub String);
+impl TryFrom<String> for NoticeSourceDigestDocument {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}$")
+                .expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct NoticeSourceHost(pub String);
@@ -1088,6 +1163,21 @@ impl TryFrom<String> for NoticeSourceHost {
     fn try_from(value: String) -> Result<Self, String> {
         static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
             regex::Regex::new("^(?:host)/[^\\s]+$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSourceOwnerClaim(pub String);
+impl TryFrom<String> for NoticeSourceOwnerClaim {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^[0-9a-f]{64}$").expect("supported pattern")
         });
         if !(PATTERN.is_match(&value)) {
             return Err("pattern".into());

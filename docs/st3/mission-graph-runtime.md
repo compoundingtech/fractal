@@ -1222,11 +1222,19 @@ currently store a timezone, and there was no fleet timezone setting; this explic
 fallback supplies it rather than using the daemon host's timezone. Configure the same IANA
 zone on fleet members. Both settings reload without a restart; an invalid time or timezone
 keeps the previously installed digest policy (an invalid timezone also refuses startup).
-Each local date's digest covers resolutions from the previous local digest boundary up to,
-but excluding, that date's boundary. This is a calendar-day window, including 23-hour and
-25-hour DST days, not a fixed 24-hour lookback. The digest becomes due at the exact boundary.
-A missing local minute advances to the first real minute after it; a repeated minute uses
-its first instant. The reconciler arms the next local boundary rather than polling.
+Each local date's digest becomes due at its exact local boundary, including across
+23-hour and 25-hour DST days. Replicated `covered_through` records the actual prior
+boundary; reloading the time or timezone selects only the next boundary, never
+reinterprets the already-covered instants. After downtime the owner catches up missed
+nonempty dates even before today's wake. Resolution claim identities prevent repeats;
+late-replicated, previously unreported resolutions are carried into the next unissued
+date rather than lost behind a frozen source. Empty dates write nothing.
+A missing local minute advances to the first real minute after it; a repeated minute
+uses its first instant. The reconciler arms the next local boundary rather than polling.
+Arrival discovery, history indexing and large-day staging use bounded 128-item pages
+with immediate work continuations; rebuildable local indexes avoid rescanning lifetime
+ask history on empty days. Authenticated historical owner declarations fence duplicate
+emissions across handovers; unauthorized imported sources cannot reserve a digest date.
 
 At the deadline the member that took the ask writes `work.person-done` as `daemon/runtime` with
 `resolved_by: "deadline"`. The ask leaves the person's home and its origin resumes as it would

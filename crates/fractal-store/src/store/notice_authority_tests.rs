@@ -227,6 +227,7 @@ fn digest_fields(source: &ClaimRecord) -> Value {
     fields.as_object_mut().unwrap().remove("_registration");
     fields.as_object_mut().unwrap().remove("producer");
     fields["source"]["digest"] = json!([{
+        "resolution_id":"resolution-1",
         "title":"Choose a deployment", "requester_id":"agent/example/requester",
         "default_answer":{"id":"wait","label":"Wait"}, "resolved_at":"2026-11-15T08:00:00Z",
         "target_id":"mission/example/step/approve", "episode":"episode-1",
@@ -263,19 +264,37 @@ fn digest_sources_and_snapshots_require_the_bound_owner_and_matching_identity() 
 }
 
 #[test]
-fn imported_non_owner_digest_source_fails_closed() {
+fn imported_non_owner_digest_source_cannot_fence_or_conflict_a_legitimate_emission() {
     let fleet = setup();
     let fields = digest_fields(&fleet.source);
-    fleet.birch.connection.batched(|tx| {
+    let forged = fleet.birch.connection.batched(|tx| {
         let mut fields = fields.clone();
         fields["_registration"] = json!(custom::registration(tx, DIGEST_SOURCE)?.unwrap().0);
+        fields["source"]["owner_claim"] = json!(current_desired_row_tx(tx, notice_owner::SUBJECT)?.unwrap().claim_id);
         append_claim_tx(tx, &fleet.birch.origin, DIGEST_SOURCE, &fleet.source.kind,
             Some(RUNTIME), &json!({"fields":fields}), &[], None)
     }).unwrap().unwrap();
     sync(&fleet.birch, &fleet.alder);
+    assert!(!authenticated_digest_source(&fleet.alder.readers.get(), &forged).unwrap());
     let row = state(&fleet.alder, DIGEST_SOURCE);
     assert_ne!(row["state"], "ready");
-    assert!(row["error"].as_str().unwrap().contains("only the bound notice owner's daemon"), "{row}");
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap();
+    let mut snapshot = snapshot(&source);
+    snapshot["source_id"] = json!(DIGEST_SOURCE);
+    snapshot["producer"] = json!(RUNTIME);
+    fleet.alder.append_claim(&input(DIGEST_SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, snapshot)).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
+        assert_eq!(state(store, DIGEST_SNAPSHOT)["state"], "ready");
+        store.connection.batched(|tx| {
+            assert!(authenticated_digest_source(tx, &source)?);
+            custom::rebuild(tx)?;
+            assert_eq!(custom::source(tx, DIGEST_SOURCE)?.unwrap()["state"], "ready");
+            assert_eq!(custom::source(tx, DIGEST_SNAPSHOT)?.unwrap()["state"], "ready");
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+    }
 }
 
 #[test]
@@ -298,6 +317,44 @@ fn digest_registration_bootstrap_requires_an_owner_and_installs_only_reviewed_pi
         }
         Ok::<_, anyhow::Error>(())
     }).unwrap().unwrap();
+}
+
+#[test]
+fn reviewed_runtime_registrations_survive_handover_and_unrelated_registry_refresh() {
+    let (alder_key, birch_key) = (key(), key());
+    let (_, _, stores) = fleet(&[("alder", &alder_key), ("birch", &birch_key)]);
+    let (alder, birch) = (&stores[0], &stores[1]);
+    declare(alder, "alder", alder_key.public()).unwrap();
+    alder.connection.batched(|tx| ensure_digest_registrations_tx(tx, "alder")).unwrap().unwrap();
+    declare(alder, "birch", birch_key.public()).unwrap();
+    sync(alder, birch);
+    custom::tests_shared_delivery::registration(birch);
+    birch.connection.batched(|tx| {
+        ensure_digest_registrations_tx(tx, "birch")?;
+        custom::rebuild(tx)?;
+        for (subject, pin) in [(DIGEST_SOURCE, notice::HASHES[0]), (DIGEST_SNAPSHOT, notice::HASHES[1])] {
+            let (hash, _, state) = custom::registration(tx, subject)?.unwrap();
+            assert_eq!((hash.as_str(), state.as_str()), (pin, "ready"));
+        }
+        assert!(ensure_digest_registrations_tx(tx, "alder").is_err(),
+            "registration persistence must not authorize the former owner to write");
+        Ok::<_, anyhow::Error>(())
+    }).unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_digest_emission_survives_handover_and_still_fences_the_date() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields.clone())).unwrap();
+    declare(&fleet.alder, "birch", &fleet.birch.member_public_key().unwrap()).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert!(authenticated_digest_source(&store.readers.get(), &source).unwrap());
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
+    }
+    let error = fleet.birch.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap_err();
+    assert!(error.message.contains("producer input is immutable"), "{error:?}");
 }
 
 #[test]

@@ -119,7 +119,11 @@
       "type": "object", "additionalProperties": false, "required": ["host"],
       "properties": {
         "host": {"type": "string", "x-st-ref": "host", "pattern": "^(?:host)/[^\\s]+$"},
-        "digest": {"type": "array", "items": {"$ref": "#/$defs/NoticeDigestRow"}},
+        "digest": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/NoticeDigestRow"}},
+        "digest_document": {"description": "Immutable native document root of a reverse-linked JSONL fragment chain. Each document contains data and an optional previous exact document reference. Concatenate data in chain creation order, then decode one lossless digest row per line.", "type": "string", "pattern": "^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}$"},
+        "digest_count": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)$"},
+        "covered_through": {"$ref": "#/$defs/NoticeTimestamp"},
+        "owner_claim": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "agent": {"$ref": "#/$defs/NoticeAgent"},
         "repo": {"type": "string"},
         "pty": {"type": "string", "x-st-ref": "pty", "pattern": "^(?:pty)/[^\\s]+$"},
@@ -141,7 +145,7 @@
     "NoticeDigestRow": {
       "description": "An automatically resolved ask. Override parameters are omitted after the seven-day override window; absent optional fields are never null.",
       "type": "object", "additionalProperties": false,
-      "required": ["title", "requester_id", "resolved_at", "target_id", "episode"],
+      "required": ["title", "requester_id", "resolved_at", "target_id", "episode", "resolution_id"],
       "properties": {
         "title": {"type": "string", "minLength": 1},
         "requester_id": {"type": "string", "minLength": 1},
@@ -149,6 +153,7 @@
         "resolved_at": {"$ref": "#/$defs/NoticeTimestamp"},
         "target_id": {"type": "string", "minLength": 1},
         "episode": {"type": "string", "minLength": 1},
+        "resolution_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "action_parameters": {"$ref": "#/$defs/NoticeDigestActions"}
       }
     },

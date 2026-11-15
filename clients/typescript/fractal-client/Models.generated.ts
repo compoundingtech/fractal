@@ -3200,6 +3200,7 @@ export type NoticeDigestRow = {
   default_answer?: NoticeDigestDefaultAnswer;
   episode: string;
   requester_id: string;
+  resolution_id: string;
   resolved_at: NoticeTimestamp;
   target_id: string;
   title: string;
@@ -3278,9 +3279,13 @@ export type NoticeSnoozeParameters = {
 
 export type NoticeSource = {
   agent?: NoticeAgent;
+  covered_through?: NoticeTimestamp;
   cwd?: string;
   digest?: Array<NoticeDigestRow>;
+  digest_count?: string;
+  digest_document?: string;
   host: string;
+  owner_claim?: string;
   pty?: string;
   repo?: string;
 };

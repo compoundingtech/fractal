@@ -403,10 +403,6 @@ fn refresh_registrations(tx: &Transaction<'_>) -> Result<()> {
                     || fractal_schema::notice::pinned_hash(&m) != Some(hash) {
                     continue;
                 }
-                let position = notice_authority::Position::written(tx, c)?;
-                if notice_authority::validate_owner_writer(tx, fractal_schema::notice::RUNTIME_ACTOR, Some(position)).is_err() {
-                    continue;
-                }
             }
             registrations.entry(hash.to_owned()).or_insert((m, c));
         }
@@ -482,7 +478,11 @@ pub fn prepare(
         return Err(fail("claim pins another registration"));
     }
     f.insert("_registration".into(), json!(hash));
-    let history = claims(tx, &input.subject).map_err(internal)?;
+    if input.subject.starts_with(fractal_schema::notice::DIGEST_SOURCE_PREFIX) {
+        notice_authority::pin_digest_owner(tx, origin, &mut f).map_err(|e| fail(e.to_string()))?;
+    }
+    let mut history = claims(tx, &input.subject).map_err(internal)?;
+    notice_authority::retain_authenticated_digest_sources(tx, &input.subject, &mut history).map_err(internal)?;
     let creation = history.iter().find(|c| {
         c.kind == m.creation_kind && fields(c).get("_registration") == Some(&json!(hash))
     });
@@ -683,7 +683,8 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
     Ok(false)
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
-    let history = claims(tx, subject)?;
+    let mut history = claims(tx, subject)?;
+    notice_authority::retain_authenticated_digest_sources(tx, subject, &mut history)?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h5f040aa46115 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
     notice_authority::record_dependencies(tx, subject, &history)?;
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {

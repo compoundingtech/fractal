@@ -37,6 +37,8 @@ pub mod custom;
 pub mod model_drift;
 mod notice_authority;
 pub mod ask_digest;
+mod ask_digest_cache;
+mod ask_digest_payload;
 mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
@@ -2904,6 +2906,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2933,6 +2936,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2967,6 +2971,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;

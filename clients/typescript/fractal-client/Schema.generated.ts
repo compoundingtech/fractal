@@ -1270,6 +1270,7 @@ export const NoticeDigestRow = /*#__PURE__*/ (() => Schema.Struct({
   "default_answer": optionalKey(NoticeDigestDefaultAnswer),
   "episode": Schema.String.check(Schema.isMinCodePoints(1)),
   "requester_id": Schema.String.check(Schema.isMinCodePoints(1)),
+  "resolution_id": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))),
   "resolved_at": NoticeTimestamp,
   "target_id": Schema.String.check(Schema.isMinCodePoints(1)),
   "title": Schema.String.check(Schema.isMinCodePoints(1))
@@ -1280,9 +1281,14 @@ export type NoticeDigestRowEncoded = typeof NoticeDigestRow.Encoded
 /** Execution-context provenance and optional native daemon digest details; repository and cwd are informational, never authenticated sender evidence. */
 export const NoticeSource = /*#__PURE__*/ (() => Schema.Struct({
   "agent": optionalKey(NoticeAgent),
+  "covered_through": optionalKey(NoticeTimestamp),
   "cwd": optionalKey(Schema.String),
-  "digest": optionalKey(Schema.Array(NoticeDigestRow)),
+  "digest": optionalKey(Schema.Array(NoticeDigestRow).check(Schema.isMaxLength(128))),
+  "digest_count": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^(?:0|[1-9][0-9]*)$", "u")))),
+  /** Immutable native document root of a reverse-linked JSONL fragment chain. Each document contains data and an optional previous exact document reference. Concatenate data in chain creation order, then decode one lossless digest row per line. */
+  "digest_document": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}$", "u")))).annotate({ description: "Immutable native document root of a reverse-linked JSONL fragment chain. Each document contains data and an optional previous exact document reference. Concatenate data in chain creation order, then decode one lossless digest row per line." }),
   "host": subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host"),
+  "owner_claim": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u")))),
   "pty": optionalKey(subjectRef(new RegExp("^(?:pty)/[^\\s]+$", "u"), "pty")),
   "repo": optionalKey(Schema.String)
 }).annotate({ identifier: "NoticeSource", description: "Execution-context provenance and optional native daemon digest details; repository and cwd are informational, never authenticated sender evidence." }))()

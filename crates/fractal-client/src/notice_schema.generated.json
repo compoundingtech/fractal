@@ -287,6 +287,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "resolution_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
         "resolved_at": {
           "$ref": "#/$defs/NoticeTimestamp"
         },
@@ -304,7 +308,8 @@
         "requester_id",
         "resolved_at",
         "target_id",
-        "episode"
+        "episode",
+        "resolution_id"
       ],
       "type": "object"
     },
@@ -659,6 +664,9 @@
         "agent": {
           "$ref": "#/$defs/NoticeAgent"
         },
+        "covered_through": {
+          "$ref": "#/$defs/NoticeTimestamp"
+        },
         "cwd": {
           "type": "string"
         },
@@ -666,12 +674,26 @@
           "items": {
             "$ref": "#/$defs/NoticeDigestRow"
           },
+          "maxItems": 128,
           "type": "array"
+        },
+        "digest_count": {
+          "pattern": "^(?:0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "digest_document": {
+          "description": "Immutable native document root of a reverse-linked JSONL fragment chain. Each document contains data and an optional previous exact document reference. Concatenate data in chain creation order, then decode one lossless digest row per line.",
+          "pattern": "^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}$",
+          "type": "string"
         },
         "host": {
           "pattern": "^(?:host)/[^\\s]+$",
           "type": "string",
           "x-st-ref": "host"
+        },
+        "owner_claim": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
         },
         "pty": {
           "pattern": "^(?:pty)/[^\\s]+$",

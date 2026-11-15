@@ -610,6 +610,17 @@ public struct NoticeDigestRowRequesterId: Codable, Sendable, Hashable {
     public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
 }
 
+public struct NoticeDigestRowResolutionId: Codable, Sendable, Hashable {
+    public let value: String
+    private static let pattern = try! NSRegularExpression(pattern: "^[0-9a-f]{64}\\z")
+    public init(_ value: String) throws {
+        guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeDigestRowResolutionId: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
 public typealias NoticeDigestRowResolvedAt = NoticeTimestamp
 
 public struct NoticeDigestRowTargetId: Codable, Sendable, Hashable {
@@ -637,14 +648,16 @@ public struct NoticeDigestRow: Codable, Sendable, Hashable {
     public let `defaultAnswer`: NoticeDigestRowDefaultAnswer?
     public let `episode`: NoticeDigestRowEpisode
     public let `requesterID`: NoticeDigestRowRequesterId
+    public let `resolutionID`: NoticeDigestRowResolutionId
     public let `resolvedAt`: NoticeDigestRowResolvedAt
     public let `targetID`: NoticeDigestRowTargetId
     public let `title`: NoticeDigestRowTitle
-    public init(`actionParameters`: NoticeDigestRowActionParameters? = nil, `defaultAnswer`: NoticeDigestRowDefaultAnswer? = nil, `episode`: NoticeDigestRowEpisode, `requesterID`: NoticeDigestRowRequesterId, `resolvedAt`: NoticeDigestRowResolvedAt, `targetID`: NoticeDigestRowTargetId, `title`: NoticeDigestRowTitle) throws {
+    public init(`actionParameters`: NoticeDigestRowActionParameters? = nil, `defaultAnswer`: NoticeDigestRowDefaultAnswer? = nil, `episode`: NoticeDigestRowEpisode, `requesterID`: NoticeDigestRowRequesterId, `resolutionID`: NoticeDigestRowResolutionId, `resolvedAt`: NoticeDigestRowResolvedAt, `targetID`: NoticeDigestRowTargetId, `title`: NoticeDigestRowTitle) throws {
         self.`actionParameters` = `actionParameters`
         self.`defaultAnswer` = `defaultAnswer`
         self.`episode` = `episode`
         self.`requesterID` = `requesterID`
+        self.`resolutionID` = `resolutionID`
         self.`resolvedAt` = `resolvedAt`
         self.`targetID` = `targetID`
         self.`title` = `title`
@@ -654,6 +667,7 @@ public struct NoticeDigestRow: Codable, Sendable, Hashable {
         case `defaultAnswer` = "default_answer"
         case `episode` = "episode"
         case `requesterID` = "requester_id"
+        case `resolutionID` = "resolution_id"
         case `resolvedAt` = "resolved_at"
         case `targetID` = "target_id"
         case `title` = "title"
@@ -666,6 +680,7 @@ public struct NoticeDigestRow: Codable, Sendable, Hashable {
         self.`defaultAnswer` = container.contains(.`defaultAnswer`) ? try container.decode(NoticeDigestRowDefaultAnswer.self, forKey: .`defaultAnswer`) : nil
         self.`episode` = try container.decode(NoticeDigestRowEpisode.self, forKey: .`episode`)
         self.`requesterID` = try container.decode(NoticeDigestRowRequesterId.self, forKey: .`requesterID`)
+        self.`resolutionID` = try container.decode(NoticeDigestRowResolutionId.self, forKey: .`resolutionID`)
         self.`resolvedAt` = try container.decode(NoticeDigestRowResolvedAt.self, forKey: .`resolvedAt`)
         self.`targetID` = try container.decode(NoticeDigestRowTargetId.self, forKey: .`targetID`)
         self.`title` = try container.decode(NoticeDigestRowTitle.self, forKey: .`title`)
@@ -1401,6 +1416,8 @@ public struct NoticeSnoozeParameters: Codable, Sendable, Hashable {
 
 public typealias NoticeSourceAgent = NoticeAgent
 
+public typealias NoticeSourceCoveredThrough = NoticeTimestamp
+
 public struct NoticeSourceCwd: Codable, Sendable, Hashable {
     public let value: String
     public init(_ value: String) throws {
@@ -1415,9 +1432,32 @@ public typealias NoticeSourceDigestItem = NoticeDigestRow
 public struct NoticeSourceDigest: Codable, Sendable, Hashable {
     public let value: [NoticeSourceDigestItem]
     public init(_ value: [NoticeSourceDigestItem]) throws {
+        guard value.count <= 128 else { throw WireValidation.error("NoticeSourceDigest: constraint violation") }
         self.value = value
     }
     public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode([NoticeSourceDigestItem].self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeSourceDigestCount: Codable, Sendable, Hashable {
+    public let value: String
+    private static let pattern = try! NSRegularExpression(pattern: "^(?:0|[1-9][0-9]*)\\z")
+    public init(_ value: String) throws {
+        guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeSourceDigestCount: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeSourceDigestDocument: Codable, Sendable, Hashable {
+    public let value: String
+    private static let pattern = try! NSRegularExpression(pattern: "^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}\\z")
+    public init(_ value: String) throws {
+        guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeSourceDigestDocument: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
     public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
 }
 
@@ -1426,6 +1466,17 @@ public struct NoticeSourceHost: Codable, Sendable, Hashable {
     private static let pattern = try! NSRegularExpression(pattern: "^(?:host)/[^\\s]+\\z")
     public init(_ value: String) throws {
         guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeSourceHost: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeSourceOwnerClaim: Codable, Sendable, Hashable {
+    public let value: String
+    private static let pattern = try! NSRegularExpression(pattern: "^[0-9a-f]{64}\\z")
+    public init(_ value: String) throws {
+        guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeSourceOwnerClaim: constraint violation") }
         self.value = value
     }
     public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
@@ -1454,24 +1505,36 @@ public struct NoticeSourceRepo: Codable, Sendable, Hashable {
 
 public struct NoticeSource: Codable, Sendable, Hashable {
     public let `agent`: NoticeSourceAgent?
+    public let `coveredThrough`: NoticeSourceCoveredThrough?
     public let `cwd`: NoticeSourceCwd?
     public let `digest`: NoticeSourceDigest?
+    public let `digestCount`: NoticeSourceDigestCount?
+    public let `digestDocument`: NoticeSourceDigestDocument?
     public let `host`: NoticeSourceHost
+    public let `ownerClaim`: NoticeSourceOwnerClaim?
     public let `pty`: NoticeSourcePty?
     public let `repo`: NoticeSourceRepo?
-    public init(`agent`: NoticeSourceAgent? = nil, `cwd`: NoticeSourceCwd? = nil, `digest`: NoticeSourceDigest? = nil, `host`: NoticeSourceHost, `pty`: NoticeSourcePty? = nil, `repo`: NoticeSourceRepo? = nil) throws {
+    public init(`agent`: NoticeSourceAgent? = nil, `coveredThrough`: NoticeSourceCoveredThrough? = nil, `cwd`: NoticeSourceCwd? = nil, `digest`: NoticeSourceDigest? = nil, `digestCount`: NoticeSourceDigestCount? = nil, `digestDocument`: NoticeSourceDigestDocument? = nil, `host`: NoticeSourceHost, `ownerClaim`: NoticeSourceOwnerClaim? = nil, `pty`: NoticeSourcePty? = nil, `repo`: NoticeSourceRepo? = nil) throws {
         self.`agent` = `agent`
+        self.`coveredThrough` = `coveredThrough`
         self.`cwd` = `cwd`
         self.`digest` = `digest`
+        self.`digestCount` = `digestCount`
+        self.`digestDocument` = `digestDocument`
         self.`host` = `host`
+        self.`ownerClaim` = `ownerClaim`
         self.`pty` = `pty`
         self.`repo` = `repo`
     }
     enum CodingKeys: String, CodingKey {
         case `agent` = "agent"
+        case `coveredThrough` = "covered_through"
         case `cwd` = "cwd"
         case `digest` = "digest"
+        case `digestCount` = "digest_count"
+        case `digestDocument` = "digest_document"
         case `host` = "host"
+        case `ownerClaim` = "owner_claim"
         case `pty` = "pty"
         case `repo` = "repo"
     }
@@ -1480,9 +1543,13 @@ public struct NoticeSource: Codable, Sendable, Hashable {
         guard keys.allKeys.allSatisfy({ CodingKeys(rawValue: $0.stringValue) != nil }) else { throw WireValidation.error("NoticeSource: unknown property") }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.`agent` = container.contains(.`agent`) ? try container.decode(NoticeSourceAgent.self, forKey: .`agent`) : nil
+        self.`coveredThrough` = container.contains(.`coveredThrough`) ? try container.decode(NoticeSourceCoveredThrough.self, forKey: .`coveredThrough`) : nil
         self.`cwd` = container.contains(.`cwd`) ? try container.decode(NoticeSourceCwd.self, forKey: .`cwd`) : nil
         self.`digest` = container.contains(.`digest`) ? try container.decode(NoticeSourceDigest.self, forKey: .`digest`) : nil
+        self.`digestCount` = container.contains(.`digestCount`) ? try container.decode(NoticeSourceDigestCount.self, forKey: .`digestCount`) : nil
+        self.`digestDocument` = container.contains(.`digestDocument`) ? try container.decode(NoticeSourceDigestDocument.self, forKey: .`digestDocument`) : nil
         self.`host` = try container.decode(NoticeSourceHost.self, forKey: .`host`)
+        self.`ownerClaim` = container.contains(.`ownerClaim`) ? try container.decode(NoticeSourceOwnerClaim.self, forKey: .`ownerClaim`) : nil
         self.`pty` = container.contains(.`pty`) ? try container.decode(NoticeSourcePty.self, forKey: .`pty`) : nil
         self.`repo` = container.contains(.`repo`) ? try container.decode(NoticeSourceRepo.self, forKey: .`repo`) : nil
     }
