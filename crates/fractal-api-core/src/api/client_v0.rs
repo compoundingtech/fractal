@@ -498,6 +498,7 @@ pub struct ClientSession {
     /// Negotiated `model-drift-attention.v1`: the client reads `model-drift` attention rows.
     pub model_drift_attention: bool,
     pub conversation_blocks: bool,
+    pub conversation_semantics: bool,
     pub conversation_delivery_links: bool,
     pub conversation_message_participants: bool,
     /// Internal assistant projection option, never negotiated by native clients.
@@ -530,6 +531,7 @@ impl ClientSession {
             custom_forms: true,
             model_drift_attention: true,
             conversation_blocks: false,
+            conversation_semantics: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
@@ -574,6 +576,7 @@ impl ClientSession {
                 custom_forms,
                 model_drift_attention: false,
                 conversation_blocks: false,
+                conversation_semantics: false,
                 conversation_delivery_links: false,
                 conversation_message_participants: false,
                 assistant_content_handles: false,
@@ -615,6 +618,7 @@ impl ClientSession {
             custom_forms: false,
             model_drift_attention: false,
             conversation_blocks: false,
+            conversation_semantics: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
@@ -637,6 +641,7 @@ impl ClientSession {
             custom_forms: false,
             model_drift_attention: false,
             conversation_blocks: false,
+            conversation_semantics: false,
             conversation_delivery_links: false,
             conversation_message_participants: false,
             assistant_content_handles: false,
@@ -715,6 +720,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"conversation-message-participants", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-delivery-links", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"conversation-semantics", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
     capabilities.push(json!({"id":"messages-paging", "version":2, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"assistant.grants.v1", "version":1,
@@ -773,6 +779,36 @@ pub fn administrative_get(request: &Request<Body>) -> bool {
             || request.uri().path() == "/v1/client/devices")
 }
 
+fn negotiate_conversation_semantics(
+    request: &Request<Body>,
+    conversation_blocks: bool,
+) -> Result<bool, ApiError> {
+    let mut negotiated = false;
+    for feature in request.headers().get("x-st3-features")
+        .and_then(|value| value.to_str().ok()).unwrap_or("").split(',').map(str::trim)
+    {
+        if feature == "conversation-semantics.v1" {
+            negotiated = true;
+        } else if feature == "conversation-semantics" || feature.starts_with("conversation-semantics.") {
+            return Err(ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "unsupported-capability".into(),
+                message: format!("unsupported semantic projection capability: {feature}"),
+                details: Box::default(),
+            });
+        }
+    }
+    if negotiated && !conversation_blocks {
+        return Err(ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "unsupported-capability".into(),
+            message: "conversation-semantics.v1 requires conversation-blocks.v1".into(),
+            details: Box::default(),
+        });
+    }
+    Ok(negotiated)
+}
+
 pub fn authenticate(
     state: &AppState,
     request: &Request<Body>,
@@ -794,6 +830,7 @@ pub fn authenticate(
                 .split(',')
                 .any(|feature| feature.trim() == "conversation-blocks.v1")
         });
+    let conversation_semantics = negotiate_conversation_semantics(request, conversation_blocks)?;
     let conversation_message_participants = request.headers().get("x-st3-features")
         .and_then(|value| value.to_str().ok()).is_some_and(|value|
             value.split(',').any(|feature| feature.trim() == "conversation-message-participants.v1"));
@@ -823,6 +860,7 @@ pub fn authenticate(
         session.model_drift_attention = model_drift_attention;
         session.grant_expires_at = Some(web.expires_at);
         session.conversation_blocks = conversation_blocks;
+        session.conversation_semantics = conversation_semantics;
         session.messages_paging = messages_paging;
         return Ok(session);
     }
@@ -851,6 +889,7 @@ pub fn authenticate(
             session.custom_forms = custom_forms;
             session.model_drift_attention = model_drift_attention;
             session.conversation_blocks = conversation_blocks;
+            session.conversation_semantics = conversation_semantics;
             session.conversation_delivery_links = conversation_delivery_links;
             session.conversation_message_participants = conversation_message_participants;
             session.messages_paging = messages_paging;
@@ -872,11 +911,13 @@ pub fn authenticate(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| forbidden("the client authorization scheme must be Bearer"))?;
     let digest = credential_digest(credential);
-    if let Some(session) = assistant::authenticate(state, &digest, transport)? {
+    if let Some(mut session) = assistant::authenticate(state, &digest, transport)? {
         assistant::authorize_route(&session, request)?;
         if external_grants::is_service(&session) {
             external_grants::audit_service_read(state, &session)?;
         }
+        session.conversation_blocks = conversation_blocks;
+        session.conversation_semantics = conversation_semantics;
         return Ok(session);
     }
     let pairings = state
@@ -907,6 +948,7 @@ pub fn authenticate(
     }
     session.model_drift_attention = model_drift_attention;
     session.conversation_blocks = conversation_blocks;
+    session.conversation_semantics = conversation_semantics;
     session.conversation_delivery_links = conversation_delivery_links;
     session.conversation_message_participants = conversation_message_participants;
     session.messages_paging = messages_paging;
@@ -983,6 +1025,7 @@ pub fn paired_client_session_at(
         custom_forms,
         model_drift_attention: false,
         conversation_blocks: false,
+        conversation_semantics: false,
         conversation_delivery_links: false,
         conversation_message_participants: false,
         assistant_content_handles: false,
@@ -1034,6 +1077,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
     current.model_drift_attention = session.model_drift_attention;
     current.conversation_blocks = session.conversation_blocks;
+    current.conversation_semantics = session.conversation_semantics;
     current.conversation_delivery_links = session.conversation_delivery_links;
     current.conversation_message_participants = session.conversation_message_participants;
     current.messages_paging = session.messages_paging;
@@ -2266,10 +2310,17 @@ fn conversation_page_header(
         items,
         window_truncated || crate::conversation_header::window_truncated(items),
     );
-    crate::conversation_header::merge_register(
+    let mut header = crate::conversation_header::merge_register(
         derived,
         conversation_register_value(state, session_id).as_ref(),
-    )
+    ).or_else(|| session.conversation_semantics.then(|| json!({})))?;
+    if session.conversation_semantics {
+        // Legacy cost sums the loaded window without response identity. Semantic
+        // clients must aggregate only the explicitly scoped per-block usage facts.
+        header.as_object_mut()?.remove("cost");
+        header["projection_revision"] = json!(fractal_kernel::transcript_semantics::PROJECTION_REVISION);
+    }
+    (!header.as_object()?.is_empty()).then_some(header)
     })
 }
 
@@ -2483,6 +2534,9 @@ pub struct NativePagePosition {
     /// Content generation at the page boundary. An in-place replacement moves it even when
     /// driver, native id, path and inode are unchanged.
     source_generation: u64,
+    /// None is the unchanged legacy projection; semantic cursors are revision-fenced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_revision: Option<u32>,
     expires_at_unix_ms: u128,
 }
 
@@ -2527,6 +2581,46 @@ fn decode_native_page_cursor(encoded: &str) -> Result<NativePagePosition, ApiErr
         .map_err(|_| expired())?;
     native_page_mac(&cursor.position)?.verify_slice(&signature).map_err(|_| expired())?;
     Ok(cursor.position)
+}
+
+fn negotiated_semantic_revision(session: &ClientSession) -> Option<u32> {
+    session.conversation_semantics.then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION)
+}
+
+fn fence_semantic_revision(position: &NativePagePosition, session: &ClientSession) -> Result<(), ApiError> {
+    if position.semantic_revision != negotiated_semantic_revision(session) {
+        return Err(client_page_expired("the semantic projection changed; restart pagination"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod semantic_cursor_tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_native_cursor_fences_previous_projection_revision() {
+        let position: NativePagePosition = serde_json::from_value(json!({
+            "session_id": "session/test", "collection": "timeline/session/test", "order": "sequence",
+            "boundary": {"timestamp": "", "sequence": 16, "rank": 0, "id": "native/stable"},
+            "limit": 2, "filter_digest": "filter", "source_basis": "unchanged",
+            "source_generation": 1, "semantic_revision": fractal_kernel::transcript_semantics::PROJECTION_REVISION - 1,
+            "expires_at_unix_ms": 9999999999999_u64,
+            "snapshot": {"id": "snapshot/test", "host_id": "host/test", "store_index": 0,
+                "projection_version": "test", "created_at": ""}
+        })).unwrap();
+        let encoded = encode_native_page_cursor(position).unwrap();
+        let mut decoded = decode_native_page_cursor(&encoded).unwrap();
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        session.conversation_semantics = true;
+        let error = fence_semantic_revision(&decoded, &session).unwrap_err();
+        assert_eq!(error.code, "page-cursor-expired");
+        assert!(error.message.contains("semantic projection changed"));
+        decoded.semantic_revision = negotiated_semantic_revision(&session);
+        let encoded = encode_native_page_cursor(decoded).unwrap();
+        fence_semantic_revision(&decode_native_page_cursor(&encoded).unwrap(), &session).unwrap();
+    }
 }
 
 pub fn native_page_cursor_snapshot(encoded: &str) -> Result<ClientSnapshot, ApiError> {
@@ -2603,6 +2697,7 @@ fn native_slice_page_impl(
     let requested_limit = query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS)
         .clamp(1, CLIENT_MAX_PAGE_ITEMS);
     if let Some(cursor) = &cursor {
+        fence_semantic_revision(cursor, session)?;
         if cursor.session_id != session_id
             || cursor.collection != format!("timeline/{session_id}")
             || cursor.snapshot.id != snapshot.id
@@ -2759,6 +2854,7 @@ fn native_slice_page_impl(
             filter_digest,
             source_basis,
             source_generation: native.generation,
+            semantic_revision: negotiated_semantic_revision(session),
             expires_at_unix_ms,
         })?)
     } else {

@@ -3501,6 +3501,39 @@ without secret or token filtering. Without the feature, the server returns known
 text/tool/status bodies with visible size-limit notices. Old clients can read those
 fallbacks but do not fetch images or expand a chunked remainder.
 
+`conversation-semantics.v1` is an explicit opt-in layered on `conversation-blocks.v1`.
+The capability is `conversation-semantics`, version 1; requesting it without blocks
+or requesting an unsupported semantic version is refused before an incompatible
+response. Existing clients do not opt in by default. Owners and relays both verify
+support; a relay does not downgrade a semantic request to raw text.
+
+Negotiated blocks carry `semantic`: `revision`, open-string `category` and
+`disposition`, conversation-local `source_record_id` and `source_part_id`, optional
+block-local `text` and optional normalized usage facts. Categories and defaults are
+defined by the normalization design, not native-text prefixes. Non-conversation
+records retain raw inspection payloads without becoming prose; semantic content
+uses block-local text/typed fields instead of the legacy body text fallback.
+Mixed legacy bodies lacking independent text produce an explicit source diagnostic.
+Without opt-in, semantic metadata is removed and existing fallback bodies are unchanged.
+
+`header.projection_revision` identifies the selected revision even on an empty
+negotiated page/change response. It is revision metadata, not a `{value,source,as_of}`
+header fact. Native fold/cache identity, collection fingerprints and authenticated
+paging cursors fence the projection revision; an obsolete cursor requires resync
+without rewriting native source history. Legacy cursors retain their existing shape.
+The new header omits legacy window-summed cost: clients derive only explicitly scoped
+usage from normalized facts, never treat the old header sum as a semantic total.
+
+Category counts are derived over the client's loaded window using stable source/part
+identities, excluding `source_record` sidecars. They are not whole-session totals;
+page overlap, reconnects and chunk expansion must not increment an identity twice.
+Usage facts distinguish response identity, cumulative `counter_id`, and unclassified
+observations. Repeated cumulative observations replace counter state, not add deltas.
+Unclassified facts remain inspectable with unavailable aggregate; missing metrics
+are not zero. Currency, units and source incompleteness must remain visible.
+`timeline-semantics.json` and `timeline-semantic-empty.json` are constructed
+cross-language fixtures; they do not claim live terminal or device verification.
+
 Subagent `conversation.session_id` links encode the native parent, task id, and root
 routing session. A gateway resolves ownership from that routing session and forwards the
 unchanged child id to its owner; the child is not a managed parent conversation. Owners
