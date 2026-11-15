@@ -304,6 +304,8 @@ pub mod thread_links;
 pub mod thread_metadata;
 pub mod thread_rollout;
 #[cfg(test)]
+mod claim_commit_context_tests;
+#[cfg(test)]
 mod message_routing_tests;
 pub mod message_sent;
 #[cfg(test)]
@@ -24000,6 +24002,9 @@ pub type ClaimSubjectSnapshotReader<'a> = dyn Fn(&Connection) -> Result<ClaimSub
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
     pub signature: Option<&'a str>,
+    /// Already-attached secondary effect operation (id, digest), only for the
+    /// transaction-local seam. The ordinary fenced writer derives its own operation.
+    pub effect_operation: Option<(&'a str, &'a str)>,
     // Only retire_agent supplies the declaration, owner and rollout admission together.
     pub retirement_writer: bool,
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
@@ -24032,7 +24037,7 @@ pub struct ClaimCommitContext<'a> {
 
 fn claim_operation_outcome_tx(
     transaction: &Transaction<'_>,
-    operation: Option<&(String, String)>,
+    operation: Option<(&str, &str)>,
 ) -> Result<Option<ClaimRecord>, FractalError> {
     if let Some((operation_id, request_digest)) = operation {
         if let Some((stored_digest, canonical_claim, state)) =
@@ -24043,16 +24048,16 @@ fn claim_operation_outcome_tx(
                     "idempotency-conflict",
                     "the replicated operation has conflicting requests",
                 )
-                .with_detail("operation_id", operation_id.clone()));
+                .with_detail("operation_id", operation_id));
             }
-            if stored_digest != *request_digest {
+            if stored_digest != request_digest {
                 return Err(FractalError::new(
                     "idempotency-mismatch",
                     "the idempotency key already identifies a different request",
                 )
-                .with_detail("operation_id", operation_id.clone())
+                .with_detail("operation_id", operation_id)
                 .with_detail("stored_digest", stored_digest)
-                .with_detail("request_digest", request_digest.clone()));
+                .with_detail("request_digest", request_digest));
             }
             let claim = claim_by_id_tx(transaction, &canonical_claim)
                 .map_err(internal)?
@@ -24074,10 +24079,89 @@ pub fn append_claim_with_commit_context(
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
+    claim_commit_preflight(input, &context)?;
+    #[cfg(any(test, feature = "test-support"))]
+    let older_build = context.as_older_build;
+    #[cfg(not(any(test, feature = "test-support")))]
+    let older_build = false;
+    if !older_build
+        && (local_retention(&input.kind)
+            || local_code(input)
+            || (input.actor.is_none() && system_local_retention(&input.kind)))
+    {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
+        let connection = graph.readers.get();
+        claim_commit_admission(&connection, input, &context)?;
+        let input = identities::normalize_claim_input(&connection, input)?;
+        return append_local_observation_fenced(graph, &input, event_runtime);
+    }
+    if latest_retention(&input.kind) {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
+        let connection = graph.readers.get();
+        claim_commit_admission(&connection, input, &context)?;
+        let input = identities::normalize_claim_input(&connection, input)?;
+        return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
+    }
+    // Probe before consuming callbacks or deriving persisted request fields. On pending
+    // work the executor returns the first writer before taking the projection gate.
+    let run_fence = if context.all_run_projections || context.run_projection_subjects.len() > 1 {
+        Some(RunMutationFence::All)
+    } else {
+        context.run_projection_subjects.first().map(|subject| RunMutationFence::Run(subject))
+    };
+    run_fence::execute(graph, run_fence, Some(run_fence::API_TURN_BUDGET),
+        |transaction| execute_claim_commit_tx(
+            graph, transaction, input, None, fence, event_runtime, expected_subjects,
+            observer_completion, None, context,
+        ))
+}
+
+/// Append a typed replicated claim inside the caller's transaction and batch.
+/// This shares admission with the fenced writer without acquiring another writer lock.
+pub(crate) fn append_claim_with_commit_context_tx(
+    graph: &GraphStore,
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+    forced_batch: Option<&str>,
+    context: ClaimCommitContext<'_>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    claim_commit_preflight(input, &context)?;
+    execute_claim_commit_tx(
+        graph, transaction, input, forced_batch, None, None, None, None,
+        context.effect_operation, context,
+    )
+}
+
+fn claim_commit_preflight(
+    input: &ClaimInput,
+    context: &ClaimCommitContext<'_>,
+) -> Result<(), FractalError> {
     if !context.thread_delivery {
         refuse_untyped_thread_message(&input.kind, |field| input.fields.contains_key(field))?;
     }
-    let admission = |connection: &Connection| {
+    if context.assistant.is_none() {
+        assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
+            input.fields.get("from").and_then(Value::as_str),
+            ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
+    }
+    // Retirement alone validates in its serialized admission after the operation replay
+    // check. Its successor eligibility refusal must win over a generic field-reference
+    // error, while a changed idempotency key must still report a mismatch first.
+    if !context.retirement_writer {
+        validate_claim_input(input)?;
+    }
+    Ok(())
+}
+
+fn claim_commit_admission(
+    connection: &Connection,
+    input: &ClaimInput,
+    context: &ClaimCommitContext<'_>,
+) -> Result<(), FractalError> {
         message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
         if input.kind == message_expiry::KIND && !context.expiry_writer {
             return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
@@ -24108,53 +24192,22 @@ pub fn append_claim_with_commit_context(
         }
         retirements::admit_mail_claim(connection, input)?;
         Ok(())
-    };
-    if context.assistant.is_none() {
-        assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
-            input.fields.get("from").and_then(Value::as_str),
-            ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
-    }
-    // Retirement alone validates in its serialized admission after the operation replay
-    // check. Its successor eligibility refusal must win over a generic field-reference
-    // error, while a changed idempotency key must still report a mismatch first.
-    if !context.retirement_writer {
-        validate_claim_input(input)?;
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    let older_build = context.as_older_build;
-    #[cfg(not(any(test, feature = "test-support")))]
-    let older_build = false;
-    if !older_build
-        && (local_retention(&input.kind)
-            || local_code(input)
-            || (input.actor.is_none() && system_local_retention(&input.kind)))
-    {
-        if context.then.is_some() {
-            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
-        }
-        let connection = graph.readers.get();
-        admission(&connection)?;
-        let input = identities::normalize_claim_input(&connection, input)?;
-        return append_local_observation_fenced(graph, &input, event_runtime);
-    }
-    if latest_retention(&input.kind) {
-        if context.then.is_some() {
-            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
-        }
-        let connection = graph.readers.get();
-        admission(&connection)?;
-        let input = identities::normalize_claim_input(&connection, input)?;
-        return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
-    }
-    // Probe before consuming callbacks or deriving persisted request fields. On pending
-    // work the executor returns the first writer before taking the projection gate.
-    let run_fence = if context.all_run_projections || context.run_projection_subjects.len() > 1 {
-        Some(RunMutationFence::All)
-    } else {
-        context.run_projection_subjects.first().map(|subject| RunMutationFence::Run(subject))
-    };
-    run_fence::execute(graph, run_fence, Some(run_fence::API_TURN_BUDGET),
-        |transaction| -> Result<(ClaimRecord, bool), FractalError> {
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_claim_commit_tx(
+    graph: &GraphStore,
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+    forced_batch: Option<&str>,
+    fence: Option<&crate::mailbox::Fence>,
+    event_runtime: Option<&str>,
+    expected_subjects: Option<&BTreeMap<String, String>>,
+    observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
+    effect_operation: Option<(&str, &str)>,
+    context: ClaimCommitContext<'_>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    let original_input = input;
             let normalized_input = if context.signature.is_none() {
                 identities::normalize_claim_input(transaction, input)?
             } else { std::borrow::Cow::Borrowed(input) };
@@ -24178,7 +24231,13 @@ pub fn append_claim_with_commit_context(
             if let Some(authority) = context.authority {
                 authority(transaction)?;
             }
-            let operation = identities::claim_operation(input)?;
+            let derived_operation = if effect_operation.is_none() {
+                identities::claim_operation(input)?
+            } else {
+                None
+            };
+            let operation = effect_operation.or_else(|| derived_operation.as_ref()
+                .map(|(id, digest)| (id.as_str(), digest.as_str())));
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }
@@ -24223,12 +24282,13 @@ pub fn append_claim_with_commit_context(
                     && !(matches!(input.kind.as_str(), "message.delivered" | "message.read")
                         && message_expiry::exists(transaction, &input.subject).map_err(internal)?)
             } else { false };
-            if let Some(claim) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
+            if let Some(claim) = claim_operation_outcome_tx(transaction, operation)? {
                 return Ok((claim, false));
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.
-            admission(transaction)?;
+            // Admission intentionally uses the original request, before identity normalization.
+            claim_commit_admission(transaction, original_input, &context)?;
             if let Some(expected_subjects) = expected_subjects {
                 for (subject, expected) in expected_subjects {
                     let physical_subject = identities::resolve_reference_conn(transaction, subject)?;
@@ -24468,7 +24528,7 @@ pub fn append_claim_with_commit_context(
                 input.actor.as_deref(),
                 &body,
                 &predecessors,
-                None,
+                forced_batch,
                 false,
             )
             .map_err(claim_append_error)?;
@@ -24504,7 +24564,6 @@ pub fn append_claim_with_commit_context(
                 ).map_err(internal)?;
             }
             Ok(outcome)
-        })
 }
 
 pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {

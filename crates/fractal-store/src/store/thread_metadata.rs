@@ -1153,6 +1153,10 @@ pub fn start_from_inbox_as(
     });
     creation_body["fields"]["origin_source"] = json!(source);
     creation_body["fields"]["origin_episode"] = json!(episode);
+    // This secondary effect has always stored empty evidence and used the
+    // thread-start-message local-request operation, not a generic claim key.
+    first_message.evidence.clear();
+    first_message.idempotency_key = None;
     let message_body = json!({"fields": first_message.fields, "evidence": []});
     store.graph.ensure_principal_key(person)?;
     store
@@ -1224,37 +1228,21 @@ pub fn start_from_inbox_as(
                     "the first message already exists",
                 ));
             }
-            if let Some(signature) = encoded_signature.as_deref() {
-                tx.execute(
-                     /* sqlite-large-value: allow-for-now lv-hd06b93ec0d26 owner=fractal_store::store::thread_metadata TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO expected_claim_signatures(subject,kind,actor,signature) VALUES (?1,'message.sent',?2,?3)",
-                    params![first_message.subject, person, signature],
-                ).map_err(internal)?;
-            }
-            // The typed transaction has already authorized this exact source and sender.
-            // Retain the ordinary recipient and provenance checks before the admitted append.
-            retirements::admit_recipient(tx, Some(agent))?;
-            assistant_write::refuse_unverified(
-                "message.sent",
-                Some(person),
-                Some(person),
-                ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"]
-                    .iter().any(|field| first_message.fields.contains_key(*field)),
-            )?;
             let mut message_body = message_body.clone();
             smallclaims::store::idempotency::attach(
                 &mut message_body, &format!("thread-start-message:{key}"),
             ).map_err(internal)?;
-            let message = append_admitted_claim_tx(
-                tx, &store.origin, &first_message.subject, "message.sent", Some(person),
-                &message_body, &[], Some(&created.batch_id), false,
-            ).map_err(claim_append_error)?;
-            register_operation_tx(tx, &message).map_err(internal)?;
-            if encoded_signature.is_some() {
-                tx.execute(
-                     /* sqlite-large-value: allow-for-now lv-hf3b18f858b62 owner=fractal_store::store::thread_metadata TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind='message.sent' AND actor=?2",
-                    params![first_message.subject, person],
-                ).map_err(internal)?;
-            }
+            // Keep the secondary effect's existing operation digest, while sharing
+            // typed admission and the caller's atomic thread-creation transaction.
+            append_claim_with_commit_context_tx(
+                &store.graph, tx, &first_message, Some(&created.batch_id),
+                ClaimCommitContext {
+                    thread_delivery: true,
+                    signature: encoded_signature.as_deref(),
+                    effect_operation: smallclaims::store::operation_parts(&message_body),
+                    ..Default::default()
+                },
+            )?;
             register_operation_tx(tx, &created).map_err(internal)?;
             Ok((created, true))
         })

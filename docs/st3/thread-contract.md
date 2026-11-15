@@ -16,6 +16,14 @@ state, conversation, message history and related items are read through that ide
 new thread started from an Inbox item can commit its creation, origin link and first message
 together. A client may hold an unsent draft without publishing an empty thread.
 
+The typed first-message writer uses `append_claim_with_commit_context_tx` inside the
+thread-creation transaction, with the creation's batch ID. This sanctioned seam shares
+the ordinary commit-context preflight and serialized admission, including recipient
+retirement checks, without nesting a writer lock. The secondary message keeps its
+`thread-start-message:` operation body identity and signature expectation in that same
+transaction; a refusal or caller rollback leaves neither thread nor message. Ordinary
+untyped appends still cannot set thread relation fields.
+
 The thread ID is independent of the first message ID. Anchoring it to the first message could
 reuse reply-chain lookup, but would couple the discussion's identity and availability to that
 message's delivery, visibility and retention. A separate identity makes rename, reopening and
