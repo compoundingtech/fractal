@@ -393,7 +393,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         reason: "Can we proceed?".into(),
         step: None, new_run: None, incarnation: None, legacy_request: None,
         idempotency_key: "browser-thread-ask".into(), deadline_ms: None,
-        default_answer: None, request: None,
+        default_answer: None, request: None, priority: None,
     }).unwrap();
     let episode = state.store.newest_claim_for_subject_kind(&ask.subject, "work.person-asked")
         .unwrap().unwrap();
