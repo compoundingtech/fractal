@@ -15,8 +15,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::on_origin("origin")
+    }
+
+    fn on_origin(origin: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let state = persistent_state(root.path(), "origin");
+        let state = persistent_state(root.path(), origin);
         state.store.bind_fleet(FLEET).unwrap();
         state.store.apply_internal(
             &parse_intent(r#"version 2
@@ -125,6 +129,24 @@ mission "example/report" state="ready" {
             && claim.body["evidence"].as_array().unwrap().contains(&json!(effect.effect_id))));
         assert_eq!(self.state.store.step_run(&self.owner().step).unwrap().unwrap().status, "blocked");
     }
+}
+
+#[test]
+fn daemon_capabilities_refuse_unknown_provider_class_and_target_before_admission() {
+    use crate::store::effects::{EffectClass, EffectTarget};
+    let fixture = Fixture::new();
+    for (provider, class, target, code) in [
+        ("sdk-provider", EffectClass::NativeCoordinated, "agent/example/reader", "effect-provider-unknown"),
+        ("native-message", EffectClass::ProviderIdempotent, "agent/example/reader", "effect-class-mismatch"),
+        ("native-message", EffectClass::NativeCoordinated, "not-a-recipient", "effect-target-mismatch"),
+        ("git.branch-create", EffectClass::ProviderIdempotent, r#"{"repo":"example/repo"}"#, "effect-target-mismatch"),
+    ] {
+        let error = fixture.state.store.admit_effect(fixture.owner(), &fixture.request.from,
+            &fixture.request.from, "digest", EffectTarget { provider, class, target }).unwrap_err();
+        assert_eq!(error.code, code);
+    }
+    // Refused declarations cannot consume the key or widen native-message capability.
+    fixture.admit();
 }
 
 fn persistent_state(root: &Path, origin: &str) -> AppState {
@@ -527,6 +549,34 @@ fn split_host_first_send_converges_with_a_durable_peer_fence_and_never_two_messa
     replicate(&fixture.state, &peer);
     assert_message_count(&fixture.state, 1);
     assert_message_count(&peer, 1);
+}
+
+#[test]
+fn visible_two_writer_admission_conflict_parks_before_either_host_sends() {
+    for at_send_boundary in [false, true] {
+        let first = Fixture::on_origin("first");
+        let second = Fixture::on_origin("second");
+        let left = first.admit();
+        let right = second.admit();
+        assert_eq!(left.operation_id, right.operation_id);
+        // Both independently admitted before either intent was visible to the other.
+        replicate(&first.state, &second.state);
+        replicate(&second.state, &first.state);
+        for (fixture, admitted) in [(&first, &left), (&second, &right)] {
+            let key = crate::store::effects::effect_key(fixture.owner()).unwrap();
+            let (writers, _) = fixture.state.store.operation_claims(&key).unwrap();
+            assert_eq!(writers.len(), 2);
+            let error = if at_send_boundary {
+                fixture.state.store.effect_in_flight(admitted).unwrap_err().code.to_owned()
+            } else {
+                fixture.accept().unwrap_err().code
+            };
+            assert_eq!(error, "idempotency-conflict");
+            fixture.assert_parked(admitted);
+            assert!(fixture.state.store.effect_in_flight(admitted).is_err());
+            assert_message_count(&fixture.state, 0);
+        }
+    }
 }
 
 #[test]
