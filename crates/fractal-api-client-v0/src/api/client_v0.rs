@@ -21854,7 +21854,8 @@ mission "example/zero-run" state="ready" {
             &ClientListQuery { limit: Some(2), ..Default::default() }, &source).unwrap().0;
         let encoded = first["page"]["next_cursor"].as_str().unwrap();
         let query = ClientListQuery { cursor: Some(encoded.to_owned()), ..Default::default() };
-        native_slice_page(&state, &snapshot, &session, &session_id, &query, &source).unwrap();
+        let next = native_slice_page(&state, &snapshot, &session, &session_id, &query, &source).unwrap().0;
+        assert!(!next["items"].as_array().unwrap().is_empty());
         session.conversation_semantics = false;
         assert_expired_without_resync(
             native_slice_page(&state, &snapshot, &session, &session_id, &query, &source).unwrap_err());
