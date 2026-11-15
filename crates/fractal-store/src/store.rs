@@ -21115,6 +21115,7 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
     definition_hash: row.get(3)?,
     status: row.get(4)?,
     attempt: row.get::<_, u32>(5)?,
+    retry: None,
     assigned_to: row.get(6)?,
     available_to: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
     agentless: row.get(8)?,
@@ -21436,6 +21437,7 @@ fn apply_step_definition(view: &mut StepRunView, mission: &MissionSpec) {
         view.queue_position = step.queue_position;
         view.timeout_ms = step.timeout_ms;
         view.fresh_context = step.fresh_context;
+        view.retry = (step.retry != crate::model::RetrySpec::default()).then(|| step.retry.clone());
     }
 }
 

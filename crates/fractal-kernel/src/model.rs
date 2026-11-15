@@ -3279,6 +3279,9 @@ pub struct StepRunView {
     pub definition_hash: String,
     pub status: String,
     pub attempt: u32,
+    /// The pinned step's native retry policy; omitted when no retries are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
     pub assigned_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_to: Vec<String>,
