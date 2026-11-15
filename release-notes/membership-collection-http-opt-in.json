@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add explicitly selected collection-scoped ordered-membership HTTP pages with authoritative metadata and non-expiring keyset continuations",
+  "replay": {"status": "none", "detail": "No projection replay is required."},
+  "schema": {"status": "none", "detail": "No persistent schema change. HTTP query dispatch uses the existing API-owned metadata wrapper; generated client integration remains separate."},
+  "rules": {"status": "none", "detail": "Existing authentication, arrangement owner authorization, response budgets and membership projection rules remain authoritative."},
+  "compatibility": {"status": "changed", "detail": "The existing membership route accepts paging_contract=collection-v1. Selected pages require paging_contract and membership metadata; mixed cursor contracts are rejected. Requests without the selector retain legacy page fields and cursor semantics. Unsupported selectors or collections return unsupported-membership-paging-contract. No capability is advertised."},
+  "downtime": {"status": "none", "detail": "No migration or service downtime is required."},
+  "manual": {"status": "none", "detail": "No client activation is included; typed client and stream support remain separate slices."},
+  "recovery": {"status": "none", "detail": "Selected collection changes and scope resets return distinct restart errors. Cursors retain no transaction or lease and do not expire solely due to time."}
+}

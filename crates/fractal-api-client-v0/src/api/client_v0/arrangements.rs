@@ -138,20 +138,33 @@ pub(crate) async fn memberships(
     Extension(session): Extension<ClientSession>,
     AxumPath((name, uuid)): AxumPath<(String, String)>,
     Query(query): Query<ClientListQuery>,
-) -> Result<(Extension<ClientSnapshot>, Json<ClientResourcePage>), ApiError> {
+) -> Result<(Extension<ClientSnapshot>, Json<fractal_api_core::api::client_v0::membership_paging::Page>), ApiError> {
     let owner = person(&session, query.person.as_deref(), false)?;
     let subject = format!("arrangement/person/{name}/{uuid}");
     if fractal_schema::arrangements::owner(&subject).map_err(|error| validation(error.message))? != owner {
         return Err(validation("selected arrangement owner must match person"));
     }
+    use fractal_api_core::api::client_v0::membership_paging as paging;
+    let selected = paging::selected(query.paging_contract.as_deref(), true)?;
+    if selected && (query.fresh || query.min_cut.is_some()) {
+        return Err(paging::error(paging::INVALID));
+    }
     if query.history || query.actor.is_some() || query.owner_run.is_some()
         || query.status.is_some() || query.owner.is_some() || query.state.is_some() || query.native_only
     {
-        return Err(validation("ordered memberships select subject and person only"));
+        return Err(if selected { paging::error(paging::INVALID) }
+            else { validation("ordered memberships select subject and person only") });
     }
     let limit = query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
     if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit) {
-        return Err(validation("membership page limit must be 1 through 200"));
+        return Err(if selected { paging::error(paging::INVALID) }
+            else { validation("membership page limit must be 1 through 200") });
+    }
+    if selected {
+        return collection_memberships(state, owner, subject, limit, query.cursor.as_deref()).await;
+    }
+    if query.cursor.as_deref().is_some_and(|cursor| cursor.starts_with("membership-v1/")) {
+        return Err(paging::error(paging::INVALID));
     }
     let cursor = query.cursor.as_deref().map(|encoded| {
         if encoded.len() > 16_384 {
@@ -213,7 +226,27 @@ pub(crate) async fn memberships(
         page: ClientPageInfo { limit, has_more, next_cursor, cursor_expires_at: has_more.then(|| client_timestamp(expires)), omitted_items: None },
         sync: client_sync_notice(&state),
         replicated: None,
-    })))
+    }.into())))
+}
+
+async fn collection_memberships(
+    state: AppState, owner: String, subject: String, limit: usize, token: Option<&str>,
+) -> Result<(Extension<ClientSnapshot>, Json<fractal_api_core::api::client_v0::membership_paging::Page>), ApiError> {
+    use fractal_api_core::api::client_v0::membership_paging as paging;
+    let cursor = token.map(|token| paging::Cursor::decode(token, &owner, &subject, limit)).transpose()?;
+    let read_state = state.clone();
+    let (snapshot, mut page) = blocking_store(move || {
+        read_state.store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&read_state, index);
+            let after = cursor.as_ref().map(|cursor| (
+                cursor.after.bucket.as_str(), cursor.after.key.as_str(), cursor.after.member.as_str()));
+            let captured = read_state.store.ordered_membership_page(&subject, after, limit + 1)?;
+            Ok(paging::assemble(captured, &snapshot, read_state.store.ordered_membership_lifetime(),
+                &owner, &subject, limit, cursor.as_ref()).map(|page| (snapshot, page)))
+        })
+    }).await??;
+    page.value.sync = client_sync_notice(&state);
+    Ok((Extension(snapshot), Json(page)))
 }
 
 #[cfg(test)]
@@ -223,6 +256,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use tower::ServiceExt;
+    include!("membership_http_tests.rs");
 
     const SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
 
