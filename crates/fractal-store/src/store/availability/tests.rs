@@ -476,13 +476,16 @@ fn historical_window_cost_does_not_grow_with_post_window_claims() {
             Ok((claims?.into_iter().map(|claim| claim.id).collect::<Vec<_>>(), steps.load(Ordering::Relaxed)))
         }).unwrap();
         let connection = store.readers.get();
-        let query = claims_in_order_before_query();
-        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap()
-            .query_map(rusqlite::params![ADA, STATUS_KIND, end.to_string()], |row| row.get::<_, String>(3))
-            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        assert!(plan.iter().any(|line| line.contains("claims_subject_kind_accepted_index") && line.contains("<")),
-            "expected an indexed upper-bound seek: {plan:?}");
-        eprintln!("availability history plan: {plan:?}; VM steps: {steps}");
+        for same_length in [true, false] {
+            let query = claims_in_order_before_query(same_length);
+            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap()
+                .query_map(rusqlite::params![ADA, STATUS_KIND, end.to_string()], |row| row.get::<_, String>(3))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            let bound = if same_length { "accepted_at_unix_ms<?" } else { "<expr><?" };
+            assert!(plan.iter().any(|line| line.contains("claims_subject_kind_accepted_index") && line.contains(bound)),
+                "expected an indexed upper-bound seek: {plan:?}");
+            eprintln!("availability history plan: {plan:?}; VM steps: {steps}");
+        }
         (rows, steps)
     };
     let before = cost();

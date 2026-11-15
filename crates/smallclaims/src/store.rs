@@ -6525,11 +6525,17 @@ impl Store {
     ) -> Result<()> {
         crate::touched::note_read(|| subject.to_owned());
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&claims_in_order_before_query())?;
-        let mut rows = statement.query(params![subject, kind, end.to_string()])?;
-        while let Some(row) = rows.next()? {
-            if !visit(&claim_from_row(row)?) {
-                break;
+        let end = end.to_string();
+        // SQLite cannot seek a row-value inequality whose first element is an indexed
+        // expression. Seek equal-width timestamps first, then shorter ones; these disjoint
+        // ranges concatenate to the same numeric newest-first order.
+        for same_length in [true, false] {
+            let mut statement = connection.prepare_cached(&claims_in_order_before_query(same_length))?;
+            let mut rows = statement.query(params![subject, kind, end])?;
+            while let Some(row) = rows.next()? {
+                if !visit(&claim_from_row(row)?) {
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -10541,16 +10547,20 @@ pub fn claims_in_order_query(newest_first: bool) -> String {
     )
 }
 
-/// Newest-first canonical claims before `?3` (a decimal millisecond string). The tuple
-/// comparison seeks the existing numeric-text acceptance index, including across digit
-/// lengths, without casting its indexed columns.
-pub fn claims_in_order_before_query() -> String {
+/// One of two disjoint newest-first ranges below `?3`, a decimal millisecond string.
+/// Read `same_length=true` first, then false. Scalar constraints let SQLite seek all
+/// needed parts of the existing expression index rather than filtering newer timestamps.
+pub fn claims_in_order_before_query(same_length: bool) -> String {
+    let bound = if same_length {
+        "length(claims.accepted_at_unix_ms)=length(?3) AND claims.accepted_at_unix_ms<?3"
+    } else {
+        "length(claims.accepted_at_unix_ms)<length(?3)"
+    };
     format!(
         "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind=?2
-           AND (length(claims.accepted_at_unix_ms), claims.accepted_at_unix_ms)
-             < (length(?3), ?3)
+           AND {bound}
          ORDER BY {CANONICAL_ORDER_DESC}"
     )
 }
