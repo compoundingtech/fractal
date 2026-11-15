@@ -5894,7 +5894,7 @@ impl Store {
         // index. Enumerating DISTINCT kinds reads every runtime observation and
         // builds a temporary btree even when none of the subjects is reserved.
         // Separate UNION arms keep each exact/prefix probe independently indexed.
-        let mut query = connection.prepare_cached(Self::GENERIC_RESERVED_SUBJECTS_SQL)?;
+        let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc18b868e178d owner=fractal_store::store TODO=trace-statement-and-value-representation */ Self::GENERIC_RESERVED_SUBJECTS_SQL)?;
         for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
             row.get::<_,String>(0))? {
             subjects.remove(&row?);

@@ -528,7 +528,7 @@ fn generic_visibility_probes_reserved_kinds_without_reading_runtime_history() {
     let encoded = serde_json::to_string(&names).unwrap();
     let connection = store.readers.get();
     for (label, sql) in [("before", BEFORE), ("after", Store::GENERIC_RESERVED_SUBJECTS_SQL)] {
-        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+        let plan = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7e1064300ed4 owner=fractal_store::store::status_summary_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
             .query_map(params![encoded, cut], |row| row.get::<_, String>(3)).unwrap()
             .collect::<rusqlite::Result<Vec<_>>>().unwrap();
         eprintln!("generic visibility {label} plan: {plan:?}");
@@ -541,7 +541,7 @@ fn generic_visibility_probes_reserved_kinds_without_reading_runtime_history() {
     }
     let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     let started = std::time::Instant::now();
-    let before = connection.prepare(BEFORE).unwrap()
+    let before = connection.prepare(/* sqlite-large-value: allow-for-now lv-h09de396c3650 owner=fractal_store::store::status_summary_tests TODO=trace-statement-and-value-representation */ BEFORE).unwrap()
         .query_map(params![encoded, cut], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
@@ -575,15 +575,15 @@ fn generic_visibility_reserved_kind_probes_match_namespace_and_snapshot_boundari
     // independently of today's write-time schema validation.
     for (index, kind) in kinds.iter().enumerate() {
         store.connection.write().execute(
-            "UPDATE claims SET subject=?1,kind=?2 WHERE store_index=?3",
+            /* sqlite-large-value: allow-for-now lv-h7fa84ab32e1a owner=fractal_store::store::status_summary_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET subject=?1,kind=?2 WHERE store_index=?3",
             params![format!("agent/kind-{index}"), kind, index + 1],
         ).unwrap();
     }
     for cut in 0..=kinds.len() as u64 {
-        let expected = kinds.iter().enumerate().filter_map(|(index, kind)| {
-            (index as u64 >= cut || !fractal_schema::notice::is_reserved_kind(kind))
-                .then(|| format!("agent/kind-{index}"))
-        }).collect::<BTreeSet<_>>();
+        let expected = kinds.iter().enumerate()
+            .filter(|&(index, kind)| index as u64 >= cut || !fractal_schema::notice::is_reserved_kind(kind))
+            .map(|(index, _)| format!("agent/kind-{index}"))
+            .collect::<BTreeSet<_>>();
         assert_eq!(store.generic_status_subject_names_at(names.clone(), cut).unwrap(),
             expected, "cut={cut}");
     }
