@@ -10,11 +10,23 @@ appId: com.compoundingtech.fractal.starter
     "scrollUntilVisible":
       { "element": { "text": "Older-page summary — initial, 1 message.*" }, "direction": "DOWN", "timeout": 30000 },
   }
-- { "runScript": { "file": "${CONTROL_SCRIPT}", "env": { "CONTROL_JSON": '{"update":"older-rest"}' } } }
+- {
+    "runScript":
+      {
+        "file": "../../../tmp/threads-ios-preview/fixture-control.js",
+        "env": { "CONTROL_JSON": '{"update":"older-rest"}' },
+      },
+  }
 - { "tapOn": "Older-page summary — initial, 1 message.*" }
 - { "extendedWaitUntil": { "visible": "Older-page summary — REST update, 1 message.*", "timeout": 30000 } }
-- { "takeScreenshot": "${CAPTURE_DIR}/older-page-rest" }
-- { "runScript": { "file": "${CONTROL_SCRIPT}", "env": { "CONTROL_JSON": '{"update":"older-live"}' } } }
+- { "takeScreenshot": "older-page-rest" }
+- {
+    "runScript":
+      {
+        "file": "../../../tmp/threads-ios-preview/fixture-control.js",
+        "env": { "CONTROL_JSON": '{"update":"older-live"}' },
+      },
+  }
 - { "extendedWaitUntil": { "visible": "Older-page summary — live update, 1 message.*", "timeout": 30000 } }
 # PREVIEW_FINAL_ASSERTIONS
 - { "assertVisible": "Older-page summary — live update, 1 message.*" }

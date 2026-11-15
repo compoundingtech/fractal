@@ -5,10 +5,10 @@ appId: com.compoundingtech.fractal.starter
 - { "tapOn": "^Close thread$" }
 - { "extendedWaitUntil": { "visible": '^Closed "Writable thread — fixture".*', "timeout": 30000 } }
 - { "assertVisible": "^Reopen thread$" }
-- { "takeScreenshot": "${CAPTURE_DIR}/actions-closed" }
+- { "takeScreenshot": "actions-closed" }
 - { "tapOn": "^Reopen thread$" }
 - { "extendedWaitUntil": { "visible": '^Reopened "Writable thread — fixture"$', "timeout": 30000 } }
-- { "takeScreenshot": "${CAPTURE_DIR}/actions-reopened" }
+- { "takeScreenshot": "actions-reopened" }
 - { "tapOn": "^Rename$" }
 - { "tapOn": "^Thread title$" }
 - { "eraseText": 100 }
@@ -16,7 +16,7 @@ appId: com.compoundingtech.fractal.starter
 - { "tapOn": "^Save title$" }
 - { "extendedWaitUntil": { "visible": '^Renamed to "Renamed fixture thread"$', "timeout": 30000 } }
 - { "assertVisible": "^Renamed fixture thread$" }
-- { "takeScreenshot": "${CAPTURE_DIR}/actions-renamed" }
+- { "takeScreenshot": "actions-renamed" }
 - { "runFlow": { "file": "threads-preview-thread.yaml", "env": { "THREAD_TITLE": "Rejected changes — fixture" } } }
 - { "tapOn": "^Close thread$" }
 - { "extendedWaitUntil": { "visible": ".*This fixture intentionally rejects thread changes.*", "timeout": 30000 } }

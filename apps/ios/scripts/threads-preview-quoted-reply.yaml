@@ -1,7 +1,13 @@
 # Fixture/preliminary source preparation; NOT RUN against the revised UI.
 appId: com.compoundingtech.fractal.starter
 ---
-- { "runScript": { "file": "${CONTROL_SCRIPT}", "env": { "CONTROL_JSON": '{"state":"quoted"}' } } }
+- {
+    "runScript":
+      {
+        "file": "../../../tmp/threads-ios-preview/fixture-control.js",
+        "env": { "CONTROL_JSON": '{"state":"quoted"}' },
+      },
+  }
 - { "runFlow": { "file": "threads-preview-thread.yaml", "env": { "THREAD_TITLE": "Quoted reply — fixture" } } }
 - { "extendedWaitUntil": { "visible": ".*Should this reply retain the original quoted context.*", "timeout": 30000 } }
 - { "longPressOn": ".*Should this reply retain the original quoted context.*" }
@@ -9,7 +15,7 @@ appId: com.compoundingtech.fractal.starter
 - { "tapOn": "^Message thread$" }
 - { "inputText": "Fixture quoted reply preserves context." }
 - { "tapOn": "^Send$" }
-- { "hideKeyboard": null }
+- hideKeyboard
 - { "extendedWaitUntil": { "visible": ".*Fixture quoted reply preserves context.*", "timeout": 30000 } }
 # PREVIEW_FINAL_ASSERTIONS
 - { "assertVisible": ".*Fixture quoted reply preserves context.*" }

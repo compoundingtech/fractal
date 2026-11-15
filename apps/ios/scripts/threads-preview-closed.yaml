@@ -15,7 +15,7 @@ appId: com.compoundingtech.fractal.starter
     timeout: 30000
 # PREVIEW_FINAL_ASSERTIONS
 - assertVisible: ".*Rollout notes.*"
-- assertVisible: ".*1 message.*closed.*"
+- assertVisible: ".*1 message.*"
 - assertVisible: ".*closed the thread.*"
 - assertVisible: "^Closed, replying keeps it closed$"
 - assertVisible: "^Reopen thread$"

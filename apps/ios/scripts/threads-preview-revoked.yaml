@@ -2,7 +2,13 @@
 appId: com.compoundingtech.fractal.starter
 ---
 - { "runFlow": { "file": "threads-preview-thread.yaml", "env": { "THREAD_TITLE": "Writable thread — fixture" } } }
-- { "runScript": { "file": "${CONTROL_SCRIPT}", "env": { "CONTROL_JSON": '{"state":"revoked"}' } } }
+- {
+    "runScript":
+      {
+        "file": "../../../tmp/threads-ios-preview/fixture-control.js",
+        "env": { "CONTROL_JSON": '{"state":"revoked"}' },
+      },
+  }
 - { "extendedWaitUntil": { "visible": ".*Fixture thread grant was revoked.*", "timeout": 30000 } }
 # PREVIEW_FINAL_ASSERTIONS
 - { "assertVisible": ".*Fixture thread grant was revoked.*" }

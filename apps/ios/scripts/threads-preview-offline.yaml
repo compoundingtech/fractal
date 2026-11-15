@@ -6,7 +6,13 @@ appId: com.compoundingtech.fractal.starter
 - { "tapOn": "^Threads, [0-9]+( or more)?$" }
 - { "tapOn": "Writable thread — fixture, 1 message.*open" }
 - { "extendedWaitUntil": { "visible": "^Message thread$", "timeout": 30000 } }
-- { "runScript": { "file": "${CONTROL_SCRIPT}", "env": { "CONTROL_JSON": '{"state":"offline"}' } } }
+- {
+    "runScript":
+      {
+        "file": "../../../tmp/threads-ios-preview/fixture-control.js",
+        "env": { "CONTROL_JSON": '{"state":"offline"}' },
+      },
+  }
 - { "extendedWaitUntil": { "visible": "^reconnect now$", "timeout": 30000 } }
 # PREVIEW_FINAL_ASSERTIONS
 - { "assertVisible": "^reconnect now$" }
