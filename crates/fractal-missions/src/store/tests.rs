@@ -12169,10 +12169,10 @@ fn observe_admission_pulls(
     pulls: Value,
 ) {
     let revision = store.selected_desired_revision("observer/admission-repo").unwrap().unwrap();
-    store.record_resource_observation(
+    store.record_resource_observation_attempt(
         "observer/admission-repo", &revision, None, "resource/admission-repo", None,
         &json!({"repository_id": 17, "pull_requests": pulls}),
-        now_ms() + 60_000, subscriptions, None,
+        now_ms() + 60_000, subscriptions, None, None, None,
     ).unwrap();
 }
 
@@ -12371,7 +12371,7 @@ fn author_scopes_wait_for_attribution_and_match_case_insensitively_in_both_modes
 #[tokio::test]
 async fn fake_github_observations_admit_relevant_changes_end_to_end() {
     use crate::resource::ObservationRequest;
-    use crate::resource::github_repository::test_github::{
+    use crate::resource::test_github::{
         FakeGithub, age_pull_request_check, observe,
     };
 
@@ -12501,7 +12501,7 @@ async fn fake_github_observations_admit_relevant_changes_end_to_end() {
             }
             let observed = observe(ObservationRequest {
                 provider: "github.repository".into(), locator: "acme/garden".into(),
-                fields: vec!["pull_requests".into(), "comments".into()],
+                fields: BTreeSet::from(["pull_requests".into(), "comments".into()]),
                 cursor: cursor.clone(), previous_facts: previous_facts.clone(),
                 every_ms: Some(0), refresh: false, webhook_covered: false, workflow_runs: None,
             }, &base).await.unwrap();
@@ -12522,10 +12522,10 @@ async fn fake_github_observations_admit_relevant_changes_end_to_end() {
                     assert_ne!(facts["last_comment"]["body_digest"], original_comment_digest);
                 }
             }
-            store.record_resource_observation(
+            store.record_resource_observation_attempt(
                 "observer/admission-repo", &revision, None, "resource/admission-repo",
                 observed.cursor.as_deref(), &observed.facts, now_ms() + 60_000,
-                &subscriptions, None,
+                &subscriptions, None, None, None,
             ).unwrap();
             cursor = observed.cursor;
             previous_facts = Some(observed.facts);
