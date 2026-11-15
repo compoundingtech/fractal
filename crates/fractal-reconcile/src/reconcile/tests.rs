@@ -178,9 +178,10 @@ mission "example/report" state="ready" {
             fixture.converge();
             fixture.assert_one_episode(&effect);
             fixture.store.resolve_effect_authorized(&effect.effect_id,
-                "person/example", "person/example", outcome,
-                (outcome == "confirmed").then_some("message/example-manually-observed"),
-                &["claim/example-human-observation".into()], "example-resolution").unwrap();
+                "person/example", "person/example", crate::store::effects::EffectResolution {
+                    outcome, provider_ref: (outcome == "confirmed").then_some("message/example-manually-observed"),
+                    evidence: &["claim/example-human-observation".into()], key: "example-resolution",
+                }).unwrap();
             fixture.converge();
             let run = fixture.store.mission_run(&fixture.run.id).unwrap().unwrap();
             assert_eq!(run.steps[0].effects[0].state, outcome);

@@ -76,7 +76,10 @@ pub async fn resolve(
     let writes = state.clone();
     let result = blocking_api(move || {
         writes.store.resolve_effect_authorized(&subject, &request.actor, &session.authority_actor,
-            request.outcome.as_str(), request.provider_ref.as_deref(), &request.evidence, &request.idempotency_key)
+            crate::store::effects::EffectResolution {
+                outcome: request.outcome.as_str(), provider_ref: request.provider_ref.as_deref(),
+                evidence: &request.evidence, key: &request.idempotency_key,
+            })
             .map_err(|error| if error.code == "not-found" { missing() } else { ApiError::bad(error) })?;
         let (phase, record) = writes.store.effect_state(&subject).map_err(ApiError::bad)?.ok_or_else(missing)?;
         Ok(Json(response(phase, record)))

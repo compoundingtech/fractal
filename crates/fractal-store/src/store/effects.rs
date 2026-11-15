@@ -28,6 +28,13 @@ pub struct EffectTarget<'a> {
     pub target: &'a str,
 }
 
+pub struct EffectResolution<'a> {
+    pub outcome: &'a str,
+    pub provider_ref: Option<&'a str>,
+    pub evidence: &'a [String],
+    pub key: &'a str,
+}
+
 /// JSON tuples are unambiguous even when mission names or user keys contain separators.
 pub fn effect_key(owner: &EffectOwner) -> Result<String, FractalError> {
     Ok(format!("native-effect/{}", serde_json::to_string(&(owner.mission.strip_prefix("mission/").unwrap_or(&owner.mission), &owner.key)).map_err(internal)?))
@@ -255,7 +262,8 @@ impl Store {
 
     /// The caller supplies server-established person authority, never the request actor alone.
     pub fn resolve_effect_authorized(&self, subject: &str, actor: &str, authorized_person: &str,
-        outcome: &str, provider_ref: Option<&str>, evidence: &[String], key: &str) -> Result<EffectRecord, FractalError> {
+        resolution: EffectResolution<'_>) -> Result<EffectRecord, FractalError> {
+        let EffectResolution { outcome, provider_ref, evidence, key } = resolution;
         if actor != authorized_person || !actor.starts_with("person/") || actor.len() == 7 || actor.matches('/').count() != 1 {
             return Err(FractalError::new("forbidden", "only an authenticated person can resolve an effect"));
         }
