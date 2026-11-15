@@ -226,7 +226,7 @@ def build_release(args):
         "scripts/prepare-pnpm-source-inputs.py")
         + str(shutil.which("node")) + str(shutil.which("pnpm"))).encode()).hexdigest()
     try:
-        run([sys.executable, str(repo / "scripts/prepare-pnpm-source-inputs.py"), "prepare"],
+        run([sys.executable, str(repo / "scripts/prepare-pnpm-source-inputs.py"), "prepare", "--cache-only"],
             cwd=repo, env=env)
     except (OSError, subprocess.SubprocessError) as error:
         save(output / "failure.json", {"reason": "source_inputs_preparation_failed",
@@ -247,7 +247,8 @@ def build_release(args):
     if config["ios"]["bundleIdentifier"] != bundle_id(args.variant):
         raise ValueError("Tracked ref lacks the selected app variant; refusing another identity")
     # Reuse the documented builder inside the same gated worker as Xcode.
-    run(["sh", "modules/fractal-fabric/build.sh"], cwd=app, env=env)
+    run(["sh", "modules/fractal-fabric/build.sh"], cwd=app,
+        env={**env, "FRACTAL_NIX_CACHE_ONLY": "1"})
     fabric_hash = framework_hash(repo)
     native_paths = ["apps/ios/app.json", "apps/ios/plugins", "apps/ios/modules",
                     "apps/ios/assets", "apps/ios/react-native.config.js"]
