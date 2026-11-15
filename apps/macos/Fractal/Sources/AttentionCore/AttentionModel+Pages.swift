@@ -16,17 +16,21 @@ extension AttentionModel {
   public static let attachmentByteLimit = 8 << 20
 
   /// Shows a page (callers animate it); the previous receipt is cleared, since the person moved
-  /// on. A card's page then needs `readOpenPage()`.
+  /// on. A page opened from another page (a card from the full inbox) remembers it, so Back
+  /// returns there. A card's page then needs `readOpenPage()`.
   public func open(_ next: PanelRoute) {
+    pageParent = route == .home ? nil : route
     route = next
     receipt = nil
     backFrom = nil
   }
 
-  /// Back to the top level (Back, Esc), which then returns focus to what opened the page.
+  /// Back to the page that opened this one, else the top level (Back, Esc); either returns focus
+  /// to what opened the page.
   public func back() {
     backFrom = route
-    route = .home
+    route = pageParent ?? .home
+    pageParent = nil
   }
 
   /// Reads the open card's detail and its asker's conversation concurrently, each kept on

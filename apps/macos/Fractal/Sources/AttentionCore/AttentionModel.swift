@@ -63,6 +63,8 @@ public enum AnswerState: Sendable, Equatable {
 @MainActor @Observable public final class AttentionModel {
   public private(set) var attention = LiveSection<AttentionPage>()
   public private(set) var slo = LiveSection<SloSnapshot>()
+  public private(set) var sloBoard: SloBoard?
+  public private(set) var signalBoard = SignalBoard(rows: [])
   /// Each listed row's history by `SloEntry.id`, read after the rows it belongs to.
   public private(set) var sloHistory = LiveSection<[String: SloHistory]>()
   private var sloHistoryCache = SloHistoryCache()
@@ -108,12 +110,14 @@ public enum AnswerState: Sendable, Equatable {
   public let configurationError: String?
   let adapter: (any AttentionAdapter)?
   let availabilityAdapter: (any AvailabilityAdapter)?
-  /// The page the panel shows; a page whose card left Fractal, and every page when the panel
-  /// closes, returns to the top level.
+  /// The page the panel shows; a page whose card left Fractal returns to its parent,
+  /// and closing the panel returns to the top level.
   public internal(set) var route: PanelRoute = .home
   /// The page the person last went back from, so the top level returns VoiceOver focus to the
   /// row or tile that opened it; nil once another page opens or the panel closes.
   public internal(set) var backFrom: PanelRoute?
+  /// The full inbox when it opened a card, so Back returns there; nil from the top level.
+  public internal(set) var pageParent: PanelRoute?
   /// Each open card's detail and its asker's conversation, read when its page opens and again
   /// on every refresh while it is open on screen; a failed read keeps the last one, marked stale.
   public internal(set) var contexts: [String: LiveSection<AttentionContext>] = [:]
@@ -165,8 +169,6 @@ public enum AnswerState: Sendable, Equatable {
 
   /// The menu bar count: asks waiting on the person. Updates ask nothing.
   public var openAskCount: Int { asks.count }
-
-  public var sloBoard: SloBoard? { slo.value.map { SloBoard($0.rows) } }
 
   public var canAnswer: Bool { attention.value?.canAnswer ?? false }
 
@@ -239,9 +241,15 @@ public enum AnswerState: Sendable, Equatable {
   /// Histories follow the rows: when the rows cannot be read, neither section is current.
   private func readSlo(from adapter: any AttentionAdapter, now: Date?) async {
     let result = await Self.capture { try await adapter.readSlo() }
+    let previousRows = slo.value?.rows
     Self.apply(result, to: &slo, now: now ?? .now)
     switch result {
-    case .success(let snapshot): await readSloHistory(snapshot.rows, from: adapter, now: now)
+    case .success(let snapshot):
+      if sloBoard == nil || previousRows != snapshot.rows {
+        sloBoard = SloBoard(snapshot.rows)
+        signalBoard = SignalBoard(rows: snapshot.rows)
+      }
+      await readSloHistory(snapshot.rows, from: adapter, now: now)
     case .failure(let error): Self.apply(Result<[String: SloHistory], Error>.failure(error), to: &sloHistory, now: now ?? .now)
     }
   }
@@ -312,8 +320,11 @@ public enum AnswerState: Sendable, Equatable {
       if case .sending = state { return true }
       return shown.contains(id)
     }
-    // A page whose card was answered, closed or snoozed elsewhere goes back to the top level.
-    if case .attention(let id) = route, !shown.contains(id) { route = .home }
+    // A card answered, closed or snoozed elsewhere returns to the page that opened it.
+    if case .attention(let id) = route, !shown.contains(id) {
+      route = pageParent ?? .home
+      pageParent = nil
+    }
   }
 
   /// Whether the person has typed or picked anything not yet sent, or is typing now: the

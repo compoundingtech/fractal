@@ -10,6 +10,10 @@ public enum PanelRoute: Hashable, Sendable {
   case availability
   case speech
   case objectives
+  /// One glance signal's objectives, by `Signal.id`.
+  case signal(String)
+  /// Every shown ask and update, when the top level caps its inbox.
+  case inbox
 }
 
 /// Everything a card's page shows beyond its row, read fresh when the page opens: the full

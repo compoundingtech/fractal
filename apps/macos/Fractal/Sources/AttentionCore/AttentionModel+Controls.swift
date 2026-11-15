@@ -21,6 +21,7 @@ extension AttentionModel {
     guard visible else {
       if route != .home { route = .home }
       backFrom = nil
+      pageParent = nil
       return
     }
     for record in rowsInPanel.values { await markSeen(record) }

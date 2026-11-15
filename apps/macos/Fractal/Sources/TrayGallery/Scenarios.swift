@@ -172,6 +172,68 @@ struct Content {
   await model.answer(record, with: answer, label: choice.label)
 }
 
+/// The glance board uses only Fractal rows, including objectives without a measurement yet.
+/// Histories are budget-remaining percentages, never a fabricated PR-throughput series.
+extension Content {
+  var glanceSlo: SloSnapshot {
+    SloSnapshot(asOf: now - 120, rows: [
+      slo("factory/work-throughput", about: "Merged PR throughput", target: "≥ 100/day", current: "—", status: "no-data"),
+      slo("merge-latency/p95", about: "Merge latency", target: "≤ 4h", current: "—", status: "no-data"),
+      slo("ci-critical-path/p95", about: "CI critical path", target: "≤ 20m", current: "—", status: "no-data"),
+      slo("flakes", about: "Flaky runs", target: "≤ 3/h", current: "—", status: "no-data"),
+      slo("main-green/dotfiles", about: "Dotfiles main", target: "green", current: "red 40m", status: "stale"),
+      slo("main-green/fractal", about: "Fractal main", target: "green", current: "green", status: "met"),
+      slo("main-green/factory", about: "Factory main", target: "green", current: "green", status: "met"),
+      slo("fleet/dev5", about: "dev5 deployment", target: "on roll", current: "rolling", status: "stale"),
+      slo("fleet/review-host", about: "review-host reachable", target: "reachable", current: "reachable", status: "met"),
+      slo("person-read", about: "Person read latency", target: "p99 ≤ 100ms", current: "p99 31 ms over 636 samples", status: "met"),
+      slo("projection-fresh", about: "Projection freshness", target: "p99 ≤ 1s", current: "p99 5243 ms over 636 samples", status: "missed"),
+      slo("database", about: "Database size", target: "≤ 50 GB", current: "live 54.86 GB", status: "missed"),
+      slo("transaction/read", about: "Read transactions", target: "p99 ≤ 100ms", current: "p99 175 ms over 636 samples", status: "missed"),
+      slo("agents/tray", about: "Tray agents", target: "no stuck agents", current: "2 stuck", status: "stale"),
+      slo("codex/weekly", .budget, about: "Codex weekly budget", target: "≤ 100%", current: "37% used", status: "met", remaining: 63),
+      slo("disk/review-host", about: "Disk headroom", target: "≥ 20% free", current: "18% free", status: "stale"),
+    ])
+  }
+
+  var glanceHistories: [String: [Double?]] {
+    [
+      "person-read": steps(100, 98),
+      "projection-fresh": steps(80, 0),
+      "database": steps(40, 0),
+      "transaction/read": steps(60, 0),
+      "codex/weekly": steps(90, 63),
+    ]
+  }
+}
+
+let glanceScenarios: [Scenario] = [false, true].map { busy in
+  Scenario(
+    id: busy ? "glance-busy" : "glance-quiet",
+    title: busy ? "Glance · busy inbox (17)" : "Glance · quiet inbox (3)",
+    description: busy
+      ? "Seventeen asks and updates, capped to keep all ten signal tiles visible at the live panel height."
+      : "Three inbox items followed by ten signals, including missed, stale, met and unmeasured objectives."
+  ) { now in
+    let content = Content(now: now)
+    var records = Array(content.asks.prefix(2)) + [content.update]
+    if busy {
+      records += (0..<14).map { index in
+        content.record(
+          "glance-extra-\(index)", title: "Review rollout \(index + 1)", from: "agent/factory",
+          askedAgo: Double(index + 30) * 60)
+      }
+    }
+    let fractal = FixtureFractal(
+      page: AttentionPage(records: records, canAnswer: true, canControl: true),
+      slo: content.glanceSlo, histories: content.glanceHistories, availability: content.present)
+    let model = model(fractal, speech: FixtureSpeech().coordinator())
+    model.macPresence = .present
+    await model.refresh()
+    return model
+  }
+}
+
 let scenarios: [Scenario] = [
   Scenario(
     id: "busy", title: "Busy inbox",

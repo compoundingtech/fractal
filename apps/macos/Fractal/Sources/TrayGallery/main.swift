@@ -81,7 +81,7 @@ let out = URL(fileURLWithPath: outArgument, isDirectory: true)
 try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-let panels = scenarios + pageScenarios + historyScenarios + speechScenarios
+let panels = scenarios + glanceScenarios + pageScenarios + historyScenarios + speechScenarios
 
 if arguments.first == "--capture" {
   // Captures put a backdrop and the panel on the real screen: only with the person's consent,
@@ -146,7 +146,9 @@ for scenario in panels where wanted.isEmpty || wanted.contains(scenario.id) {
   for appearance in GalleryAppearance.all {
     let model = await scenario.prepare(.now)
     guard
-      let png = await PanelSnapshot.png(model: model, build: GalleryBuild.identity, appearance: appearance.value),
+      let png = await PanelSnapshot.png(
+        model: model, build: GalleryBuild.identity, appearance: appearance.value,
+        scrollHeight: scenario.id.hasPrefix("glance-") ? PanelSnapshot.liveScrollHeight : .infinity),
       let bitmap = NSBitmapImageRep(data: png)
     else { fail("could not render \(scenario.id) \(appearance.name)", code: 1) }
     let file = "\(scenario.id)-\(appearance.name).png"

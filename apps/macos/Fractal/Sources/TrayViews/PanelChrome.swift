@@ -18,6 +18,8 @@ public enum PanelMetrics {
   static let rowHeight: CGFloat = 28
   /// The tallest a page's scrolling content gets before it scrolls.
   static let scrollHeight: CGFloat = 520
+  /// The top level's scroll content padding, above and below.
+  static let scrollPadding: CGFloat = 4
   /// Leading symbol column of a row.
   static let symbolWidth: CGFloat = 18
   static let symbolSpacing: CGFloat = 8
@@ -193,8 +195,12 @@ extension View {
 }
 
 /// A section label, as Control Center's pages and the Wi-Fi menu draw them: small, semibold and
-/// secondary, with an optional trailing count.
+/// secondary, with an optional trailing count. One line of fixed `height`, so the top level can
+/// reserve it when it caps the inbox.
 struct SectionLabel: View {
+  static let height: CGFloat = 26
+  private static let lineHeight: CGFloat = 16
+
   let title: String
   var aside: String?
 
@@ -204,10 +210,12 @@ struct SectionLabel: View {
       Spacer()
       if let aside { Text(aside).monospacedDigit() }
     }
+    .lineLimit(1)
     .font(.subheadline)
     .foregroundStyle(.secondary)
+    .frame(height: Self.lineHeight)
     .padding(.horizontal, PanelMetrics.inset)
-    .padding(.top, 8)
+    .padding(.top, Self.height - Self.lineHeight - 2)
     .padding(.bottom, 2)
   }
 }

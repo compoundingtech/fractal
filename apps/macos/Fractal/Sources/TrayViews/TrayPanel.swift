@@ -32,10 +32,22 @@ public struct TrayPanel: View {
   }
 
   /// The top level leaves and returns on the leading side, pages on the trailing side: a page
-  /// goes back the way it came. With Reduce Motion, pages cross-fade in place.
+  /// goes back the way it came. The full inbox sits between: it comes back from a card's page on
+  /// the leading side, and fades as it leaves, since it leaves both ways. With Reduce Motion,
+  /// pages cross-fade in place.
   private var transition: AnyTransition {
     if reduceMotion { return .opacity }
-    return (model.route == .home ? AnyTransition.move(edge: .leading) : .move(edge: .trailing)).combined(with: .opacity)
+    switch model.route {
+    case .home:
+      return AnyTransition.move(edge: .leading).combined(with: .opacity)
+    case .inbox:
+      let returning = model.backFrom.map { $0 != .inbox } ?? false
+      return .asymmetric(
+        insertion: AnyTransition.move(edge: returning ? .leading : .trailing).combined(with: .opacity),
+        removal: .opacity)
+    default:
+      return AnyTransition.move(edge: .trailing).combined(with: .opacity)
+    }
   }
 
   @ViewBuilder private var page: some View {
@@ -80,6 +92,18 @@ public struct TrayPanel: View {
       } content: {
         ObjectivesSection(model: model)
       }
+    case .signal(let id):
+      if let signal = model.signalBoard.signals.first(where: { $0.id == id }) {
+        ModulePage(title: signal.title, model: model) {
+          EmptyView()
+        } content: {
+          SignalSection(signal: signal, model: model)
+        }
+      } else {
+        HomePage(model: model, build: build)
+      }
+    case .inbox:
+      InboxPage(model: model)
     }
   }
 }
