@@ -10,11 +10,21 @@ use std::collections::BTreeMap;
 /// The operation names this observation, not the global event subject. Keep every payload
 /// field in the fingerprint: even the same observer on two pollers can see different facts.
 pub(super) fn observation_key(subject: &str, fields: &BTreeMap<String, Value>) -> anyhow::Result<String> {
+    let digest = fingerprint("github-event-observation.v1", subject, fields)?;
+    Ok(format!("github-event-observation:v1:{digest}"))
+}
+
+/// The operation names one poller's write of one completed CI run, like [`observation_key`].
+pub(super) fn workflow_run_observation_key(subject: &str, fields: &BTreeMap<String, Value>) -> anyhow::Result<String> {
+    let digest = fingerprint("github-workflow-run-observation.v1", subject, fields)?;
+    Ok(format!("github-workflow-run-observation:v1:{digest}"))
+}
+
+fn fingerprint(domain: &str, subject: &str, fields: &BTreeMap<String, Value>) -> anyhow::Result<String> {
     let fields = fields.iter()
         .map(|(name, value)| (name, smallclaims::hash::canonical_json_value(value)))
         .collect::<BTreeMap<_, _>>();
-    let digest = smallclaims::hash::canonical_hash(&("github-event-observation.v1", subject, fields))?;
-    Ok(format!("github-event-observation:v1:{digest}"))
+    smallclaims::hash::canonical_hash(&(domain, subject, fields))
 }
 
 /// One thing that happened to one item.

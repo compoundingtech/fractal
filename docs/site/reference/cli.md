@@ -31,6 +31,7 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 | `fractal alerts ls` | List requests and approvals. |
 | `fractal conversations` | Read and send durable conversation. |
 | `fractal usage` | Inspect observed usage and estimated cost. |
+| `fractal availability` | Read or set your status, interruptions and deadline clock. |
 
 ## Publication and planning
 

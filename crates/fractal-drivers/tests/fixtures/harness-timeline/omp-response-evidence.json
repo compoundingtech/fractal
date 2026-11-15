@@ -1,0 +1,38 @@
+[
+  {
+    "role": "assistant",
+    "completedAt": 1794561823331,
+    "api": "openai-codex-responses",
+    "provider": "openai-codex",
+    "model": "gpt-6.1-sol",
+    "usage": {
+      "input": 2860, "output": 387, "cacheRead": 0, "cacheWrite": 0,
+      "totalTokens": 3247, "reasoningTokens": 291,
+      "cost": {"input": 0.005719999999999999, "output": 0.00387, "cacheRead": 0, "cacheWrite": 0, "total": 0.00959},
+      "premiumRequests": 0
+    },
+    "stopReason": "stop",
+    "timestamp": 1794561806339,
+    "responseId": "response-gpt-example",
+    "duration": 16990.777334000002,
+    "ttft": 2106.666
+  },
+  {
+    "role": "assistant",
+    "completedAt": 1794561831127,
+    "api": "anthropic-messages",
+    "provider": "anthropic",
+    "model": "claude-opus-5-5",
+    "usage": {
+      "input": 4, "output": 866, "cacheRead": 2929, "cacheWrite": 1820,
+      "totalTokens": 5619,
+      "cost": {"input": 0.000016, "output": 0.017320000000000002, "cacheRead": 0.0005858, "cacheWrite": 0.01456, "total": 0.032481800000000005},
+      "cttl": {"ephemeral1h": 1820}
+    },
+    "stopReason": "stop",
+    "timestamp": 1794561821646,
+    "responseId": "response-opus-example",
+    "duration": 9480.126167,
+    "ttft": 1093.79875
+  }
+]

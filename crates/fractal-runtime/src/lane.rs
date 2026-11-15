@@ -270,6 +270,85 @@ impl Lane {
     }
 }
 
+/// Finite roots share the named policy's slice, not a seat's environment-selected slice.
+/// Admission owns the aggregate capacity; this backend only installs and verifies its envelope.
+pub(crate) fn prepare_finite(name: &str, capacity: Option<Capacity>) -> Result<Lane> {
+    anyhow::ensure!(!name.is_empty(), "finite lane name is empty");
+    if let Some(capacity) = capacity {
+        anyhow::ensure!(capacity.cores > 0 && capacity.memory > 0, "finite lane capacity is empty");
+    }
+    let slice = seat_slice(&format!("finite:{name}"));
+    let output = crate::isolate::systemctl()
+        .args(["--user", "set-property", "--runtime", &slice])
+        .args(capacity.map_or_else(
+            || vec!["CPUAccounting=yes".to_owned(), "MemoryAccounting=yes".to_owned(), "TasksAccounting=yes".to_owned()],
+            |capacity| capacity.slice_properties(),
+        ))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("cap finite lane {slice}"))?;
+    anyhow::ensure!(output.status.success(), "cap finite lane {slice}: {}", String::from_utf8_lossy(&output.stderr));
+    Ok(Lane { slice })
+}
+
+/// Read kernel controls and the blocked leader's actual placement before releasing its payload.
+pub(crate) fn verify_finite(lane: &Lane, capacity: Option<Capacity>, unit: &str, pid: u32) -> Result<()> {
+    let cgroup = slice_cgroup(&lane.slice).context("finite lane cgroup is unavailable")?;
+    if let Some(capacity) = capacity {
+        let cpu = std::fs::read_to_string(cgroup.join("cpu.max"))?;
+        let memory = std::fs::read_to_string(cgroup.join("memory.max"))?;
+        anyhow::ensure!(parse_live(&cpu, &memory) == Some(capacity), "finite lane CPU/memory readback differs");
+        verify_cpu_bound(&cpu, capacity, true)?;
+        for parent in cgroup.ancestors().skip(1) {
+            if parent == std::path::Path::new("/sys/fs/cgroup") {
+                break;
+            }
+            let cpu = std::fs::read_to_string(parent.join("cpu.max"))?;
+            verify_cpu_bound(&cpu, capacity, false)?;
+            let memory = std::fs::read_to_string(parent.join("memory.max"))?;
+            anyhow::ensure!(memory.trim() == "max" || memory.trim().parse::<u64>()? >= capacity.memory,
+                "finite lane exceeds an ancestor memory boundary");
+        }
+        let swap = std::fs::read_to_string(cgroup.join("memory.swap.max"))?;
+        let tasks = std::fs::read_to_string(cgroup.join("pids.max"))?;
+        anyhow::ensure!(swap.trim().parse::<u64>()? == capacity.memory / 4, "finite lane swap readback differs");
+        anyhow::ensure!(tasks.trim().parse::<u32>()? == TASKS_MAX, "finite lane task readback differs");
+    }
+    let placement = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))?;
+    let expected = cgroup.join(unit);
+    let actual = placement.lines().find_map(|line| line.strip_prefix("0::"))
+        .context("finite execution has no unified cgroup placement")?;
+    anyhow::ensure!(
+        std::path::Path::new("/sys/fs/cgroup").join(actual.trim_start_matches('/')) == expected,
+        "finite execution did not join its admitted lane"
+    );
+    // Missing controllers fail closed: finite launches cannot inherit an apparent no-op cap.
+    let controllers = std::fs::read_to_string(cgroup.join("cgroup.controllers"))?;
+    for required in if capacity.is_some() { &["cpu", "memory", "pids"][..] } else { &[][..] } {
+        anyhow::ensure!(controllers.split_whitespace().any(|value| value == *required),
+            "finite lane lacks required controller {required}");
+    }
+    Ok(())
+}
+
+fn verify_cpu_bound(value: &str, capacity: Capacity, exact: bool) -> Result<()> {
+    let mut fields = value.split_whitespace();
+    let quota = fields.next().context("CPU quota is missing")?;
+    let period = fields.next().context("CPU period is missing")?.parse::<u64>()?;
+    anyhow::ensure!(period > 0 && fields.next().is_none(), "CPU boundary is malformed");
+    if quota == "max" {
+        anyhow::ensure!(!exact, "finite lane CPU boundary is unlimited");
+        return Ok(());
+    }
+    let quota = quota.parse::<u64>()?;
+    let requested = u128::from(capacity.cores) * u128::from(period);
+    anyhow::ensure!(
+        if exact { u128::from(quota) == requested } else { u128::from(quota) >= requested },
+        "finite lane CPU boundary differs from admission"
+    );
+    Ok(())
+}
+
 /// The lane a launch of `runtime_id` starts in: its declared capacity, when this host enforces
 /// lanes and can. The seat's slice holds the capacity before anything starts in it, so a laned
 /// harness never runs uncapped; a slice that cannot be capped refuses the launch.
@@ -543,6 +622,18 @@ pub fn sccache_socket(runtime: &str, slice: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn finite_cpu_readback_rejects_rounded_and_tighter_ancestor_limits() {
+        let capacity = Capacity { cores: 1, memory: GIB };
+        assert!(verify_cpu_bound("100000 100000", capacity, true).is_ok());
+        assert!(verify_cpu_bound("50000 100000", capacity, true).is_err());
+        assert!(verify_cpu_bound("max 100000", capacity, true).is_err());
+        assert!(verify_cpu_bound("max 100000", capacity, false).is_ok());
+        assert!(verify_cpu_bound("200000 100000", capacity, false).is_ok());
+        assert!(verify_cpu_bound("50000 100000", capacity, false).is_err());
+        assert!(verify_cpu_bound("100000 0", capacity, false).is_err());
+        assert!(verify_cpu_bound("100000 100000 extra", capacity, false).is_err());
+    }
     #[test]
     fn a_declaration_fills_what_it_omits_and_refuses_what_cannot_start() {
         assert_eq!(Capacity::declared(None, None).unwrap(), Capacity::DEFAULT);

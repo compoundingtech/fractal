@@ -2476,7 +2476,7 @@ def cmd_inventory(args):
 
     A site's id and owner come from its path, so moving code changes them; the adjacent marker comment still
     names the old id, which says which record the site is. This rewrites the marker and the record (id, path,
-    owner, line_hint), re-derives the declaration catalog and the dependency-crate list, and moves the manual
+    owner), re-derives the declaration catalog and the dependency-crate list, and moves the manual
     flows that follow their function. Nothing is accepted that the guard (scripts/check-sqlite-large-values)
     does not accept; a site without a marker, or whose fingerprint changed, is reported and left alone."""
     import bisect
@@ -2519,10 +2519,10 @@ def cmd_inventory(args):
     for e in manifest["sites"]:
         s = remap.get(e["id"])
         if s is not None:
-            e = dict(e, id=s.id, path=s.path, owner=s.owner, line_hint=s.line)
+            e = dict(e, id=s.id, path=s.path, owner=s.owner)
         entries.append(e)
     for oid, s in copies:
-        entries.append(dict(old[oid], id=s.id, path=s.path, owner=s.owner, line_hint=s.line))
+        entries.append(dict(old[oid], id=s.id, path=s.path, owner=s.owner))
     manifest["sites"] = sorted(entries, key=lambda e: e["id"])
     # manual flows follow their function
     flows = []

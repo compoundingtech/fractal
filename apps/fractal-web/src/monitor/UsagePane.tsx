@@ -114,7 +114,7 @@ const Detail = ({ row, source, now }: { readonly row: Native.SloRow; readonly so
   const forecast = forecastOf(row, now)
   const resets = Option.getOrUndefined(row.resets_at_unix_ms)
   const fields: ReadonlyArray<readonly [string, string | undefined]> = [
-    ['id', row.id], ['status', row.status], ['about', row.about], ['target', row.target], ['current', row.current], ['window', row.window], ['account', row.account],
+    ['id', row.id], ['status', typeof row.status === 'string' ? row.status : row.status.raw], ['about', row.about], ['target', row.target], ['current', row.current], ['window', row.window], ['account', row.account],
     ['resets', resets === undefined ? undefined : resets > now ? `in ${spanText(resets - now)}` : 'now'],
     // The phone's basis wording: whole days from a day, else whole hours.
     ['forecast', forecast ? `${forecast.long}${row.forecast_basis_minutes === undefined ? '' : ` (from the last ${row.forecast_basis_minutes >= 1440 ? `${Math.floor(row.forecast_basis_minutes / 1440)}d` : `${Math.floor(row.forecast_basis_minutes / 60)}h`})`}` : undefined],

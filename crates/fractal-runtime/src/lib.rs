@@ -22,6 +22,7 @@ mod process;
 mod procfs;
 mod pty;
 mod seat_placement;
+pub mod transcript;
 #[cfg(test)]
 mod test_executable;
 pub mod seat_admission;
@@ -58,10 +59,11 @@ pub use peer_process::PeerProcessIdentity;
 pub use peer_process::{macos_process_identity, macos_process_owner};
 pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token, process_generation_alive,
+    FiniteLane, FiniteExecutionAuthorization, ResourceCoverage, ResourceExecutionBinding, UnsupportedCoverage,
 };
 pub use procfs::ProcessNamespaceMismatch;
 pub use pty::{
     Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable,
-    ProcfsHidesProcesses, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
+    ProcfsHidesProcesses, PtyExitEvidence, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
     PtySpawnTimeoutPhase, TerminalSize, mailbox_legacy_admissions_total,
 };

@@ -385,6 +385,9 @@ where
     T::deserialize(deserializer).map(Some)
 }
 
+/// Native finite-execution context carried with the effective member launch.
+pub const RESOURCE_LANE_REQUEST_TAG: &str = "st3.resource-lane";
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemberSpec {
     pub kind: MemberKind,
@@ -447,6 +450,9 @@ impl MemberSpec {
         }
         if authored_launch(&self.launch) != authored_launch(&launched.launch) {
             changes.push("launch");
+        }
+        if self.tags.get(RESOURCE_LANE_REQUEST_TAG) != launched.tags.get(RESOURCE_LANE_REQUEST_TAG) {
+            changes.push("resource-lane");
         }
         changes
     }
@@ -678,6 +684,23 @@ pub enum UsedMissionSpec {
 pub struct RetrySpec {
     pub attempts: u32,
     pub backoff_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedule_ms: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_error_tags: Vec<String>,
+}
+
+impl RetrySpec {
+    /// Delay after the given one-based failed attempt; the final scheduled delay repeats.
+    pub fn delay_ms(&self, attempt: u32) -> u64 {
+        self.schedule_ms
+            .get(attempt.saturating_sub(1) as usize)
+            .or_else(|| self.schedule_ms.last())
+            .copied()
+            .unwrap_or(self.backoff_ms)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -815,6 +838,9 @@ impl Default for RetrySpec {
         Self {
             attempts: 1,
             backoff_ms: 0,
+            schedule_ms: Vec::new(),
+            window_ms: None,
+            on_error_tags: Vec::new(),
         }
     }
 }
@@ -847,6 +873,9 @@ pub struct StepSpec {
     /// did before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<fractal_runtime::Raise>,
+    /// Finite exec admission policy; independent of an assigned seat's scoped capacity raise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_lane: Option<ResourceLaneSpec>,
     pub retry: RetrySpec,
     pub finally: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -881,6 +910,25 @@ pub struct StepSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_spec: Option<Box<LoopSpec>>,
     pub definition_hash: String,
+}
+
+/// The declarative counterpart of `resources.lane`: one host-local admission policy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLaneSpec {
+    pub name: String,
+    pub host: String,
+    pub max_members: u32,
+    pub capacity: Option<fractal_runtime::Capacity>,
+    pub coverage: ResourceLaneCoverage,
+    pub admission_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceLaneCoverage {
+    Logical,
+    Enforced,
 }
 
 /// A program step's code: one self-contained ES module, pinned by the SHA-256 of its bytes. The
@@ -2395,6 +2443,13 @@ impl AttentionItemView {
         attention_is_alert(&self.kind, self.is_update())
     }
 
+    /// Whether this item is urgent: the one server rule, priority `critical`
+    /// ([`fractal_schema::availability::urgent_priority`]). Interruptions `urgent`, the deadline
+    /// clock's `hold-routine` and spoken delivery read only this.
+    pub fn is_urgent(&self) -> bool {
+        fractal_schema::availability::urgent_priority(Some(&self.priority))
+    }
+
     /// Every agent conversation this item shows in: its own, and for a login, every seat that
     /// shares it, since one sign-in answers them all.
     pub fn conversations(&self) -> Vec<String> {
@@ -2566,6 +2621,16 @@ pub struct AttachmentInput {
     pub name: Option<String>,
 }
 
+/// The mission step attempt and runtime incarnation that own a native effect.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EffectOwner {
+    pub mission: String,
+    pub key: String,
+    pub step: String,
+    pub attempt: u32,
+    pub incarnation: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MessageSendRequest {
     pub idempotency_key: String,
@@ -2580,6 +2645,68 @@ pub struct MessageSendRequest {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentInput>,
+    /// Absent for ordinary messages; binds a native effect to its mission owner when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<EffectOwner>,
+}
+
+#[cfg(test)]
+mod message_send_request_tests {
+    use super::{EffectOwner, MessageSendRequest};
+    use serde_json::json;
+
+    #[test]
+    fn unbound_owner_is_omitted_and_preserves_the_original_wire_shape() {
+        let wire = json!({
+            "idempotency_key": "message-example",
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Example message",
+            "title": null,
+            "in_reply_to": null,
+            "tags": []
+        });
+        let request: MessageSendRequest = serde_json::from_value(wire.clone()).unwrap();
+
+        assert!(request.owner.is_none());
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+    }
+
+    #[test]
+    fn populated_owner_roundtrips_with_all_fields_required() {
+        let owner = EffectOwner {
+            mission: "mission/example".into(),
+            key: "notify-reviewer".into(),
+            step: "notify".into(),
+            attempt: 2,
+            incarnation: "incarnation/example".into(),
+        };
+        let wire = json!({
+            "idempotency_key": "message-example",
+            "from": "agent/example/sender",
+            "to": "agent/example/receiver",
+            "content": "Example message",
+            "title": null,
+            "in_reply_to": null,
+            "tags": [],
+            "owner": {
+                "mission": "mission/example",
+                "key": "notify-reviewer",
+                "step": "notify",
+                "attempt": 2,
+                "incarnation": "incarnation/example"
+            }
+        });
+        let request: MessageSendRequest = serde_json::from_value(wire.clone()).unwrap();
+
+        assert_eq!(request.owner.as_ref(), Some(&owner));
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+        for field in ["mission", "key", "step", "attempt", "incarnation"] {
+            let mut incomplete = wire.clone();
+            incomplete["owner"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<MessageSendRequest>(incomplete).is_err());
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2989,6 +3116,17 @@ pub struct MissionRunRequest {
     pub idempotency_key: String,
 }
 
+/// Start an independent run from a failed run without changing the failed run's history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionRunRetryRequest {
+    pub actor: String,
+    #[serde(default)]
+    pub same_revision: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub idempotency_key: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionDefinitionView {
     #[serde(
@@ -3076,6 +3214,21 @@ pub struct MissionRunView {
     /// The outcome a person or an authorized agent set after the run finished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<MissionRunOutcomeView>,
+    /// The failed run this fresh run retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// Independent retry runs linked to this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retried_by: Vec<String>,
+    /// The cancelled predecessor whose cleanup this replacement must await.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// The fresh replacement selected by a later mission publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Why a publication could not safely replace this still-active run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_fault: Option<String>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
     #[serde(default)]
@@ -3186,6 +3339,9 @@ pub struct StepRunView {
     pub run: String,
     pub generation: String,
     pub step: String,
+    /// Detail-read execution evidence; absent on lean work reads and older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executions: Option<Vec<crate::step_execution::StepExecution>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub fresh_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3195,6 +3351,9 @@ pub struct StepRunView {
     pub definition_hash: String,
     pub status: String,
     pub attempt: u32,
+    /// The pinned step's native retry policy; omitted when no retries are configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
     pub assigned_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_to: Vec<String>,
@@ -3578,6 +3737,11 @@ pub struct PersonAskRequest {
     /// the ask resolves as timed out with no answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_answer: Option<String>,
+    /// `critical`, `high`, `normal` or `low` ([`fractal_schema::availability::PRIORITIES`]);
+    /// absent is `normal`. Only `critical` is urgent: it keeps running under `hold-routine` and
+    /// may interrupt a person whose interruptions are `urgent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
     pub idempotency_key: String,
 }
 

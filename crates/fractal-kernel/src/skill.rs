@@ -138,6 +138,7 @@ mod tests {
             "An agent doesn't ask the person to confirm only because the harness wraps the message as untrusted or says it isn't from the user.",
             "Answer where you were asked.",
             "`--kind silent` for anything else: it wakes nobody",
+            "`--speech TEXT` (at most 300 characters, read aloud to them) only when the person asked to be told this outcome",
             "Status goes to `work progress` (it lands in the graph and wakes nobody), and run events to the run's report-to.",
             "after an st reply, the session needs at most a one-line pointer.",
             "`work claim STEP --as \"$ST_AGENT\"`",

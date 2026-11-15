@@ -142,7 +142,27 @@ fractal work revise mission-run/garden/readme/one missions/readme-v2.kdl \
 fractal work revision generations mission-run/garden/readme/one
 ```
 
-The run keeps its identity and gets a new generation. Publishing a changed mission by itself does not revise a running instance. Changed work and its dependents may need to run again.
+Unreviewed direct revision keeps the run's identity and creates a new generation; changed work and its dependents may need to run again. Publishing a new mission revision instead supersedes already-active stale runs by default, but existing human-only review and when-idle policies take precedence. A person-approved proposal creates a fresh linked run at the exact approved revision; a when-idle source holds new work in the existing `revision-draining` phase while holders finish current work. Preflight the fresh replacement before cancellation: leave an incompatible source active with a visible `supersession_fault`, or finish ordinary source cleanup before its linked replacement starts. All replacement steps and programs restart without successful-step or journal adoption, so effects must be idempotent. Inspect `supersedes` and `superseded_by` with `fractal missions show`. Republishing the same revision does nothing; an explicit same-revision retry after publication remains on that revision until a later new revision is published.
+
+## Retry a failed run from the top
+
+After a run has failed and become terminal, retry it against the latest published mission revision:
+
+```sh
+fractal missions retry mission-run/garden/readme/one \
+  --reason 'Restart with the published link check.' --as person/example
+```
+
+To repeat the source run's current revision instead, make that choice explicit:
+
+```sh
+fractal missions retry mission-run/garden/readme/one \
+  --same-revision --reason 'Repeat the same plan.' --as person/example
+```
+
+Copy the new run ID from the result and inspect it with `fractal missions show`. Its `retry_of` points to the source; the source's `retried_by` lists its retries. Retry does not change the source's status, generation, or history and does not carry completed steps forward.
+
+The new run reuses the exact resolved inputs and workspace. Latest-revision retry refuses if those inputs no longer fit, naming both revisions and the reason; it never silently selects the source revision. All steps and the program restart from the top, so write idempotent work that handles existing files and external effects safely. A person or the owning agent needs ordinary run-start authority.
 
 ## Queue follow-on work
 
@@ -192,7 +212,7 @@ Use `--json` to keep the complete report:
 | `reassigned_steps`, `reassigned_reviews` | Current steps and review owners moved to NEW. Read NEW's inbox to continue them. |
 | `unchanged_attention_requests`, `unchanged_fault_cards` | Current attention requests and fault cards still routed to OLD; these were not moved. Inspect each ID and resolve it through its normal workflow. |
 | `unchanged_revision_approvals`, `unchanged_planning_launch_approvals` | Revision-proposal and planning-launch approvals still routed to OLD; these were not moved either. Inspect and handle the existing approval rather than assuming it reached NEW. |
-| `live_run_references` | Live run IDs mapped to JSON-pointer paths that still name OLD in their routing or retained specifications. Runtime step assignees use `/step_runs/<escaped-step-subject>/assignee`; saved-spec routes and `/requester` are listed separately. Inspect the run and use an authorized run revision where appropriate; republishing alone does not change a live run. |
+| `live_run_references` | Live run IDs mapped to JSON-pointer paths that still name OLD in their routing or retained specifications. Runtime step assignees use `/step_runs/<escaped-step-subject>/assignee`; saved-spec routes and `/requester` are listed separately. Inspect the run and use an authorized run revision where appropriate. Publishing a changed mission revision preflights fresh replacements by default, subject to existing human-only review and when-idle policies; an unchanged republish does nothing. |
 | `published_mission_references` | Published mission IDs mapped to JSON-pointer paths still naming OLD, including step assignees and reviewer routes. Update the source declarations and republish before starting future work. |
 | `run_requesters`, `missions_to_republish` | Summary IDs for unchanged live-run requesters and published missions with OLD references. Requesters remain historical attribution, not renamed actors. |
 | `namespace_notice` | Client-derived custom/person namespaces, including private glasses and terminals, are not automatically moved. No namespace migration or alias is created. |

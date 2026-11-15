@@ -4562,6 +4562,11 @@ jobs:
               "apps/fractal-web/src/changelog/**",
               # The dev-bar build and changes stories render the real segment.
               "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
+              # SettingsDialog and AvailabilityPanel stories render the availability section.
+              "apps/fractal-web/src/availability/AvailabilityEditor.tsx",
+              "apps/fractal-web/src/availability/AvailabilityPanel.tsx",
+              "apps/fractal-web/src/availability/availability.fixtures.ts",
+              "apps/fractal-web/src/availability/availabilityModel.ts",
               "apps/fractal-web/src/embed/**",
               "apps/fractal-web/src/web/AlertDetailsPane.tsx",
               "apps/fractal-web/src/web/AlertFlashBand.tsx",

@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { assertResponseEvidence } from "./response-evidence.mjs";
 
 // A recorder standing in for `st2 driver omp-channel`, so this smoke can assert what the extension
 // EMITS and not merely that it loads — see smoke.mjs for why `true` as the channel binary cannot
@@ -203,6 +204,10 @@ for (const ctx of [bareCtx, fullCtx, throwingCtx]) {
   await handlers.get("session_shutdown")({}, ctx);
   await awaitRecorderDrain();
 }
+await handlers.get("session_start")({}, fullCtx);
+await assertResponseEvidence(handlers, fullCtx, readFrames);
+await handlers.get("session_shutdown")({}, fullCtx);
+await awaitRecorderDrain();
 
 // Structured ask observation is correlated by toolCallId. An unrelated result must emit nothing
 // (and therefore leave the durable blocked frame intact); only the matching result clears it.

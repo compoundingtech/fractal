@@ -534,66 +534,30 @@ pub async fn propose_planning_variant(
     let intent = crate::store::identities::normalize_intent(&state.store.readers.get(), &intent)
         .map_err(ApiError::bad)?;
     let mission = &intent.missions[&session.mission];
-    let old = state
-        .store
-        .mission_spec(&session.mission, Some(&current.revision))
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::internal("the current mission revision is unavailable"))?;
-    let (_, reviewers) = crate::store::analyze_mission_revision(&old, mission, &current.requester)
-        .map_err(ApiError::bad)?;
-    state
-        .store
-        .apply(
-            &intent,
-            &preview.mission.subject_tokens,
-            &format!("{}:publish", request.idempotency_key),
-        )
-        .map_err(ApiError::bad)?;
-    let result =
-        if reviewers.is_empty() && matches!(old.revision_cutover, RevisionCutover::RestartActive) {
-            RevisionSubmissionView {
-                provenance: state
-                    .store
-                    .mission_provenance(&session.mission, &mission.revision)
-                    .map_err(ApiError::internal)?,
-                status: "applied".into(),
-                mission_run: state
-                    .store
-                    .adopt_mission_revision(
-                        run_subject,
-                        mission,
-                        &request.actor,
-                        &request.reason,
-                        &format!("{}:cutover", request.idempotency_key),
-                    )
-                    .map_err(ApiError::bad)?,
-                proposal: None,
-            }
-        } else {
-            let proposal = state
-                .store
-                .create_revision_proposal(
-                    run_subject,
-                    mission,
-                    &request.actor,
-                    &request.reason,
-                    &format!("{}:proposal", request.idempotency_key),
-                )
-                .map_err(ApiError::bad)?;
-            RevisionSubmissionView {
-                provenance: state
-                    .store
-                    .mission_provenance(&session.mission, &mission.revision)
-                    .map_err(ApiError::internal)?,
-                status: proposal.status.clone(),
-                mission_run: state
-                    .store
-                    .mission_run(run_subject)
-                    .map_err(ApiError::internal)?
-                    .expect("the target mission run exists"),
-                proposal: Some(proposal),
-            }
-        };
+    state.store.apply_run_revision(
+        &intent,
+        &preview.mission.subject_tokens,
+        &format!("{}:publish", request.idempotency_key),
+        fractal_store::store::RunRevisionApply {
+            actor: &request.actor,
+            run: run_subject,
+            operation: &crate::model::MissionRevisionOperation {
+                id: request.idempotency_key.clone(),
+                mission: mission.id.clone(),
+                revision: mission.revision.clone(),
+                from_generation: current.generation,
+                reason: request.reason.clone(),
+                cancellation: None,
+            },
+            direct_key: &format!("{}:cutover", request.idempotency_key),
+            proposal_key: &format!("{}:proposal", request.idempotency_key),
+        },
+    ).map_err(ApiError::bad)?;
+    let result = cached_revision_submission(
+        &state,
+        &format!("{}:cutover", request.idempotency_key),
+        &format!("{}:proposal", request.idempotency_key),
+    )?.ok_or_else(|| ApiError::internal("the atomic revision response is unavailable"))?;
     let mut result = result;
     runs::present_mission_run(&state.store, &mut result.mission_run).map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -756,62 +720,51 @@ pub async fn approve_planning_session(
     let intent =
         parse_intent(&preview.mission.resolved_intent.kdl, &state.node).map_err(ApiError::bad)?;
     let approval_key = format!("planning-approval:{}:{}", session.id, preview.hash);
-    state
-        .store
-        .apply(
+    if let Some((run_subject, current)) = target {
+        let mission = &intent.missions[&session.mission];
+        state.store.apply_run_revision(
             &intent,
             &preview.mission.subject_tokens,
             &format!("{approval_key}:publish"),
-        )
-        .map_err(ApiError::bad)?;
-    if let Some((run_subject, current)) = target {
-        let mission = &intent.missions[&session.mission];
-        let old = state
-            .store
-            .mission_spec(&session.mission, Some(&current.revision))
-            .map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::internal("the current mission revision is unavailable"))?;
-        let (_, reviewers) =
-            crate::store::analyze_mission_revision(&old, mission, &current.requester)
-                .map_err(ApiError::bad)?;
-        if reviewers.is_empty() && matches!(old.revision_cutover, RevisionCutover::RestartActive) {
-            state
-                .store
-                .adopt_mission_revision(
-                    &run_subject,
-                    mission,
-                    &request.actor,
-                    "the requester approved the launch revision",
-                    &format!("{approval_key}:cutover"),
-                )
-                .map_err(ApiError::bad)?;
-        } else {
-            let proposal = state
-                .store
-                .create_revision_proposal(
-                    &run_subject,
-                    mission,
-                    &request.actor,
-                    "the requester approved the launch revision",
-                    &format!("{approval_key}:proposal"),
-                )
-                .map_err(ApiError::bad)?;
-            if proposal.reviewers.contains(&request.actor) {
-                let revision_preview = proposal
-                    .preview_hash
-                    .as_deref()
-                    .ok_or_else(|| ApiError::internal("the revision proposal has no preview"))?;
-                state
-                    .store
-                    .approve_revision_proposal(
-                        &proposal.subject,
-                        &request.actor,
-                        revision_preview,
-                        &format!("{approval_key}:revision-approval"),
-                    )
-                    .map_err(ApiError::bad)?;
-            }
+            fractal_store::store::RunRevisionApply {
+                actor: &request.actor,
+                run: &run_subject,
+                operation: &crate::model::MissionRevisionOperation {
+                    id: approval_key.clone(),
+                    mission: mission.id.clone(),
+                    revision: mission.revision.clone(),
+                    from_generation: current.generation,
+                    reason: "the requester approved the launch revision".into(),
+                    cancellation: None,
+                },
+                direct_key: &format!("{approval_key}:cutover"),
+                proposal_key: &format!("{approval_key}:proposal"),
+            },
+        ).map_err(ApiError::bad)?;
+        let revision = cached_revision_submission(
+            &state,
+            &format!("{approval_key}:cutover"),
+            &format!("{approval_key}:proposal"),
+        )?.ok_or_else(|| ApiError::internal("the atomic revision response is unavailable"))?;
+        if let Some(proposal) = revision.proposal
+            && proposal.reviewers.contains(&request.actor)
+        {
+            let revision_preview = proposal.preview_hash.as_deref()
+                .ok_or_else(|| ApiError::internal("the revision proposal has no preview"))?;
+            state.store.approve_revision_proposal(
+                &proposal.subject,
+                &request.actor,
+                revision_preview,
+                &format!("{approval_key}:revision-approval"),
+            ).map_err(ApiError::bad)?;
         }
+    } else {
+        state.store.apply_as(
+            &intent,
+            &preview.mission.subject_tokens,
+            &format!("{approval_key}:publish"),
+            Some(&request.actor),
+        ).map_err(ApiError::bad)?;
     }
     let response = state
         .store

@@ -1034,12 +1034,9 @@ fn rollout_rechecks_pending_replies_and_the_physical_render_fence() {
     assert!(reconciler.rollout_render_guard(&seat.desired()).is_err());
 }
 
-/// Nothing writes when an unanswered ask's deadline passes, so the pass that sees the ask arms
-/// a wake for its deadline, and the pass that wake starts resolves the ask and readies its step.
-#[tokio::test(start_paused = true)]
-async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
-    use futures_util::FutureExt;
-    let seat = Seat::new();
+/// A seat claims its step and asks `person/operator` from it with a one-hour deadline: the
+/// origin step, the ask's step and its stored deadline.
+fn ask_with_deadline(seat: &Seat) -> (String, String, u128) {
     seat.store.set_ask_deadlines(true);
     let run = seat.work();
     let origin = run.steps[0].subject.clone();
@@ -1057,6 +1054,7 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     let ask = seat
         .store
         .ask_person(&crate::model::PersonAskRequest {
+            priority: None,
             deadline_ms: Some(3_600_000),
             default_answer: None,
             legacy_request: None,
@@ -1077,6 +1075,16 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
             .as_u64()
             .unwrap(),
     );
+    (origin, ask.subject, deadline)
+}
+
+/// Nothing writes when an unanswered ask's deadline passes, so the pass that sees the ask arms
+/// a wake for its deadline, and the pass that wake starts resolves the ask and readies its step.
+#[tokio::test(start_paused = true)]
+async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
+    use futures_util::FutureExt;
+    let seat = Seat::new();
+    let (origin, ask, deadline) = ask_with_deadline(&seat);
     let reconciler = Reconciler::new(
         seat.store.clone(),
         seat.runtime.clone(),
@@ -1104,10 +1112,114 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     let resolved = reconciler.reconcile_person_asks();
     smallclaims::store::set_thread_clock(None);
     assert!(resolved.unwrap());
-    assert_eq!(seat.store.step_run(&ask.subject).unwrap().unwrap().status, "completed");
+    assert_eq!(seat.store.step_run(&ask).unwrap().unwrap().status, "completed");
     let resumed = seat.store.step_run(&origin).unwrap().unwrap();
     assert_eq!(resumed.status, "ready");
     assert_eq!(resumed.person_answers[0].resolved_by.as_deref(), Some("deadline"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn ask_digest_stage_records_and_fires_local_nine_wakes_across_dst() {
+    use crate::store::fleet_admission_tests_shared_seats::{admit, key, node};
+    use futures_util::FutureExt as _;
+    struct Clock;
+    impl Drop for Clock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    let _clock = Clock;
+    let ms = |at: &str| u128::try_from(chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis()).unwrap();
+    for (previous, boundary, hours) in [
+        ("2026-03-28T08:00:00Z", "2026-03-29T07:00:00Z", 23),
+        ("2026-10-24T07:00:00Z", "2026-10-25T08:00:00Z", 25),
+    ] {
+        let armed = ms(previous) + 1;
+        let deadline = ms(boundary);
+        assert_eq!(deadline - ms(previous), hours * 3_600_000);
+        smallclaims::store::set_thread_clock(Some(armed));
+        let identity = key();
+        let store = Arc::new(node("alder", Some(&identity), Some(&identity)));
+        admit(&store, "alder", &identity, "anchor", None);
+        store.project_replication_backlog().unwrap();
+        store.fleet_membership().unwrap();
+        let intent = parse_intent(&format!(
+            "version 2\nnotice-owner {{ member \"alder\"; member-key \"{}\"; always-on }}",
+            identity.public(),
+        ), "alder").unwrap();
+        let subject = crate::notice_owner::SUBJECT;
+        let expected = BTreeMap::from([(subject.to_owned(), Vec::new())]);
+        store.apply_as(&intent, &expected, "digest-owner", Some("person/example")).unwrap();
+        let reconciler = Reconciler::new(
+            store,
+            Arc::new(Runtime::default()),
+            "alder".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.set_ask_digest_policy(&crate::config::AsksConfig {
+            digest_timezone: "Europe/Berlin".into(),
+            ..crate::config::AsksConfig::default()
+        }).unwrap();
+        let (pass, due) = smallclaims::touched::record_due(|| reconciler.reconcile_ask_digests());
+        assert!(!pass.unwrap(), "no resolved asks means no digest");
+        assert_eq!(due, Some(deadline));
+        assert_eq!(reconciler.step_deadlines.lock().unwrap().get("ask-digest"), Some(&deadline));
+        let _ = reconciler.notify.notified().now_or_never();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(u64::try_from(deadline - armed - 1).unwrap())).await;
+        tokio::task::yield_now().await;
+        assert!(reconciler.notify.notified().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(reconciler.notify.notified().now_or_never().is_some(), "local 09:00 wakes the digest stage");
+        smallclaims::store::set_thread_clock(Some(deadline));
+        let (_, next) = smallclaims::touched::record_due(|| reconciler.reconcile_ask_digests().unwrap());
+        assert_eq!(next, Some(deadline + 24 * 3_600_000));
+    }
+}
+
+/// While the asked person holds their deadline clock no wake is armed for the ask; once it
+/// runs again the wake is armed for the stored deadline plus the time held.
+#[tokio::test(start_paused = true)]
+async fn the_reconciler_arms_the_ask_deadline_wake_past_the_time_the_clock_was_held() {
+    let seat = Seat::new();
+    let (_, ask, deadline) = ask_with_deadline(&seat);
+    let reconciler = Reconciler::new(
+        seat.store.clone(),
+        seat.runtime.clone(),
+        "amber".into(),
+        Arc::new(Notify::new()),
+    );
+    let clock = |deadline_clock: &str| {
+        seat.store
+            .append_claim(&ClaimInput {
+                subject: "person/operator".into(),
+                kind: "person.deadline-clock-set".into(),
+                actor: Some("person/operator".into()),
+                fields: BTreeMap::from([
+                    ("deadline_clock".into(), json!(deadline_clock)),
+                    ("source".into(), json!("host/amber")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let held = now_ms();
+    smallclaims::store::set_thread_clock(Some(held));
+    clock("hold-all");
+    assert!(!reconciler.reconcile_person_asks().unwrap());
+    assert_eq!(reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"), None, "a held clock arms nothing");
+    let resumed = held + 600_000;
+    smallclaims::store::set_thread_clock(Some(resumed));
+    clock("run");
+    let pass = reconciler.reconcile_person_asks();
+    smallclaims::store::set_thread_clock(None);
+    assert!(!pass.unwrap());
+    assert_eq!(
+        reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"),
+        Some(&(deadline + 600_000))
+    );
+    assert_eq!(seat.store.step_run(&ask).unwrap().unwrap().status, "ready");
 }
 
 #[test]
@@ -1149,6 +1261,7 @@ mission "garden/cancel-ask" state="ready" {
         idempotency_key: "cancel-ask-claim".into(),
     }).unwrap();
     let ask = seat.store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -1229,6 +1342,7 @@ fn rollout_pending_person_work_can_resume_and_finish_while_new_work_waits() {
         let ask = seat
             .store
             .ask_person(&crate::model::PersonAskRequest {
+                priority: None,
                 deadline_ms: None,
                 default_answer: None,
                 legacy_request: None,

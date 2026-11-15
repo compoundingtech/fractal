@@ -2083,6 +2083,21 @@ prints, over the full warm runs in the window that ran and signed every check (e
 the nearest-rank p50 and p90, the maximum, the share within the objective, whether it is breached and why, the same per host, and the five
 slowest stages or checks; the runs left out are counted by reason (`not_full`, `cold`, `partial`: exit 4, a tree that edits a lane runs nothing for that check, and `failed`). It writes nothing.
 
+The installed stub first runs the accepted remote main's `scripts/check-public-repo` over
+every outgoing ref update. This content-only publication boundary recursively checks
+newly reachable commits, including intermediate commits and merged side histories:
+every commit message and each complete added, modified or type-changed blob at its real
+repository path, compared against every parent. Gitlinks receive path checks only.
+Removed lines and synthetic diff headers are not scanned. It runs no tests and requires
+no evidence. A finding, missing accepted policy, or inability to scan refuses publication.
+`ST_SKIP_EVIDENCE` and `ST_EVIDENCE_LOCAL` affect only the signing path below, never this
+content guard. Evidence-record publication also passes this boundary: the record's commit,
+message and newly reachable source ancestors are checked, with known remote history
+excluded as for other new refs. Neither the evidence namespace nor immutable record
+hashes bypass content policy; the signed bytes and hashes are not rewritten. See
+[CI](../ci.md#required-public-history-guard) for the separate required trusted workflow,
+its organization-ruleset contract and the plan prerequisite for hosted enforcement.
+
 A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
 one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
 a hook it did not write and leaving a configured `core.hooksPath` alone. **The hook and the runner are not the pushed branch's:** the stub takes
@@ -2101,13 +2116,13 @@ first CI run sees it. A tree that edits a lane's definition is not signed for th
 push on the machine is still signing (in the background, say) says so and goes, and that run's notes follow. Each push of the checked-out head appends
 one line to `~/.local/state/st3/evidence-prepush/receipts.jsonl` (`time`, `tree`, `branch`, `agent`, `outcome`: `covered`, `signed`,
 `signed_lane_edit`, `background`, `failed`, `skip_flag`, `local_off`, `not_signing:REASON`, and for an agent `refused` or `override`), append only, so the pre-sign rate can be read per push.
-**The hook's environment is scrubbed (st2#3014).** git exports `GIT_DIR` (and `GIT_PREFIX`, `GIT_EXEC_PATH`, ...) to a hook, and `GIT_DIR` is set whenever the push is made from a linked worktree, which every agent seat uses. A script run with it that makes its own repository or says `git -C elsewhere ...` still acts on the CALLER's repository, because `GIT_DIR` wins over `-C` and over the working directory. The repository's own fixture tests do exactly that; run from the hook they committed on the caller's branches, rewrote the shared repository's identity and pushed. The stub, `evidence-prepush`, `fractal-test` and `ci-genie-freshness` (through `scripts/git-env-clean`) now drop the variables that select a repository or an identity (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_PREFIX`, `GIT_QUARANTINE_PATH`, `GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `GIT_PUSH_OPTION*`, ...) before they start anything; transport and credential variables (`GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_TERMINAL_PROMPT`, `GIT_HTTP_*`, `GIT_CONFIG_*`) stay, because the notes push needs them. The shell scrub uses only `export -p` (the non-interactive bash of a nix shell has no `compgen`, which made its first version a silent no-op there) and checks its own result: a scrub that did not work stops the caller, and makes the stub skip the hook with a message. The stub is a copy in each repository's hooks directory but runs `evidence-prepush` and `fractal-test` as they are on `origin/main`, so a stub installed before this change is covered as soon as it is on main; `install-git-hooks` replaces an older stub carrying its marker on the next shell entry. Tests push from a linked worktree through the real hook, also with `compgen` disabled, and require the caller's config, HEAD, status, branches and tags to be byte-identical.
-Apart from an agent's refusal, it never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
+**The hook's environment is scrubbed (st2#3014).** Git exports repository-selection variables such as `GIT_DIR` to hooks in linked worktrees. The stub drops repository-selection and author/committer variables before starting the content guard or evidence runner, so nested fixture repositories cannot accidentally operate on the caller's checkout. Transport and credential variables remain available for evidence publication. The scrub uses `export -p`, not `compgen`, and refuses publication if it cannot remove the selecting variables. Reinstall with `scripts/install-git-hooks` (also run on shell entry) to upgrade an older marked stub. Linked-worktree fixture tests exercise the real hook and require the caller's repository to remain unchanged.
+Apart from an agent's refusal, the evidence-signing path never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
 a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing signing key). `ST_SKIP_EVIDENCE=1` does not wait: the push
 goes at once, the same signing runs in the background, and the hook says that a CI run that starts before a note is there runs that check in full.
 `ST_EVIDENCE_LOCAL=off` does no local signing work at all, not even the status question, and says so in one line (for a seat or unit where
 local builds are fenced; it wins over `ST_SKIP_EVIDENCE`); `git push --no-verify` skips the hook entirely. Tags, deletes,
-other branches and the base branch are pushed untouched, and the notes push inside the run does not run the hook again. A new tree always takes the slow
+other branches and the base branch do not request signing, but still pass the content guard; the notes push inside the run does not request signing again. A new tree always takes the slow
 path (the checks run once); so does every fixup that changes the tree; a tree that already has notes is instant.
 
 The checks run without the agent seat's identity and session variables (`ST_*`, `ST2_*`, `ST3_*`, `CLAUDE*`, `ANTHROPIC_*`; `ST_AGENT`, `ST_SKIP_EVIDENCE` and the `ST_EVIDENCE*` switches stay, by exact name: that list in `scripts/fractal-test` is the only exception mechanism, and `ST_AGENT` stays visible to the checks because the `nix` wrapper that needs it starts them), as on a CI runner: tests that read them fail or behave differently under a seat. Tests that bind a request to the seat by process ancestry still do, so a trustworthy full run of the Linux gate must be started detached from any seat. It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs

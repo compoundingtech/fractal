@@ -331,7 +331,7 @@ fn exhausted_snapshot_fixture() -> (Store, MissionRunView, StepRunView) {
 }
 
 fn exhausted_snapshot_fixture_in(store: Store) -> (Store, MissionRunView, StepRunView) {
-    publish_mission(
+    let initial = publish_mission(
         &store,
         r#"version 2
 agent "worker" { workspace "/tmp"; command "true" }
@@ -345,7 +345,7 @@ mission "snapshot-work" state="ready" {
     );
     let run = store.create_mission_run(&MissionRunRequest {
         mission: "snapshot-work".into(),
-        revision: None,
+        revision: Some(initial.revision),
         workspace: "/tmp".into(),
         requester: Some("person/operator".into()),
         mode: Some("run".into()),
@@ -678,9 +678,7 @@ fn fault_snapshot_reference_invalidates_exhausted_wake_after_real_reassignment()
 
 #[test]
 fn fault_snapshot_reference_invalidates_exhausted_wake_after_real_generation_replacement() {
-    let (store, run, step) = exhausted_snapshot_fixture();
-    assert!(assert_reference_snapshot_parity(&store, now_ms())
-        .iter().any(|fault| fault.item.title == "exhausted wake current"));
+    let store = Store::open_memory("node").unwrap();
     let revised = publish_mission(
         &store,
         r#"version 2
@@ -693,6 +691,10 @@ mission "snapshot-work" state="ready" {
 }"#,
         "snapshot-generation-publish",
     );
+    // Keep publication separate from the legacy generation replacement under test.
+    let (store, run, step) = exhausted_snapshot_fixture_in(store);
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().any(|fault| fault.item.title == "exhausted wake current"));
     let adopted = store.adopt_mission_revision(
         &run.id, &revised, "person/operator", "Replace the generation.", "snapshot-generation",
     ).unwrap();

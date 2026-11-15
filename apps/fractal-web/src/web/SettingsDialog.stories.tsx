@@ -6,6 +6,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { assistantDarkTheme, compositionLightTheme } from '@fractal/ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { fixtureAvailabilityPort, type AvailabilityFixture } from '../availability/availability.fixtures.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import type { Grants } from '../data/source.ts'
@@ -18,11 +19,14 @@ import { useResolvedScheme } from './themePreference.ts'
 const readOnly: Grants = { actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }
 const full: Grants = { actions: 'granted', messageSend: 'granted', attachmentUpload: 'granted', terminalInput: 'granted', terminalControl: 'granted' }
 
-const SettingsSurface = ({ initialScheme = 'dark', grants = readOnly }: { readonly initialScheme?: 'dark' | 'light'; readonly grants?: Grants }) => {
+const SettingsSurface = ({ initialScheme = 'dark', grants = readOnly, availability }: { readonly initialScheme?: 'dark' | 'light'; readonly grants?: Grants; readonly availability?: AvailabilityFixture }) => {
   const [preference, setPreference] = React.useState<SettingsScheme>(initialScheme)
   const scheme = useResolvedScheme(preference)
   const [registry] = React.useState(() => AtomRegistry.make())
-  const [source] = React.useState(() => ({ ...fixtureSource({ world: fixtureProjections }), gateway: 'gateway.example:7411', grants: Atom.make(grants) }))
+  const [source] = React.useState(() => ({
+    ...fixtureSource({ world: fixtureProjections }), gateway: 'gateway.example:7411', grants: Atom.make(grants),
+    ...(availability === undefined ? {} : { availability: fixtureAvailabilityPort(availability) }),
+  }))
   return <DataSourceProvider source={source} registry={registry}>
     <main data-scheme={scheme} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
       <div {...stylex.props(styles.sidebar)}>
@@ -62,6 +66,7 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'Availability:contract-fixture',
   'Dark:contract-fixture',
   'FullControl:contract-fixture',
   'Light:contract-fixture',
@@ -74,6 +79,12 @@ export const FullControl: Story = { args: { grants: full }, play: async ({ canva
   await userEvent.click(within(canvasElement).getByRole('button', { name: 'Settings' }))
   const dialog = await within(document.body).findByRole('dialog', { name: 'Settings' })
   await expect(within(dialog).getByRole('region', { name: 'Device and connection' })).toHaveTextContent('Full control')
+} }
+export const Availability: Story = { args: { availability: 'away' }, play: async ({ canvasElement }) => {
+  await userEvent.click(within(canvasElement).getByRole('button', { name: 'Settings' }))
+  const dialog = await within(document.body).findByRole('dialog', { name: 'Settings' })
+  await expect(await within(dialog).findByTestId('availability-facts')).toHaveTextContent('Away · until')
+  await expect(within(dialog).getByRole('group', { name: 'Status' })).toBeVisible()
 } }
 export const SwitchTheme: Story = { args: { initialScheme: 'dark' }, play: switchTheme }
 

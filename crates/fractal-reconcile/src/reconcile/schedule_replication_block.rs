@@ -41,7 +41,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if spec.stopped { return self.clear_schedule_replication_block(schedule); }
         let Some(revision) = self.store.selected_desired_revision(&schedule.subject)? else { return Ok(()) };
         let reached = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
-        let last = reached.iter().filter_map(|claim| claim.body["fields"]["occurrence"].as_u64()).max();
+        let last = schedule_last_reached(&self.store, schedule)?;
         // A tick whose work was requested can be held at the second admission boundary too.
         let requests = self.store.pending_schedule_work_requests(&schedule.subject)?;
         let queued = requests.iter().filter_map(|request| request.body["fields"]["occurrence"].as_u64()).min();

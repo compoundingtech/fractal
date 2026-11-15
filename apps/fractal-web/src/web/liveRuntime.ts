@@ -7,6 +7,7 @@ import type { DataSource } from '../data/source.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
 import { setPageFoldersClientName } from '../folders/client.ts'
 import { takeEarlyCollections } from '../data/sdk-browser/early.ts'
+import { reportPresenceWhenGranted } from '../availability/presence.ts'
 import type { Replay } from '@fractal/scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
@@ -48,12 +49,27 @@ export const createPageRuntime = (replay?: Replay, answerPorts?: Pick<DataSource
     telemetryLayer,
     ux: () => ux,
   })
+  // Presence is the page's: reported for the person while this page lives, once the capabilities grant
+  // `write.presence` to a person; a replay has no person to report.
+  const stopPresence = replay === undefined && live.source.availability !== undefined ? reportPresenceWhenGranted(live.source.availability) : undefined
   return {
     // Pairing belongs to the host that served this page; a replay has no host to pair with.
-    live: replay === undefined ? { ...live, source: { ...live.source, pairing: browserPairingPort({ baseUrl: window.location.origin }) } } : {
+    live: replay === undefined ? {
       ...live,
-      // Example data's stubbed answers need no grant: nothing leaves the page.
-      source: answerPorts === undefined ? live.source : { ...live.source, ...answerPorts, grants: Atom.map(live.source.grants, (grants) => ({ ...grants, actions: 'granted' as const })) },
+      source: { ...live.source, pairing: browserPairingPort({ baseUrl: window.location.origin }) },
+      dispose: () => {
+        stopPresence?.()
+        return live.dispose()
+      },
+    } : {
+      ...live,
+      // A replay has no person, so it drops the availability port and shows no Availability section. Example data's
+      // stubbed answers need no grant: nothing leaves the page.
+      source: {
+        ...live.source,
+        availability: undefined,
+        ...(answerPorts === undefined ? {} : { ...answerPorts, grants: Atom.map(live.source.grants, (grants) => ({ ...grants, actions: 'granted' as const })) }),
+      },
       dispose: () => live.dispose().finally(() => replay.close()),
     },
     telemetry,

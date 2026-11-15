@@ -68,8 +68,8 @@ fn pricing_period_delta(latest: Vec<Value>, baseline: &[Value]) -> Vec<Value> {
                     );
                 }
             }
-            // A zero-token response may still have a reported cost.
-            (entry["total_tokens"] != 0 || entry["cost_microusd"] != 0).then_some(entry)
+            // Missing token totals must not hide an unpriced contribution.
+            USAGE_BUCKETS.iter().any(|name| entry[*name].as_u64().unwrap_or(0) > 0).then_some(entry)
         })
         .collect()
 }
@@ -1448,8 +1448,20 @@ impl SeatsStore for Store {
         let owner_step = fields["attribution"]["step_id"].as_str().unwrap_or("");
         let host = fields["host"].as_str().unwrap_or(&self.origin);
         let connection = self.readers.get();
-        let totals = connection
-            .query_row(
+        let execution = fields["attribution"]["execution_id"].as_str();
+        let read_totals = |row: &rusqlite::Row<'_>| {
+            (0..10).map(|index| row.get::<_, u64>(index)).collect::<Result<Vec<_>, _>>()
+        };
+        let totals = if let Some(execution) = execution {
+            connection.query_row(
+                "SELECT input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+                    cached_tokens, total_tokens, cost_microusd, reported_cost_microusd,
+                    unpriced_tokens, observed_at_unix_ms
+                 FROM local_step_execution_spend WHERE execution_id=?1 AND model=?2 AND account=?3 AND host=?4",
+                params![execution, model, account, host], read_totals,
+            ).optional()?
+        } else {
+            connection.query_row(
                 "SELECT input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
                     cached_tokens, total_tokens, cost_microusd, reported_cost_microusd,
                     unpriced_tokens, observed_at_unix_ms
@@ -1464,13 +1476,9 @@ impl SeatsStore for Store {
                     owner_step,
                     host
                 ],
-                |row| {
-                    (0..10)
-                        .map(|index| row.get::<_, u64>(index))
-                        .collect::<Result<Vec<_>, _>>()
-                },
-            )
-            .optional()?;
+                read_totals,
+            ).optional()?
+        };
         let Some(totals) = totals else {
             return Ok(None);
         };
@@ -1487,6 +1495,14 @@ impl SeatsStore for Store {
                 Value::String(crate::pricing::PRICING_REVISION.into()),
             ),
         ]);
+        for key in ["invocation_id", "attempt"] {
+            if let Some(value) = observation.body["fields"]["attribution"].get(key).filter(|value| !value.is_null()) {
+                fields.insert(key.into(), value.clone());
+            }
+        }
+        if let Some(execution) = execution {
+            fields.insert("execution_id".into(), Value::String(execution.into()));
+        }
         if !account.is_empty() {
             fields.insert("account".into(), Value::String(account.into()));
         }
@@ -1515,10 +1531,11 @@ impl SeatsStore for Store {
             )
             .optional()?;
         if let Some(provenance) = provenance {
-            fields.insert(
-                "pricing_provenance".into(),
-                serde_json::from_str(&provenance)?,
-            );
+            let provenance: Vec<Value> = serde_json::from_str(&provenance)?;
+            fields.insert("unpriced_responses".into(), json!(provenance.iter()
+                .map(|entry| entry["unpriced_responses"].as_u64().unwrap_or(0))
+                .fold(0_u64, u64::saturating_add)));
+            fields.insert("pricing_provenance".into(), json!(provenance));
         }
         // Never use the seat's current binding for a response from an older incarnation.
         if let Some(binding) = usage_native_session(&connection, &observation.subject, &fields)? {
@@ -2029,13 +2046,15 @@ impl SeatsStore for Store {
             pricing: String,
             native_session_id: Option<String>,
             provenance: Option<Vec<Value>>,
+            invocation_id: Option<String>,
+            attempt: Option<u32>,
         }
         #[derive(Clone, Copy, Default)]
         struct DailySnapshot {
             at: u64,
             buckets: [u64; USAGE_BUCKETS.len()],
         }
-        type Key = (String, String, String, String, String, String, String);
+        type Key = (String, String, String, String, String, String, String, String);
         let mut days = agent_messages::windows(since_ms, until_ms)
             .into_iter()
             .map(|(since, until)| agent_messages::DailyUsage {
@@ -2043,6 +2062,7 @@ impl SeatsStore for Store {
                 until,
                 cost: 0,
                 unpriced: 0,
+                unpriced_responses: 0,
             })
             .collect::<Vec<_>>();
         #[derive(Default)]
@@ -2074,6 +2094,8 @@ impl SeatsStore for Store {
             if fields.get("cost_microusd").is_none() {
                 snapshot.buckets[8] = snapshot.buckets[0];
             }
+            snapshot.invocation_id = fields["invocation_id"].as_str().map(str::to_owned);
+            snapshot.attempt = fields["attempt"].as_u64().and_then(|n| u32::try_from(n).ok());
             let text = |name| fields[name].as_str().unwrap_or("").to_owned();
             let key = (
                 subject,
@@ -2083,6 +2105,7 @@ impl SeatsStore for Store {
                 text("owner_run"),
                 text("owner_step"),
                 text("host"),
+                text("execution_id"),
             );
             let group = groups.entry(key).or_insert_with(|| Group {
                 days: vec![(None, None); days.len()],
@@ -2110,7 +2133,7 @@ impl SeatsStore for Store {
             }
         }
         let mut result = Vec::new();
-        for ((agent, _incarnation, model, account, mission_run, step, host), group) in groups {
+        for ((agent, _incarnation, model, account, mission_run, step, host, execution), group) in groups {
             for (day, (baseline, latest)) in days.iter_mut().zip(group.days) {
                 let Some(latest) = latest else {
                     continue;
@@ -2118,13 +2141,15 @@ impl SeatsStore for Store {
                 let baseline = baseline
                     .filter(|b| b.buckets[0] <= latest.buckets[0])
                     .unwrap_or_default();
-                if latest.buckets[0] > baseline.buckets[0] {
+                if latest.buckets != baseline.buckets {
                     day.cost = day
                         .cost
                         .saturating_add(latest.buckets[6].saturating_sub(baseline.buckets[6]));
                     day.unpriced = day
                         .unpriced
                         .saturating_add(latest.buckets[8].saturating_sub(baseline.buckets[8]));
+                    day.unpriced_responses = day.unpriced_responses
+                        .saturating_add(latest.buckets[9].saturating_sub(baseline.buckets[9]));
                 }
             }
             let Some(latest) = group.latest else {
@@ -2141,6 +2166,9 @@ impl SeatsStore for Store {
                 "model": model, "account": account, "host": host,
                 "pricing": latest.pricing,
             });
+            if !execution.is_empty() { row["execution_id"] = json!(execution); }
+            if let Some(invocation) = latest.invocation_id { row["invocation_id"] = json!(invocation); }
+            if let Some(attempt) = latest.attempt { row["attempt"] = json!(attempt); }
             if let Some(session) = latest.native_session_id {
                 row["native_session_id"] = json!(session);
             }
@@ -2154,7 +2182,7 @@ impl SeatsStore for Store {
                 row[*name] =
                     Value::from(latest.buckets[index].saturating_sub(baseline.buckets[index]));
             }
-            if row["total_tokens"] == 0 {
+            if USAGE_BUCKETS.iter().all(|name| row[*name] == 0) {
                 continue;
             }
             result.push(row);

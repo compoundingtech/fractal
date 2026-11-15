@@ -929,9 +929,11 @@ fn parse_loop_group(
         agent_constraints: BTreeMap::new(),
         timeout_ms: None,
         capacity: None,
+        resource_lane: None,
         retry: RetrySpec {
             attempts: rounds as u32,
             backoff_ms: 0,
+            ..RetrySpec::default()
         },
         finally: false,
         work_selector: Some(WorkSelector::Agentless),
@@ -1392,6 +1394,39 @@ fn unique_named_child<'a>(
     Ok(found.first().copied())
 }
 
+fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec, FractalError> {
+    use crate::model::{ResourceLaneCoverage, ResourceLaneSpec};
+    reject_type(node)?;
+    ensure_only_properties(node, &["host", "max-members", "coverage", "admission-timeout"])?;
+    let name = one_string_with_children(node)?;
+    validate_id(&name, "resource lane")?;
+    let host = property_string(node, "host")?.filter(|host| !host.trim().is_empty())
+        .ok_or_else(|| FractalError::new("invalid-step-lane", "lane needs an explicit execution host"))?;
+    let max_members = match node.get("max-members") {
+        None => 1,
+        Some(KdlValue::Integer(value)) => u32::try_from(*value).ok().filter(|value| *value > 0)
+            .ok_or_else(|| FractalError::new("invalid-step-lane", "max-members must be a positive whole number"))?,
+        Some(_) => return Err(FractalError::new("invalid-step-lane", "max-members must be a positive whole number")),
+    };
+    let coverage = match property_string(node, "coverage")?.as_deref().unwrap_or("logical") {
+        "logical" => ResourceLaneCoverage::Logical,
+        "enforced" => ResourceLaneCoverage::Enforced,
+        _ => return Err(FractalError::new("invalid-step-lane", "coverage must be logical or enforced")),
+    };
+    let admission_timeout_ms = property_string(node, "admission-timeout")?
+        .map(|value| parse_duration(&value)).transpose()?;
+    let mut capacity = None;
+    if let Some(body) = node.children() {
+        for child in body.nodes() {
+            if child.name().value() != "capacity" || capacity.is_some() {
+                return Err(FractalError::new("invalid-step-lane", "lane accepts one capacity block"));
+            }
+            capacity = Some(parse_capacity(child)?);
+        }
+    }
+    Ok(ResourceLaneSpec { name, host, max_members, capacity, coverage, admission_timeout_ms })
+}
+
 fn parse_step(
     node: &KdlNode,
     parent_path: &str,
@@ -1417,6 +1452,7 @@ fn parse_step(
     let mut fresh_context = false;
     let mut keep_open = false;
     let mut capacity = None;
+    let mut resource_lane = None;
     let mut goals = Vec::new();
     let mut constraints = Vec::new();
     let mut agent_constraints = BTreeMap::new();
@@ -1516,12 +1552,7 @@ fn parse_step(
                         format!("step `{path}` cannot own an objective"),
                     ));
                 }
-                "lane" => {
-                    return Err(FractalError::new(
-                        "lane-inside-step",
-                        format!("step `{path}` cannot declare a lane; declare it on the mission"),
-                    ));
-                }
+                "lane" => resource_lane = Some(parse_resource_lane(child)?),
                 name if is_mission_declaration(name) => {
                     validate_deferred_declaration(child)?;
                     let child =
@@ -1644,6 +1675,15 @@ fn parse_step(
             format!("step `{path}` is agentless, so it has no seat whose lane its capacity could raise"),
         ));
     }
+    if resource_lane.is_some() {
+        let execs = declarations.iter().filter(|node| node.name().value() == "exec").count();
+        if execs != 1 || program.is_some() || nested_mission.is_some() {
+            return Err(FractalError::new(
+                "invalid-step-lane",
+                format!("step `{path}` needs exactly one exec declaration for its lane"),
+            ));
+        }
+    }
     let declarations_kdl = declarations_document(declarations);
     let mut step = StepSpec {
         id,
@@ -1658,6 +1698,7 @@ fn parse_step(
         agent_constraints,
         timeout_ms,
         capacity,
+        resource_lane,
         retry,
         finally,
         work_selector,
@@ -2529,6 +2570,7 @@ pub fn mission_after_run(mut mission: MissionSpec, run: &str) -> Result<MissionS
         agent_constraints: BTreeMap::new(),
         timeout_ms: None,
         capacity: None,
+        resource_lane: None,
         retry: RetrySpec::default(),
         finally: false,
         work_selector: Some(WorkSelector::Agentless),
@@ -2588,10 +2630,51 @@ fn parse_retry(node: &KdlNode) -> Result<RetrySpec, FractalError> {
         .map(|value| parse_duration(&value))
         .transpose()?
         .unwrap_or(0);
+    let schedule_ms = retry_strings(body, "delays")?
+        .iter()
+        .map(|value| positive_retry_duration(value, "delay"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let window_ms = unique_named_child(body, "within")?
+        .map(plain_string)
+        .transpose()?
+        .map(|value| positive_retry_duration(&value, "window"))
+        .transpose()?;
+    let on_error_tags = retry_strings(body, "on")?;
     Ok(RetrySpec {
         attempts: attempts as u32,
         backoff_ms,
+        schedule_ms,
+        window_ms,
+        on_error_tags,
     })
+}
+
+fn retry_strings(body: &KdlDocument, name: &str) -> Result<Vec<String>, FractalError> {
+    let Some(node) = unique_named_child(body, name)? else {
+        return Ok(Vec::new());
+    };
+    reject_type(node)?;
+    ensure_only_properties(node, &[])?;
+    ensure_no_children(node)?;
+    let values = positional_strings(node)?;
+    if values.is_empty() {
+        return Err(FractalError::new(
+            "invalid-value-count",
+            format!("`{name}` needs at least one string"),
+        ));
+    }
+    Ok(values)
+}
+
+fn positive_retry_duration(value: &str, field: &str) -> Result<u64, FractalError> {
+    let ms = parse_duration(value)?;
+    if ms == 0 {
+        return Err(FractalError::new(
+            "invalid-retry-duration",
+            format!("retry {field} must be positive"),
+        ));
+    }
+    Ok(ms)
 }
 
 fn validate_dependencies(

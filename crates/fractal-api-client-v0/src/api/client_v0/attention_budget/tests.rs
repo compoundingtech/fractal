@@ -76,6 +76,7 @@ async fn recipient_revalidation_and_report_never_return_text() {
         summary: None, reason: None, evidence: vec![], idempotency_key: "budget-claim".into(), wait_ms: None,
     }).unwrap();
     let ask = state.store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         person: "person/example".into(), title: "Secret title".into(), reason: "Secret reason".into(),
         actor: "agent/budget-node.desk".into(), step: Some(step.clone()), new_run: None,
         incarnation: Some("one".into()), idempotency_key: "budget-ask".into(), request: None,

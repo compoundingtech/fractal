@@ -84,7 +84,10 @@ def main():
     release = view(tag)
     if release is None:
         # A create that timed out may still have made the draft, with some of its files.
-        gh('release', 'create', tag, '--verify-tag', '--target', args.source, '--draft', '--prerelease', '--latest=false',
+        # The verified tag already pins the source. Supplying target_commitish as well makes
+        # GitHub's Actions-token release POST time out even for an empty body; omit that redundant
+        # ref-creation input rather than asking the release endpoint to resolve it again.
+        gh('release', 'create', tag, '--verify-tag', '--draft', '--prerelease', '--latest=false',
            '--title', f'Fractal web embed {args.source}',
            '--notes', f'Offline embed, four posters and provenance for source {args.source}. '
                       'Verify the archive against its SHA-256 sidecar.',

@@ -54,7 +54,7 @@ pub(super) struct TabStatuses {
 }
 
 impl TabStatuses {
-    pub(super) fn new(world: &World, closed: &HashSet<String>, snoozed: &HashSet<String>) -> Self {
+    pub(super) fn new(world: &World, closed: &HashSet<String>) -> Self {
         let mut status = Self { loaded: world.attention.ready().is_some(), ..Self::default() };
         let agent_missions: BTreeMap<_, _> = world.agents.items().iter()
             .filter_map(|agent| agent.mission.as_deref().map(|mission| (agent.id.as_str(), mission)))
@@ -86,7 +86,7 @@ impl TabStatuses {
             }
         }
         for item in world.attention.items().iter().filter(|item| {
-            item.is_alert() && !closed.contains(&item.id) && !snoozed.contains(&item.id)
+            item.is_alert() && !closed.contains(&item.id) && !item.snoozed(world.at)
         }) {
             // Question identity outlives answer eligibility (for example, an expired client
             // submission window). Only live attention establishes that the prompt is open.
@@ -1272,7 +1272,7 @@ impl Ui {
             );
         }
         for item in self.world.attention.items() {
-            if !self.snoozed.contains(&item.id) {
+            if !item.snoozed(self.world.at) {
                 open(
                     0,
                     screens::attention_style(&item.kind),
@@ -1381,6 +1381,18 @@ impl Ui {
                 detail: "spend by agent, mission, step, model, account or host".into(),
                 search: "usage spend tokens cost".into(),
                 action: Action::Usage,
+            },
+        );
+        // The person's own availability and note, in a tab.
+        choices.insert(
+            2,
+            Choice {
+                section: 0,
+                glyph: ("◐", theme::PERSON),
+                label: "Availability".into(),
+                detail: "your status, interruptions, deadline clock and note".into(),
+                search: "availability status away available interruptions deadline clock hold note".into(),
+                action: Action::Open(Pane::Availability),
             },
         );
         // Starting things: an agent from the query, or the empty form.
@@ -3109,6 +3121,7 @@ impl Ui {
             Pane::Documents(None) => "Documents".into(),
             Pane::Documents(Some(prefix)) => format!("Documents · {}", prefix.trim_start_matches("doc/")),
             Pane::Usage(None) => "Usage".into(),
+            Pane::Availability => "Availability".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
         }
@@ -3141,7 +3154,7 @@ impl Ui {
             .filter(|agent| self.reads.unread(&agent.id, agent.last_prose_ms))
             .map(|agent| agent.id.clone())
             .collect();
-        self.tab_statuses = TabStatuses::new(&self.world, &self.closed, &self.snoozed);
+        self.tab_statuses = TabStatuses::new(&self.world, &self.closed);
         self.refresh_recent_labels();
     }
 
@@ -3412,7 +3425,8 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
-        // A document page or the documents list has no box to type in: its plain letters act.
+        // A document page, the documents list and Availability act on plain letters; an open
+        // Availability box takes the typing keys instead.
         if !sidebar_keys
             && !self.home_open()
             && !self.editing
@@ -3421,7 +3435,7 @@ impl Ui {
             && self.chat.as_ref().is_none_or(|chat| !chat.editing)
             && self.confirm.is_none()
             && self.popover.is_none()
-            && self.document_key(key)
+            && (self.document_key(key) || self.availability_key(key))
         {
             return true;
         }
@@ -6156,8 +6170,17 @@ mod tests {
     fn tab_badge_inbox_complete_window_excludes_closed_snoozed_and_updates() {
         let mut ui = tab_badge_world();
         let inbox = Tab::pane("list:home");
-        ui.snoozed.insert("attention/a".into());
-        ui.refresh_tab_statuses();
+        // st's snooze on a row: one that has ended hides nothing, one still ahead hides it.
+        let at = ui.world.at;
+        let snooze = |ui: &mut Ui, until: chrono::DateTime<chrono::FixedOffset>| {
+            if let Load::Ready(items) = &mut ui.world.attention {
+                items.iter_mut().find(|item| item.id == "attention/a").unwrap().snoozed_until = Some(until);
+            }
+            ui.refresh_tab_statuses();
+        };
+        snooze(&mut ui, at - chrono::TimeDelta::minutes(1));
+        assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " ?2 Inbox ");
+        snooze(&mut ui, at + chrono::TimeDelta::hours(1));
         assert_eq!(ui.tab_badge(&inbox, Some(&Pane::List(0))).label("Inbox", 80, true), " ?1 Inbox ");
         ui.closed.insert("attention/b".into());
         ui.refresh_tab_statuses();
@@ -6560,6 +6583,7 @@ mod tests {
         Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: format!("{agent} is waiting for a permission"),

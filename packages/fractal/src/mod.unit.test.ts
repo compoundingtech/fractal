@@ -29,6 +29,7 @@ import {
   PersonReferenceSchema,
   type OmpSchema,
   resource,
+  RetrySchema,
   schedule,
   step,
   StepSchema,
@@ -65,6 +66,41 @@ const humanReviewGate = {
   name: 'Approve the bounded Berlin cutover',
   reviewer: operator,
 } satisfies typeof HumanGateSchema.Encoded
+
+describe('KDL v2 string emission', () => {
+  it.each([
+    ['\u0000', '\\u{0}'],
+    ['\u0001', '\\u{1}'],
+    ['\u000b', '\\u{b}'],
+    ['\u001f', '\\u{1f}'],
+    ['\u007f', '\\u{7f}'],
+    ['\u0085', '\\u{85}'],
+    ['\u2028', '\\u{2028}'],
+    ['\u2029', '\\u{2029}'],
+    ['\ufeff', '\\u{feff}'],
+    ['\u200e', '\\u{200e}'],
+    ['\u200f', '\\u{200f}'],
+    ['\u202a', '\\u{202a}'],
+    ['\u202b', '\\u{202b}'],
+    ['\u202c', '\\u{202c}'],
+    ['\u202d', '\\u{202d}'],
+    ['\u202e', '\\u{202e}'],
+    ['\u2066', '\\u{2066}'],
+    ['\u2067', '\\u{2067}'],
+    ['\u2068', '\\u{2068}'],
+    ['\u2069', '\\u{2069}'],
+  ])('escapes %j in node names, arguments, property keys and values', (character, escaped) => {
+    expect(emit([node({ name: character, args: [character], props: { [character]: character } })]))
+      .toBe(`version 2\n"${escaped}" "${escaped}" "${escaped}"="${escaped}"\n`)
+  })
+  it('preserves ordinary Unicode, astral scalars and established short escapes', () => {
+    expect(emit([node({ name: 'text', args: ['é😀\b\f\n\r\t"\\'] })]))
+      .toBe('version 2\ntext "é😀\\b\\f\\n\\r\\t\\"\\\\"\n')
+  })
+  it.each(['\ud800', '\udfff'])('rejects non-scalar UTF-16 %j', (text) => {
+    expect(() => emit([node({ name: 'text', args: [text] })])).toThrow(RangeError)
+  })
+})
 
 describe('declared admission', () => {
   const base = {
@@ -748,6 +784,85 @@ describe('mission step decoding', () => {
   })
 })
 
+describe('native retry policies', () => {
+  it('retains legacy attempts and zero backoff without new KDL fields', () => {
+    const retry = { attempts: 100, backoff: '0s' }
+    expect(Schema.decodeSync(RetrySchema)(retry)).toEqual({ attempts: 100, backoff: '0ms' })
+    expect(emit([step({ id: 'work', agentless: true, retry })])).toBe(
+      [
+        'version 2',
+        'step "work" {',
+        '  agentless',
+        '  retry {',
+        '    attempts 100',
+        '    backoff "0ms"',
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+    )
+  })
+
+  it('normalizes and emits a schedule, window and typed error tags alongside backoff', () => {
+    const retry = {
+      attempts: 5,
+      backoff: '1 second',
+      delays: ['2 minutes', '10m', '30m'],
+      within: '2 hours',
+      on: ['HostUnavailable', 'SlotLost'],
+    } as const
+    const decoded = Schema.decodeSync(RetrySchema)(retry)
+    expect(decoded).toEqual({
+      attempts: 5,
+      backoff: '1000ms',
+      delays: ['120000ms', '600000ms', '1800000ms'],
+      within: '7200000ms',
+      on: ['HostUnavailable', 'SlotLost'],
+    })
+    const kdl = emit([step({ id: 'work', agentless: true, retry })])
+    expect(kdl).toContain(
+      [
+        '  retry {',
+        '    attempts 5',
+        '    backoff "1s"',
+        '    delays "2m" "10m" "30m"',
+        '    within "2h"',
+        '    on "HostUnavailable" "SlotLost"',
+        '  }',
+      ].join('\n'),
+    )
+    expect(emit([step({ id: 'work', agentless: true, retry: decoded })])).toBe(kdl)
+  })
+
+  it('omits empty schedules and tag lists to retain retry-all defaults', () => {
+    expect(
+      emit([step({ id: 'work', agentless: true, retry: { attempts: 1, delays: [], on: [] } })]),
+    ).toBe(emit([step({ id: 'work', agentless: true, retry: { attempts: 1 } })]))
+  })
+
+  it.each([0, -1, 101, 1.5])('rejects invalid total attempts %j', (attempts) => {
+    expect(() => Schema.decodeUnknownSync(RetrySchema)({ attempts })).toThrow()
+  })
+
+  it.each(['0ms', '0s', '-1m', '1.5h', '', '45', 45])(
+    'rejects invalid positive retry durations %j',
+    (duration) => {
+      expect(() =>
+        Schema.decodeUnknownSync(RetrySchema)({ attempts: 4, delays: ['2m', duration] }),
+      ).toThrow()
+      expect(() =>
+        Schema.decodeUnknownSync(RetrySchema)({ attempts: 4, within: duration }),
+      ).toThrow()
+    },
+  )
+
+  it('rejects empty error tags', () => {
+    expect(() =>
+      Schema.decodeUnknownSync(RetrySchema)({ attempts: 4, on: [''] }),
+    ).toThrow()
+  })
+})
+
 describe('compact native time rendering', () => {
   it('lowers every duration surface without changing canonical mission values', () => {
     const input = {
@@ -1349,6 +1464,83 @@ describe('Fractal declarations', () => {
       agent({ id: 'garden/worker', harness: { kind: 'claude', model: '' } }),
     ).toThrow()
   })
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'renders a %s first-turn message with escaped text and an id property',
+    (kind) => {
+      const message = { text: 'Start "here".\nRead C:\\notes\\plan.', id: 'startup-v1' }
+      const harness = { kind, model: 'example-model', effort: 'high' as const, message }
+      const expected =
+        `version 2\nagent "example/message" {\n  harness "${kind}" {\n` +
+        '    model "example-model"\n    effort "high"\n' +
+        '    message "Start \\"here\\".\\nRead C:\\\\notes\\\\plan." id="startup-v1"\n  }\n}\n'
+      expect(emit([agent({ id: 'example/message', harness })])).toBe(expected)
+      if (kind === 'omp') {
+        expect(emit([agent({ id: 'example/message', harness: omp(harness) })])).toBe(expected)
+      }
+    },
+  )
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'rejects invalid %s first-turn messages at schema and render boundaries',
+    (kind) => {
+      for (const message of [
+        { text: '', id: 'startup' },
+        { text: ' \n\t', id: 'startup' },
+        { text: '\u0085', id: 'startup' },
+        { text: 'Start.' },
+        { text: 'Start.', id: '' },
+        { text: 'Start.', id: 'a'.repeat(257) },
+        { text: 'Start.', id: 'é'.repeat(129) },
+        { text: 'a'.repeat(65537), id: 'startup' },
+        { text: 'é'.repeat(32769), id: 'startup' },
+        { text: 'Start.\0Stop.', id: 'startup' },
+      ]) {
+        const declaration = {
+          id: 'example/message',
+          harness: { kind, model: 'example-model', effort: 'high', message },
+        }
+        expect(() => Schema.decodeUnknownSync(AgentSchema)(declaration)).toThrow()
+        expect(() => agent(declaration as never)).toThrow()
+        if (kind === 'omp') {
+          expect(() => omp(declaration.harness as never)).toThrow()
+        }
+      }
+    },
+  )
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'uses native Unicode White_Space rather than JS trim for %s messages',
+    (kind) => {
+      const declaration = {
+        id: 'example/message',
+        harness: {
+          kind,
+          model: 'example-model',
+          effort: 'high' as const,
+          message: { text: '\ufeff', id: 'startup' },
+        },
+      }
+      expect(Schema.decodeUnknownSync(AgentSchema)(declaration)).toEqual(declaration)
+      expect(emit([agent(declaration)])).toContain('message "\\u{feff}" id="startup"')
+      if (kind === 'omp') {
+        expect(omp(declaration.harness).message).toEqual(declaration.harness.message)
+      }
+    },
+  )
+  it.each(['omp', 'codex', 'claude'] as const)(
+    'accepts %s messages at the native UTF-8 byte limits',
+    (kind) => {
+      const declaration = {
+        id: 'example/message',
+        harness: {
+          kind,
+          model: 'example-model',
+          effort: 'high' as const,
+          message: { text: 'é'.repeat(32768), id: 'é'.repeat(128) },
+        },
+      }
+      expect(Schema.decodeUnknownSync(AgentSchema)(declaration)).toEqual(declaration)
+      expect(() => agent(declaration)).not.toThrow()
+    },
+  )
   it('decodes and renders an OMP role selector without adding effort', () => {
     const harness = { kind: 'omp', model: '@generalist_root' } as const
     const declaration = { id: 'example/omp', harness }
@@ -2768,7 +2960,14 @@ testWithSt(
               id: 'garden/xhigh',
               workspace: dir,
               rollout: 'manual',
-              harness: omp({ model: 'example-model', effort: 'xhigh' }),
+              harness: omp({
+                model: 'example-model',
+                effort: 'xhigh',
+                message: {
+                  text: 'Start "here".\nRead C:\\notes\\plan.\u2028\u2029\u0001\u0085\ufeff\u200e\u202a\u2066',
+                  id: 'startup-v1',
+                },
+              }),
             }),
           ]),
         )
@@ -2781,6 +2980,8 @@ testWithSt(
         expect(xhighShown.status, xhighShown.stderr).toBe(0)
         expect(xhighShown.stdout).toContain('harness "omp"')
         expect(xhighShown.stdout).toMatch(/^\s*effort "xhigh"\s*$/mu)
+        expect(xhighShown.stdout).toContain('message')
+        expect(xhighShown.stdout).toContain('id="startup-v1"')
         const xhighReapplied = applySeat(xhighShown.stdout)
         expect(xhighReapplied.status, xhighReapplied.stderr).toBe(0)
         expect(JSON.parse(xhighReapplied.stdout)).toMatchObject({ changed: false })

@@ -102,14 +102,16 @@ impl Store {
                     )
                     .optional()?
                     .flatten();
-                items.push(
-                    json!({"id": subject, "generation_id": format!("run-generation/{generation}"),
+                let mut item = json!({
+                    "id": subject, "generation_id": format!("run-generation/{generation}"),
                     "requester": short(&requester), "status": status, "phase": phase,
-                    "revision":revision,
+                    "revision": revision,
                     "created_at_unix_ms": created.parse::<u128>()?,
                     "updated_at_unix_ms": updated.parse::<u128>()?,
-                    "reason": reason.as_deref().map(short)}),
-                );
+                    "reason": reason.as_deref().map(short),
+                });
+                mission_run_lineage_tx(&connection, &subject)?.insert_into(&mut item);
+                items.push(item);
             }
             previews.push(items);
         }
@@ -194,10 +196,13 @@ impl Store {
                 "assignee": assignee, "claimant": claimant,
             }));
         }
-        Ok(Some(json!({
-            "id": format!("mission-run/{run}"), "status": status,
+        let subject = format!("mission-run/{run}");
+        let mut metadata = json!({
+            "id": subject, "status": status,
             "progress": {"total": steps.len(), "done": done}, "steps": steps,
-        })))
+        });
+        mission_run_lineage_tx(&connection, &subject)?.insert_into(&mut metadata);
+        Ok(Some(metadata))
     }
 
     /// A run card's progress counts cover every step; only its first twenty steps are hydrated.
@@ -457,12 +462,13 @@ fn outcome_history_sql(collection: &str, scoped: bool) -> String {
         // Unfiltered pages walk the terminal-history index newest first. A mission page starts
         // from that mission's subjects instead; CROSS JOIN pins that order so SQLite cannot
         // fall back to scanning every terminal claim and filtering by mission afterwards.
+        // Keep this established covering driver independent of maintenance-only indexes.
         let (scope, from) = if scoped {
             (
                 "WITH scope(subject) AS (
-                   SELECT 'mission-run/' || m.id FROM mission_runs m WHERE m.mission_id=?6
+                   SELECT 'mission-run/' || m.id FROM mission_runs m INDEXED BY mission_runs_collection_latest_index WHERE m.mission_id=?6
                    UNION ALL
-                   SELECT st.subject FROM mission_runs m JOIN step_runs st ON st.run_id=m.id
+                   SELECT st.subject FROM mission_runs m INDEXED BY mission_runs_collection_latest_index JOIN step_runs st ON st.run_id=m.id
                    WHERE m.mission_id=?6)",
                 "scope CROSS JOIN claims c ON c.subject=scope.subject",
             )

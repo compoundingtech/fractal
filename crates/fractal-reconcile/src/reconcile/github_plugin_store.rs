@@ -59,7 +59,8 @@ impl ObserverFreshness {
 }
 
 /// The GitHub plugin and the only graph writes it may make: one compact state per item, written
-/// on change, and one claim per keyed event. Neither is written before step 3b.
+/// on change, one claim per keyed event, and one claim per completed CI run. The first two are
+/// not written before step 3b.
 pub const MANIFEST: Manifest = Manifest {
     name: "github",
     graph_kinds: &[
@@ -72,6 +73,11 @@ pub const MANIFEST: Manifest = Manifest {
             kind: fractal_schema::github_plugin::EVENT,
             subject_prefix: "github-event/",
             max_fields_bytes: fractal_schema::github_plugin::MAX_EVENT_BYTES,
+        },
+        GraphKind {
+            kind: fractal_schema::github_plugin::WORKFLOW_RUN,
+            subject_prefix: "github-workflow-run/",
+            max_fields_bytes: fractal_schema::github_plugin::MAX_WORKFLOW_RUN_BYTES,
         },
     ],
 };
@@ -973,6 +979,32 @@ mod tests {
             ("kind".to_owned(), json!("vcs.pull-request")), ("facts".to_owned(), facts),
         ]);
         assert!(MANIFEST.admit("resource/github/acme/garden/pull-request/7", "resource.observed", &snapshot).is_err());
+    }
+
+    #[test]
+    fn the_github_manifest_admits_a_completed_run_within_its_bound_and_field_set() {
+        let subject = "github-workflow-run/acme/garden/9001";
+        let run = std::collections::BTreeMap::from([
+            ("version".to_owned(), json!(1)), ("observer".to_owned(), json!(OBSERVER)),
+            ("repository".to_owned(), json!("acme/garden")), ("workflow".to_owned(), json!("Workspace CI")),
+            ("run_id".to_owned(), json!(9001)), ("attempt".to_owned(), json!(1)),
+            ("event".to_owned(), json!("merge_group")), ("conclusion".to_owned(), json!("success")),
+            ("head_sha".to_owned(), json!("a".repeat(40))), ("created_at".to_owned(), json!("2026-11-13T10:00:00Z")),
+            ("started_at".to_owned(), json!("2026-11-13T10:00:30Z")), ("completed_at".to_owned(), json!("2026-11-13T10:09:30Z")),
+            ("duration_ms".to_owned(), json!(540_000)), ("flaky_tests".to_owned(), json!(0)), ("flakes".to_owned(), json!(0)),
+        ]);
+        MANIFEST.admit(subject, fractal_schema::github_plugin::WORKFLOW_RUN, &run).unwrap();
+        let refused = |subject: &str, fields: &std::collections::BTreeMap<String, Value>| {
+            MANIFEST.admit(subject, fractal_schema::github_plugin::WORKFLOW_RUN, fields).unwrap_err().reason
+        };
+        let mut oversize = run.clone();
+        oversize.insert("head_sha".into(), json!("a".repeat(fractal_schema::github_plugin::MAX_WORKFLOW_RUN_BYTES)));
+        assert!(refused(subject, &oversize).contains("the bound is 1024"));
+        assert!(refused("github-event/github/acme/garden/pull-request/7/run/9001", &run).contains("not under github-workflow-run/"));
+        assert!(refused("resource/github/acme/garden", &run).contains("not under github-workflow-run/"));
+        let mut extra = run.clone();
+        extra.insert("jobs".into(), json!([]));
+        assert!(!refused(subject, &extra).is_empty(), "a field outside the kind's set");
     }
 
     #[test]

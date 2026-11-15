@@ -1294,6 +1294,20 @@ fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
 }
 
 #[test]
+fn usage_report_marks_unpriced_responses_without_inventing_tokens() {
+    let report = json!({"rows":[{"agent":"agent/incomplete","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":1}]});
+    let output = render_usage_report(&report, 24, None);
+    assert!(output.contains("SPEND  $0.00+ · 0 tokens"));
+    assert!(output.contains("UNPRICED  1 responses without a known price"));
+    let zero = json!({"rows":[{"agent":"agent/zero","cost_microusd":0,
+        "total_tokens":0,"unpriced_tokens":0,"unpriced_responses":0}]});
+    let output = render_usage_report(&zero, 24, None);
+    assert!(output.contains("SPEND  $0.00 · 0 tokens"));
+    assert!(!output.contains("UNPRICED"));
+}
+
+#[test]
 fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
     let report = json!({"rows": [
         {"agent":"agent/cheap","mission_run":"mission-run/one","step":"step-run/one/build","model":"model-a","account":"claude/aaaa","host":"host/a","cost_microusd":250000,"total_tokens":900,"input_tokens":200,"output_tokens":100,"cache_write_tokens":0,"cached_tokens":600,"unpriced_tokens":0},
@@ -1302,7 +1316,7 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
         {"agent":"agent/local","mission_run":"","step":"","model":"model-local","account":"","host":"host/a","cost_microusd":0,"total_tokens":50,"input_tokens":50,"output_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"unpriced_tokens":50},
     ]});
     let output = render_usage_report(&report, 24, None);
-    assert_eq!(output.matches("USAGE  ").count(), 6);
+    assert_eq!(output.matches("USAGE  ").count(), 8);
     assert!(
         output.starts_with("SPEND  $4.25+ · 990 tokens · 24h · API-equivalent\n"),
         "{output}"
@@ -1353,6 +1367,24 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
     let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));
     assert_eq!(by_step.matches("USAGE  ").count(), 1);
     assert!(by_step.contains("by step"));
+}
+
+#[test]
+fn usage_report_groups_exact_invocations_and_step_scoped_attempts() {
+    let report = json!({"rows":[
+        {"agent":"agent/a","step":"step-run/one/build","attempt":1,"invocation_id":"invocation/one","total_tokens":10,"cost_microusd":10},
+        {"agent":"agent/a","step":"step-run/two/build","attempt":1,"invocation_id":"invocation/two","total_tokens":20,"cost_microusd":20},
+        {"agent":"agent/a","step":"step-run/unknown/build","total_tokens":3,"cost_microusd":0}
+    ]});
+    let attempts = render_usage_report(&report, 24, Some(UsageBy::Attempt));
+    assert!(attempts.contains("step-run/one/build attempt 1"));
+    assert!(attempts.contains("step-run/two/build attempt 1"));
+    assert!(attempts.contains("unknown"));
+    let invocations = render_usage_report(&report, 24, Some(UsageBy::Invocation));
+    assert!(invocations.contains("by invocation"));
+    assert!(invocations.contains("invocation/one"));
+    assert!(invocations.contains("invocation/two"));
+    assert!(invocations.contains("unknown"));
 }
 
 #[test]
@@ -2856,15 +2888,13 @@ fn agent_card_shows_the_current_step_and_its_last_progress() {
             Some(("Tests pass\nnext: docs", 60_000)),
         ),
         step("step-run/two/review", "Review the parser", None),
-        StepRunView {
-            status: "verifying".into(),
-            completion_summary: Some("Published the guide".into()),
-            ..step(
-                "step-run/two/docs",
-                "Write the guide",
-                Some(("Drafting", 0)),
-            )
-        },
+        StepRunView { executions: None, status: "verifying".into(),
+        completion_summary: Some("Published the guide".into()),
+        ..step(
+            "step-run/two/docs",
+            "Write the guide",
+            Some(("Drafting", 0)),
+        ) },
     ];
 
     let card = render_client_agent(&agent, &current, 360_000);
@@ -3614,6 +3644,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
         ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
         ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
+        ("hosts", /* sqlite-large-value: allow-for-now lv-h04ee6ce18457 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("hosts_cli.rs")),
         ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
         ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
         ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
@@ -4022,7 +4053,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
             diverged_since: None,
         }],
     });
-    let output = render_now_page(&page, "fractal now --as person/alex");
+    let output = render_now_page(&page, &[], "fractal now --as person/alex");
     assert!(
         output.starts_with(
             "SYNCING  ExampleMac has 1 envelope this host lacks · estimating time to catch up · \
@@ -4058,7 +4089,7 @@ fn a_catching_up_page_leads_with_how_far_behind_this_host_is() {
     );
 
     page.sync = None;
-    assert!(!render_now_page(&page, "fractal now").contains("SYNCING"));
+    assert!(!render_now_page(&page, &[], "fractal now").contains("SYNCING"));
 }
 
 #[test]
@@ -4231,6 +4262,7 @@ fn an_attention_item_names_its_kind_sender_and_age() {
         about: "message/abc".into(),
         subjects: Vec::new(),
         summary: None,
+        speech: None,
     });
     assert_eq!(
         attention_heading(&item, now),
@@ -4257,6 +4289,7 @@ fn an_attention_item_names_its_kind_sender_and_age() {
 fn now_page_without_work_does_not_claim_zero_working() {
     let attention_only = render_now_page(
         &fixture_product_page(&["attention"], false),
+        &[],
         "fractal now --as person/alex",
     );
     assert!(attention_only.starts_with("1 alert\n"), "{attention_only}");
@@ -4269,6 +4302,7 @@ fn now_page_without_work_does_not_claim_zero_working() {
 
     let with_work = render_now_page(
         &fixture_product_page(&["attention", "work"], false),
+        &[],
         "fractal now --as person/alex --owner-run mission-run/release/1",
     );
     assert!(with_work.contains("\nWORKING  1\n"), "{with_work}");
@@ -4277,14 +4311,56 @@ fn now_page_without_work_does_not_claim_zero_working() {
 }
 
 #[test]
+fn now_page_names_availability_before_alerts() {
+    use fractal_client::{
+        AvailabilityDeadlineClock, AvailabilityInterruptions, AvailabilityPresence, AvailabilityStatus,
+        AvailabilityStatusSource,
+    };
+    let away = fractal_client::PersonAvailability {
+        person: "person/alex".into(),
+        status: AvailabilityStatus::Away,
+        status_source: AvailabilityStatusSource::Override,
+        status_until: Some("2026-11-12T18:00:00.000Z".into()),
+        presence: None,
+        presence_observed_at: None,
+        interruptions: AvailabilityInterruptions::None,
+        interruptions_until: None,
+        deadline_clock: AvailabilityDeadlineClock::Run,
+        deadline_clock_since: None,
+        deadline_clock_until: None,
+    };
+    let output = render_now_page(&fixture_product_page(&["attention"], false), std::slice::from_ref(&away), "fractal now");
+    assert!(
+        output.starts_with(
+            "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\n1 alert\n"
+        ),
+        "{output}"
+    );
+    assert_eq!(
+        render_now_page(&fixture_product_page(&[], false), std::slice::from_ref(&away), "fractal now"),
+        "person/alex is away until 2026-11-12T18:00:00.000Z; interruptions: none\n\nWork: fractal work ls · Health: fractal doctor\n"
+    );
+    let unreported = fractal_client::PersonAvailability {
+        status: AvailabilityStatus::Available,
+        status_source: AvailabilityStatusSource::Unreported,
+        status_until: None,
+        presence: Some(AvailabilityPresence::Unreported),
+        interruptions: AvailabilityInterruptions::All,
+        ..away
+    };
+    let quiet = render_now_page(&fixture_product_page(&["attention"], false), &[unreported], "fractal now");
+    assert!(quiet.starts_with("1 alert\n"), "no device reporting alone prints nothing: {quiet}");
+}
+
+#[test]
 fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let page = fixture_product_page(&["attention"], false);
     let mut alerts = page.clone();
     alerts.items = [page.items.clone(), page.items.clone()].concat();
     assert!(
-        render_now_page(&alerts, "fractal now").starts_with("2 alerts\n"),
+        render_now_page(&alerts, &[], "fractal now").starts_with("2 alerts\n"),
         "{}",
-        render_now_page(&alerts, "fractal now")
+        render_now_page(&alerts, &[], "fractal now")
     );
     // An update asks nothing: it is listed apart and never counted as an alert.
     let mut updates = page.clone();
@@ -4297,14 +4373,15 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
         about: "message/abc".into(),
         subjects: Vec::new(),
         summary: None,
+        speech: None,
     });
     update.alert = Some(false);
-    let now = render_now_page(&updates, "fractal now");
+    let now = render_now_page(&updates, &[], "fractal now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
     assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
-        render_now_page(&fixture_product_page(&[], false), "fractal now"),
+        render_now_page(&fixture_product_page(&[], false), &[], "fractal now"),
         "Work: fractal work ls · Health: fractal doctor\n"
     );
     // `st alerts ls` counts the alerts under its heading, then lists updates apart.
@@ -5309,6 +5386,36 @@ fn mission_start_explicit_paths_and_default_ids_are_preserved() {
 }
 
 #[test]
+fn mission_retry_defaults_to_latest_and_requires_an_actor() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "retry", "demo/failed", "--as", "person/operator",
+    ]).unwrap();
+    let Command::Missions { command: MissionViewCommand::Retry(args) } = cli.command else {
+        panic!("the mission retry command did not parse");
+    };
+    assert_eq!(args.run, "demo/failed");
+    assert_eq!(args.actor, "person/operator");
+    assert!(!args.same_revision);
+    assert!(args.reason.is_none());
+    assert!(Cli::try_parse_from(["fractal", "missions", "retry", "demo/failed"]).is_err());
+}
+
+#[test]
+fn mission_retry_accepts_same_revision_reason_and_agent_actor() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "retry", "mission-run/demo/failed",
+        "--same-revision", "--reason", "the worker is available", "--as", "agent/operator",
+    ]).unwrap();
+    let Command::Missions { command: MissionViewCommand::Retry(args) } = cli.command else {
+        panic!("the mission retry command did not parse");
+    };
+    assert_eq!(args.run, "mission-run/demo/failed");
+    assert_eq!(args.actor, "agent/operator");
+    assert!(args.same_revision);
+    assert_eq!(args.reason.as_deref(), Some("the worker is available"));
+}
+
+#[test]
 fn mission_start_accepts_an_explicit_run_id() {
     let cli = Cli::try_parse_from([
         "st3",
@@ -6272,14 +6379,15 @@ fn message_send_and_reply_accept_a_key_for_unconfirmed_retries() {
 #[test]
 fn a_derived_message_key_names_one_message_in_one_hour() {
     let request = MessageSendRequest {
-        idempotency_key: String::new(),
-        from: "person/avery".into(),
-        to: "agent/example/worker".into(),
-        content: "The merge train is live.".into(),
-        title: Some("Merge train".into()),
-        in_reply_to: None,
-        tags: Vec::new(),
-        attachments: Vec::new(),
+    owner: None,
+    idempotency_key: String::new(),
+    from: "person/avery".into(),
+    to: "agent/example/worker".into(),
+    content: "The merge train is live.".into(),
+    title: Some("Merge train".into()),
+    in_reply_to: None,
+    tags: Vec::new(),
+    attachments: Vec::new(),
     };
     let key = derived_message_key(&request, None, 490_000);
     // The key never changes between builds: a retry after an upgrade finds the first send.
@@ -6544,14 +6652,15 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "message-read-final-state".into(),
-                from: "agent/sender".into(),
-                to: "agent/sup".into(),
-                content: "Read me".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "message-read-final-state".into(),
+            from: "agent/sender".into(),
+            to: "agent/sup".into(),
+            content: "Read me".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
         )
         .await
@@ -6565,14 +6674,15 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "message-read-archive-final-state".into(),
-                from: "agent/sender".into(),
-                to: "agent/sup".into(),
-                content: "Archive me".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "message-read-archive-final-state".into(),
+            from: "agent/sender".into(),
+            to: "agent/sup".into(),
+            content: "Archive me".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
         )
         .await
@@ -8932,6 +9042,54 @@ async fn publish_test_mission(client: &Client, root: &Path, goal: &str) {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn mission_retry_command_creates_distinct_runs_through_the_api() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open_memory("single").unwrap());
+    let (client, server) = serve_test_store(store.clone(), root.path(), "single").await;
+    publish_text(
+        &client,
+        "version 2\nmission \"arrival\" state=\"ready\" {\n goal \"Retry the failed run.\"\n concurrent-runs max=2\n step \"work\" { }\n}\n".into(),
+        "retry command fixture".into(),
+        "person/test".into(),
+    ).await.unwrap();
+    let source = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+        mission: "arrival".into(),
+        revision: None,
+        workspace: root.path().display().to_string(),
+        requester: Some("person/test".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "cli-retry-source".into(),
+    }).unwrap();
+    store.set_mission_run_state(&source.id, "failed", "terminal", Some("a gate failed")).unwrap();
+    for same_revision in [false, true] {
+        run_mission_view(
+            &client,
+            &Endpoint::Unix(root.path().join("st3.sock")),
+            MissionViewCommand::Retry(MissionRunRetryArgs {
+                run: source.id.clone(),
+                actor: "person/test".into(),
+                same_revision,
+                reason: Some("the worker is available".into()),
+            }),
+            true,
+        ).await.unwrap();
+    }
+    let source_after = store.mission_run(&source.subject).unwrap().unwrap();
+    assert_eq!(source_after.status, "failed");
+    assert_eq!(source_after.generation, source.generation);
+    assert_eq!(source_after.retried_by.len(), 2, "each invocation has a unique idempotency key");
+    assert_ne!(source_after.retried_by[0], source_after.retried_by[1]);
+    for subject in &source_after.retried_by {
+        let retried = store.mission_run(subject).unwrap().unwrap();
+        assert_eq!(retried.retry_of.as_deref(), Some(source.subject.as_str()));
+        assert_eq!(retried.revision, source.revision);
+        assert_eq!(retried.workspace, source.workspace);
+    }
+    server.abort();
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 //! telemetry of the Fractal library, which name no store, api or reconcile code. fractal-daemon re-exports
 //! each module at its old path.
 
+mod attempt_trace;
 pub mod incremental;
 pub mod otel;
 pub mod otel_client_class;

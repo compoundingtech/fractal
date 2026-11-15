@@ -7,6 +7,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 pub use fractal_missions::store::runtime_starts::*;
 pub use fractal_missions::store::runtime_starts::{RuntimeStartOperation, create_schema};
+use fractal_store::store::invocation_receipts::{append_native_receipt_tx, InvocationPhase};
 
 /// Physical captures are synchronous and thread-scoped. Never carry the witness
 /// to another thread or allow a nested capture to erase its predecessor.
@@ -90,6 +91,8 @@ fn cancel_undispatched_runtime_start_tx(tx: &Transaction<'_>, origin: &str, id: 
     closed_runtime_start_result(&operation, origin, &mut result)?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-haddf2c06fbd7 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
         params![id, serde_json::to_string(&result)?])?;
+    append_native_receipt_tx(tx, origin, &operation.id, &operation.subject,
+        &operation.body, InvocationPhase::Cancelled, Some(&result))?;
     Ok(true)
 }
 
@@ -133,6 +136,41 @@ fn recovery_intent_current(
          IN ('suspend','resume','stop','terminate','restart','restart-when-idle'))"
     ), params![operation.subject, original.store_index], |row| row.get(0))?;
     Ok(!changed)
+}
+
+// Publication work is deliberately paged. A source beyond the current page must
+// still lose admission to new effects, including a prepared start racing the
+// evaluator's publication check. Mechanical gates predate explicit owner_run
+// metadata, so resolve their canonical request's owner as well.
+fn mission_publication_current(
+    store: &Store,
+    connection: &Connection,
+    operation: &RuntimeStartOperation,
+) -> Result<bool> {
+    let prepared = &operation.body["subject"];
+    let declared_owner = prepared["owner_run"].as_str();
+    let gate_owner = if declared_owner.is_none() && prepared["kind"].as_str() == Some("gate") {
+        let owner: Option<String> = connection.query_row(
+            "SELECT json_extract(body,'$.fields.owner') FROM claims
+             WHERE subject=?1 AND kind='gate.requested' ORDER BY store_index DESC LIMIT 1",
+            [&operation.subject], |row| row.get(0),
+        ).optional()?.flatten();
+        match owner {
+            Some(owner) if owner.starts_with("mission-run/") => Some(owner),
+            Some(owner) => connection.query_row(
+                "SELECT run_id FROM step_runs WHERE subject=?1", [&owner], |row| row.get(0),
+            ).optional()?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let Some(owner) = declared_owner.or(gate_owner.as_deref()) else { return Ok(true); };
+    let run = fractal_store::store::mission_run_header_tx(
+        connection, owner.strip_prefix("mission-run/").unwrap_or(owner),
+    ).optional()?;
+    let Some(run) = run else { return Ok(false); };
+    Ok(!store.mission_run_supersession_pending_tx(connection, &run)?)
 }
 
 fn runtime_start_requests_retained(
@@ -320,7 +358,10 @@ impl RuntimeStartsStore for Store {
                 ..Default::default()
             },
         ) {
-            Ok((record, _)) => Ok(Some(record)),
+            Ok((record, _)) => {
+                self.record_invocation_runtime_end(&record)?;
+                Ok(Some(record))
+            }
             Err(error) if error.code == "stale-runtime-observation" => {
                 crate::reconcile_telemetry::record_runtime_observation_drop();
                 Ok(None)
@@ -682,7 +723,8 @@ impl RuntimeStartsStore for Store {
                 return Ok(RuntimeStartAdmission::Superseded);
             }
             let selected = selected.map(|row| row.claim_id);
-            if !recovery_intent_current(tx, self.origin(), operation)? {
+            if !recovery_intent_current(tx, self.origin(), operation)?
+                || !mission_publication_current(self, tx, operation)? {
                 return Ok(RuntimeStartAdmission::Superseded);
             }
             let superseded = operation.body["stale_failed_start"].as_str().map(str::to_owned);
@@ -786,6 +828,8 @@ impl RuntimeStartsStore for Store {
             let body = serde_json::to_string(&operation.body)?;
             tx.execute(/* sqlite-large-value: allow-for-now lv-h787cccc6af77 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_runtime_starts(id,subject,owner,body) VALUES (?1,?2,?3,?4)",
                 params![operation.id, operation.subject, operation.owner, body])?;
+            append_native_receipt_tx(tx, self.origin(), &operation.id, &operation.subject,
+                &operation.body, InvocationPhase::Admitted, None)?;
             if let Some(request) = operation.body["start_request"].as_str() {
                 pin_evidence(tx, &operation.id, self.origin(), request)?;
             }
@@ -798,7 +842,8 @@ impl RuntimeStartsStore for Store {
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
             let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-            if !recovery_intent_current(tx, self.origin(), &operation)? {
+            if !recovery_intent_current(tx, self.origin(), &operation)?
+                || !mission_publication_current(self, tx, &operation)? {
                 tx.execute(/* sqlite-large-value: allow-for-now lv-he8f98f77d11c owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,'restart-intent-superseded') WHERE id=?1", [id])?;
                 cancel_undispatched_runtime_start_tx(tx, self.origin(), id)?;
                 return Ok(false);
@@ -851,7 +896,8 @@ impl RuntimeStartsStore for Store {
     fn runtime_start_intent_current(&self, id: &str) -> Result<bool> {
         let connection = self.readers.get();
         let operation = connection.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-        recovery_intent_current(&connection, self.origin(), &operation)
+        Ok(recovery_intent_current(&connection, self.origin(), &operation)?
+            && mission_publication_current(self, &connection, &operation)?)
     }
 
     fn runtime_start_revoked(&self, id: &str) -> Result<bool> {
@@ -869,6 +915,9 @@ impl RuntimeStartsStore for Store {
         self.connection.batched(|tx| -> Result<()> {
             tx.execute(/* sqlite-large-value: allow-for-now lv-hb6b2eba1fa02 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2) WHERE id=?1", params![id, request])?;
             pin_evidence(tx, id, self.origin(), request)?;
+            let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+            append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                &operation.body, InvocationPhase::Revoked, operation.result.as_ref())?;
             Ok(())
         })
             .map_err(|error| anyhow::anyhow!("{error}"))??;
@@ -912,22 +961,38 @@ impl RuntimeStartsStore for Store {
                     [id],
                 )?;
                 release_evidence(tx, id)?;
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::ProducerClosed, Some(result))?;
                 Ok(true)
             })
             .map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
     fn finish_runtime_start(&self, id: &str, result: &Value) -> Result<()> {
-        self.connection.batched(|tx| -> Result<()> {
+        let failed = self.connection.batched(|tx| -> Result<bool> {
             let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-            if operation.finished { return Ok(()); }
+            if operation.finished { return Ok(false); }
             let mut result = result.clone();
             closed_runtime_start_result(&operation, self.origin(), &mut result)?;
             tx.execute(/* sqlite-large-value: allow-for-now lv-h7ab00a9247a2 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,result=?2,
                 cleanup_verified=CASE WHEN json_extract(?2,'$.error') IS NOT NULL AND json_extract(?2,'$.producer_closed')=1 THEN 1 ELSE cleanup_verified END
                 WHERE id=?1 AND finished=0", params![id, serde_json::to_string(&result)?])?;
-            Ok(())
+            let phase = if result["error"].is_string() { InvocationPhase::StartupFailed }
+                else if result["verification"] == "operation-incarnation" { InvocationPhase::Started }
+                else { InvocationPhase::LaunchAccepted };
+            append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                &operation.body, phase, Some(&result))?;
+            if result["producer_closed"] == true {
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::ProducerClosed, Some(&result))?;
+            }
+            Ok(result["error"].is_string())
         }).map_err(|error| anyhow::anyhow!("{error}"))??;
+        // Any failed launch ends its invocation span, including a producer left open:
+        // the owner map is daemon-local and would otherwise leak the entry.
+        if failed {
+            self.finish_invocation_trace(&format!("invocation/{id}"), true);
+        }
         Ok(())
     }
 
@@ -985,6 +1050,8 @@ impl RuntimeStartsStore for Store {
                     params![id, serde_json::to_string(&result)?],
                 )?;
                 release_evidence(tx, id)?;
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::Ended, Some(&result))?;
                 Ok(true)
             })
             .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -992,17 +1059,23 @@ impl RuntimeStartsStore for Store {
 
     fn verify_runtime_start(&self, id: &str, incarnation: &str) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
-            Ok(tx.execute(
+            let changed = tx.execute(
                 /* sqlite-large-value: allow-for-now lv-h0589f022f6bc owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET result=json_set(result,
                     '$.incarnation',?2,'$.verification','operation-incarnation','$.phase','completed')
                  WHERE id=?1 AND finished=1 AND applied=0 AND receipted=0
                     AND revoked_by IS NULL AND json_extract(result,'$.error') IS NULL",
-                params![id, incarnation])? == 1)
+                params![id, incarnation])? == 1;
+            if changed {
+                let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::Started, operation.result.as_ref())?;
+            }
+            Ok(changed)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
     fn close_unverified_runtime_start(&self, id: &str) -> Result<bool> {
-        self.connection
+        let changed = self.connection
             .batched(|tx| -> Result<bool> {
                 let operation =
                     tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
@@ -1028,9 +1101,17 @@ impl RuntimeStartsStore for Store {
                     /* sqlite-large-value: allow-for-now lv-h3c233cfbc1f1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
                 )?;
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::StartupFailed, Some(&result))?;
+                append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                    &operation.body, InvocationPhase::ProducerClosed, Some(&result))?;
                 Ok(true)
             })
-            .map_err(|error| anyhow::anyhow!("{error}"))?
+            .map_err(|error| anyhow::anyhow!("{error}"))??;
+        if changed {
+            self.finish_invocation_trace(&format!("invocation/{id}"), true);
+        }
+        Ok(changed)
     }
 
     fn runtime_start_applied(&self, id: &str) -> Result<()> {
@@ -1111,6 +1192,8 @@ impl RuntimeStartsStore for Store {
             tx.execute(/* sqlite-large-value: allow-for-now lv-hec19c18c98e2 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                 params![id, serde_json::to_string(&result)?])?;
             release_evidence(tx, id)?;
+            append_native_receipt_tx(tx, self.origin(), id, &operation.subject,
+                &operation.body, InvocationPhase::Ended, Some(&result))?;
             Ok(true)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
@@ -1133,8 +1216,113 @@ impl RuntimeStartsStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fractal_missions::MissionsStore;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn initially_unverified_launch_retains_later_producer_closure_and_ends_trace() {
+        let store = Store::open_memory("node").unwrap();
+        let agent = "agent/unverified-closure";
+        let mut start = operation("unverified-closure", agent, None);
+        let invocation = format!("invocation/{}", start.id);
+        let trace = store.start_invocation_trace(&invocation, agent, &[]);
+        start.body["trace_context"] = serde_json::to_value(&trace).unwrap();
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+        store.finish_runtime_start(&start.id, &json!({
+            "candidate_incarnation":"candidate", "incarnation":null,
+            "verification":"launch-accepted-unverified"
+        })).unwrap();
+        assert!(store.close_unverified_runtime_start(&start.id).unwrap());
+        assert!(!store.close_unverified_runtime_start(&start.id).unwrap());
+        let receipts = store.invocation_receipts(&invocation).unwrap();
+        for phase in [InvocationPhase::StartupFailed, InvocationPhase::ProducerClosed] {
+            let receipt = receipts.iter().find(|receipt| receipt.phase == phase).unwrap();
+            assert_eq!(receipt.incarnation, None);
+            assert_eq!(receipt.error.as_deref(), Some("producer closed without a verified launch"));
+            assert_eq!(receipt.trace_context, Some(serde_json::to_value(&trace).unwrap()));
+        }
+        assert_ne!(store.start_invocation_trace(&invocation, agent, &[]).trace_id(), trace.trace_id());
+    }
+
+    #[test]
+    fn a_failed_launch_with_an_open_producer_still_ends_its_invocation_trace() {
+        let store = Store::open_memory("node").unwrap();
+        let agent = "agent/open-producer-failure";
+        let mut start = operation("open-producer-failure", agent, None);
+        let invocation = format!("invocation/{}", start.id);
+        let trace = store.start_invocation_trace(&invocation, agent, &[]);
+        start.body["trace_context"] = serde_json::to_value(&trace).unwrap();
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+        store.finish_runtime_start(&start.id, &json!({
+            "error": "launch entered the backend and failed", "producer_closed": false
+        })).unwrap();
+        let receipts = store.invocation_receipts(&invocation).unwrap();
+        let failed = receipts.iter().find(|receipt| receipt.phase == InvocationPhase::StartupFailed).unwrap();
+        assert_eq!(failed.error.as_deref(), Some("launch entered the backend and failed"));
+        assert!(receipts.iter().all(|receipt| receipt.phase != InvocationPhase::ProducerClosed));
+        // The daemon-local span owner is gone: a later start of the same invocation identity
+        // would begin a fresh trace instead of reusing the leaked entry.
+        assert_ne!(store.start_invocation_trace(&invocation, agent, &[]).trace_id(), trace.trace_id());
+    }
+
+    #[test]
+    fn mission_publication_fences_unpaged_owned_and_legacy_gate_starts_at_every_boundary() {
+        for gate in [false, true] {
+            for boundary in ["admission", "dispatch", "physical-guard"] {
+                let store = Store::open_memory("node").unwrap();
+                let original = r#"version 2
+mission "launch-publication" state="ready" {
+  concurrent-runs
+  goal "Fence starts."
+  step "work" { goal "Do the work." }
+}"#;
+                publish(&store, original, "launch-original");
+                let runs: Vec<_> = (0..97).map(|index| {
+                    store.create_mission_run(&fractal_missions::model::MissionRunRequest {
+                        mission: "launch-publication".into(), revision: None,
+                        workspace: "/work/launch".into(), requester: Some("person/operator".into()),
+                        mode: None, inputs: BTreeMap::new(),
+                        idempotency_key: format!("launch-run-{index}"),
+                    }).unwrap()
+                }).collect();
+                // The queue pages by run id. Choose a source outside the first page,
+                // not one whose immediate cancellation already revokes its starts.
+                let source = runs.iter().max_by(|left, right| left.id.cmp(&right.id)).unwrap();
+                let subject = if gate { "gate-operation/publication-fence" } else { "agent/publication-fence" };
+                let mut start = operation("publication-start", subject, None);
+                if gate {
+                    start.body["subject"]["kind"] = Value::from("gate");
+                    store.append_claim(&ClaimInput {
+                        subject: subject.into(), kind: "gate.requested".into(), actor: None,
+                        fields: BTreeMap::from([
+                            ("gate".into(), Value::from("publication-fence")),
+                            ("owner".into(), Value::from(source.steps[0].subject.clone())),
+                            ("runner".into(), Value::from("exec")),
+                        ]),
+                        evidence: Vec::new(), expected_subject: None,
+                        idempotency_key: Some("publication-gate".into()),
+                    }).unwrap();
+                } else {
+                    start.body["subject"]["owner_run"] = Value::from(source.subject.clone());
+                }
+                if boundary != "admission" {
+                    assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+                }
+                if boundary == "physical-guard" {
+                    assert!(store.dispatch_runtime_start(&start.id, 1).unwrap());
+                }
+                publish(&store, &original.replace("Fence starts.", "Fence revised starts."), "launch-revised");
+                assert!(store.mission_run(&source.subject).unwrap().unwrap().superseded_by.is_none());
+                match boundary {
+                    "admission" => assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Superseded),
+                    "dispatch" => assert!(!store.dispatch_runtime_start(&start.id, 1).unwrap()),
+                    "physical-guard" => assert!(!store.runtime_start_intent_current(&start.id).unwrap()),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
 
     #[test]
     fn stale_failed_start_recovery_fences_interleaved_controls_at_admission_and_dispatch() {
@@ -1786,6 +1974,10 @@ mod tests {
             format!("start-proof/{}", canonical_hash(proof).unwrap())
         );
         assert!(store.runtime_start_for(&queued.subject).unwrap().is_none());
+        let receipts = store.invocation_receipts("invocation/queued").unwrap();
+        assert_eq!(receipts.iter().map(|receipt| receipt.phase).collect::<Vec<_>>(),
+            vec![InvocationPhase::Admitted, InvocationPhase::Revoked, InvocationPhase::Cancelled]);
+        assert!(receipts.iter().all(|receipt| receipt.incarnation.is_none()));
     }
 
     #[test]

@@ -9,6 +9,7 @@ on:
       - Workspace CI
       - Performance
       - Public repository check
+      - Public repository history
       - Nix
       - macOS CI
       - Fractal tag release
@@ -46,7 +47,7 @@ jobs:
           from urllib.parse import quote
           from urllib.request import Request, urlopen
 
-          WORKFLOWS = ('Workspace CI', 'Performance', 'Public repository check',
+          WORKFLOWS = ('Workspace CI', 'Performance', 'Public repository check', 'Public repository history',
                        'Nix', 'macOS CI', 'Fractal tag release', 'fractal-web')
 
 

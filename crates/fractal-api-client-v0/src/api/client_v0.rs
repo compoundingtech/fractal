@@ -58,6 +58,7 @@ pub mod private_notes;
 pub mod quota;
 mod usage_hub;
 pub mod read_positions;
+pub mod attention_controls;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -235,6 +236,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(assistant::pin_read_trust))
         .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(assistant::update_policy))
         .route("/v1/client/assistant/summary", get(assistant::read_projection))
+        .route("/v1/client/assistant/availability", get(assistant::read_projection))
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
@@ -244,6 +246,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo-history", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
         .route(
             "/v1/client/pairings/{id}/complete",
@@ -3036,6 +3040,9 @@ pub async fn publication_definition(
 const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -3333,7 +3340,9 @@ fn mission_resources_filtered(
                     } else if selected_id.is_some() {
                         store.with_step_states(header.clone(), true)?
                     } else {
-                        header.clone()
+                        let mut run = header.clone();
+                        store.enrich_mission_run_lineage(&mut run)?;
+                        run
                     };
                     let done = run
                         .steps
@@ -3426,6 +3435,13 @@ fn mission_resources_filtered(
                     } else {
                         BTreeMap::new()
                     };
+                    let executions = if selected_id.is_some() {
+                        run.steps.iter().map(|step| {
+                            Ok((step.subject.as_str(), store.step_executions(&step.subject)?))
+                        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?
+                    } else {
+                        BTreeMap::new()
+                    };
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()
@@ -3483,6 +3499,9 @@ fn mission_resources_filtered(
                                     value["transitions"] = json!(history.transitions);
                                     value["history_complete"] = json!(history.complete);
                                 }
+                                if let Some(executions) = executions.get(step.subject.as_str()) {
+                                    value["executions"] = json!(executions);
+                                }
                                 // Detail reads that enrich the run (`Store::mission_run`) carry
                                 // its program steps' journals.
                                 if let Some(program) = program {
@@ -3513,11 +3532,12 @@ fn mission_resources_filtered(
                             })
                             .collect::<Vec<_>>()
                     });
-                    Ok::<Value, anyhow::Error>(json!({
+                    let mut value = json!({
                         "id": run.subject,
                         "generation_id": run.generation,
                         "revision": run.revision,
                         "requester": run.requester,
+                        "retried_by": run.retried_by,
                         "status": run.status,
                         "phase": run.phase,
                         "progress": {"done": done, "total": run.steps.len()},
@@ -3537,7 +3557,20 @@ fn mission_resources_filtered(
                         "after": run.after,
                         "deadline": run.deadline_at_unix_ms.map(client_timestamp),
                         "steps": steps,
-                    }))
+                    });
+                    if let Some(source) = &run.retry_of {
+                        value["retry_of"] = json!(source);
+                    }
+                    for (field, value_field) in [
+                        ("supersedes", &run.supersedes),
+                        ("superseded_by", &run.superseded_by),
+                        ("supersession_fault", &run.supersession_fault),
+                    ] {
+                        if let Some(text) = value_field {
+                            value[field] = json!(text);
+                        }
+                    }
+                    Ok::<Value, anyhow::Error>(value)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let state = if run_details.iter().any(|run| run["blocker"]["scope"] == crate::reconcile::FIRST_READINESS_FAULT_SCOPE) { "blocked" } else { state };
@@ -8352,6 +8385,7 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    priority: None,
                     deadline_ms: p
                         .get("deadline_ms")
                         .map(|deadline| {
@@ -8448,35 +8482,36 @@ async fn dispatch_action(
             let result = accept_message_receipt_with_upload_owner(
                 state,
                 MessageSendRequest {
-                    idempotency_key: request.idempotency_key.clone(),
-                    // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if let Some(authorization) = session.assistant_write.as_ref() {
-                        authorization.principal().into()
-                    } else {
-                        authority_actor.clone()
-                    },
-                    to,
-                    // An attachment may travel alone; text is then optional.
-                    content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
-                        p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
-                    } else {
-                        parameter_string(p, "content")?
-                    },
-                    title: p.get("title").and_then(Value::as_str).map(str::to_owned),
-                    in_reply_to: p
-                        .get("in_reply_to")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    tags: message_send_tags(p)?,
-                    attachments: p
-                        .get("attachments")
-                        .cloned()
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|_| {
-                            validation("attachments are `{blob, media_type, name?}` records")
-                        })?
-                        .unwrap_or_default(),
+                owner: None,
+                idempotency_key: request.idempotency_key.clone(),
+                // Owner authority permits the operation, but is never the assistant's sender.
+                from: if let Some(authorization) = session.assistant_write.as_ref() {
+                    authorization.principal().into()
+                } else {
+                    authority_actor.clone()
+                },
+                to,
+                // An attachment may travel alone; text is then optional.
+                content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
+                    p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
+                } else {
+                    parameter_string(p, "content")?
+                },
+                title: p.get("title").and_then(Value::as_str).map(str::to_owned),
+                in_reply_to: p
+                    .get("in_reply_to")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                tags: message_send_tags(p)?,
+                attachments: p
+                    .get("attachments")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| {
+                        validation("attachments are `{blob, media_type, name?}` records")
+                    })?
+                    .unwrap_or_default(),
                 },
                 session_id,
                 p.get("signature")
@@ -9844,6 +9879,11 @@ async fn action_inner(
     } else {
         None
     };
+    let attention_control = if matches!(request.action_type.as_str(), "attention.seen" | "attention.snooze" | "attention.dismiss") {
+        Some(attention_controls::control(&state, &session, &request).await?)
+    } else {
+        None
+    };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
     }
@@ -9858,6 +9898,8 @@ async fn action_inner(
         vec![claim.subject.clone()]
     } else if let Some(advanced) = &read_position {
         vec![advanced.id.clone()]
+    } else if let Some(controlled) = &attention_control {
+        controlled.affected.clone()
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
@@ -9872,6 +9914,10 @@ async fn action_inner(
     if let Some(advanced) = &read_position {
         // The stored position after the merge, whether or not this advance appended a claim.
         result["read_position_at"] = json!(advanced.at);
+    }
+    if let Some(controls) = attention_control.and_then(|controlled| controlled.state) {
+        // The row's controls after the action, whether or not it appended a claim.
+        result["attention_control"] = controls;
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -13555,7 +13601,7 @@ mission "differential" state="ready" {
     }
 
     #[tokio::test]
-    async fn diagnostics_scope_is_in_default_device_and_full_control_pairing() {
+    async fn device_write_scopes_are_in_default_device_and_full_control_pairing() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let app = super::super::router(state.clone());
@@ -13576,8 +13622,10 @@ mission "differential" state="ready" {
             ).unwrap();
             let begun = begun.claims.iter().find(|claim|
                 claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
-            assert!(begun.body["fields"]["scopes"].as_array().unwrap()
-                .contains(&json!("write.client-diagnostics")));
+            let scopes = begun.body["fields"]["scopes"].as_array().unwrap();
+            for scope in ["write.client-diagnostics", "write.availability", "write.presence", "write.notes"] {
+                assert!(scopes.contains(&json!(scope)), "{scope}");
+            }
         }
     }
 
@@ -13777,18 +13825,19 @@ mission "differential" state="ready" {
         let sent = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-attachment".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "see image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: vec![crate::model::AttachmentInput {
-                    blob: format!("blob/{hash}"),
-                    media_type: "image/png".into(),
-                    name: Some("paste.png".into()),
-                }],
+            owner: None,
+            idempotency_key: "timeline-attachment".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "see image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: vec![crate::model::AttachmentInput {
+                blob: format!("blob/{hash}"),
+                media_type: "image/png".into(),
+                name: Some("paste.png".into()),
+            }],
             },
             None,
             None,
@@ -13814,14 +13863,15 @@ mission "differential" state="ready" {
         let plain = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-plain".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "no image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "timeline-plain".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "no image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,
@@ -16989,6 +17039,126 @@ mission "example/looped" state="ready" {
             .find(|value| value["id"] == "mission/example/looped")
             .unwrap();
         assert_eq!(retired["state"], "retired");
+    }
+
+    #[test]
+    fn mission_list_and_detail_preserve_retry_links_without_null_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "retry-node");
+        let mission = "mission/example/retry-links";
+        let source = r#"version 2
+mission "example/retry-links" state="ready" {
+  goal "Keep retry lineage visible."
+  step "work" { agentless }
+}"#;
+        let intent = crate::graph::parse_intent(source, "retry-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "publish-retry-links", Some("person/operator")).unwrap();
+        let start = |key: &str| state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let original = start("retry-links-original");
+        state.store.set_mission_run_state(&original.id, "failed", "terminal", Some("a gate failed")).unwrap();
+        let retried = state.store.retry_mission_run(&original.subject, &crate::model::MissionRunRetryRequest {
+            actor: "person/operator".into(), same_revision: false, reason: None,
+            idempotency_key: "retry-links-new".into(),
+        }).unwrap();
+        state.store.set_mission_run_state(&retried.id, "failed", "terminal", Some("another gate failed")).unwrap();
+        let ordinary = start("retry-links-ordinary");
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+        for items in [&cards, &detail, &history] {
+            let card = items.iter().find(|item| item["id"] == mission).unwrap();
+            let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+            let runs = card["run_details"].as_array().unwrap();
+            let original_view = runs.iter().find(|run| run["id"] == original.subject).unwrap();
+            assert!(original_view.get("retry_of").is_none(), "{original_view}");
+            assert_eq!(original_view["retried_by"], json!([retried.subject]));
+            let retry_view = runs.iter().find(|run| run["id"] == retried.subject).unwrap();
+            assert_eq!(retry_view["retry_of"], original.subject);
+            let ordinary_view = runs.iter().find(|run| run["id"] == ordinary.subject).unwrap();
+            assert!(ordinary_view.get("retry_of").is_none(), "{ordinary_view}");
+            assert_eq!(ordinary_view["retried_by"], json!([]));
+            for run in runs {
+                for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                    assert!(run.get(field).is_none(), "{run}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mission_public_readers_decode_supersession_links_and_input_refusal() {
+        for compatible in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "supersession-node");
+            let mission = "mission/example/supersession";
+            let source = r#"version 2
+mission "example/supersession" state="ready" {
+  input "value" kind="text"
+  goal "Keep publication lineage visible."
+  step "work" { agentless }
+}"#;
+            let publish = |source: &str, key: &str| {
+                let intent = crate::graph::parse_intent(source, "supersession-node").unwrap();
+                let preview = state.store.mission(&intent, crate::model::IntentInput {
+                    kdl: source.into(), source_name: None,
+                }).unwrap();
+                state.store.apply_as(&intent, &preview.subject_tokens, key, Some("person/operator")).unwrap();
+            };
+            publish(source, "supersession-original");
+            let original = state.store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None,
+                inputs: BTreeMap::from([("value".into(), "retained".into())]),
+                idempotency_key: "supersession-source".into(),
+            }).unwrap();
+            let changed = if compatible {
+                source.replace("Keep publication lineage visible.", "Keep replacement lineage visible.")
+            } else {
+                source.replace("input \"value\"", "input \"replacement\"")
+            };
+            publish(&changed, "supersession-next");
+            let latest = state.store.mission_spec(mission, None).unwrap().unwrap();
+            let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+            let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+            for items in [&cards, &detail, &history] {
+                let card = items.iter().find(|item| item["id"] == mission).unwrap();
+                let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+                let runs: Vec<fractal_client::MissionRunSummary> =
+                    serde_json::from_value(card["run_details"].clone()).unwrap();
+                let old = runs.iter().find(|run| run.id == original.subject).unwrap();
+                assert!(old.retry_of.is_none());
+                assert!(old.retried_by.is_empty());
+                assert!(old.supersedes.is_none());
+                if compatible {
+                    let successor = old.superseded_by.as_ref().unwrap();
+                    let replacement = runs.iter().find(|run| &run.id == successor).unwrap();
+                    assert_eq!(replacement.supersedes.as_deref(), Some(original.subject.as_str()));
+                    assert!(replacement.superseded_by.is_none());
+                    assert!(replacement.supersession_fault.is_none());
+                    assert!(old.supersession_fault.is_none());
+                } else {
+                    assert_eq!(old.status, "running");
+                    assert!(old.superseded_by.is_none());
+                    let fault = old.supersession_fault.as_deref().unwrap();
+                    assert!(fault.contains(&original.revision), "{fault}");
+                    assert!(fault.contains(&latest.revision), "{fault}");
+                    assert!(fault.contains("replacement") && fault.contains("value"), "{fault}");
+                }
+                for run in card["run_details"].as_array().unwrap() {
+                    for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                        assert!(run.get(field).is_none_or(Value::is_string), "{run}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -20294,14 +20464,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-older".into(),
-                from: client_session.authority_actor.clone(),
-                to: subject.into(),
-                content: "older session message".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-older".into(),
+            from: client_session.authority_actor.clone(),
+            to: subject.into(),
+            content: "older session message".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             Some("session/older-incarnation".into()),
             None,
@@ -20352,14 +20523,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-outgoing".into(),
-                from: subject.into(),
-                to: "agent/session-message-peer".into(),
-                content: "outgoing Fractal message".into(),
-                title: Some("A question".into()),
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-outgoing".into(),
+            from: subject.into(),
+            to: "agent/session-message-peer".into(),
+            content: "outgoing Fractal message".into(),
+            title: Some("A question".into()),
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Validate native effect providers against daemon-owned capabilities and park visible admission conflicts",
+  "replay": {"status": "none", "detail": "Existing native-message receipts and origination fences are preserved."},
+  "schema": {"status": "none", "detail": "No registry, corpus or database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint changes."},
+  "compatibility": {"status": "none", "detail": "Native messages remain native-coordinated; unknown providers and mismatched class or target declarations are refused before admission."},
+  "downtime": {"status": "none", "detail": "No startup migration."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Visible operation conflicts park durably before sending; recovery never grants native-message origination authority."}
+}

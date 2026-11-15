@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "iOS clears availability on disconnected or unsupported connections",
+  "replay": { "status": "none", "detail": "No graph replay." },
+  "schema": { "status": "none", "detail": "No API or claim change." },
+  "rules": { "status": "none", "detail": "No server rule changes." },
+  "compatibility": { "status": "changed", "detail": "The app clears the preceding connection's availability when it disconnects or connects to a daemon without the availability capability. Superseded reads cannot restore that old state." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "Reconnecting to a supported daemon reads current availability." }
+}

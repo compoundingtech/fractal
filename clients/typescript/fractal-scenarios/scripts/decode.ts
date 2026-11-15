@@ -146,7 +146,7 @@ export const decodeCatalog = (nows: readonly number[]): DecodeFailure[] => {
 const isSliceKind = (value: string): value is SliceKind => (SLICE_KINDS as readonly string[]).includes(value)
 
 /** Strict-decodes the wire values of one committed slice file as it is on disk. */
-const decodeFile = (world: string, path: string): DecodeFailure[] => {
+export const decodeFile = (world: string, path: string): DecodeFailure[] => {
   const failure = (slice: string, variant: string, message: string): DecodeFailure[] => [{ world, slice, variant, pointer: '', message }]
   const file = JSON.parse(readFileSync(path, 'utf8')) as SliceFile
   if (file.format !== SLICE_FORMAT || !isSliceKind(file.slice)) return failure(String(file.slice), String(file.variant), `not a ${SLICE_FORMAT} file`)

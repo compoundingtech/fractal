@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Paired iOS sessions show the concrete person's availability and directive note",
+  "replay": { "status": "none", "detail": "No graph replay." },
+  "schema": { "status": "none", "detail": "Uses the existing availability endpoint, which resolves an unfiltered person read through the authenticated pairing." },
+  "rules": { "status": "none", "detail": "No server rule changes." },
+  "compatibility": { "status": "changed", "detail": "Availability reads use the single concrete person returned by the server rather than comparing the person to a device-session actor. Notes are selected by that concrete person. Empty or ambiguous availability responses show no person section." },
+  "downtime": { "status": "none", "detail": "No service interruption." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "The next read replaces the in-memory availability state." }
+}

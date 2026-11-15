@@ -88,6 +88,29 @@ class Policy(unittest.TestCase):
         old = self.register('fn write() { db.execute("INSERT INTO facts(body) VALUES(?1)", [body]); }')
         self.fails(old + '\nfn extra() { db.execute("UPDATE facts SET body=?1", [other]); }', "unregistered")
 
+    def test_records_carry_no_stored_diagnostics(self):
+        self.register('fn write() { db.execute("INSERT INTO facts(body) VALUES(?1)", [body]); }')
+        self.assertEqual(set(self.manifest["sites"][0]),
+                         {"id", "path", "kind", "fingerprint", "owner", "todo", "disposition"})
+
+    def test_unregistered_site_failure_reports_excerpt_and_line_from_source(self):
+        old = self.register('fn write() { db.execute("INSERT INTO facts(body) VALUES(?1)", [body]); }')
+        text = old + '\nfn extra() { db.execute("UPDATE facts SET body=?1", [other]); }'
+        self.path.write_text(text)
+        errors = findings(self.root, self.manifest)
+        self.assertTrue(any("unregistered" in e for e in errors), errors)
+        line = text.count("\n", 0, text.index("UPDATE facts")) + 1
+        self.assertTrue(any(f"crates/sample/src/lib.rs:{line}: " in e and "UPDATE facts SET body=?1" in e
+                            for e in errors), errors)
+
+    def test_stored_diagnostic_fields_are_rejected(self):
+        self.register('fn write() { db.execute("INSERT INTO facts(body) VALUES(?1)", [body]); }')
+        self.manifest["sites"][0]["excerpt"] = "stale excerpt"
+        self.assertTrue(any("non-canonical fields" in e for e in findings(self.root, self.manifest)))
+        del self.manifest["sites"][0]["excerpt"]
+        self.manifest["sites"][0]["line_hint"] = 1
+        self.assertTrue(any("non-canonical fields" in e for e in findings(self.root, self.manifest)))
+
     def test_empty_ambiguous_sink_keeps_marker_stable(self):
         self.register("fn candidate() { publication.prepare(); }")
 

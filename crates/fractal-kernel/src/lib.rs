@@ -7,6 +7,8 @@ pub mod accounts;
 pub mod declaration_kdl;
 /// An `objective` declaration: an indicator, its targets and the response to a miss.
 pub mod objective;
+/// The fleet's `notice-owner` declaration: the member incarnation whose daemon writes notices.
+pub mod notice_owner;
 pub mod archive;
 pub mod boot;
 pub mod config;
@@ -37,6 +39,8 @@ pub mod program_journal;
 pub mod projection;
 pub mod rules;
 pub mod seat_queue;
+pub mod step_execution;
+pub use step_execution::{StepExecution, StepExecutionUsage};
 /// The st agent skill bundled in this binary and installed for each harness.
 pub mod skill;
 pub mod publication;

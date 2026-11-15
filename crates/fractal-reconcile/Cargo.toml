@@ -42,5 +42,6 @@ uuid = { version = "1", features = ["v4", "v7"] }
 
 [dev-dependencies]
 fractal_reconcile_self = { package = "fractal-reconcile", path = ".", features = ["test-support"] }
+opentelemetry_sdk = { version = "0.30", features = ["testing"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }

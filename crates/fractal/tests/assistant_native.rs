@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use fractal_daemon::{EvidenceStore as _, api::AppState, model::{ClaimInput, PersonAskRequest}, store::Store};
 use fractal_client::{ActionRequest, AssistantGrant, AssistantGrantPolicy, AssistantMinimalReadMode,
     AssistantPairedSession, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
+    AttentionDismissParameters, AttentionSeenParameters, AttentionSnoozeParameters,
     Fence, MessageKind, MessageSendParameters, PairingComplete, PersonAnswerInput,
     PersonStepParameters};
 use tower::ServiceExt as _;
@@ -154,6 +155,7 @@ impl Harness {
 
     fn ask(&self, key: &str, title: &str) -> String {
         self.state.store.ask_person(&PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None, person: OWNER.into(), title: title.into(), reason: "Owner must choose".into(),
@@ -708,6 +710,44 @@ async fn assistant_cannot_complete_authored_owner_step_but_owner_can() {
     assert!(h.state.store.step_run(&step.subject).unwrap().unwrap().person_answers.is_empty());
     h.owner("POST", "/v1/client/actions", &action).await;
     assert_eq!(h.state.store.step_run(&step.subject).unwrap().unwrap().status, "completed");
+}
+
+/// Attention controls are the person's own: a grant holding every assistant scope can neither
+/// propose them nor send them to the actions route, and nothing is recorded. The owner then
+/// marks the same row seen.
+#[tokio::test]
+async fn assistant_grants_cannot_use_attention_controls() {
+    let h = Harness::new();
+    let ask = h.ask("controls-ask", "Controls stay the owner's");
+    let paired = h.pair().await;
+    let attention = h.owner("GET", "/v1/client/attention", &()).await;
+    let id = attention["value"]["items"].as_array().unwrap().iter()
+        .find(|row| row["source_id"] == ask.as_str()).unwrap_or_else(|| panic!("{attention}"))["id"]
+        .as_str().unwrap().to_owned();
+    let requests = [
+        ("attention.seen", ActionRequest::attention_seen("action/assistant-seen", "native-test-assistant-seen", h.fence().await,
+            AttentionSeenParameters { attention_id: id.clone() }).unwrap()),
+        ("attention.snooze", ActionRequest::attention_snooze("action/assistant-snooze", "native-test-assistant-snooze", h.fence().await,
+            AttentionSnoozeParameters { attention_id: id.clone(), until: None }).unwrap()),
+        ("attention.dismiss", ActionRequest::attention_dismiss("action/assistant-dismiss", "native-test-assistant-dismiss", h.fence().await,
+            AttentionDismissParameters { attention_id: id.clone(), text: None }).unwrap()),
+    ];
+    for (kind, request) in &requests {
+        for path in ["/v1/client/assistant/propose", "/v1/client/actions"] {
+            let (status, denied) = h.assistant(&paired, "POST", path, request).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{kind} {path}: {denied}");
+        }
+    }
+    for kind in ["person.attention-seen", "person.attention-snoozed"] {
+        assert!(h.state.store.claims_for(OWNER, Some(kind)).unwrap().is_empty(), "{kind}");
+    }
+    let work = h.state.store.step_run(&ask).unwrap().unwrap();
+    assert!(work.person_answers.is_empty());
+    assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
+    let seen = h.owner("POST", "/v1/client/actions", &ActionRequest::attention_seen("action/owner-seen",
+        "native-test-owner-seen", h.fence().await, AttentionSeenParameters { attention_id: id.clone() }).unwrap()).await;
+    assert_eq!(seen["value"]["attention_control"]["attention_id"], id);
+    assert!(seen["value"]["attention_control"]["seen_at"].is_string(), "{seen}");
 }
 
 #[tokio::test]

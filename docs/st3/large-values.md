@@ -24,6 +24,10 @@ same stable ID, owning **producer module**, and a breakup/reference TODO.
 IDs use `lv-h<12hex>` / `flow-h<12hex>`: the alphabetic hash tag distinguishes
 source fingerprints from numbered decision citations. Full content fingerprints
 remain separate and unchanged by that namespace.
+Site records store only reviewed identity and metadata (`id`, `path`, `kind`,
+`fingerprint`, `owner`, `todo`, `disposition`). Excerpts and line locations are
+diagnostics the guard recomputes from source when it reports a finding; they are
+not stored per record, and a record carrying extra fields is rejected.
 `declarations` records every column and index expression found by the declared
 lexical catalog, including types that look small. A template that cannot be
 resolved stays explicitly unresolved. No catalog entry proves a value's size.
@@ -240,6 +244,8 @@ These accept existing inline representations, not a value-size or cost bound.
 The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
 
 The same flow takes a `source_forced` flag: a mission retire that its owning set's source gate admitted as forced skips only the plain `set-managed-subject` refusal, and records its source debt in the same transaction. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
+
+The same flow also runs the person-availability actor check, refusing any availability claim whose actor is not its subject person. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
 
 ### Agent answer atomicity inventory review
 
@@ -656,4 +662,30 @@ retains `trace-statement-and-value-representation`: trace any future fixture or
 consumer change before adding SQL execution or persistence, and review the
 resulting value/column representation rather than treating these markers as a
 permanent storage exemption.
+
+### Durable host hold storage
+
+`fractal_store::store::host_holds` owns `lv-ha677d62abc9d`,
+`lv-h93ce54913c6d` and `lv-h16424da0718d`. These reviewed allow-for-now
+sites declare, insert and revision-check the authoritative local host-hold
+record. Owner/host keys and serialized hold bodies remain inline; sizes are
+not proven bounded. Their eventual representation change must preserve
+authenticated ownership, exact-revision release and the committed local
+observation in the same writer transaction. Terminal run status cannot reclaim
+an unresolved hold; reclamation needs a separate explicit retention policy.
+
+### Finite membership storage
+
+`fractal_store::store::resource_membership` owns schema site
+`lv-hb7bab5eb8be2` and mutation sites `lv-h15191adeac97`,
+`lv-h32081bb17f3d`, `lv-hbb24831194f3`, `lv-h466c8225b3a9` and
+`lv-hacf1fd1c6d10`. Host/epoch and host/lane/policy TEXT record the authority
+fence and installed policy; membership identifier, host, lane, state and JSON body
+record execution custody, grants, child runs and runtime roots. The queue index
+retains host, lane, state and membership identifier keys. Inline updates preserve
+one transaction for policy, admission, child attachment and retirement decisions.
+The schema TODO is to chunk or reference variable columns and keys; the mutation
+TODO is to bound or reference bodies and account for their cleanup without
+weakening fencing or releasing uncertain execution custody. Neither queue order,
+capacity counts nor the host-local authority proves value sizes.
 

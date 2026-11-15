@@ -21,6 +21,7 @@ BASELINES = ('.github/fleet-compat-baseline.json', '.github/messaging-compat-bas
 TARGETS = ('x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')
 STABLE = re.compile(r'v\d+\.\d+\.\d+')
 SHA = re.compile(r'[0-9a-f]{40}')
+FLEET = re.compile(r'fleet-([0-9a-f]{40})')
 DIGEST = re.compile(r'[0-9a-f]{64}')
 POLICY = 'Rolling previous-published-release compatibility baseline; advance after each stable release.'
 # Seconds to wait before asking again after an empty release listing; one try more than delays.
@@ -84,8 +85,12 @@ def validate(pin, label):
         raise BaselineError(f'{label}: expected commit, tag, why, exception_reason and bundles')
     if not isinstance(pin['commit'], str) or not SHA.fullmatch(pin['commit']):
         raise BaselineError(f'{label}: commit must be a full 40-character source SHA')
-    if not isinstance(pin['tag'], str) or not STABLE.fullmatch(pin['tag']):
-        raise BaselineError(f'{label}: tag must be a stable vMAJOR.MINOR.PATCH release')
+    fleet = FLEET.fullmatch(pin['tag']) if isinstance(pin['tag'], str) else None
+    if fleet:
+        if fleet[1] != pin['commit']:
+            raise BaselineError(f'{label}: fleet tag must name the exact baseline source')
+    elif not isinstance(pin['tag'], str) or not STABLE.fullmatch(pin['tag']):
+        raise BaselineError(f'{label}: tag must be a stable release or fleet-SHA')
     if not isinstance(pin['why'], str) or not pin['why'].strip():
         raise BaselineError(f'{label}: why must describe the policy')
     reason = pin['exception_reason']
@@ -106,6 +111,10 @@ def check(pins, releases, require_latest=False):
     tags = [row['tag_name'] for row in releases]
     for path, pin in pins.items():
         validate(pin, path)
+        if FLEET.fullmatch(pin['tag']):
+            if path != BASELINES[0]:
+                raise BaselineError(f'{path}: only the fleet baseline may pin a main source')
+            continue
         if pin['tag'] not in tags:
             raise BaselineError(f'{path}: {pin["tag"]} is not a published stable release')
         behind = tags.index(pin['tag'])
@@ -121,8 +130,14 @@ def read_pins(source=None):
                              else (ROOT / path).read_text()) for path in BASELINES}
 
 
-def release_pin(tag, releases):
-    if tag not in {row['tag_name'] for row in releases}:
+def release_pin(tag, releases, fleet=False):
+    if fleet:
+        if not FLEET.fullmatch(tag):
+            raise BaselineError('fleet baseline requires a fleet-SHA release')
+        published = api(f'repos/{repository()}/releases/tags/{tag}')
+        if published['draft']:
+            raise BaselineError(f'{tag} is not published')
+    elif tag not in {row['tag_name'] for row in releases}:
         raise BaselineError(f'{tag} is not a published stable release')
     with tempfile.TemporaryDirectory(prefix='fractal-compat-release-') as temporary:
         dist = Path(temporary)
@@ -165,7 +180,11 @@ def release_pin(tag, releases):
                 'url': f'https://github.com/{repository()}/releases/download/{tag}/{archive.name}',
                 'sha256': digest,
             }
-    return {'commit': source, 'tag': tag, 'why': POLICY, 'exception_reason': None, 'bundles': bundles}
+    pin = {'commit': source, 'tag': tag, 'why': (
+        'Oldest deployed source; advance with the deployment pin, not stable publication.'
+        if fleet else POLICY), 'exception_reason': None, 'bundles': bundles}
+    validate(pin, tag)
+    return pin
 
 
 def encoded(pin):
@@ -175,7 +194,7 @@ def encoded(pin):
 def changes(pins, pin):
     # An explicit temporary hold is a human policy choice, not an automation reset.
     return {path: encoded(pin) for path, current in pins.items()
-            if current['exception_reason'] is None and current != pin}
+            if current['exception_reason'] is None and not FLEET.fullmatch(current['tag']) and current != pin}
 
 
 def impact(tag):
@@ -223,8 +242,8 @@ def advance(tag, pin):
             'message': f'Roll compatibility baselines forward to {tag}', 'tree': tree, 'parents': [main]})['sha']
         api(f'repos/{repo}/git/refs', {'ref': f'refs/heads/{branch}', 'sha': commit})
     body = (f'## Problem\nThe published {tag} must become the previous-release baseline for the next candidate.\n\n'
-            '## Goal\nAdvance both unheld compatibility baselines using the published archive checksums and exact source.\n\n'
-            '## Decisions\nUpdate main after publication, never the release commit itself. Preserve explicit temporary holds.\n\n'
+            '## Goal\nAdvance unheld stable compatibility baselines using published archive checksums and exact source.\n\n'
+            '## Decisions\nUpdate main after publication, never the release commit itself. Preserve deployment source pins and explicit temporary holds.\n\n'
             '## Verification\nPublished archive SHA256SUMS, embedded BUILD.json and dereferenced tag source were checked. '
             'Workspace CI is dispatched on this branch because GITHUB_TOKEN-created PRs do not trigger PR workflows.\n\n'
             '## Complexity\nNo new dependencies.\n\n## Concerns\nHuman review and merge are required before another stable release. '
@@ -252,13 +271,18 @@ def main():
     checker.add_argument('--require-latest', action='store_true', help='release preparation requires the latest baseline')
     for command in ('repin', 'advance'):
         sub.add_parser(command).add_argument('tag')
+    sub.add_parser('repin-fleet', help='pin a published immutable fleet-SHA native release').add_argument('tag')
     args = parser.parse_args()
+    if args.command == 'repin-fleet':
+        pin = release_pin(args.tag, [], fleet=True)
+        (ROOT / BASELINES[0]).write_text(encoded(pin))
+        return 0
     releases = published_releases()
     if args.command == 'latest':
         print(releases[0]['tag_name'])
     elif args.command == 'check':
         check(read_pins(args.source), releases, args.require_latest)
-        print('Compatibility baselines satisfy the published stable release window')
+        print('Compatibility baselines satisfy their deployment-source and stable-release policies')
     else:
         pin = release_pin(args.tag, releases)
         if args.command == 'repin':

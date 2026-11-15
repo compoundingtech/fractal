@@ -49,6 +49,36 @@ const rollout = {
   }),
 } satisfies ObjectiveInput
 
+const throughput = {
+  name: 'factory/work-throughput',
+  about: "Factory-authored pull requests merged into the roster's default branches",
+  indicator: Fractal.indicator.count({
+    subjectPrefix: 'custom/factory/merged-pr/',
+    event: { kind: 'custom.factory.pr-merged', at: 'merged_at' },
+    labels: ['repository'],
+    exclude: [{ field: 'author', values: ['renovate'] }],
+  }),
+  window: { span: '24h' },
+  targets: [{ stat: 'per-hour', min: 10 }],
+} satisfies ObjectiveInput
+
+/** One claim per run is the whole sample, from its creation to its completion. */
+const runs = {
+  name: 'acme/merge-latency',
+  about: "A merge group's run, from created to completed",
+  indicator: Fractal.indicator.interval({
+    subjectPrefix: 'github-workflow-run/acme/repo/',
+    start: { kind: 'github.workflow-run', at: 'created_at' },
+    stop: { kind: 'github.workflow-run', at: 'completed_at' },
+    only: [
+      { field: 'event', values: ['merge_group'] },
+      { field: 'attempt', values: ['1'] },
+    ],
+  }),
+  window: { span: '1d' },
+  targets: [{ stat: 'p95', within: '10m' }],
+} satisfies ObjectiveInput
+
 describe('Fractal.objective lowering', () => {
   it('lowers an interval over claims as docs/st3/objectives.md declares it', () => {
     expect(render(rollout)).toBe(`version 2
@@ -97,6 +127,56 @@ objective "ops/build" {
   target "p99" within="30m"
 }
 `)
+  })
+
+  it('lowers a count over claims as docs/st3/objectives.md declares it', () => {
+    expect(render(throughput)).toBe(`version 2
+objective "factory/work-throughput" {
+  about "Factory-authored pull requests merged into the roster's default branches"
+  indicator "count" {
+    subject-prefix "custom/factory/merged-pr/"
+    event "custom.factory.pr-merged" at="merged_at"
+    label "repository"
+    exclude "author" "renovate"
+  }
+  window "24h"
+  target "per-hour" min=10
+}
+`)
+    const flakes = { ...throughput, name: 'factory/flakes', indicator: Fractal.indicator.count({ subjectPrefix: 'custom/factory/flake/', event: { kind: 'custom.factory.flake', at: 'seen_at' } }), targets: [{ stat: 'per-hour', max: 0.5 }] }
+    expect(render(flakes)).toContain('  indicator "count" {\n    subject-prefix "custom/factory/flake/"\n    event "custom.factory.flake" at="seen_at"\n  }\n  window "24h"\n  target "per-hour" max=0.5\n')
+  })
+
+  it('lowers one claim as the whole sample and an only per field', () => {
+    expect(render(runs)).toBe(`version 2
+objective "acme/merge-latency" {
+  about "A merge group's run, from created to completed"
+  indicator "interval" {
+    subject-prefix "github-workflow-run/acme/repo/"
+    start "github.workflow-run" at="created_at"
+    stop "github.workflow-run" at="completed_at"
+    only "event" "merge_group"
+    only "attempt" "1"
+  }
+  window "1d"
+  target "p95" within="10m"
+}
+`)
+    const flakes = {
+      name: 'acme/flakes',
+      about: 'Runs with a flake',
+      indicator: Fractal.indicator.count({
+        subjectPrefix: 'github-workflow-run/acme/repo/',
+        event: { kind: 'github.workflow-run', at: 'completed_at' },
+        exclude: [{ field: 'flakes', values: ['0'] }],
+        only: [{ field: 'workflow', values: ['Workspace CI'] }],
+      }),
+      window: { span: '1h' },
+      targets: [{ stat: 'per-hour', max: 0 }],
+    } satisfies ObjectiveInput
+    expect(render(flakes)).toContain(
+      '  indicator "count" {\n    subject-prefix "github-workflow-run/acme/repo/"\n    event "github.workflow-run" at="completed_at"\n    exclude "flakes" "0"\n    only "workflow" "Workspace CI"\n  }\n',
+    )
   })
 
   const native: ReadonlyArray<{
@@ -156,16 +236,6 @@ objective "ops/build" {
       targets: [{ stat: 'open', max: 0 }],
       kdl: '  indicator "divergence"\n  target "open" max=0\n',
     },
-    {
-      indicator: Fractal.indicator.ciDuration({ series: 'ci/merge-queue' }),
-      targets: [{ stat: 'p50', within: '10m' }],
-      kdl: '  indicator "ci-duration" {\n    series "ci/merge-queue"\n  }\n  target "p50" within="10m"\n',
-    },
-    {
-      indicator: Fractal.indicator.ciCount({ series: 'ci/flakes' }),
-      targets: [{ stat: 'per-hour', max: 0 }],
-      kdl: '  indicator "ci-count" {\n    series "ci/flakes"\n  }\n  target "per-hour" max=0\n',
-    },
   ]
   it.each(native)('lowers indicator $indicator.kind', ({ indicator, targets, kdl }) => {
     expect(render({ name: 'shipped', about: 'Measured', indicator, targets })).toBe(
@@ -198,7 +268,6 @@ describe('Fractal.objective validation', () => {
     { name: 'a fractional idle minimum', input: { name: 'cpu', about: 'a', indicator: { kind: 'cpu', idleMinMinutes: 1.5, loadMaxCores: 1 }, targets: [] }, message: /idleMinMinutes is not a positive integer/ },
     { name: 'an idle minimum over an hour', input: { name: 'cpu', about: 'a', indicator: Fractal.indicator.cpu({ idleMinMinutes: 61, loadMaxCores: 1 }), targets: [{ stat: 'cores', max: 1 }, { stat: 'idle-cores', max: 0.5 }] }, message: /idle minimum is not between 1 and 60/ },
     { name: 'idle cores above cores', input: { name: 'cpu', about: 'a', indicator: Fractal.indicator.cpu({ idleMinMinutes: 10, loadMaxCores: 1 }), targets: [{ stat: 'cores', max: 1 }, { stat: 'idle-cores', max: 2 }] }, message: /idle CPU target is above/ },
-    { name: 'a non-CI series', input: { name: 'x', about: 'a', indicator: { kind: 'ci-count', series: 'merge-queue' }, targets: [] }, message: /is not `ci\/` and lowercase words/ },
     { name: 'a relative subject prefix', input: { ...base, indicator: { ...interval, subjectPrefix: '/custom/' } }, message: /must name subjects and end with `\/`/ },
     { name: 'a prefix without a slash', input: { ...base, indicator: { ...interval, subjectPrefix: 'custom' } }, message: /must name subjects/ },
     { name: 'no stop', input: { ...base, indicator: { ...interval, stop: undefined } }, message: /an interval needs `stop`/ },
@@ -209,8 +278,8 @@ describe('Fractal.objective validation', () => {
     { name: 'an exclude without values', input: { ...base, indicator: { ...interval, exclude: [{ field: 'exclusion', values: [] }] } }, message: /needs a field and at least one value/ },
     { name: 'a pause without resume', input: { ...base, indicator: { ...interval, pause: { kind: 'held', resume: '' } } }, message: /`pause` needs `resume`/ },
     { name: 'a claim kind in two roles', input: { ...base, indicator: { ...interval, cancel: 'custom.acme.change-ready' } }, message: /claim kind "custom.acme.change-ready" has two roles/ },
-    { name: 'an interval without a window', input: { ...base, window: undefined }, message: /an interval needs a `window`/ },
-    { name: 'a window on native telemetry', input: { name: 'x', about: 'a', indicator: latency, window: { span: '1d' }, targets: [{ stat: 'p99', within: '1s' }] }, message: /only an interval takes a `window`/ },
+    { name: 'an interval without a window', input: { ...base, window: undefined }, message: /a `interval` indicator needs a `window`/ },
+    { name: 'a window on native telemetry', input: { name: 'x', about: 'a', indicator: latency, window: { span: '1d' }, targets: [{ stat: 'p99', within: '1s' }] }, message: /only an interval or a count takes a `window`/ },
     { name: 'a zero window', input: { ...base, window: { span: '0d' } }, message: /must be positive/ },
     { name: 'a malformed duration', input: { ...base, targets: [{ stat: 'p95', within: '5 minutes' }] }, message: /invalid duration `5 minutes`/ },
     { name: 'a zero minimum sample count', input: { ...base, window: { span: '1d', minSamples: 0 } }, message: /minSamples is not a positive integer/ },
@@ -225,7 +294,26 @@ describe('Fractal.objective validation', () => {
     { name: 'a remote latency below local', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }, { stat: 'p99', within: '500ms', scope: 'remote' }] }, message: /remote latency is below its own/ },
     { name: 'a fractional divergence max', input: { name: 'x', about: 'a', indicator: Fractal.indicator.divergence(), targets: [{ stat: 'open', max: 0.5 }] }, message: /no target `open` with that bound/ },
     { name: 'a min-percent over 100', input: { name: 'x', about: 'a', indicator: Fractal.indicator.share({ path: 'p' }), targets: [{ stat: 'live-share', minPercent: 101 }] }, message: /is not between 0 and 100/ },
-    { name: 'a response on native telemetry', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }], onBreach: rollout.onBreach }, message: /only an interval takes `onBreach`/ },
+    { name: 'a response on native telemetry', input: { name: 'x', about: 'a', indicator: latency, targets: [{ stat: 'p99', within: '1s' }], onBreach: rollout.onBreach }, message: /only an interval or a count takes `onBreach`/ },
+    { name: 'a count with min and max', input: { ...throughput, targets: [{ stat: 'per-hour', min: 1, max: 2 }] }, message: /needs one bound/ },
+    { name: 'a count with a zero minimum', input: { ...throughput, targets: [{ stat: 'per-hour', min: 0 }] }, message: /no target `per-hour` with that bound/ },
+    { name: 'a count with a negative maximum', input: { ...throughput, targets: [{ stat: 'per-hour', max: -1 }] }, message: /no target `per-hour` with that bound/ },
+    { name: 'a count with a percentile', input: { ...throughput, targets: [{ stat: 'p95', within: '5m' }] }, message: /no target `p95` with that bound/ },
+    { name: 'a count without a window', input: { ...throughput, window: undefined }, message: /a `count` indicator needs a `window`/ },
+    { name: 'a count window with a sample minimum', input: { ...throughput, window: { span: '24h', minSamples: 5 } }, message: /takes no `minSamples`/ },
+    { name: 'a count without an event', input: { ...throughput, indicator: { ...throughput.indicator, event: undefined } }, message: /a count needs `event`/ },
+    { name: 'a count event without a time field', input: { ...throughput, indicator: { ...throughput.indicator, event: { kind: 'custom.factory.pr-merged' } } }, message: /`event` needs `at`/ },
+    { name: 'a count with an interval child', input: { ...throughput, indicator: { ...throughput.indicator, start: { kind: 'k' } } }, message: /indicator `count` has an unknown field `start`/ },
+    { name: 'a count prefix without a slash', input: { ...throughput, indicator: { ...throughput.indicator, subjectPrefix: 'custom' } }, message: /must name subjects/ },
+    { name: 'a min on native telemetry', input: { name: 'x', about: 'a', indicator: Fractal.indicator.divergence(), targets: [{ stat: 'open', min: 1 }] }, message: /no target `open` with that bound/ },
+    { name: 'a repeated only field', input: { ...runs, indicator: { ...runs.indicator, only: [{ field: 'event', values: ['merge_group'] }, { field: 'event', values: ['pull_request'] }] } }, message: /`only "event"` is repeated/ },
+    { name: 'an only without values', input: { ...runs, indicator: { ...runs.indicator, only: [{ field: 'event', values: [] }] } }, message: /`only` needs a field and at least one value/ },
+    { name: 'an only with an empty value', input: { ...runs, indicator: { ...runs.indicator, only: [{ field: 'event', values: [''] }] } }, message: /`only` needs a field and at least one value/ },
+    { name: 'an only on a count without values', input: { ...throughput, indicator: { ...throughput.indicator, only: [{ field: 'author', values: [] }] } }, message: /`only` needs a field and at least one value/ },
+    { name: 'a same-kind stop at the same field', input: { ...runs, indicator: { ...runs.indicator, stop: { kind: 'github.workflow-run', at: 'created_at' } } }, message: /needs both to name different `at` fields/ },
+    { name: 'a same-kind stop without a time field', input: { ...runs, indicator: { ...runs.indicator, stop: { kind: 'github.workflow-run' } } }, message: /needs both to name different `at` fields/ },
+    { name: 'a same-kind stop with a member', input: { ...runs, indicator: { ...runs.indicator, stop: { kind: 'github.workflow-run', at: 'completed_at', member: 'host' } } }, message: /takes no `expect` or `member`/ },
+    { name: 'a same-kind stop with expect', input: { ...base, indicator: { ...interval, start: { kind: 'custom.acme.change-applied', at: 'ready_at' } } }, message: /takes no `expect` or `member`/ },
     { name: 'an owner that is not an agent', input: { ...base, onBreach: { ...rollout.onBreach, owner: 'person/ada' } }, message: /`owner` is not an agent/ },
     { name: 'a backup equal to the owner', input: { ...base, onBreach: { ...rollout.onBreach, backup: rollout.onBreach.owner } }, message: /`backup` is an agent other than the owner/ },
     { name: 'a malformed condition', input: { ...base, onBreach: { ...rollout.onBreach, condition: 'Missed' } }, message: /needs `condition`/ },
@@ -238,6 +326,19 @@ describe('Fractal.objective validation', () => {
   it('lets the expect kind also start the sample', () => {
     const mergeToLive = { ...base, indicator: { ...interval, start: { kind: 'custom.acme.change-merged', at: 'merged_at' } } }
     expect(Fractal.objective(mergeToLive as ObjectiveInput).indicator).toMatchObject({ start: { kind: 'custom.acme.change-merged' } })
+  })
+
+  it('lets one claim start and stop the sample, and keeps each only', () => {
+    expect(Fractal.objective(runs).indicator).toEqual({
+      kind: 'interval',
+      subjectPrefix: 'github-workflow-run/acme/repo/',
+      start: { kind: 'github.workflow-run', at: 'created_at' },
+      stop: { kind: 'github.workflow-run', at: 'completed_at' },
+      only: [
+        { field: 'event', values: ['merge_group'] },
+        { field: 'attempt', values: ['1'] },
+      ],
+    })
   })
 
   it('names the objective in its errors', () => {
@@ -256,7 +357,7 @@ describe('the objectives Fractal ships', () => {
     expect(builtins.validate()).toEqual([])
   })
 
-  it('are the 21 native objectives, one segment each, so none is declarable', () => {
+  it('are the 18 native objectives, one segment each, so none is declarable', () => {
     expect(objectives.map(({ name }) => name)).toEqual([
       'person-read',
       'person-read-fresh',
@@ -276,9 +377,6 @@ describe('the objectives Fractal ships', () => {
       'ios-live-share',
       'projection-divergence',
       'database',
-      'merge-latency',
-      'ci-critical-path',
-      'flakes',
     ])
     expect(objectives.some(({ indicator, name }) => indicator.kind === 'interval' || name.includes('/'))).toBe(
       false,
@@ -352,6 +450,20 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
     }),
   )
 
+  it.effect('declare a count objective from objective.ts and objective.kdl', () =>
+    Effect.gen(function* () {
+      const root = fixture({
+        'factory/work-throughput/objective.ts': `${header}export default Fractal.objective({ about: 'Merged', indicator: Fractal.indicator.count({ subjectPrefix: 'custom/factory/merged-pr/', event: { kind: 'custom.factory.pr-merged', at: 'merged_at' } }), window: { span: '24h' }, targets: [{ stat: 'per-hour', min: 10 }] })`,
+        'factory/flakes/objective.kdl': 'version 2\nobjective "factory/flakes" {\n  about "Flakes"\n  indicator "count" {\n    subject-prefix "custom/factory/flake/"\n    event "custom.factory.flake" at="seen_at"\n  }\n  window "24h"\n  target "per-hour" max=1\n}\n',
+      })
+      const subjects = (yield* load(root)).filter(({ kind }) => kind === 'objective')
+      expect(subjects.map(({ id, declaration }) => ({ id, tag: declaration._tag }))).toEqual([
+        { id: 'factory/flakes', tag: 'Kdl' },
+        { id: 'factory/work-throughput', tag: 'Module' },
+      ])
+    }),
+  )
+
   const rejections: ReadonlyArray<{
     readonly name: string
     readonly files: Readonly<Record<string, string>>
@@ -367,7 +479,7 @@ export default Fractal.objective({ ...${declared}, onBreach: Fractal.response.fa
       files: {
         'ops/x/objective.ts': `${header}export default Fractal.objective({ about: 'a', indicator: Fractal.indicator.statement(), targets: [{ stat: 'p99', within: '10ms' }, { stat: 'max', within: '100ms' }] })`,
       },
-      message: 'A declared objective is an interval over claims named NAMESPACE/NAME; objective/ops/x is not',
+      message: 'A declared objective is an interval or count over claims named NAMESPACE/NAME; objective/ops/x is not',
     },
     {
       name: 'a one-segment name',

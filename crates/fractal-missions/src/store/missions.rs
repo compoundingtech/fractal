@@ -263,7 +263,7 @@ fn public_mission_spec(connection: &Connection, body: &str) -> Result<MissionSpe
     Ok(mission)
 }
 
-pub type StepStateRow = (String, bool, u32, String, String, String, String, String);
+pub type StepStateRow = (String, bool, u32, String, String, String, String, String, String);
 
 /// The most one `work extend` adds to a step attempt's execution budget.
 const MAX_STEP_EXTENSION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -780,7 +780,7 @@ fn retry_step_tx(
     subject: &str,
     actor: Option<&str>,
     reason: &str,
-    backoff_ms: u64,
+    delay_ms: u64,
     receipt_key: Option<&str>,
 ) -> Result<bool> {
     let current: Option<StepRetryRow> = transaction
@@ -832,7 +832,7 @@ fn retry_step_tx(
         return Ok(false);
     }
     let now = now_ms();
-    let not_before = now.saturating_add(backoff_ms as u128);
+    let not_before = now.saturating_add(delay_ms as u128);
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-hc71c13a84a5f owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='pending', attempt=?2, worker_reported=0, lease_owner=NULL,
                 lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, blocked_reason=?3,
@@ -934,9 +934,19 @@ fn set_mission_run_state_tx(
         return Ok(!claim_ids.is_empty());
     }
     if current_status == status && current_phase == phase {
-        return Ok(false);
+        // A blocked run can acquire retained exit evidence without changing state.
+        // Keep the reason durable too, while unchanged running/no-reason passes stay cheap.
+        if reason.is_none()
+            || latest_claim_of_kind_tx(transaction, &subject, "mission-run.state")?
+                .is_some_and(|claim| claim.body.pointer("/fields/reason").and_then(Value::as_str) == reason)
+        {
+            return Ok(false);
+        }
     }
-    if (current_phase.starts_with("cleanup-") && phase != "terminal")
+    // Cleanup cannot move backwards, but it can park in its current phase while
+    // durable evidence prevents terminalization.
+    if (current_phase.starts_with("cleanup-") && phase != "terminal"
+        && !(phase == current_phase && status == "blocked"))
         || (current_phase == "final-cancelled"
             && !matches!(phase, "final-cancelled" | "cleanup-cancelled" | "terminal"))
     {
@@ -1453,6 +1463,7 @@ fn mission_run_steps_view_tx(
         .collect::<Result<Vec<_>, _>>()?;
     apply_step_states_tx(connection, &mut view.steps, summaries)?;
     view.scheduler_fault = first_readiness_fault_tx(connection, &view.subject)?;
+    fractal_store::store::enrich_mission_run_lineage_tx(connection, &mut view)?;
     Ok(view)
 }
 
@@ -1807,7 +1818,6 @@ pub trait MissionsStore {
             idempotency_key: &str,
             expected_generation: Option<&str>,
             protected_approved: bool,
-            proposal: Option<&RevisionProposalView>,
             retry: bool,
         ) -> Result<MissionRunView, FractalError>;
     fn active_mission_runs(&self) -> Result<Vec<MissionRunView>>;
@@ -1860,6 +1870,11 @@ pub trait MissionsStore {
             id: &str,
         ) -> Result<(MissionRunView, Option<MissionSpec>)>;
     fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>>;
+    /// Earliest ready/working state of attempt one, retained in claims across retries.
+    /// A never-activated step has no start, regardless of its creation time.
+    fn first_step_attempt_started_at(&self, subject: &str) -> Result<Option<u128>>;
+    /// Next future retry eligibility time for pending current-generation local work.
+    fn next_step_retry_deadline(&self, origin: &str) -> Result<Option<u128>>;
     /// Cancel `run` at `expected_generation`, requested by `actor`. A run as `actor` cancels
     /// only itself and the runs it started.
     fn request_mission_run_cancellation_at_generation(
@@ -2237,7 +2252,7 @@ fn set_step_state_guarded(
                     "SELECT step_runs.status,
                                 step_runs.generation_id=mission_runs.current_generation_id,
                                 step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
-                                run_generations.status, root_runs.status, root_runs.phase
+                                run_generations.status, root_runs.status, root_runs.phase, mission_runs.id
                          FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
                          JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
                          JOIN run_generations ON run_generations.id=step_runs.generation_id
@@ -2253,6 +2268,7 @@ fn set_step_state_guarded(
                             row.get(5)?,
                             row.get(6)?,
                             row.get(7)?,
+                            row.get(8)?,
                         ))
                     },
                 )
@@ -2266,6 +2282,7 @@ fn set_step_state_guarded(
                 generation_status,
                 root_status,
                 root_phase,
+                run_id,
             )) = current
             else {
                 return Ok(false);
@@ -2281,6 +2298,15 @@ fn set_step_state_guarded(
                     && !matches!(status, "completed" | "failed" | "cancelled"))
             {
                 return Ok(false);
+            }
+            if matches!(status, "claimed" | "working" | "verifying") {
+                let run = mission_run_header_tx(transaction, &run_id)?;
+                if store.mission_run_supersession_pending_tx(transaction, &run)? {
+                    return Err(FractalError::new(
+                        "stale-run-generation",
+                        "the mission run awaits automatic revision cutover",
+                    ).into());
+                }
             }
             let now = now_ms();
             let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
@@ -3236,6 +3262,7 @@ impl MissionsStore for Store {
         let connection = self.readers.get();
         apply_step_states_tx(&connection, &mut run.steps, summaries)?;
         run.scheduler_fault = first_readiness_fault_tx(&connection, &run.subject)?;
+        fractal_store::store::enrich_mission_run_lineage_tx(&connection, &mut run)?;
         Ok(run)
     }
 
@@ -3574,14 +3601,14 @@ impl MissionsStore for Store {
             && proposal.preview_hash.as_deref() == Some(preview_hash)
             && proposal.approvals.contains(&actor)
         {
-            let run = mission_run_view_tx(
-                transaction,
-                proposal
-                    .run
-                    .strip_prefix("mission-run/")
-                    .unwrap_or(&proposal.run),
-            )
-            .map_err(internal)?;
+            let successor: String = transaction.query_row(
+                "SELECT run_id FROM run_generations WHERE id=?1",
+                [generation_id_from_subject(proposal.successor_generation.as_deref().ok_or_else(|| {
+                    FractalError::new("revision-proposal-not-applied", "the applied proposal has no successor generation")
+                })?)],
+                |row| row.get(0),
+            ).map_err(internal)?;
+            let run = mission_run_view_tx(transaction, &successor).map_err(internal)?;
             let response = RevisionSubmissionView {
                 provenance: crate::provenance::read(
                     transaction,
@@ -3937,7 +3964,7 @@ impl MissionsStore for Store {
         let connection = self.connection.write();
         let run_id = connection
             .query_row(
-                "SELECT id FROM mission_runs WHERE parent_step_run=?1 ORDER BY created_at_unix_ms DESC LIMIT 1",
+                "SELECT id FROM mission_runs WHERE parent_step_run=?1 ORDER BY created_at_unix_ms DESC, id DESC LIMIT 1",
                 [step],
                 |row| row.get::<_, String>(0),
             )
@@ -3954,16 +3981,25 @@ impl MissionsStore for Store {
     fn step_has_active_child_runs(&self, step: &str) -> Result<bool> {
         let step = normalize_step_run(step);
         smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
-        let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            "SELECT 'mission-run/' || id, status FROM mission_runs WHERE parent_step_run=?1",
-        )?;
-        let rows = statement.query_map([step], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (subject, status) = row?;
-            smallclaims::touched::note_read(|| subject);
+        let subjects = {
+            let connection = self.readers.get();
+            connection
+                .prepare_cached("SELECT 'mission-run/' || id FROM mission_runs WHERE parent_step_run=?1")?
+                .query_map([step], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut seen = BTreeSet::new();
+        for subject in subjects {
+            let successor = self.mission_run_supersession_successor(&subject)?;
+            if !seen.insert(successor.clone()) {
+                continue;
+            }
+            let connection = self.readers.get();
+            let status: String = connection.query_row(
+                "SELECT status FROM mission_runs WHERE id=?1",
+                [successor.trim_start_matches("mission-run/")],
+                |row| row.get(0),
+            )?;
             if !matches!(status.as_str(), "completed" | "failed" | "cancelled") {
                 return Ok(true);
             }
@@ -4004,7 +4040,6 @@ impl MissionsStore for Store {
             idempotency_key,
             None,
             false,
-            None,
             false,
         )
     }
@@ -4016,21 +4051,102 @@ impl MissionsStore for Store {
             mission: &MissionSpec,
             actor: &str,
             reason: &str,
-            idempotency_key: &str,
+            _idempotency_key: &str,
             source_generation: &str,
             proposal: &RevisionProposalView,
         ) -> Result<MissionRunView, FractalError> {
-        self.adopt_mission_revision_inner(
-            run,
-            mission,
-            actor,
-            reason,
-            idempotency_key,
-            Some(source_generation),
-            true,
-            Some(proposal),
-            false,
-        )
+        self.with_all_runs_fenced(|transaction| -> Result<MissionRunView, FractalError> {
+            let actor = physical_actor(transaction, actor)?;
+            let proposal = revision_proposal_view_tx(transaction, &proposal.id).map_err(internal)?;
+            let current = mission_run_view_tx(
+                transaction,
+                run.trim_start_matches("mission-run/"),
+            ).map_err(internal)?;
+            if current.subject != proposal.run
+                || current.generation != source_generation
+                || current.generation != proposal.source_generation
+                || mission.revision != proposal.candidate_revision
+            {
+                return Err(FractalError::new(
+                    "stale-revision-proposal",
+                    "the revision proposal does not target the current generation and exact candidate",
+                ));
+            }
+            if !matches!(proposal.status.as_str(), "pending-approval" | "draining" | "applied")
+                || !proposal.reviewers.iter().all(|reviewer| proposal.approvals.contains(reviewer))
+            {
+                return Err(FractalError::new(
+                    "revision-needs-human-approval",
+                    "the revision proposal is not fully approved",
+                ));
+            }
+            if proposal.status != "applied" {
+                if is_failed_terminal(&current.status, &current.phase) {
+                    failed_run_reopen_blocker(&current).map_err(|reason| not_reopenable(run, &reason))?;
+                } else if !matches!(current.status.as_str(), "running" | "standing" | "blocked")
+                    || !matches!(current.phase.as_str(), "normal" | "revision-draining")
+                {
+                    return Err(FractalError::new(
+                        "mission-run-not-revisable",
+                        format!("mission run `{run}` is {} in its {} phase", current.status, current.phase),
+                    ));
+                }
+            }
+            if proposal.status != "applied"
+                && matches!(proposal.cutover, RevisionCutover::WhenIdle)
+                && !is_failed_terminal(&current.status, &current.phase)
+            {
+                for descendant in descendant_mission_run_ids_tx(
+                    transaction,
+                    generation_id_from_subject(&current.generation),
+                ).map_err(internal)? {
+                    let active: bool = transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM step_runs WHERE run_id=?1
+                         AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)
+                         AND status IN ('claimed','working','verifying'))",
+                        [descendant],
+                        |row| row.get(0),
+                    ).map_err(internal)?;
+                    if active {
+                        return Err(FractalError::new(
+                            "revision-needs-drained-cutover",
+                            "the approved revision still has active work to drain",
+                        ));
+                    }
+                }
+            }
+            // The exact linked successor is the cutover's durable idempotency record;
+            // approval receipts and their response cache belong to the caller.
+            let successor = self.supersede_mission_run_at_revision_tx(
+                transaction, &current, &proposal.candidate_revision,
+            )?;
+            if proposal.status != "applied" {
+                let record = append_claim_tx(
+                    transaction,
+                    &self.origin,
+                    &proposal.subject,
+                    "revision-proposal.applied",
+                    Some(&actor),
+                    &json!({"fields": {
+                        "status": "applied",
+                        "successor_generation": successor.generation,
+                        "reason": reason
+                    }}),
+                    &[],
+                    None,
+                ).map_err(smallclaims::error::typed)?;
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h04befd430f94 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE revision_proposals SET status='applied', successor_generation_id=?2,
+                     updated_at_unix_ms=?3 WHERE id=?1",
+                    params![
+                        proposal.id,
+                        generation_id_from_subject(&successor.generation),
+                        record.accepted_at_unix_ms.to_string()
+                    ],
+                ).map_err(internal)?;
+            }
+            Ok(successor)
+        })
     }
 
     fn retry_failed_step(
@@ -4041,8 +4157,8 @@ impl MissionsStore for Store {
             idempotency_key: &str,
         ) -> Result<MissionRunView, FractalError> {
         enum RetryDecision {
-            Complete(MissionRunView),
-            Adopt(Box<MissionRunView>, MissionSpec),
+            Complete(Box<MissionRunView>),
+            Adopt(Box<(MissionRunView, MissionSpec)>),
         }
         let subject = normalize_step_run(subject);
         let decision = self.with_all_runs_fenced(|transaction| -> Result<RetryDecision, FractalError> {
@@ -4099,7 +4215,7 @@ impl MissionsStore for Store {
                     ),
                 ));
             }
-            return Ok(RetryDecision::Adopt(Box::new(current), mission));
+            return Ok(RetryDecision::Adopt(Box::new((current, mission))));
         }
         let finally = flatten_mission_step_specs(&mission)
             .into_iter()
@@ -4146,14 +4262,14 @@ impl MissionsStore for Store {
                 ],
             )
             .map_err(internal)?;
-        Ok(RetryDecision::Complete(view))
+        Ok(RetryDecision::Complete(Box::new(view)))
         })?;
         // Adoption opens its own fence. Release this writer first and retain the
         // generation observed above so a concurrent cutover cannot be overwritten.
         match decision {
-            RetryDecision::Complete(view) => Ok(view),
-            RetryDecision::Adopt(current, mission) => {
-                let current = *current;
+            RetryDecision::Complete(view) => Ok(*view),
+            RetryDecision::Adopt(adoption) => {
+                let (current, mission) = *adoption;
                 self.adopt_mission_revision_inner(
                     &current.id,
                     &mission,
@@ -4162,7 +4278,6 @@ impl MissionsStore for Store {
                     idempotency_key,
                     Some(&current.generation),
                     false,
-                    None,
                     true,
                 )
             }
@@ -4588,7 +4703,6 @@ impl MissionsStore for Store {
             idempotency_key: &str,
             expected_generation: Option<&str>,
             protected_approved: bool,
-            proposal: Option<&RevisionProposalView>,
             retry: bool,
         ) -> Result<MissionRunView, FractalError> {
         if let Some(response) = self
@@ -4611,8 +4725,7 @@ impl MissionsStore for Store {
             ));
         }
         let reopening = is_failed_terminal(&current.status, &current.phase);
-        let phase_allows_cutover = current.phase == "normal"
-            || (proposal.is_some() && current.phase == "revision-draining");
+        let phase_allows_cutover = current.phase == "normal";
         if reopening {
             failed_run_reopen_blocker(&current).map_err(|reason| not_reopenable(run, &reason))?;
         } else if retry
@@ -4888,37 +5001,6 @@ impl MissionsStore for Store {
             )
             .map_err(smallclaims::error::typed)?;
         }
-        if let Some(proposal) = proposal {
-            let changed = transaction
-                .execute(
-                    /* sqlite-large-value: allow-for-now lv-hdfd4341fc0fd owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE revision_proposals
-                     SET status='applied', successor_generation_id=?2, updated_at_unix_ms=?3
-                     WHERE id=?1 AND source_generation_id=?4
-                       AND status IN ('pending-approval','draining')",
-                    params![proposal.id, generation_id, now.to_string(), predecessor_id],
-                )
-                .map_err(internal)?;
-            if changed != 1 {
-                return Err(FractalError::new(
-                    "stale-revision-proposal",
-                    "the revision proposal changed before the cutover",
-                ));
-            }
-            append_claim_tx(
-                transaction,
-                &self.origin,
-                &proposal.subject,
-                "revision-proposal.applied",
-                Some(&actor),
-                &json!({"fields": {
-                    "status": "applied",
-                    "successor_generation": generation_subject
-                }}),
-                &[],
-                None,
-            )
-            .map_err(smallclaims::error::typed)?;
-        }
         let view = mission_run_view_tx(transaction, run_id).map_err(internal)?;
         transaction
             .execute(
@@ -4962,7 +5044,11 @@ impl MissionsStore for Store {
         let connection = self.readers.get();
         connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h488727939c7c owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &open_mission_run_headers_query())?
-            .query_map([], mission_run_header_from_row)?
+            .query_map([], |row| {
+                let mut view = mission_run_header_from_row(row)?;
+                fractal_store::store::enrich_mission_run_lineage_tx(&connection, &mut view)?;
+                Ok(view)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -4998,7 +5084,9 @@ impl MissionsStore for Store {
                 let identity = row.get::<_, String>(19)?;
                 let blocked = row.get::<_, Option<String>>(20)?;
                 let header = if blocked.is_none() && row.get_ref(0)?.data_type() != rusqlite::types::Type::Null {
-                    Some(mission_run_header_from_row(row)?)
+                    let mut view = mission_run_header_from_row(row)?;
+                    fractal_store::store::enrich_mission_run_lineage_tx(&connection, &mut view)?;
+                    Some(view)
                 } else {
                     None
                 };
@@ -5196,6 +5284,60 @@ impl MissionsStore for Store {
             .into_iter()
             .filter_map(|value| value.parse::<u128>().ok())
             .min())
+    }
+
+    fn first_step_attempt_started_at(&self, subject: &str) -> Result<Option<u128>> {
+        let subject = normalize_step_run(subject);
+        let connection = self.readers.get();
+        let started_at: Option<String> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms FROM claims
+                 WHERE subject=?1 AND kind='step-run.state'
+                   AND json_extract(body, '$.fields.status') IN ('ready','working')
+                   AND COALESCE(json_extract(body, '$.fields.attempt'), 1)=1
+                   AND store_index<COALESCE((
+                     SELECT MIN(store_index) FROM claims
+                     WHERE subject=?1 AND kind='step-run.retried'
+                   ), 9223372036854775807)
+                 ORDER BY length(accepted_at_unix_ms), accepted_at_unix_ms
+                 LIMIT 1",
+                [&subject],
+                |row| row.get(0),
+            )
+            .optional()?;
+        started_at.map(|value| value.parse().map_err(Into::into)).transpose()
+    }
+
+    fn next_step_retry_deadline(&self, origin: &str) -> Result<Option<u128>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT step_runs.not_before_unix_ms
+             FROM step_runs
+             JOIN mission_runs ON mission_runs.id=step_runs.run_id
+             WHERE step_runs.generation_id=mission_runs.current_generation_id
+               AND step_runs.status='pending'
+               AND step_runs.not_before_unix_ms IS NOT NULL
+               AND mission_runs.status IN ('running','standing','blocked')
+               AND mission_runs.phase NOT LIKE 'cleanup-%'
+               AND EXISTS (
+                 SELECT 1 FROM claims
+                 WHERE claims.subject='mission-run/' || mission_runs.id
+                   AND claims.kind='mission-run.created'
+                   AND claims.origin=?1
+               )",
+        )?;
+        let deadlines = statement
+            .query_map([origin], |row| row.get::<_, String>(0))?;
+        let now = now_ms();
+        let mut next = None;
+        for deadline in deadlines {
+            if let Ok(deadline) = deadline?.parse::<u128>()
+                && deadline > now
+            {
+                next = Some(next.map_or(deadline, |current: u128| current.min(deadline)));
+            }
+        }
+        Ok(next)
     }
 
     fn request_mission_run_cancellation(
@@ -6364,6 +6506,14 @@ impl MissionsStore for Store {
                     }
                 }
                 if action == "claim" {
+                    let run = mission_run_header_tx(transaction, current.run.strip_prefix("mission-run/").unwrap_or(&current.run))
+                        .map_err(internal)?;
+                    if self.mission_run_supersession_pending_tx(transaction, &run).map_err(internal)? {
+                        return Err(FractalError::new(
+                            "stale-run-generation",
+                            "the mission run awaits automatic revision cutover",
+                        ));
+                    }
                     let mut statement = transaction
                         .prepare(
                             "SELECT subject, generation_id, step_path FROM step_runs
@@ -6734,6 +6884,11 @@ impl MissionsStore for Store {
             self.with_run_fence(&subject, apply_action)
         };
         let (mut view, snapshot) = committed?;
+        if matches!(action, "complete" | "fail" | "release") {
+            // A predecessor-named request may have committed on its carried
+            // successor; the committed view names that terminal event's subject.
+            self.finish_work_turn_traces(&view.subject, requested_incarnation).map_err(internal)?;
+        }
         // An exact retry also replays a view cached without these fields.
         let filled = if action == "renew" {
             if enrich_renewal { self.enrich_work_response(&mut view) } else { Ok(()) }

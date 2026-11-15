@@ -171,6 +171,7 @@
     "claude-channel/.claude-plugin/marketplace.json",
     "claude-channel/plugins/st2-channel/.claude-plugin/plugin.json",
     "claude-channel/plugins/st2-channel/.mcp.json",
+    "docs/st3/client-v0/fixtures/response-evidence.json",
     "plugins/claude/.claude-plugin/marketplace.json",
     "plugins/claude/st-channel/.claude-plugin/plugin.json",
     "plugins/claude/st-channel/.mcp.json",
@@ -239,6 +240,7 @@
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
     "crates/fractal-daemon/hooks/pi-channel.ts",
+    "slo/fractal-ci.kdl",
     "slo/objectives.kdl"
    ]
   },

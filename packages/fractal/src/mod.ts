@@ -202,12 +202,25 @@ export const OmpResumeSchema = Schema.Union([
   Schema.Struct({ transcript: Text }),
 ]).annotate({ identifier: 'Fractal.OmpResume' })
 
+/** One-shot first-turn message, identified within the agent subject. */
+export const HarnessMessageSchema = Schema.Struct({
+  text: Text.pipe(
+    Schema.refine(
+      (text): text is string =>
+        /\P{White_Space}/u.test(text) && utf8ByteLength(text) <= 65536 && text.includes('\0') === false,
+      { message: 'message text must be nonblank, at most 65536 UTF-8 bytes and contain no NUL' },
+    ),
+  ),
+  id: Text.pipe(Schema.refine((id): id is string => utf8ByteLength(id) <= 256)),
+}).annotate({ identifier: 'Fractal.HarnessMessage' })
+
 /** OMP harness selection for a seat. */
 export const OmpSchema = Schema.Struct({
   kind: Schema.Literal('omp'),
   model: Text,
   effort: Schema.optionalKey(Schema.Literals(['low', 'medium', 'high', 'xhigh'])),
   resume: Schema.optionalKey(OmpResumeSchema),
+  message: Schema.optionalKey(HarnessMessageSchema),
 }).annotate({ identifier: 'Fractal.Omp' })
 
 /** Codex harness selection with explicit model and effort routing. */
@@ -217,6 +230,7 @@ export const CodexSchema = Schema.Struct({
   effort: Text,
   args: Schema.optionalKey(Schema.Array(Text)),
   resume: Schema.optionalKey(Schema.Struct({ session: Text })),
+  message: Schema.optionalKey(HarnessMessageSchema),
 }).annotate({ identifier: 'Fractal.Codex' })
 
 /** Claude Code harness selection; effort is the native driver's optional effort level. */
@@ -224,6 +238,7 @@ export const ClaudeSchema = Schema.Struct({
   kind: Schema.Literal('claude'),
   model: Text,
   effort: Schema.optionalKey(Text),
+  message: Schema.optionalKey(HarnessMessageSchema),
 }).annotate({ identifier: 'Fractal.Claude' })
 
 /**
@@ -559,6 +574,12 @@ const withoutFeedback = (gates: readonly (typeof GateSchema.Type)[]): boolean =>
 export const RetrySchema = Schema.Struct({
   attempts: Schema.Int.pipe(Schema.refine((n): n is number => n >= 1 && n <= 100)),
   backoff: Schema.optionalKey(NonNegativeDuration),
+  /** Per-retry delays override backoff; the final delay repeats. */
+  delays: Schema.optionalKey(Schema.Array(Duration)),
+  /** Whole-policy window from the first attempt's start. */
+  within: Schema.optionalKey(Duration),
+  /** Empty or absent matches every failure; otherwise match typed error tags. */
+  on: Schema.optionalKey(Schema.Array(Text)),
 }).annotate({ identifier: 'Fractal.Retry' })
 
 /** An agentless command a step runs. */
@@ -1047,10 +1068,12 @@ export const omp = ({
   model,
   effort,
   resume,
+  message,
 }: {
   readonly model: string
   readonly effort?: (typeof OmpSchema.Encoded)['effort']
   readonly resume?: typeof OmpResumeSchema.Encoded
+  readonly message?: typeof HarnessMessageSchema.Encoded
 }): typeof OmpSchema.Type =>
   snapshotComposition(
     decode({
@@ -1060,6 +1083,7 @@ export const omp = ({
         model,
         ...(effort === undefined ? {} : { effort }),
         ...(resume === undefined ? {} : { resume }),
+        ...(message === undefined ? {} : { message }),
       },
     }),
   )
@@ -1731,6 +1755,13 @@ const lowerStep = (input: typeof StepSchema.Encoded): Node => {
         children: [
           child({ name: 'attempts', value: s.retry.attempts }),
           ...optionalChild({ name: 'backoff', value: nativeDuration(s.retry.backoff) }),
+          ...(s.retry.delays === undefined || s.retry.delays.length === 0
+            ? []
+            : [node({ name: 'delays', args: s.retry.delays.map(lowerDuration) })]),
+          ...optionalChild({ name: 'within', value: nativeDuration(s.retry.within) }),
+          ...(s.retry.on === undefined || s.retry.on.length === 0
+            ? []
+            : [node({ name: 'on', args: s.retry.on })]),
         ],
       }),
     )
@@ -2613,6 +2644,15 @@ export const agent = (input: typeof AgentSchema.Encoded): Node => {
                     a.harness.resume === 'latest'
                       ? ['--continue']
                       : ['--resume', a.harness.resume.transcript],
+                }),
+              ]),
+          ...(a.harness.message === undefined
+            ? []
+            : [
+                node({
+                  name: 'message',
+                  args: [a.harness.message.text],
+                  props: { id: a.harness.message.id },
                 }),
               ]),
         ],

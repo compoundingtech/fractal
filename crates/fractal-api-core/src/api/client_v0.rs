@@ -321,6 +321,9 @@ pub fn validate_agent_selector(collection: &str, agent: Option<&str>) -> Result<
 pub const ALL_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.declarations",
     "read.glasses",
     "control.glasses",
@@ -343,6 +346,9 @@ const ACTIONS: &[&str] = &[
     "arrangement.membership.edit",
     "read-position.advance",
     "attention.resolve",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -406,6 +412,9 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "arrangement.edit",
     "arrangement.membership.edit",
     "read-position.advance",
+    "attention.seen",
+    "attention.snooze",
+    "attention.dismiss",
     "review.approve",
     "review.reject",
     "review.request-changes",
@@ -1133,8 +1142,9 @@ pub fn mission_list_cards_with(
             })).collect::<Vec<_>>();
             let current=shown.iter().filter(|s| matches!(s["state"].as_str(),Some("ready"|"claimed"|"verifying"|"blocked")))
                 .map(|s| json!({"id":s["id"],"title":s["title"],"assignee":s["assignee"],"claimant":s["claimant"],"state":s["state"],"since":s["since"],"progress_at":s["progress_at"]})).collect::<Vec<_>>();
-            Ok::<Value,anyhow::Error>(json!({
+            let mut value = json!({
                 "id":run["id"],"generation_id":run["generation_id"],"revision":run["revision"],"requester":run["requester"],
+                "retried_by":run["retried_by"],
                 "status":run["status"],"phase":run["phase"],"progress":{"done":done,"total":total},
                 "current_steps":current,"must_act":must_act,
                 "blocker":scheduler_fault.map(|reason| json!({"step":steps.first().map(|step| &step.subject),"reason":reason,"scope":crate::reconcile::FIRST_READINESS_FAULT_SCOPE})),
@@ -1143,7 +1153,13 @@ pub fn mission_list_cards_with(
                 "completed_at":run_states.get(run_id).and_then(|state| state.completed_at_unix_ms),
                 "eta":if terminal {None} else {store.mission_run_eta(run_id, at_unix_ms)?},
                 "steps":shown
-            }))
+            });
+            for field in ["retry_of", "supersedes", "superseded_by", "supersession_fault"] {
+                if run[field].is_string() {
+                    value[field] = run[field].clone();
+                }
+            }
+            Ok::<Value,anyhow::Error>(value)
         }).collect::<anyhow::Result<Vec<_>>>()?;
         let state=if details.iter().any(|run| run["blocker"]["scope"]==crate::reconcile::FIRST_READINESS_FAULT_SCOPE) {"blocked"} else {state};
         let must_act=["you","agent","blocked","system"].into_iter()
