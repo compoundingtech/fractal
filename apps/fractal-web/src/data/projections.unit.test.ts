@@ -65,6 +65,24 @@ test.each([
   },
 )
 
+test.each([
+  { state: 'running', harness_state: 'working', turn: 'active' },
+  { state: 'running', harness_state: 'idle', turn: 'inactive' },
+  { state: 'waiting', harness_state: 'blocked', turn: 'inactive' },
+  { state: 'suspended', harness_state: null, turn: 'inactive' },
+  { state: 'running', harness_state: null, turn: undefined },
+  { state: 'waiting', harness_state: 'indeterminate', turn: undefined },
+] as const)('reads a turn only from the seat itself: $state / $harness_state is $turn', ({ turn, ...observation }) => {
+  const row = openAgent(decodeUnknownSync(Agent, 'strict')({
+    kind: 'agent', id: 'agent/turn-row', name: 'Turn row', host_id: 'host/example', runtime_ids: [],
+    reachability: 'reachable', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z',
+    ...observation,
+  } satisfies AgentEncoded))
+  const projected = fleetFromAgents([row]).agents[0]!
+  // A running seat still reads as working in the roster; only its own harness report claims a turn.
+  expect(projected.turn).toBe(turn)
+})
+
 const row = openAgent(decodeUnknownSync(
   Agent,
   'strict',

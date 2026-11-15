@@ -6,13 +6,15 @@ import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-u
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
-import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useFleetSelection, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
+import type { AgentStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { useAgent, useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useFleetSelection, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
 import { nativeTurnFooter } from './NativeTurnFooter.tsx'
 import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
+import { LastSeen, SeatAtRest, ThreadUnavailable } from './ConversationStates.tsx'
+import { sidebarRow } from './sidebarRow.ts'
 import { LiveAgentThreads } from '../threads/LiveThreads.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
@@ -100,6 +102,14 @@ const ConversationThreadPane = ({
   const rosterNames = useFleetSelection({ select: selectRosterNames, equal: sameRosterNames })
   const names = React.useMemo(() => (ref: string) => rosterNames.get(ref), [rosterNames])
   const state = projectTranscript(feed, { agentName, showSystemEvents, onLoadEarlier, agentRef, names })
+  // A roster seat's own report outranks an open run in its transcript: only a seat that reports an active turn is
+  // working. One at rest shows its roster word instead; one whose turn is unknown shows neither. A pane with no roster
+  // seat (a subagent's session) keeps the transcript's run evidence.
+  const seat = useAgent(agentRef)
+  const seatRow = seat._tag === 'Observed' ? seat.value : undefined
+  const turnHeld = seatRow === undefined || seatRow.turn === 'active'
+  const atRest = seatRow?.turn === 'inactive' ? sidebarRow({ agent: seatRow, stale: false }) : undefined
+  const rest = atRest === undefined || atRest.status === 'working' ? undefined : atRest
   const observed = state._tag === 'Observed'
   const hasTurns = observed && state.turns.length > 0
   const boundary = React.useRef<HTMLDivElement>(null)
@@ -154,12 +164,17 @@ const ConversationThreadPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} onOpenThread={onOpenThread} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} onOpenThread={onOpenThread} feed={feed} state={state} stale={stale} turnHeld={turnHeld} restStatus={rest?.status} restLabel={rest?.statusLabel} ux={ux} visible={visible} readOnly={readOnly} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, onOpenThread, feed, state, stale, ux, visible, readOnly }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, onOpenThread, feed, state, stale, turnHeld, restStatus, restLabel, ux, visible, readOnly }: {
   readonly stale: boolean
+  /** False when the seat reports no turn in progress, or its turn is unknown: an open run in the transcript is not progress. */
+  readonly turnHeld: boolean
+  /** The seat reports no turn in progress: its roster status and word, when the roster names one. */
+  readonly restStatus: AgentStatus | undefined
+  readonly restLabel: string | undefined
   readonly ux?: UxTelemetry
   readonly visible: boolean
   readonly readOnly: boolean
@@ -210,8 +225,10 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
   // lasts, clears when the run ends or another starts, and a late answer for an older run is dropped.
   const agentControls = readOnly ? undefined : source.agentControls
-  const running = state._tag === 'Observed' && state.isRunning
-  const runId = state._tag === 'Observed' && state.isRunning ? state.turns.findLast(turn => turn.work.running)?.id ?? '' : undefined
+  // A seat that holds no turn has no run to stop, whatever its transcript last held open.
+  const resting = !turnHeld && state._tag === 'Observed' && state.isRunning
+  const running = state._tag === 'Observed' && state.isRunning && !resting
+  const runId = running ? state.turns.findLast(turn => turn.work.running)?.id ?? '' : undefined
   const [stopRefusal, setStopRefusal] = React.useState<{ readonly runId: string; readonly detail: string }>()
   if (stopRefusal !== undefined && stopRefusal.runId !== runId) setStopRefusal(undefined)
   // The run on screen when an interrupt answer lands; a closure would hold the run of the press.
@@ -229,7 +246,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   // Only a failed (or not-yet-found) read can recover by re-acquiring the follow; refusals cannot.
   const retryUnavailable = state._tag === 'Unavailable' && retryConversation !== undefined && (state.classification === 'failed' || state.classification === 'not-found')
     && !(feed._tag === 'Unavailable' && feed.retryable === false) ? () => retryConversation(agentRef) : undefined
-  const frozen = React.useMemo(() => stale && state._tag === 'Observed' ? frozenTranscript(state.turns) : undefined, [stale, state])
+  const frozen = React.useMemo(() => (stale || resting) && state._tag === 'Observed' ? frozenTranscript(state.turns) : undefined, [stale, resting, state])
   const renderInlineReference = React.useMemo(() => onOpenDocument === undefined ? undefined : documentReferences(onOpenDocument), [onOpenDocument])
   // A Markdown link to a `doc/…` opens it in a tab instead of following a relative URL.
   const followDocumentLinks = (event: React.MouseEvent) => {
@@ -270,16 +287,21 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />}
     </div>
-    {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
+    {frozen === undefined ? null
+      : stale ? <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />
+        : restStatus === undefined || restLabel === undefined ? null : <SeatAtRest status={restStatus} label={restLabel} />}
     {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
-    {!readOnly && visible ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null}
+    {/* Only an agent has threads; a pane for any other ref would ask the daemon for a list it refuses.
+        The strip places itself in the alerts' reading lane. */}
+    {!readOnly && visible && agentRef.startsWith('agent/') ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
-      {pairing === undefined ? null : <BrowserPairing store={pairing} messageSend={grants.messageSend} />}
+      {/* Offer pairing only once Fractal has said whether this browser may send. */}
+      {pairing === undefined || grants.unread === true ? null : <BrowserPairing store={pairing} messageSend={grants.messageSend} />}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>}
   </EmbraceRuntimeProvider>
@@ -304,4 +326,3 @@ function ConversationTranscript({ agentRef, feed, ...props }: Omit<React.Compone
   const headerStatusHost = sync._tag === 'Failed' || sync._tag === 'Progress' ? headerActionsHost : undefined
   return <Transcript {...props} showHeader={headerActionsHost === null} headerActionsHost={headerStatusHost} sync={sync} observedAt={transcriptObservedAt(observation, now)} {...(paused === undefined ? {} : { now: paused })} />
 }
-

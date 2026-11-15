@@ -3,15 +3,18 @@ import * as stylex from '@stylexjs/stylex'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import { useAtom, useAtomValue } from '@effect/atom-react'
-import { Button } from 'react-aria-components'
+import { Button, Input, Label, TextField } from 'react-aria-components'
 import type { ThreadListQuery } from '@fractal/client'
-import type { Attention, ThreadMessageEvent, ThreadSummary, ThreadTimelineEvent } from '@fractal/client/schema/read'
+import type { Attention, ThreadMessageEvent, ThreadSummary } from '@fractal/client/schema/read'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
-import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { useAgent, useDataSource, useNow } from '../data/react.tsx'
+import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { useAgent, useDataSource, useGatewaySync, useNow } from '../data/react.tsx'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
+import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
+import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThreadEditor } from './ThreadEditor.tsx'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import type { RetainedThreadStart, ThreadObservation, ThreadSource } from './threadSource.ts'
@@ -19,56 +22,153 @@ import type { RetainedThreadStart, ThreadObservation, ThreadSource } from './thr
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
 const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. Your browser pairing is kept.'
+/** The same words the alert answer box uses for a device without control access. */
+const readOnlyThread = 'Read-only on this device. Reply from a device with control access.'
 
+/** Above the agent's composer the strip takes the alerts' reading lane; it renders nothing, lane included, when empty. */
 export function LiveAgentThreads({ agentId, onOpenThread }: OpenThread & { readonly agentId: string }) {
-  return <ThreadGroup query={{ agent_id: agentId }} label="Threads" onOpenThread={onOpenThread} />
+  return <ThreadGroup query={{ agent_id: agentId }} label="Threads" placement="pane" lane onOpenThread={onOpenThread} />
 }
 
 export function LiveMissionThreads({ missionId, onOpenThread }: OpenThread & { readonly missionId: string }) {
-  return <ThreadGroup query={{ mission_id: missionId }} label="Threads" onOpenThread={onOpenThread} />
+  return <ThreadGroup query={{ mission_id: missionId }} label="Threads" placement="pane" onOpenThread={onOpenThread} />
 }
 
 export function LiveRecentlyClosedThreads({ onOpenThread }: OpenThread) {
-  return <ThreadGroup query={{ recently_closed: true, limit: 10 }} label="Recently closed threads" onOpenThread={onOpenThread} />
+  return <ThreadGroup query={{ recently_closed: true, limit: 10 }} label="Recently closed threads" placement="sidebar" onOpenThread={onOpenThread} />
 }
 
-function ThreadGroup({ query, label, onOpenThread }: OpenThread & { readonly query: ThreadListQuery; readonly label: string }) {
+type Placement = 'pane' | 'sidebar'
+
+function ThreadGroup({ query, label, placement, lane = false, onOpenThread }: OpenThread & { readonly query: ThreadListQuery; readonly label: string; readonly placement: Placement; readonly lane?: boolean }) {
   const source = useDataSource().threads
-  return source === undefined ? null : <ThreadGroupContent source={source} query={query} label={label} onOpenThread={onOpenThread} />
+  return source === undefined ? null : <ThreadGroupContent source={source} query={query} label={label} placement={placement} lane={lane} onOpenThread={onOpenThread} />
 }
 
-function ThreadGroupContent({ source, query, label, onOpenThread }: OpenThread & {
+const assumedOnline = Atom.make({ _tag: 'Online' } as const)
+
+/**
+ * Thread feeds share the gateway connection. Once it is lost they stay paused until the gateway reports Live
+ * again: a successful HTTP read while the socket is still down does not bring new replies.
+ */
+function useUpdatesPaused(stale: boolean): boolean {
+  const gateway = useGatewaySync()?.status._tag
+  const network = useAtomValue(useDataSource().network ?? assumedOnline)
+  const lost = network._tag === 'Offline' || gateway === 'Stale' || gateway === 'Failed'
+  const [held, setHeld] = React.useState(false)
+  const holding = lost || (held && gateway !== undefined && gateway !== 'Live')
+  if (holding !== held) setHeld(holding)
+  return stale || holding
+}
+
+/** Whether the gateway connection is live, or `undefined` where this source reports no gateway sync. */
+function useGatewayLive(): boolean | undefined {
+  const gateway = useGatewaySync()?.status._tag
+  return gateway === undefined ? undefined : gateway === 'Live'
+}
+
+/**
+ * An open thread's own reads (its detail and every message page it shows) can go stale while its section's list
+ * stays live. Each mounted read registers here on its own while it is stale, and withdraws when it is live again or
+ * unmounts, so the section's one "Updates paused" marker covers exactly what is on screen and offers Retry.
+ */
+const StaleThreadReads = React.createContext<((read: string) => () => void) | undefined>(undefined)
+
+function useStaleThreadReads(): readonly [boolean, (read: string) => () => void] {
+  const [stale, setStale] = React.useState<ReadonlySet<string>>(() => new Set())
+  const report = React.useCallback((read: string) => {
+    setStale(current => current.has(read) ? current : new Set(current).add(read))
+    return () => setStale(current => {
+      if (!current.has(read)) return current
+      const next = new Set(current)
+      next.delete(read)
+      return next
+    })
+  }, [])
+  return [stale.size > 0, report]
+}
+
+/** Registers this mounted read with its section while its observation is stale. */
+function useReportStale(feed: Feed<unknown>) {
+  const report = React.useContext(StaleThreadReads)
+  const read = React.useId()
+  const stale = feed._tag === 'Observed' && feed.freshness === 'stale'
+  React.useEffect(() => stale && report !== undefined ? report(read) : undefined, [stale, report, read])
+}
+
+/**
+ * "Threads 2 · Updates paused", named "Threads, 2, updates paused". The name is set on the heading or summary:
+ * hidden separators between flex children are read with stray spaces ("Threads , 2"). The spaces between the parts
+ * render nothing in the flex row, but keep the text's words apart ("Threads 2", not "Threads2"), so it matches the name.
+ */
+function CountedLabel({ label, count, paused }: { readonly label: string; readonly count: number | undefined; readonly paused: boolean }) {
+  return <>
+    <span {...stylex.props(styles.label)}>{label}</span>
+    {count === undefined || count === 0 ? null : <>{' '}<span {...stylex.props(styles.count)}>{count}</span></>}
+    {paused ? <>{' '}<span data-threads-paused="" {...stylex.props(styles.paused)}>· Updates paused</span></> : null}
+  </>
+}
+const countedName = (label: string, count: number | undefined, paused: boolean) =>
+  `${label}${count === undefined || count === 0 ? '' : `, ${count}`}${paused ? ', updates paused' : ''}`
+
+/**
+ * The agent and mission views pin a one-line summary, collapsed until opened; it lists collapsed rows only and each
+ * opens the thread in its own tab, so no timeline or composer stacks above the agent's own composer.
+ */
+function ThreadGroupContent({ source, query, label, placement, lane, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly query: ThreadListQuery
   readonly label: string
+  readonly placement: Placement
+  readonly lane: boolean
 }) {
-  const { read, upgradeRequired } = useAtomValue(source.access)
+  const narrow = React.useContext(NarrowLayoutContext)
+  const { read, upgradeRequired, failure } = useAtomValue(source.access)
   const list = useAtomValue(source.list(query))
-  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
-  if (!read || (list._tag === 'Observed' && list.value.items.length === 0 && Option.isNone(list.value.next_cursor))) return null
-  return <details {...stylex.props(styles.group)}>
-    <summary>{label}</summary>
-    <div {...stylex.props(styles.groupBody)}>
-      <ThreadListPage source={source} query={query} onOpenThread={onOpenThread} />
-    </div>
-  </details>
+  const paused = useUpdatesPaused(list._tag === 'Observed' && list.freshness === 'stale')
+  const [open, setOpen] = React.useState(false)
+  // Only a complete first page states how many threads there are.
+  const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
+  const content = upgradeRequired ? <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
+    : accessFailed(failure) ? <ReadStatus feed={failure} subject="threads" onRetry={source.reload} />
+    : !read || (list._tag === 'Observed' && list.value.items.length === 0 && Option.isNone(list.value.next_cursor)) ? null
+    : <details aria-label={label} onToggle={event => setOpen(event.currentTarget.open)} {...stylex.props(styles.fold, placement === 'pane' && styles.strip)}>
+      <summary aria-label={countedName(label, count, paused)} {...stylex.props(styles.foldSummary, placement === 'sidebar' && styles.foldSidebar, narrow && styles.foldTouch)}>
+        <span {...stylex.props(styles.foldChevron)}><Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} /></span>
+        <CountedLabel label={label} count={count} paused={paused} />
+      </summary>
+      <div {...stylex.props(styles.foldBody, placement === 'sidebar' && styles.foldBodySidebar)}>
+        <ThreadListPage source={source} query={query} opensInTab onOpenThread={onOpenThread} />
+      </div>
+    </details>
+  return content === null || !lane ? content
+    : <div {...stylex.props(styles.agentLane)}><div {...stylex.props(styles.agentLaneMeasure)}>{content}</div></div>
 }
 
-function ThreadListPage({ source, query, onOpenThread, exclude }: OpenThread & {
+/** Collapsed rows share one bordered list so their columns line up; later pages join the same list. */
+function ThreadListPage({ source, query, exclude, opensInTab = false, framed = true, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly query: ThreadListQuery
   readonly exclude?: readonly string[] | undefined
+  readonly opensInTab?: boolean
+  readonly framed?: boolean
 }) {
   const list = useAtomValue(source.list(query))
   const [showNext, setShowNext] = React.useState(false)
-  if (list._tag !== 'Observed') return <ReadStatus state={list._tag} />
+  if (list._tag !== 'Observed') {
+    const status = <ReadStatus feed={list} subject="threads" onRetry={source.reload} />
+    return framed ? status : <div {...stylex.props(styles.listFoot)}>{status}</div>
+  }
   const next = Option.getOrUndefined(list.value.next_cursor)
-  return <>
-    {list.value.items.filter(thread => !exclude?.includes(thread.id)).map(thread => <LiveThread key={thread.id} source={source} thread={thread} onOpenThread={onOpenThread} />)}
+  const rows = list.value.items.filter(thread => !exclude?.includes(thread.id))
+  if (framed && rows.length === 0 && next === undefined) return null
+  const page = <>
+    {rows.map(thread => <LiveThread key={thread.id} source={source} thread={thread} inList opensInTab={opensInTab} onOpenThread={onOpenThread} />)}
     {next === undefined ? null : showNext
-      ? <ThreadListPage source={source} query={{ ...query, cursor: next }} onOpenThread={onOpenThread} exclude={exclude} />
-      : <ActionButton onPress={() => setShowNext(true)}>Load more threads</ActionButton>}
+      ? <ThreadListPage source={source} query={{ ...query, cursor: next }} exclude={exclude} opensInTab={opensInTab} framed={false} onOpenThread={onOpenThread} />
+      : <div {...stylex.props(styles.listFoot)}><ActionButton onPress={() => setShowNext(true)}>Load more threads</ActionButton></div>}
   </>
+  return framed ? <div {...stylex.props(styles.list)}>{page}</div> : page
 }
 
 export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonly alert: Attention }) {
@@ -80,6 +180,16 @@ export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonl
     canStart={alert.state === 'open'} onOpenThread={onOpenThread} />
 }
 
+/** The last segment of an actor id ("atlas"): what the UI shows when no observed name exists. Ids stay out of the text. */
+const shortActorName = (id: string) => id.split('/').at(-1) || id
+
+/** The observed agent name, else its short name with the exact id as the title: never a guessed role. */
+function AgentName({ id }: { readonly id: string }) {
+  const agent = useAgent(id)
+  const name = agent._tag === 'Observed' ? agent.value?.name : undefined
+  return name === undefined ? <span title={id}>{shortActorName(id)}</span> : <>{name}</>
+}
+
 function InboxThreadsContent({ source, agent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly agent: string | undefined
@@ -88,29 +198,74 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   readonly title: string
   readonly canStart: boolean
 }) {
-  const { read, actions, inboxOrigins, upgradeRequired } = useAtomValue(source.access)
+  const { read, actions, inboxOrigins, upgradeRequired, failure } = useAtomValue(source.access)
   const retained = useAtomValue(source.pendingStarts?.(originSource) ?? noPendingStarts)
     .filter(start => start.parameters.origin.episode === episode)
-  const [starting, setStarting] = React.useState(false)
-  const [focused, setFocused] = React.useState<string>()
-  const threadTitle = threadTitleFromAsk(title)
-  const startInput = React.useCallback((input: HTMLTextAreaElement | null) => { input?.focus() }, [])
+  const query = React.useMemo(() => ({ origin_source: originSource, origin_episode: episode }), [originSource, episode])
+  const list = useAtomValue(source.list(query))
+  const narrow = React.useContext(NarrowLayoutContext)
+  const [threadReadsStale, reportStale] = useStaleThreadReads()
+  // A stale read keeps what it last showed; Retry reads every thread projection on this item again.
+  const readsStale = (list._tag === 'Observed' && list.freshness === 'stale') || threadReadsStale
+  const paused = useUpdatesPaused(readsStale)
   const draftKey = `inbox:${JSON.stringify([originSource, episode])}`
-  if (upgradeRequired || (read && !inboxOrigins)) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
+  const draft = useAtomValue(source.draft(draftKey))
+  const gatewayLive = useGatewayLive()
+  const [starting, setStarting] = React.useState(false)
+  const [titleInput, setTitleInput] = React.useState<string>()
+  const [focused, setFocused] = React.useState<string>()
+  const headingId = React.useId()
+  const startArea = React.useRef<HTMLDivElement>(null)
+  const restoreStart = React.useRef(false)
+  // Hiding the draft removes the focused editor; focus returns to the control that opened it.
+  React.useLayoutEffect(() => {
+    if (starting || !restoreStart.current) return
+    restoreStart.current = false
+    startArea.current?.querySelector('button')?.focus()
+  }, [starting])
+  const startInput = React.useCallback((input: HTMLTextAreaElement | null) => { input?.focus() }, [])
+  if (upgradeRequired || (read && !inboxOrigins)) return <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
+  if (accessFailed(failure)) return <ReadStatus feed={failure} subject="threads" onRetry={source.reload} />
   if (!read) return null
-  return <div {...stylex.props(styles.groupBody)}>
+  // Only a complete first page states how many threads this item has.
+  const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
+  // A start waits for the list: while it loads the sibling titles are unknown, and a refused or failed list is not offered one.
+  const offerStart = retained.length === 0 && actions.has('thread.start') && canStart && list._tag === 'Observed'
+  if (count === 0 && focused === undefined && retained.length === 0 && !offerStart) return null
+  const askTitle = threadTitleFromAsk(title)
+  // Two threads named after the same ask cannot be told apart, so a second one is named after its first line.
+  const firstLine = draft.content.trim().split('\n', 1)[0] ?? ''
+  const suggested = list._tag === 'Observed' && firstLine !== '' && list.value.items.some(item => item.title === askTitle)
+    ? threadTitleFromAsk(firstLine) : askTitle
+  const startTitle = threadTitleFromAsk(titleInput?.trim() || suggested)
+  const saved = draft.content.trim() !== ''
+  return <StaleThreadReads.Provider value={reportStale}><section aria-labelledby={headingId} {...stylex.props(styles.inbox)}>
+    <div {...stylex.props(styles.headingRow)}>
+      <h3 id={headingId} aria-label={countedName('Threads', count, paused)} {...stylex.props(styles.inboxHeading)}><CountedLabel label="Threads" count={count} paused={paused} /></h3>
+      {readsStale ? <ActionButton aria-label="Retry: Updates paused" onPress={source.reload}>Retry</ActionButton> : null}
+      {/* The start control keeps one place at the end of the heading, however many threads open below it. */}
+      {!offerStart || agent === undefined || starting ? null : <div ref={startArea} {...stylex.props(styles.startArea)}>
+        <ActionButton variant="outline" onPress={() => setStarting(true)}>{saved ? 'Continue draft' : <><Icon name="plus" size={12} />Start thread</>}</ActionButton>
+      </div>}
+    </div>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    <ThreadListPage source={source} query={{ origin_source: originSource, origin_episode: episode }} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
     {retained.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
-    {retained.length > 0 || !actions.has('thread.start') || !canStart ? null : agent === undefined
+    {/* A draft opens at the top of the list, where its thread lands once sent. */}
+    {!offerStart ? null : agent === undefined
       ? <p {...stylex.props(styles.note)}>No responsible agent is configured for this Inbox item.</p>
-      : !starting ? <ActionButton onPress={() => setStarting(true)}>Start thread</ActionButton>
-      : <ThreadPanel thread={{ title: threadTitle, state: 'open' }} initiallyExpanded onHideDraft={() => setStarting(false)}>
-        <ThreadEditor source={source} destination={draftKey} label={threadTitle} inputRef={startInput}
-          send={content => source.start(draftKey, { agent_id: agent, origin: { source_id: originSource, episode }, title: threadTitle, content })}
-          onSent={id => { setFocused(id); setStarting(false) }} />
-      </ThreadPanel>}
-  </div>
+      : starting ? <ThreadPanel thread={{ title: startTitle, state: 'open' }} initiallyExpanded onHideDraft={() => { restoreStart.current = true; setStarting(false) }}>
+        <TextField value={titleInput ?? suggested} onChange={setTitleInput} {...stylex.props(styles.titleField)}>
+          <Label>Thread title</Label>
+          <Input {...stylex.props(styles.titleInput, narrow && styles.titleInputTouch)} />
+        </TextField>
+        <p {...stylex.props(styles.note)}>To <AgentName id={agent} /></p>
+        <ThreadEditor source={source} destination={draftKey} label={startTitle} inputRef={startInput} gatewayLive={gatewayLive}
+          send={content => source.start(draftKey, { agent_id: agent, origin: { source_id: originSource, episode }, title: startTitle, content })}
+          onSent={id => { setFocused(id); setStarting(false); setTitleInput(undefined) }} />
+      </ThreadPanel>
+      : count === 0 && focused === undefined ? <p {...stylex.props(styles.note)}>Ask <AgentName id={agent} /> about this item without answering it.</p> : null}
+    <ThreadListPage source={source} query={query} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
+  </section></StaleThreadReads.Provider>
 }
 
 /** Pending first sends survive the Inbox source that originally hosted their editor. */
@@ -123,14 +278,14 @@ function PendingInboxStarts({ source, items, onOpenThread }: OpenThread & { read
   const starts = useAtomValue(source.pendingStarts?.() ?? noPendingStarts).filter(start => !items.some(item =>
     item.source_id === start.parameters.origin.source_id && item.episode === start.parameters.origin.episode))
   const [focused, setFocused] = React.useState<string>()
+  const [threadReadsStale, reportStale] = useStaleThreadReads()
   if (starts.length === 0 && focused === undefined) return null
-  return <section aria-label="Thread recovery" {...stylex.props(styles.group)}>
+  return <StaleThreadReads.Provider value={reportStale}><section aria-label="Thread recovery" {...stylex.props(styles.recovery)}>
     <h3 {...stylex.props(styles.note)}>Thread recovery</h3>
-    <div {...stylex.props(styles.groupBody)}>
-      {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-      {starts.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
-    </div>
-  </section>
+    {threadReadsStale ? <SystemNotice kind="stale" scope="inline" title="Updates paused" onRetry={source.reload} /> : null}
+    {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
+    {starts.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
+  </section></StaleThreadReads.Provider>
 }
 
 function PendingStartPanel({ source, start, onSent }: {
@@ -138,8 +293,6 @@ function PendingStartPanel({ source, start, onSent }: {
   readonly start: RetainedThreadStart
   readonly onSent: (id: string) => void
 }) {
-  const agent = useAgent(start.parameters.agent_id)
-  const name = agent._tag === 'Observed' ? agent.value?.name : undefined
   const retry = source.retryStart
   return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded
     pendingChange="thread start" retryPending={start.state === 'sending'}
@@ -149,57 +302,93 @@ function PendingStartPanel({ source, start, onSent }: {
       onSent(result.threadId)
       return undefined
     } })}>
-    <p {...stylex.props(styles.note)}>To {name ?? start.parameters.agent_id}</p>
+    <p {...stylex.props(styles.note)}>To <AgentName id={start.parameters.agent_id} /></p>
     <div {...stylex.props(styles.message)}>{start.parameters.content}</div>
   </ThreadPanel>
 }
 
+/**
+ * `true` focuses the composer once it mounts. `'when-lost'` does so only when nothing holds focus, as when the
+ * control that opened this thread's tab unmounted with the view it lived in; switching tabs leaves focus alone.
+ */
+type FocusComposer = boolean | 'when-lost'
+
 export function LiveThreadPane({ threadId }: { readonly threadId: string }) {
   const source = useDataSource().threads
   return source === undefined ? <p>This connection does not support threads.</p>
-    : <div {...stylex.props(styles.standalone)}><ThreadById source={source} threadId={threadId} /></div>
+    : <div {...stylex.props(styles.standalone)}><ThreadById source={source} threadId={threadId} focusComposer="when-lost" /></div>
 }
 
 function ThreadById({ source, threadId, embedded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly threadId: string
   readonly embedded?: boolean
-  readonly focusComposer?: boolean
+  readonly focusComposer?: FocusComposer
 }) {
-  const { read, upgradeRequired } = useAtomValue(source.access)
+  const { read, upgradeRequired, unknown, failure } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
-  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
-  if (!read) return <p>This connection does not support threads.</p>
-  if (detail._tag !== 'Observed') return <ReadStatus state={detail._tag} />
-  return <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
+  // The thread reports its own detail and each message page going stale; embedded, its section carries the marker.
+  const [threadReadsStale, reportStale] = useStaleThreadReads()
+  const paused = useUpdatesPaused(threadReadsStale)
+  // A thread in its own tab keeps its status in the thread's measure, where its heading would be.
+  const status = (notice: React.ReactNode) => embedded ? notice : <div {...stylex.props(styles.dedicatedNotice)}>{notice}</div>
+  if (upgradeRequired) return status(<ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="thread" />)
+  // Until Fractal answers which operations this connection holds, the thread is still loading, not unsupported.
+  if (!read) return status(failure !== undefined && failure._tag !== 'Observed' ? <ReadStatus feed={failure} subject="thread" onRetry={source.reload} />
+    : unknown ? <ReadStatus feed={{ _tag: 'Waiting' }} subject="thread" />
+    : <p>This connection does not support threads.</p>)
+  // Reading again cannot bring back a thread Fractal says does not exist.
+  if (detail._tag === 'Unavailable' && detail.code === 'not-found') return status(<SystemNotice kind="empty" scope="inline" title="Fractal has no thread at this link." />)
+  if (detail._tag !== 'Observed') return status(<ReadStatus feed={detail} subject="thread" onRetry={source.reload} />)
+  const thread = <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
+  if (embedded) return thread
+  return <StaleThreadReads.Provider value={reportStale}>
+    {/* A thread in its own tab carries the marker above its heading; Retry only when one of its reads went stale. */}
+    {!paused ? null : <div data-threads-paused="" {...stylex.props(styles.dedicatedNotice)}>
+      <SystemNotice kind="stale" scope="inline" connection={!threadReadsStale} title="Updates paused" {...(threadReadsStale ? { onRetry: source.reload } : {})} />
+    </div>}
+    {thread}
+  </StaleThreadReads.Provider>
 }
 
 const noPendingChange = Atom.make<string | undefined>(undefined)
 const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
 const noPendingStarts = Atom.make<readonly RetainedThreadStart[]>([])
 
-function LiveThread({ source, thread, embedded = true, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
+function LiveThread({ source, thread, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly thread: ThreadSummary
   readonly embedded?: boolean
+  readonly inList?: boolean
+  /** The row opens the dedicated tab instead of expanding in place, when a tab can be opened. */
+  readonly opensInTab?: boolean
   readonly initiallyExpanded?: boolean
-  readonly focusComposer?: boolean
+  readonly focusComposer?: FocusComposer
 }) {
   const { actions } = useAtomValue(source.access)
   const [expanded, setExpanded] = React.useState(!embedded || initiallyExpanded)
   const detail = useAtomValue(expanded ? source.detail(thread.id) : idleDetail)
   const observation = detail._tag === 'Observed' ? detail.value : undefined
+  // An open row shows its detail read's loading or failure instead of messages and controls it can no longer vouch for.
+  const detailStatus = !expanded || detail._tag === 'Observed' ? null
+    : detail._tag === 'Unavailable' && detail.code === 'not-found' ? <SystemNotice kind="empty" scope="inline" title="Fractal no longer has this thread." />
+    : <ReadStatus feed={detail} subject="thread" onRetry={source.reload} />
   const summary = observation?.summary ?? thread
+  useReportStale(detail)
+  const agent = useAgent(summary.agent_id)
+  const agentName = agent._tag === 'Observed' ? agent.value?.name : undefined
   const retryChange = source.retryChange
   const pendingChange = useAtomValue(source.pendingChange?.(thread.id) ?? noPendingChange)
   const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
   const viewport = useThreadViewport(expanded && markRead !== undefined)
   return <ThreadPanel thread={summary} pendingChange={pendingChange}
     {...(retryChange === undefined ? {} : { onRetryChange: () => retryChange(thread.id) })}
-    embedded={embedded} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
+    embedded={embedded} inList={inList} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
+    {...(opensInTab && onOpenThread !== undefined ? { onActivate: () => onOpenThread(thread.id) } : {})}
+    {...(embedded || agentName === undefined ? {} : { origin: <>With {agentName}</> })}
     {...(summary.message_count === undefined ? {} : { messageCount: summary.message_count })}
     unread={summary.unread === true}
-    {...(onOpenThread === undefined ? {} : { onOpenInTab: () => onOpenThread(thread.id) })}
+    {...(onOpenThread === undefined || opensInTab ? {} : { onOpenInTab: () => onOpenThread(thread.id) })}
     {...(observation === undefined || !actions.has('thread.rename') ? {} : {
       onRename: (title: string, revision: string) => source.rename(observation, title, revision),
     })}
@@ -217,17 +406,18 @@ function LiveThread({ source, thread, embedded = true, initiallyExpanded = false
       },
     })}
   >
-    <ThreadConversation source={source} thread={summary} editable={actions.has('thread.reply') && observation !== undefined} focusComposer={focusComposer} timelineRef={viewport.timeline} />
+    {detailStatus ?? <ThreadConversation source={source} thread={summary} agentName={agentName} canReply={actions.has('thread.reply')} observed={observation !== undefined}
+      focusComposer={focusComposer} timelineRef={viewport.timeline} />}
   </ThreadPanel>
 }
 
 function useThreadViewport(enabled: boolean) {
-  const timeline = React.useRef<HTMLDivElement>(null)
+  // The timeline mounts only once the thread's detail is observed, so observation follows the element itself.
+  const [container, timeline] = React.useState<HTMLDivElement | null>(null)
   const [canMark, setCanMark] = React.useState(false)
   const capture = React.useRef<() => string[]>(() => [])
   React.useLayoutEffect(() => {
     setCanMark(false)
-    const container = timeline.current
     if (!enabled || container === null || typeof IntersectionObserver === 'undefined') return
     const tracked = new Set<Element>()
     const visible = new Set<Element>()
@@ -282,7 +472,7 @@ function useThreadViewport(enabled: boolean) {
       observer.disconnect()
       capture.current = () => []
     }
-  }, [enabled])
+  }, [enabled, container])
   return { timeline, canMark, capture: () => capture.current() }
 }
 
@@ -307,34 +497,40 @@ function threadViewportBounds(container: HTMLElement) {
   return bounds
 }
 
-function ThreadConversation({ source, thread, editable, focusComposer, timelineRef }: {
+function ThreadConversation({ source, thread, agentName, canReply, observed, focusComposer, timelineRef }: {
   readonly source: ThreadSource
   readonly thread: ThreadSummary
-  readonly editable: boolean
-  readonly focusComposer: boolean
+  readonly agentName: string | undefined
+  /** The connection holds the reply grant; the composer still waits for the thread's own observation. */
+  readonly canReply: boolean
+  readonly observed: boolean
+  readonly focusComposer: FocusComposer
   readonly timelineRef: React.Ref<HTMLDivElement>
 }) {
   const [, setDraft] = useAtom(source.draft(thread.id))
+  const gatewayLive = useGatewayLive()
   const input = React.useRef<HTMLTextAreaElement>(null)
   const didFocus = React.useRef(false)
   const attachInput = React.useCallback((element: HTMLTextAreaElement | null) => {
     input.current = element
-    if (focusComposer && element !== null && !didFocus.current) {
-      didFocus.current = true
-      element.focus()
-    }
+    if (element === null || didFocus.current) return
+    didFocus.current = true
+    // Refs attach after the commit removed the old view, so a lost focus already reads as the body here.
+    if (focusComposer === true || (focusComposer === 'when-lost' && (document.activeElement === null || document.activeElement === document.body))) element.focus()
   }, [focusComposer])
-  const agent = useAgent(thread.agent_id)
-  const agentName = agent._tag === 'Observed' ? agent.value?.name : undefined
+  const editable = canReply && observed
   const quote = editable ? (event: ThreadMessageEvent, sender: string) => {
     setDraft(draft => ({ ...draft, quote: { id: event.id, sender, excerpt: event.content } }))
     input.current?.focus()
   } : undefined
   return <>
     <div ref={timelineRef}><ThreadTimeline source={source} threadId={thread.id} agentId={thread.agent_id} agentName={agentName} onQuote={quote} /></div>
-    {!editable ? null
-      : <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput}
-        send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />}
+    {!canReply ? <p {...stylex.props(styles.note)}>{readOnlyThread}</p> : !editable ? null : <>
+      {/* Replying never changes the lifecycle; only Reopen does. */}
+      {thread.state === 'closed' ? <p {...stylex.props(styles.note)}>This thread is closed. Replying won’t reopen it.</p> : null}
+      <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput} gatewayLive={gatewayLive}
+        send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />
+    </>}
   </>
 }
 
@@ -349,62 +545,103 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
   readonly onQuote: Quote
 }) {
   const feed = useAtomValue(source.timeline(threadId, cursor))
+  // Each page, the earlier ones included, keeps its last messages when it goes stale and says so to the section.
+  useReportStale(feed)
   const { actor } = useAtomValue(source.access)
   const now = useNow()
   const [showOlder, setShowOlder] = React.useState(false)
-  if (feed._tag !== 'Observed') return <ReadStatus state={feed._tag} />
+  if (feed._tag !== 'Observed') return <ReadStatus feed={feed} subject="messages" onRetry={source.reload} />
   const next = Option.getOrUndefined(feed.value.next_cursor)
   return <>
     {next === undefined ? null : showOlder
       ? <ThreadTimeline source={source} threadId={threadId} cursor={next} agentId={agentId} agentName={agentName} onQuote={onQuote} />
       : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
-    {feed.freshness === 'stale' ? <p role="status" {...stylex.props(styles.note)}>Updates paused</p> : null}
     <ol {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
-        const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You' : event.actor_id === agentId && agentName !== undefined ? agentName : event.actor_id.split('/').at(-1) ?? event.actor_id
+        const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You' : event.actor_id === agentId && agentName !== undefined ? agentName : shortActorName(event.actor_id)
         const date = new Date(event.accepted_at_unix_ms)
         const iso = Number.isFinite(date.getTime()) ? date.toISOString() : undefined
-        const quotedId = event.kind === 'message' ? Option.getOrUndefined(event.thread_quote_id) : undefined
+        const time = iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>
+        // A lifecycle change is one quiet line; only messages carry the sender header.
+        if (event.kind !== 'message') return <li key={event.id} data-thread-event={event.kind} {...stylex.props(stylex.defaultMarker(), styles.lifecycle)}>
+          <span>{sender} {event.kind === 'thread.renamed' ? <>renamed it to “{event.title}”</> : event.kind === 'thread.closed' ? 'closed the thread' : 'reopened the thread'}</span>
+          {time === null ? null : <><span aria-hidden="true">·</span>{time}</>}
+        </li>
+        const quotedId = Option.getOrUndefined(event.thread_quote_id)
         const quoted = quotedId === undefined ? undefined : feed.value.items.find(
           (candidate): candidate is ThreadMessageEvent => candidate.kind === 'message' && candidate.id === quotedId,
         )
-        return <li key={event.id} data-thread-message={event.kind === 'message' && event.actor_id === agentId && feed.freshness === 'live' ? event.id : undefined} {...stylex.props(stylex.defaultMarker(), styles.event)}>
+        return <li key={event.id} data-thread-message={event.actor_id === agentId && feed.freshness === 'live' ? event.id : undefined} {...stylex.props(stylex.defaultMarker(), styles.event)}>
           <div {...stylex.props(styles.eventHeader)}>
             <strong>{sender}</strong>
-            {iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>}
-            {event.kind !== 'message' || onQuote === undefined ? null : <Button aria-label={`Reply to ${sender}`} onPress={() => onQuote(event, sender)} {...stylex.props(styles.reply)}>Reply</Button>}
+            {time}
+            {onQuote === undefined ? null : <Button aria-label={`Reply to ${sender}`} onPress={() => onQuote(event, sender)} {...stylex.props(styles.reply)}>Reply</Button>}
           </div>
-          <EventText event={event} excerpt={quoted?.content.slice(0, 160)} />
+          {quotedId === undefined ? null
+            : <blockquote {...stylex.props(styles.quote)}>{quoted?.content.slice(0, 160) ?? 'Reply to an earlier message'}</blockquote>}
+          <div {...stylex.props(styles.message)}>{event.content}</div>
         </li>
       })}
     </ol>
   </>
 }
 
-function EventText({ event, excerpt }: { readonly event: ThreadTimelineEvent; readonly excerpt: string | undefined }) {
-  switch (event.kind) {
-    case 'message': return <>
-      {Option.isNone(event.thread_quote_id) ? null : <span title={event.thread_quote_id.value}>{excerpt ?? 'Reply to an earlier message'}</span>}
-      <div {...stylex.props(styles.message)}>{event.content}</div>
-    </>
-    case 'thread.renamed': return <span>Renamed “{event.previous_title}” to “{event.title}”</span>
-    case 'thread.closed': return <span>Closed the thread</span>
-    case 'thread.reopened': return <span>Reopened the thread</span>
-  }
-}
+/** A completed but broken access read. A refused credential is the connection's own notice, so lists do not repeat it. */
+const accessFailed = (failure: Feed<never> | undefined): failure is Extract<Feed<never>, { readonly _tag: 'Unavailable' }> =>
+  failure?._tag === 'Unavailable' && failure.reason === 'failed'
 
-function ReadStatus({ state, detail }: { readonly state: 'Waiting' | 'Unavailable'; readonly detail?: string }) {
-  return state === 'Waiting' ? <p role="status">Loading threads…</p> : <p role="alert">{detail ?? 'Threads could not be loaded.'}</p>
+/** Loading is only loading; a refusal says what Fractal refused, and only a failed read offers Retry. */
+function ReadStatus({ feed, subject, onRetry }: {
+  readonly feed: Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>
+  readonly subject: 'threads' | 'thread' | 'messages'
+  readonly onRetry?: (() => void) | undefined
+}) {
+  if (feed._tag === 'Waiting') return <SystemNotice kind="loading" scope="inline" title={`Loading ${subject}`} />
+  return <SystemNotice kind={feed.reason === 'unsupported' ? 'empty' : 'error'} scope="inline" title={feed.detail}
+    {...(feed.reason === 'failed' && onRetry !== undefined ? { onRetry } : {})} />
 }
 
 const styles = stylex.create({
-  group: { flexShrink: 0, paddingInline: s.md, fontSize: t.metaSize },
-  groupBody: { display: 'flex', flexDirection: 'column', gap: s.sm, maxHeight: '35vh', overflowY: 'auto', paddingBlock: s.sm },
+  // The agent strip sits in the conversation pane's column, inset and measured like the alerts above it.
+  agentLane: { flexShrink: 0, minWidth: 0, boxSizing: 'border-box', paddingInline: s.section },
+  agentLaneMeasure: { maxWidth: g.lane, marginInline: 'auto' },
+  // The pinned strip and its fold follow AgentTodos: a hairline above, one summary line, a chevron slot and a muted count.
+  fold: { minWidth: 0, fontSize: t.metaSize },
+  strip: { flexShrink: 0, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: c.border },
+  foldSummary: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.controlSm, boxSizing: 'border-box', paddingBlock: s.xs, marginInline: `calc(-1 * ${s.xs})`, paddingInline: s.xs, borderRadius: r.sm, color: c.fgSoft, cursor: 'pointer', listStyle: 'none', outline: 'none', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}` }, '::-webkit-details-marker': { display: 'none' } },
+  // The sidebar summary starts where the alert rows' text does.
+  foldSidebar: { marginInline: 0, paddingInline: s.row },
+  foldTouch: { minHeight: g.touchTarget },
+  foldChevron: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.iconSm, height: t.metaLeading, flexShrink: 0, color: c.fgMuted },
+  // The open strip lists rows in the page's own scroll; it never adds a nested scroller.
+  foldBody: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0, paddingBlock: s.xs },
+  foldBodySidebar: { paddingInline: s.row },
+  label: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  count: { flexShrink: 0, fontWeight: t.weightRegular, color: c.fgMuted, fontVariantNumeric: 'tabular-nums' },
+  paused: { flexShrink: 0, fontWeight: t.weightRegular, color: c.fgMuted, whiteSpace: 'nowrap' },
+  list: { display: 'flex', flexDirection: 'column', minWidth: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, borderRadius: r.sm },
+  listFoot: { display: 'flex', alignItems: 'center', padding: s.xs, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: c.border },
+  // The Inbox detail pane scrolls as one region; its threads never get a nested scroller.
+  inbox: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0, fontSize: t.metaSize },
+  recovery: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.metaSize },
+  headingRow: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0 },
+  inboxHeading: { display: 'flex', alignItems: 'baseline', gap: s.sm, flexGrow: 1, minWidth: 0, margin: 0, color: c.fgMuted, fontSize: t.metaSize, fontWeight: 600 },
+  startArea: { display: 'flex', flexShrink: 0 },
+  titleField: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, color: c.fgMuted, fontSize: t.metaSize },
+  titleInput: { flex: '1 1 0', minWidth: 0, height: g.controlSm, boxSizing: 'border-box', paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid',
+    borderColor: c.borderStrong, borderRadius: r.sm, outline: { default: 'none', ':focus-visible': `${g.focusRing} solid ${c.primary}` }, backgroundColor: c.controlFill,
+    color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize },
+  // Below 16px iOS Safari zooms the page when the field takes focus.
+  titleInputTouch: { height: g.touchTarget, fontSize: t.touchInputSize },
   standalone: { position: 'absolute', inset: 0, overflowY: 'auto', backgroundColor: c.canvas, padding: s.md },
+  dedicatedNotice: { boxSizing: 'border-box', width: '100%', maxInlineSize: g.lane, marginInline: 'auto' },
   timeline: { display: 'flex', flexDirection: 'column', gap: s.sm, padding: 0, margin: 0, listStyle: 'none' },
   event: { display: 'flex', flexDirection: 'column', gap: s.xs, color: c.fgMuted, fontSize: t.metaSize },
+  lifecycle: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', gap: s.xs, color: c.fgMuted, fontSize: t.metaSize },
   eventHeader: { display: 'flex', alignItems: 'baseline', gap: s.sm },
   reply: { opacity: { default: 0, ':focus-visible': 1, [stylex.when.ancestor(':hover')]: 1, '@media (hover: none)': 1 } },
   message: { color: c.fg, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  quote: { margin: 0, paddingInlineStart: s.sm, borderInlineStartWidth: 2, borderInlineStartStyle: 'solid', borderInlineStartColor: c.border,
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   note: { margin: 0, color: c.fgMuted, fontSize: t.metaSize },
 })

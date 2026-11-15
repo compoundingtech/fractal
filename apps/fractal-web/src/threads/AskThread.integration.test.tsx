@@ -105,14 +105,18 @@ it.each([
     } else {
       expect(requests.some(url => url.searchParams.has('origin_source'))).toBe(false)
     }
-    const button = Array.from(host.querySelectorAll('button')).find(each => each.textContent === 'Start thread')
+    // Start is offered only once the item's thread list is observed.
+    const findStart = () => Array.from(host.querySelectorAll('button')).find(each => each.textContent === 'Start thread')
     if (!canStart) {
-      expect(button).toBeUndefined()
-      if (!responsible) expect(host.textContent).toContain('No responsible agent is configured')
+      if (!responsible) await vi.waitFor(() => expect(host.textContent).toContain('No responsible agent is configured'))
+      else await act(async () => {})
+      expect(findStart()).toBeUndefined()
       expect(host.querySelector('[aria-label="Message composer, Review PR #42"]')).toBeNull()
       return
     }
-    expect(button).toBeDefined()
+    await vi.waitFor(() => expect(findStart()).toBeDefined())
+    const button = findStart()
+    expect(host.querySelector('[data-testid="alert-details"]')?.textContent).toContain('Ask atlas about this item without answering it.')
     await act(async () => button?.click())
     const composer = host.querySelector('[data-testid="alert-details"] [aria-label="Message composer, Review PR #42"]')
     expect(composer).not.toBeNull()
@@ -120,6 +124,9 @@ it.each([
     expect(panel?.getAttribute('aria-label')).toBe('Review PR #42')
     expect(document.activeElement).toBe(panel?.querySelector('textarea'))
     expect(Array.from(panel?.querySelectorAll('button') ?? []).some(each => each.textContent === 'Send' || each.getAttribute('aria-label') === 'Send')).toBe(true)
+    expect(panel?.querySelector<HTMLInputElement>('input')?.value).toBe('Review PR #42')
+    expect([...(panel?.querySelectorAll('label') ?? [])].map(label => label.textContent)).toContain('Thread title')
+    expect(panel?.textContent).toContain('To atlas')
     if (kind === 'agent-request') expect(host.querySelector('[data-testid="alert-details"] [data-alert-kind="agent-request"]')?.textContent).toContain('Merge')
     expect(answer).not.toHaveBeenCalled()
     expect(open).not.toHaveBeenCalled()
@@ -133,7 +140,8 @@ it.each([
       const hide = [...(panel?.querySelectorAll('button') ?? [])].find(button => button.textContent === 'Hide draft')
       await act(async () => hide?.click())
       expect(host.querySelector('textarea')).toBeNull()
-      const restart = [...host.querySelectorAll('button')].find(button => button.textContent === 'Start thread')
+      const restart = [...host.querySelectorAll('button')].find(button => button.textContent === 'Continue draft')
+      expect(restart).toBeDefined()
       await act(async () => restart?.click())
       panel = host.querySelector('[aria-label="Message composer, Review PR #42"]')?.closest('section')
       expect(panel?.querySelector('textarea')?.value).toBe('Discuss this review before answering.')
