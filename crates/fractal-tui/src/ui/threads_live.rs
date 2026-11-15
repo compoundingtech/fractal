@@ -1212,7 +1212,11 @@ impl Threads {
                 {
                     doc.line(thread::heading(
                         &origin.title,
-                        &format!(" · Draft · to {}", origin.agent),
+                        &format!(" · Draft · to {}", world.agents.items().iter()
+                            .find(|agent| agent.id == origin.agent)
+                            .map(|agent| agent.name.as_str())
+                            .filter(|name| !name.trim().is_empty() && *name != origin.agent)
+                            .unwrap_or("an agent")),
                         true,
                         false,
                         width,
