@@ -1566,11 +1566,11 @@ mod tests {
     }
 
     /// st in this process, running a release whose one step waits on person/avery's approval.
-    struct WaitingGate {
+    pub(crate) struct WaitingGate {
         _root: tempfile::TempDir,
         store: Arc<fractal_daemon::store::Store>,
         reconciler: fractal_daemon::reconcile::Reconciler<NoRuntime>,
-        client: Client,
+        pub(crate) client: Client,
         step: String,
         server: tokio::task::JoinHandle<()>,
         state: fractal_daemon::api::AppState,
@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     impl WaitingGate {
-        async fn start() -> Self {
+        pub(crate) async fn start() -> Self {
             let gate = Self::serve(
                 r#"version 2
 mission "release" state="ready" {
@@ -1637,6 +1637,7 @@ mission "release" state="ready" {
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: node.into(),
+                api_socket: root.path().join("api.sock"),
                 state_dir: root.path().into(),
                 pty_root: root.path().join("pty"),
                 pty_binary: root.path().join("unused-pty"),
@@ -1734,7 +1735,7 @@ mission "release" state="ready" {
         }
 
         /// The person's card for the gate, as Fractal TUI lists it.
-        async fn card(&self) -> Option<fractal_client::Attention> {
+        pub(crate) async fn card(&self) -> Option<fractal_client::Attention> {
             self.client
                 .attention_list(None, Some(50), false)
                 .await

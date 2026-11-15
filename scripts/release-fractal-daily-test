@@ -539,6 +539,52 @@ with mock.patch.dict(os.environ, RELEASE_GH_RETRY_DELAYS='0'), \
         raise AssertionError('a permanent API failure must raise')
     github.assert_called_once()
 
+# Opt-in HTTP diagnostics distinguish GraphQL preflight from release POST/upload without exposing
+# credentials, notes, response bodies, repository names, tag names, asset names or query strings.
+for path, route in (
+        ('/graphql', '/graphql'),
+        ('/repos/private/project/releases?secret=value', '/repos/{owner}/{repo}/releases'),
+        ('/repos/private/project/releases/tags/private-tag', '/repos/{owner}/{repo}/releases/tags/{tag}'),
+        ('/repos/private/project/releases/123/assets?name=private-name',
+         '/repos/{owner}/{repo}/releases/{release}/assets'),
+        ('/repos/private/project/git/ref/tags/private-tag', '/repos/{owner}/{repo}/git/ref/{ref}'),
+        ('/unknown/private-value', '(other endpoint)')):
+    trace = (f'> POST {path} HTTP/1.1\n> Authorization: token {TOKEN}\n\n'
+             f'notes: {payload}\n< HTTP/2.0 504 Gateway Timeout\n'
+             '< X-Github-Request-Id: ABCD:1234\n< Set-Cookie: private-cookie\n\n'
+             f'{payload}\n< X-Github-Request-Id: DEAD:BEEF\nHTTP 504: rejected\n')
+    expected = f'POST {route} HTTP 504 request-id=ABCD:1234'
+    assert release_gh.request_failures(trace) == expected
+    result = subprocess.CompletedProcess(['gh', 'release', 'create'], 1, '', trace)
+    with mock.patch.dict(os.environ, RELEASE_GH_DIAGNOSTICS='1', RELEASE_GH_RETRY_DELAYS=''), \
+            mock.patch.object(release_gh.subprocess, 'run', return_value=result) as github:
+        try:
+            release_gh.gh('release', 'create', step='diagnostic-test')
+        except SystemExit as error:
+            assert str(error) == f'diagnostic-test: gh release create failed: HTTP 504 [{expected}]'
+        else:
+            raise AssertionError('diagnostic failure must raise')
+        assert github.call_args.kwargs['env']['GH_DEBUG'] == 'api'
+    with mock.patch.dict(os.environ, RELEASE_GH_DIAGNOSTICS='0'):
+        assert release_gh.failure_reason(result) == 'HTTP 504'
+
+assert release_gh.request_failures(
+    '> POST /graphql HTTP/1.1\n< HTTP/2.0 200 OK\n\nHTTP 504 in response body') == ''
+assert release_gh.request_failures(
+    '> POST /graphql HTTP/1.1\n< HTTP/2.0 504 Gateway Timeout\n'
+    '< X-Github-Request-Id: not-a-request-id\n\n') == 'POST /graphql HTTP 504'
+
+# Callers handling check=False cannot accidentally print raw traces, including on successful reads.
+for returncode in (0, 1):
+    result = subprocess.CompletedProcess(['gh', 'release', 'view'], returncode, '{}',
+        '> POST /graphql HTTP/1.1\n< HTTP/2.0 504 Gateway Timeout\n'
+        f'< Authorization: {TOKEN}\n\n{payload}\n')
+    with mock.patch.dict(os.environ, RELEASE_GH_DIAGNOSTICS='1', RELEASE_GH_RETRY_DELAYS=''), \
+            mock.patch.object(release_gh.subprocess, 'run', return_value=result):
+        completed = release_gh.gh('release', 'view', step='diagnostic-test', check=False)
+        assert TOKEN not in completed.stderr and payload not in completed.stderr
+        assert completed.stderr == ('HTTP 504 [POST /graphql HTTP 504]' if returncode else '')
+
 # Mock the single-POST recovery protocol without any release mutations.
 from release_draft_recovery import create_verified_draft
 

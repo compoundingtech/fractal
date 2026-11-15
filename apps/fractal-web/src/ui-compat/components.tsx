@@ -46,8 +46,6 @@ export function Checkbox({ label, size: _size, stylexStyle, children, ...props }
 }
 export function Toggle({ label, size: _size, ...props }: Aria.SwitchProps & { label?: string; size?: Size }) { return <Aria.Switch {...styled(props, styles.checkbox)}>{state => <><span {...stylex.props(styles.switchTrack, state.isSelected && styles.checked)} aria-hidden="true"><span {...stylex.props(styles.switchThumb, state.isSelected && styles.switchOn)} /></span>{label}</>}</Aria.Switch> }
 export function Tooltip({ size: _size, stylexStyle, ...props }: Aria.TooltipProps & Style & { size?: Size }) { return <Aria.Tooltip {...styled(props, styles.tooltip, stylexStyle)} /> }
-export const ContextCardTrigger = Aria.TooltipTrigger
-export function ContextCard({ size: _size, stylexStyle, ...props }: Aria.TooltipProps & Style & { size?: Size }) { return <Aria.Tooltip {...styled(props, styles.popover, stylexStyle)} /> }
 export function MenuPopover({ stylexStyle, ...props }: Aria.PopoverProps & Style) { return <Aria.Popover {...styled(props, styles.popover, stylexStyle)} /> }
 export function Menu<T extends object>({ stylexStyle, ...props }: Aria.MenuProps<T> & Style) { return <Aria.Menu {...styled(props, styles.menu, stylexStyle)} /> }
 export function MenuItem<T extends object>({ stylexStyle, children, suffix, ...props }: Aria.MenuItemProps<T> & Style & { suffix?: React.ReactNode }) {

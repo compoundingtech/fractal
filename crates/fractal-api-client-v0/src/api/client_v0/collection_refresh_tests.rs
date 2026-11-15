@@ -1224,6 +1224,7 @@ fn paired_session() -> ClientSession {
         local_peer: false,
         peer_process: None,
         custom_forms: false,
+        model_drift_attention: false,
         conversation_blocks: false,
         conversation_delivery_links: false, conversation_message_participants: false,
         assistant_content_handles: false,

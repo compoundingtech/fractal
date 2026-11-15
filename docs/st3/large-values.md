@@ -24,6 +24,10 @@ same stable ID, owning **producer module**, and a breakup/reference TODO.
 IDs use `lv-h<12hex>` / `flow-h<12hex>`: the alphabetic hash tag distinguishes
 source fingerprints from numbered decision citations. Full content fingerprints
 remain separate and unchanged by that namespace.
+Site records store only reviewed identity and metadata (`id`, `path`, `kind`,
+`fingerprint`, `owner`, `todo`, `disposition`). Excerpts and line locations are
+diagnostics the guard recomputes from source when it reports a finding; they are
+not stored per record, and a record carrying extra fields is rejected.
 `declarations` records every column and index expression found by the declared
 lexical catalog, including types that look small. A template that cannot be
 resolved stays explicitly unresolved. No catalog entry proves a value's size.
@@ -94,6 +98,23 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+The assistant subject-readiness regression fixtures retain inline claim history
+and queued identities solely to measure the production SQLite statement's VM
+work. Their producer modules own the corresponding test-site exceptions: the
+history copies preserve existing body/predecessor values, and queue mutations
+preserve exact claim and proof identities. A reference/chunk conversion must
+retain these cost and refusal assertions. Empty maintenance queues are checked
+inside the readiness statement with lazy `CASE` guards; nonempty queues retain
+subject-outer indexed seeks and every existing authentication fence.
+The opt-in, test-support-only statement-work scope groups completed traced SQL
+by its prepared text across request and receipt threads. Summary fixtures report
+the top three statements' VM work at 1,000 and 10,000 retained subject claims;
+these measurements impose no history-scaling assertion.
+The authority's private assistant-scope allowlist is checked for exact equality
+with the public API list by a core unit test, preserving the core-to-smallclaims
+dependency direction while making new public scopes fail visibly until admitted
+by the authority validator.
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds
@@ -118,6 +139,18 @@ indexed seeks bound non-prose-history work, not encoded key size. The existing
 `chunk-or-reference-variable-columns` TODO must preserve subject/incarnation equality,
 numeric accepted-time ordering, local arrival order and snapshot fences during reference
 conversion. The indexes add no new value representation.
+
+### Source map texts and claims
+
+`fractal_store::store::source_maps` owns `lv-hefc9d72adcbd`: a set publication's source map
+stages each newly named file text in `local_blobs` (hash TEXT, bytes BLOB, size INTEGER), the
+same staged representation as `put_blob`, and the `source.mapped` claim that names it promotes
+it into `blobs` in the same transaction. The producer caps a file at 1 MiB and a map at 32 MiB;
+those limits are the producer's own and are not a general bound. It also owns
+`lv-hcd0064dd968e`, the reader that selects the canonical first `source.mapped` claim body of
+one `subject@revision`. Both keep the existing inline blob and claim-body representations; the
+eventual chunked or referenced blob format must keep sha256 identity and claim-referenced
+replication and retention.
 
 ### Client operation admission inventory (PR #5921)
 
@@ -228,6 +261,8 @@ These accept existing inline representations, not a value-size or cost bound.
 The reviewed `flow-h1f241b496964` admission flow now checks a repair's stored request before writing. This adds no SQL sink or body copy; it retains the existing body/predecessor representation debt and rejects agent-review repairs before Core append or projection.
 
 The same flow takes a `source_forced` flag: a mission retire that its owning set's source gate admitted as forced skips only the plain `set-managed-subject` refusal, and records its source debt in the same transaction. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
+
+The same flow also runs the person-availability actor check, refusing any availability claim whose actor is not its subject person. This adds no SQL sink or body copy and keeps the body/predecessor representation debt.
 
 ### Agent answer atomicity inventory review
 
@@ -783,3 +818,47 @@ commit. Preserve these scenarios when the representation changes.
 provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
+
+### GitHub plugin read fixture includes (PR #6396)
+
+The `fractal_api_client_v0::api::client_v0::github_plugin_reads::tests` maintainer
+owns `lv-ha3a3bb1e957c` and `lv-h8fa94b508404`, reviewed for
+[PR #6396](https://github.com/compoundingtech/fractal/pull/6396).
+The former includes the shared GitHub wire JSON fixtures; the latter includes
+the capabilities JSON used to negotiate the real client's response ceiling.
+They contain test-only paths, item bodies, patches and capability metadata,
+not SQL statements, database columns or index keys, and are parsed in memory.
+Keeping exact fixture bytes inline preserves the cross-client wire assertions;
+neither site writes those bytes to SQLite or changes a production representation.
+The lexical catalog conservatively inventories these includes. The owning module
+retains `trace-statement-and-value-representation`: trace any future fixture or
+consumer change before adding SQL execution or persistence, and review the
+resulting value/column representation rather than treating these markers as a
+permanent storage exemption.
+
+### Durable host hold storage
+
+`fractal_store::store::host_holds` owns `lv-ha677d62abc9d`,
+`lv-h93ce54913c6d` and `lv-h16424da0718d`. These reviewed allow-for-now
+sites declare, insert and revision-check the authoritative local host-hold
+record. Owner/host keys and serialized hold bodies remain inline; sizes are
+not proven bounded. Their eventual representation change must preserve
+authenticated ownership, exact-revision release and the committed local
+observation in the same writer transaction. Terminal run status cannot reclaim
+an unresolved hold; reclamation needs a separate explicit retention policy.
+
+### Finite membership storage
+
+`fractal_store::store::resource_membership` owns schema site
+`lv-hb7bab5eb8be2` and mutation sites `lv-h15191adeac97`,
+`lv-h32081bb17f3d`, `lv-hbb24831194f3`, `lv-h466c8225b3a9` and
+`lv-hacf1fd1c6d10`. Host/epoch and host/lane/policy TEXT record the authority
+fence and installed policy; membership identifier, host, lane, state and JSON body
+record execution custody, grants, child runs and runtime roots. The queue index
+retains host, lane, state and membership identifier keys. Inline updates preserve
+one transaction for policy, admission, child attachment and retirement decisions.
+The schema TODO is to chunk or reference variable columns and keys; the mutation
+TODO is to bound or reference bodies and account for their cleanup without
+weakening fencing or releasing uncertain execution custody. Neither queue order,
+capacity counts nor the host-local authority proves value sizes.
+

@@ -106,7 +106,7 @@ async fn ready_work_happy_path_deduplicates_cohort_and_reports_publication_cut()
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let envelope: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-        assert_eq!(envelope["api_version"], "st3.client.v0");
+        assert_eq!(envelope["api_version"], "fractal.client.v0");
         assert_eq!(envelope["snapshot"]["store_index"], publication.cut);
         assert_eq!(envelope["value"]["ready_count"], 1);
         assert_eq!(envelope["value"]["coverage"], "local-graph-cut");
@@ -304,6 +304,7 @@ async fn ready_work_person_ask_blocks_until_answered() {
     ready_count(&state, PATH, 1).await;
     claim(&state, &step);
     let ask = state.store.ask_person(&PersonAskRequest {
+        priority: None,
         deadline_ms: None, default_answer: None, legacy_request: None,
         person: "person/operator".into(), title: "Choose a planting date".into(),
         reason: "The owner must choose.".into(), actor: ASH.into(), step: Some(step.clone()),

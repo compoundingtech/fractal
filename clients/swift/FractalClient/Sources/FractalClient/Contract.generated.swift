@@ -12,7 +12,10 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case agentSuspend = "agent.suspend"
     case arrangementEdit = "arrangement.edit"
     case arrangementMembershipEdit = "arrangement.membership.edit"
+    case attentionDismiss = "attention.dismiss"
     case attentionResolve = "attention.resolve"
+    case attentionSeen = "attention.seen"
+    case attentionSnooze = "attention.snooze"
     case customReply = "custom.reply"
     case harnessAnswer = "harness.answer"
     case laneApprove = "lane.approve"
@@ -69,6 +72,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case harnessQuestionsList = "harness-questions.list"
     case harnessQuestionsGet = "harness-questions.get"
     case notesList = "notes.list"
+    case availabilityList = "availability.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
     case privateNotesGet = "private-notes.get"
@@ -82,12 +86,21 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case documentReferencesGet = "document-references.get"
     case publicationDefinition = "publication.definition"
     case missionDeclarationGet = "mission-declaration.get"
+    case sourceMapGet = "source-map.get"
+    case sourceBlobGet = "source-blob.get"
     case subjectDefinition = "subject.definition"
     case mailBacklogSummary = "mail-backlog.summary"
     case sloList = "slo.list"
     case sloHistory = "slo.history"
     case usagePeriod = "usage.period"
     case usageHubQuota = "usage-hub.quota"
+    case githubPluginPullRequest = "github-plugin.pull-request"
+    case githubPluginIssue = "github-plugin.issue"
+    case githubPluginConversation = "github-plugin.conversation"
+    case githubPluginChecks = "github-plugin.checks"
+    case githubPluginFiles = "github-plugin.files"
+    case githubPluginComment = "github-plugin.comment"
+    case githubPluginRun = "github-plugin.run"
     case clientsList = "clients.list"
     case nowList = "now.list"
     case machinesList = "machines.list"
@@ -161,6 +174,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .harnessQuestionsList: "/v1/client/harness-questions",
     .harnessQuestionsGet: "/v1/client/harness-questions/{id}",
     .notesList: "/v1/client/notes",
+    .availabilityList: "/v1/client/availability",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
     .privateNotesGet: "/v1/client/private-notes/{uri}",
@@ -174,12 +188,21 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .documentReferencesGet: "/v1/client/document-references",
     .publicationDefinition: "/v1/client/publication-definition",
     .missionDeclarationGet: "/v1/client/mission-declaration",
+    .sourceMapGet: "/v1/client/source-maps",
+    .sourceBlobGet: "/v1/client/source-blobs/{id}",
     .subjectDefinition: "/v1/client/subject-definition",
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .sloList: "/v1/client/slo",
     .sloHistory: "/v1/client/slo/history",
     .usagePeriod: "/v1/client/usage",
     .usageHubQuota: "/v1/client/usage/quota",
+    .githubPluginPullRequest: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}",
+    .githubPluginIssue: "/v1/client/plugins/github/{owner}/{repo}/issues/{number}",
+    .githubPluginConversation: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation",
+    .githubPluginChecks: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks",
+    .githubPluginFiles: "/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files",
+    .githubPluginComment: "/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}",
+    .githubPluginRun: "/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}",
     .clientsList: "/v1/client/clients",
     .nowList: "/v1/client/now",
     .machinesList: "/v1/client/machines",

@@ -99,6 +99,32 @@ it('connects the responsive drawer toggle to its dialog while retaining narrow a
   expect(within(dialog).getByRole('navigation', { name: 'Agent roster' })).not.toBeNull()
 })
 
+it('names a child mission by the hydrated title it paints rather than the agent work label', async () => {
+  const primary: Mission = { ...fixtureMissions[0]!, id: 'mission/example/primary', title: 'Primary mission' }
+  const child: Mission = { ...fixtureMissions[0]!, id: 'mission/example/release', title: 'Release checks' }
+  const values = [primary, child]
+  const missions = Atom.make<Feed<readonly Mission[]>>(observed({ value: values })).pipe(Atom.keepAlive)
+  const missionsSync = Atom.make<FeedSync<readonly Mission[]>>({
+    last: Option.some({ value: values, observedAt: 2000 }),
+    sync: { status: { _tag: 'Live', since: 2000 }, observedAt: 2000 },
+  }).pipe(Atom.keepAlive)
+  source = { ...source, missions, sync: { ...source.sync!, missions: missionsSync } }
+  const seat = openAgent(decodeUnknownSync(Agent)({
+    kind: 'agent', id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
+    runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
+    blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-20T12:00:00Z',
+    current_work: [
+      { id: 'work/example/primary', mission_id: primary.id, mission_run_id: 'mission-run/example/primary', path: 'primary', title: 'Primary task', state: 'claimed', since: '2026-10-20T12:00:00Z' },
+      { id: 'work/example/release', mission_id: child.id, mission_run_id: 'mission-run/example/release', path: 'release', title: 'Run tests', state: 'claimed', since: '2026-10-20T12:00:00Z' },
+    ],
+  }))
+  registry.set(agents, observed({ value: [seat] }))
+  await mount(1440)
+  const content = roster().querySelector<HTMLElement>(`[data-mission-child="${child.id}"]`)!
+  expect(content.querySelector('[data-row-column="title"]')?.textContent).toBe(child.title)
+  expect(content.closest('[role="row"]')?.getAttribute('aria-label')).toMatch(/^Release checks, Mission/)
+})
+
 it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).flatMap(scheme =>
   (['missions', 'attention'] as const).map(family => ({ width, scheme, family })))))
 ('retains $family freshness and distinguishes missing mission info at $width $scheme', async ({ family, width, scheme }) => {
@@ -177,7 +203,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
     }
   })
   expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
-  expect(row().querySelector('[data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission]')).toBeNull()
   const warning = row().querySelector('[data-mission-unavailable]')!
   expect(warning.textContent).toContain('Mission info unavailable')
   expect(warning.querySelector('svg')).not.toBeNull()
@@ -185,7 +211,7 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
   expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
   await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
   expect(row().getAttribute('aria-label')).toBe('Worker, Working')
-  expect(row().querySelector('[data-mission-unavailable], [data-mission-pill]')).toBeNull()
+  expect(row().querySelector('[data-mission-unavailable], [data-mission]')).toBeNull()
   expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
 })
 
@@ -315,17 +341,18 @@ it('marks retained live-feed rows stale on a connection-only transition', async 
   const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('Idle;')
+  // A live mark says the state alone; the qualifier appears only once the observation is not live.
+  expect(status()).toBe('Idle')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   expect(registry.get(agents)).toBe(retained)
   expect(freshness()).toBe('stale')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · Idle')
-  expect(status()).toContain('Last verified · Idle;')
+  expect(status()).toContain('Last verified · Idle; stale observation')
   expect(status()).toContain('stale observation')
   await act(async () => registry.set(connection, { _tag: 'Live' }))
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('live observation')
+  expect(status()).toBe('Idle')
 })
 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {

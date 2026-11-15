@@ -229,3 +229,57 @@ fn writers_other_than_runs_are_untouched() {
     }).unwrap();
     assert_eq!(run_authority_mode(), RunAuthorityMode::Enforce);
 }
+
+/// A run cancels another run by applying a `mission-run` declaration as itself.
+fn cancel(store: &Store, actor: &MissionRunView, target: &MissionRunView, key: &str) -> Result<ApplyResponse, FractalError> {
+    let source = format!(
+        "version 2\nmission-run {:?} {{ cancellation {key:?} {{ reason \"the test cancels it\" }} }}\n",
+        target.subject,
+    );
+    let intent = crate::graph::parse_intent(&source, "node").unwrap();
+    let preview = store.mission(&intent, IntentInput { kdl: source.clone(), source_name: None }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, key, Some(&actor.subject))
+}
+
+/// A run touches only itself and the runs it started, transitively; a `write "mission-run/*"`
+/// grant reaches no sibling, parent or unrelated run.
+#[test]
+fn a_run_touches_only_its_own_descendant_runs() {
+    let _mode = hold_mode();
+    set_run_authority_mode(RunAuthorityMode::Enforce);
+    let store = missions();
+    publish_mission(&store, r#"version 2
+mission "steward" state="ready" {
+  goal "Steward runs."
+  concurrent-runs max=4
+  authority { write "mission-run/*"; start "steward"; }
+  step "program" { agentless }
+}"#, "steward");
+    let root = start(&store, "steward", "steward-root", None).unwrap();
+    let child = start(&store, "steward", "steward-child", Some(&root)).unwrap();
+    let sibling = start(&store, "steward", "steward-sibling", Some(&root)).unwrap();
+    let grandchild = start(&store, "steward", "steward-grandchild", Some(&child)).unwrap();
+    let unrelated = start(&store, "other", "steward-unrelated", None).unwrap();
+    let phase = |run: &MissionRunView| store.mission_run(&run.subject).unwrap().unwrap().phase;
+
+    for (actor, target, case) in [
+        (&root, &unrelated, "unrelated"),
+        (&child, &root, "parent"),
+        (&child, &sibling, "sibling"),
+        (&grandchild, &root, "grandparent"),
+    ] {
+        let before = store.index().unwrap();
+        assert_eq!(code(cancel(&store, actor, target, &format!("cancel-{case}"))), "run-authority-denied", "{case}");
+        assert_eq!(store.index().unwrap(), before, "{case}");
+        assert_eq!(phase(target), "normal", "{case}");
+    }
+
+    // The runs it started, transitively, are its own.
+    assert!(cancel(&store, &root, &grandchild, "cancel-grandchild").unwrap().changed);
+    assert_ne!(phase(&grandchild), "normal");
+    assert!(cancel(&store, &child, &child, "cancel-itself").unwrap().changed);
+    assert_ne!(phase(&child), "normal");
+    assert_eq!(phase(&root), "normal");
+    assert_eq!(phase(&sibling), "normal");
+    assert_eq!(phase(&unrelated), "normal");
+}

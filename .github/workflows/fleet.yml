@@ -4562,6 +4562,11 @@ jobs:
               "apps/fractal-web/src/changelog/**",
               # The dev-bar build and changes stories render the real segment.
               "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
+              # SettingsDialog and AvailabilityPanel stories render the availability section.
+              "apps/fractal-web/src/availability/AvailabilityEditor.tsx",
+              "apps/fractal-web/src/availability/AvailabilityPanel.tsx",
+              "apps/fractal-web/src/availability/availability.fixtures.ts",
+              "apps/fractal-web/src/availability/availabilityModel.ts",
               "apps/fractal-web/src/embed/**",
               "apps/fractal-web/src/web/AlertDetailsPane.tsx",
               "apps/fractal-web/src/web/AlertFlashBand.tsx",
@@ -4629,6 +4634,7 @@ jobs:
               "apps/fractal-web/src/data/source.ts",
               "apps/fractal-web/src/data/subjectReadPort.ts",
               "apps/fractal-web/src/declarations/model.ts",
+              "apps/fractal-web/src/declarations/sourceMap.ts",
               "apps/fractal-web/src/documents/DocumentLink.tsx",
               "apps/fractal-web/src/documents/DocumentPane.tsx",
               "apps/fractal-web/src/documents/document-port.ts",
@@ -4653,6 +4659,7 @@ jobs:
               "apps/fractal-web/src/missions/missionTitle.ts",
               "apps/fractal-web/src/missions/missionWords.ts",
               "apps/fractal-web/src/missions/presentation.ts",
+              "apps/fractal-web/src/missions/StepSourceChip.tsx",
               "apps/fractal-web/src/missions/rowData.ts",
               "apps/fractal-web/src/missions/SidebarMissionsList.tsx",
               "apps/fractal-web/src/missions/useMissionRows.ts",

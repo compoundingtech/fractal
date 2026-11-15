@@ -2556,6 +2556,10 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
         super::checkpoint_rules::rules_description(),
         RULES_V14_DESCRIPTION
             .replace(
+                "slot=subject,incarnation_id,model,account,owner_run,owner_step,host keep=",
+                "slot=subject,incarnation_id,model,account,owner_run,owner_step,host,execution_id keep=",
+            )
+            .replace(
                 "harness.limits keep=all-source-observations",
                 "harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at\n\
                  runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field",
@@ -2807,7 +2811,7 @@ fn legacy_slot_of(claim: &ClaimRecord) -> Option<(&'static str, Vec<String>)> {
         "harness.usage" => match field_str(claim, "semantics")? {
             "response_rollup" => Some((
                 "series",
-                slot(&["incarnation_id", "model", "account", "owner_run", "owner_step", "host"]),
+                slot(&["incarnation_id", "model", "account", "owner_run", "owner_step", "host", "execution_id"]),
             )),
             "session_cumulative" => Some(("cumulative", slot(&["semantics", "incarnation_id"]))),
             "context_occupancy" => Some(("newest", slot(&["semantics", "incarnation_id"]))),

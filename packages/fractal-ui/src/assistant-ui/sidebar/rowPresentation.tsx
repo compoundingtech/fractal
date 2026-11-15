@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { matchPositions, usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
+import { isAdHocMissionSlug, matchPositions, rowStatusLabel, usageScopeLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { describeMissionEta } from '../MissionEta'
 
@@ -19,14 +19,15 @@ export function Highlight({ value, query }: { readonly value: string; readonly q
 }
 /** Concise label-in-name for the tree host, which cannot attach a row description. */
 export const sidebarRowAccessibleName = (row: Row): string => {
-  const parts = [row.title, row.statusLabel]
+  const parts = [row.title, rowStatusLabel(row)]
   if (row.parentRef === undefined && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0) {
     parts.splice(1, 0, row.subagentCount === undefined ? '? subagents' : `${row.subagentCount} ${row.subagentCount === 1 ? 'subagent' : 'subagents'}`)
   }
   if (row.missionContext?._tag === 'Mission') {
-    const { slug, progress, step, eta } = row.missionContext
-    parts.push(`Mission ${slug}`)
-    if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
+    const { slug, title, progress, step, eta } = row.missionContext
+    const adHoc = isAdHocMissionSlug(slug)
+    parts.push(`Mission ${adHoc ? title ?? 'untitled' : slug}`)
+    if (!adHoc && progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
     if (step._tag === 'Step') parts.push(`Step ${step.name}`)
     if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
     const estimate = eta === null || eta === undefined ? null : describeMissionEta(eta, new Date(eta.as_of).toISOString())

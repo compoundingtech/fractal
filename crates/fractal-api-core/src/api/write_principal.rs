@@ -102,6 +102,9 @@ impl WritePrincipal {
 
 fn native_scope(path: &str, value: Option<&Value>) -> Option<&'static str> {
     if path.starts_with("/v1/client/") { return None; }
+    if path == "/v1/work/override" {
+        return Some("control.attention");
+    }
     let action = match path {
         "/v1/work/done" => Some("work.done"),
         "/v1/custom/reply" => Some("custom.reply"),
@@ -146,6 +149,7 @@ pub(super) async fn bind_request(
     }
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX)
         || request.uri().path() == "/v1/repair/apply"
+        || request.uri().path() == "/v1/replication/replay"
     {
         return Err(WritePrincipal::mismatch());
     }

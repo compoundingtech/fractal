@@ -9,6 +9,7 @@ const catalog = defineCatalog({
   '@types/node': '24.10.0',
   typescript: '6.0.3',
   vitest: '4.1.9',
+  'oxc-parser': '0.127.0',
 })
 const declarations = {
   data: { name: '@fractal/declarations' },
@@ -20,7 +21,7 @@ const deps = catalog.compose({
   devDependencies: {
     // Parity tests compare this package's KDL with the generated declaration encoder.
     workspace: [declarations],
-    external: catalog.pick('@effect/platform-node', '@effect/vitest', '@types/node', 'typescript', 'vitest'),
+    external: catalog.pick('@effect/platform-node', '@effect/vitest', '@types/node', 'typescript', 'vitest', 'oxc-parser'),
   },
 })
 
@@ -35,6 +36,7 @@ export default packageJson({
     './effect': './src/effect.ts',
     './tree': './src/tree.ts',
     './testing': './src/testing.ts',
+    './source-map': './src/source-map.ts',
   },
   scripts: {
     test: 'vitest run --config vitest.config.ts',

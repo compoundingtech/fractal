@@ -376,6 +376,15 @@ impl Node {
         let _ = fs::remove_file(self.socket());
     }
 
+    /// Stop this node as [`Self::stop`] does, except the seat PTY servers `servers`: a deploy
+    /// stops the daemon's service, and its seats run on in work scopes of their own.
+    fn stop_leaving_seats(&mut self, servers: &[u32]) {
+        let mut daemon = self.daemon.take().expect("the node's daemon runs");
+        daemon.kill_releasing(servers).unwrap();
+        daemon.wait().unwrap();
+        self.stop();
+    }
+
     /// Send `signal` (such as `STOP` or `CONT`) to this node's daemon and worker.
     fn signal(&self, signal: &str) {
         for pid in [
@@ -803,11 +812,11 @@ mission "harvest" state="ready" {{
     let anchor =
         (next - chrono::Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let parent_file = node.root.join("parent.kdl");
-    let parent = |revision: &str| {
+    let parent = |revision: &str, goal: &str| {
         format!(
             r#"version 2
 mission "orchard/weekly" state="ready" {{
-  goal "Maintain the orchard."
+  goal "{goal}"
   schedule "cycle" {{
     host "orchard"
     every "7d"
@@ -823,7 +832,7 @@ mission "orchard/weekly" state="ready" {{
             node.root.join("cycles").display()
         )
     };
-    fs::write(&parent_file, parent(&revisions[0])).unwrap();
+    fs::write(&parent_file, parent(&revisions[0], "Maintain the orchard.")).unwrap();
     node.st_ok(&["apply", parent_file.to_str().unwrap(),
     "--as",
     PERSON,]);
@@ -845,12 +854,13 @@ mission "orchard/weekly" state="ready" {{
     })
     .await;
 
-    for index in 0..4 {
-        fs::write(&parent_file, parent(&revisions[index % 2])).unwrap();
-        node.st_ok(&["apply", parent_file.to_str().unwrap(),
-        "--as",
-        PERSON,]);
-        if index > 0 {
+    // Republishing the same revision changes nothing. `work revise` adopts a new revision under
+    // the same run. Publishing a new revision supersedes the run with a fresh linked run, here
+    // twice in a row. The reached occurrence belongs to the schedule through all of them.
+    let goals = ["Maintain the orchard.", "Maintain the orchard.", "Keep the orchard.", "Tend the orchard."];
+    for (index, goal) in goals.into_iter().enumerate() {
+        fs::write(&parent_file, parent(&revisions[index % 2], goal)).unwrap();
+        if index == 1 {
             node.st_ok(&[
                 "work",
                 "revise",
@@ -861,6 +871,8 @@ mission "orchard/weekly" state="ready" {{
                 "--as",
                 PERSON,
             ]);
+        } else {
+            node.st_ok(&["apply", parent_file.to_str().unwrap(), "--as", PERSON]);
         }
         // Let the daemon reach a quiet pass, including any incorrectly admitted duplicate.
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -874,6 +886,16 @@ mission "orchard/weekly" state="ready" {{
             "parent publication/revision replayed the due weekly tick"
         );
     }
+    let first = node.st_json(&["missions", "show", "mission-run/orchard/weekly"]);
+    let successor = first["superseded_by"]
+        .as_str()
+        .unwrap_or_else(|| panic!("publishing a new parent revision did not supersede the weekly run: {first}"))
+        .to_owned();
+    let second = node.st_json(&["missions", "show", &successor]);
+    assert!(
+        second["superseded_by"].is_string(),
+        "the second new parent revision did not supersede the replacement run: {second}"
+    );
     node.restart().await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
@@ -908,6 +930,101 @@ mission "orchard/weekly" state="ready" {{
         .map(|claim| claim["body"]["fields"]["occurrence"].as_u64().unwrap())
         .collect();
     assert_eq!(occurrences, vec![0, 1]);
+}
+
+/// Seats on `nodes` run in the real `pty`, which the development and CI environments provide.
+fn use_real_pty(nodes: &[&Node]) {
+    let pty = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|directory| directory.join("pty"))
+        .find(|path| path.is_file())
+        .expect("the development and CI environments provide the real pty binary");
+    for node in nodes {
+        let launcher = node.root.join("bin/pty");
+        fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink(&pty, launcher).unwrap();
+    }
+}
+
+/// A deploy stops the daemon while its seats run on in work scopes of their own. The restarted
+/// daemon re-adopts each surviving PTY: the same incarnation runs on under its control, and it
+/// neither records that incarnation's end nor launches another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_daemon_readopts_a_seat_pty_that_survived_its_stop() {
+    use fractal_drivers::host_lock::process_alive;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const SUBJECT: &str = "agent/readopt/worker";
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "amber").await;
+    use_real_pty(&[&node]);
+    let source = root.path().join("seat.kdl");
+    fs::write(
+        &source,
+        r#"version 2
+agent "readopt/worker" {
+    host "amber"
+    restart "always"
+    argv "sh" "-c" "echo readopt-seat-ready; while :; do sleep 1; done"
+}
+"#,
+    )
+    .unwrap();
+    node.st_ok(&["apply", "--no-gate-check", source.to_str().unwrap(), "--as", PERSON]);
+    let actual = |node: &Node| {
+        node.st_json(&["subject", "show", SUBJECT])["status"]["subjects"][0]["actual"].clone()
+    };
+    wait_until("the seat runs", 30, || async {
+        actual(&node)["status"] == "running"
+    })
+    .await;
+    let incarnation = actual(&node)["incarnation_id"].as_str().unwrap().to_owned();
+    // An incarnation names its PTY server's PID and creation time.
+    let server: i32 = incarnation.split_once(':').unwrap().0.parse().unwrap();
+    let runtime_observations = |claims: Vec<Value>| {
+        claims
+            .into_iter()
+            .filter(|claim| claim["subject"] == SUBJECT && claim["kind"] == "runtime.observed")
+            .map(|claim| (claim["id"].clone(), claim["body"]["fields"].clone()))
+            .collect::<Vec<_>>()
+    };
+    let before = runtime_observations(node.claims().await);
+    node.stop_leaving_seats(&[server as u32]);
+    assert!(process_alive(server), "the seat's PTY server outlives its daemon");
+    node.start().await;
+    let peek = node.st_ok(&["terminals", "peek", SUBJECT]);
+    assert!(
+        peek.contains("readopt-seat-ready"),
+        "the restarted daemon reaches the surviving terminal: {peek}"
+    );
+    // Only a daemon that adopted the incarnation ends it: the stop must reach the same process.
+    node.st_ok(&["agents", "stop", SUBJECT, "--as", PERSON]);
+    wait_until("the restarted daemon stops the adopted seat", 30, || async {
+        actual(&node)["status"] == "stopped"
+    })
+    .await;
+    wait_until("the adopted PTY server exits", 30, || async {
+        !process_alive(server)
+    })
+    .await;
+    let after = runtime_observations(node.claims().await)
+        .into_iter()
+        .filter(|observation| !before.contains(observation))
+        .map(|(_, fields)| fields)
+        .collect::<Vec<_>>();
+    assert!(
+        after.iter().all(|fields| {
+            fields["incarnation_id"] == incarnation.as_str() && fields["status"] != "vanished"
+        }),
+        "after its restart the daemon observes only the surviving incarnation {incarnation}, \
+         and never as vanished: {after:#?}\n{}",
+        node.logs()
+    );
+    assert_eq!(
+        after.last().map(|fields| fields["status"].clone()),
+        Some(json!("stopped")),
+        "{after:#?}"
+    );
 }
 
 /// A stopped origin's earlier running claims must not fence a seat placed on another host.
@@ -947,15 +1064,7 @@ async fn cross_host_seat_move(mode: SeatMove) {
     let root = tempfile::tempdir().unwrap();
     let a = anchor(root.path(), "amber").await;
     let b = joined(root.path(), &a, "cobalt", &[]).await;
-    let pty = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .map(|directory| directory.join("pty"))
-        .find(|path| path.is_file())
-        .expect("the development and CI environments provide the real pty binary");
-    for node in [&a, &b] {
-        let launcher = node.root.join("bin/pty");
-        fs::remove_file(&launcher).unwrap();
-        std::os::unix::fs::symlink(&pty, launcher).unwrap();
-    }
+    use_real_pty(&[&a, &b]);
     let source = root.path().join("seat.kdl");
     fs::write(
         &source,

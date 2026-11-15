@@ -1515,6 +1515,20 @@ impl Store {
                 return Ok(None);
             }
         }
+        if f["condition"] == "restart-fresh-session" {
+            // A newer restart (including the person's stale-handoff escape) supersedes
+            // this wait. Completion also ends the episode, even before recovery is written.
+            smallclaims::touched::note_read(|| UNKEYED_READ.into());
+            let Some(request) = crate::restart::latest_request(self, source)? else {
+                return Ok(None);
+            };
+            if failure.subject != format!("agent-restart-handoff:{}", request.id)
+                || request.body["fields"]["fresh_session"] != true
+                || self.operation_claim(&format!("agent-restart-completed:{}", request.id))?.is_some()
+            {
+                return Ok(None);
+            }
+        }
         // Upgrades retain historical operational episodes. A current login with a concrete
         // person has one derived person item; the old agent fault must not ask again.
         if f["condition"] == "provider-auth" {
@@ -1800,6 +1814,8 @@ pub fn person_attention_item(
     };
     // An ask resolves by itself at its deadline, with its default answer if it names one. Only
     // while this member counts deadlines (`[asks] deadlines` on): off, nothing resolves by one.
+    // The deadline is the effective one, past the time the person held their deadline clock;
+    // none while it is held.
     let (counting_since, default_ms) = person_work::ask_deadline_policy(connection)?;
     let (deadline_unix_ms, default_answer) = match &ask {
         Some(ask) if counting_since != 0 && !person_work::is_update(ask) => {
@@ -1813,7 +1829,7 @@ pub fn person_attention_item(
                     .map(|answer| json!({"id": id, "label": answer["label"]}))
             });
             (
-                person_work::ask_deadline(ask, counting_since, default_ms),
+                person_work::effective_ask_deadline(connection, ask, counting_since, default_ms)?,
                 default_answer,
             )
         }
@@ -1823,7 +1839,12 @@ pub fn person_attention_item(
         deadline_unix_ms,
         default_answer,
         episode,
-        priority: "normal".into(),
+        // The priority the asker gave the ask; `normal` without one.
+        priority: ask
+            .as_ref()
+            .and_then(|ask| ask.body["fields"]["priority"].as_str())
+            .unwrap_or("normal")
+            .into(),
         kind: "person-step".into(),
         review_mode: None,
         subject: subject.to_owned(),

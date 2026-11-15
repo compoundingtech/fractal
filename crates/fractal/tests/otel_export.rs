@@ -2994,7 +2994,7 @@ fn population_gauges_export_exact_otlp_attribute_sets() {
         ("omp".into(), "subagent".into(), "unknown".into())]));
     assert_eq!(attention.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from(["person-step", "human-gate", "launch-approval", "unread-message",
-            "agent-request", "revision-approval", "harness-login", "harness-prompt", "fault", "unattributed"]));
+            "agent-request", "revision-approval", "harness-login", "harness-prompt", "fault", "model-drift", "unattributed"]));
     assert!(attention.values().all(|count| *count == 0));
     assert!(freshness);
 }

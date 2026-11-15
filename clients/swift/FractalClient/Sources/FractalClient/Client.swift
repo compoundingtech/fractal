@@ -19,7 +19,7 @@ public struct TraceContext: Sendable, Equatable {
 
 public actor FractalClient {
     public let baseURL: URL
-    private let session: URLSession
+    private let transport: Transport
     private var credential: String?
     /// The app's name and build, sent as `x-st3-client` ("smalltalk-ios 1.0 (42)"). st lists it as
     /// reported; it is never identity or authority.
@@ -27,10 +27,30 @@ public actor FractalClient {
     private let traceContext: (@Sendable () -> TraceContext?)?
     private let messagesPaging: Bool
 
+    private enum Transport: Sendable {
+        case session(URLSession)
+        /// The member's trusted local socket, acting for one person (`x-st3-person`).
+        case localSocket(LocalSocketEndpoint)
+    }
+
     public init(fabricLoopbackURL: URL, credential: String? = nil, session: URLSession = .shared, client: String? = nil, traceContext: (@Sendable () -> TraceContext?)? = nil, messagesPaging: Bool = false) {
         self.baseURL = fabricLoopbackURL
         self.credential = credential
-        self.session = session
+        self.transport = .session(session)
+        self.client = client
+        self.traceContext = traceContext
+        self.messagesPaging = messagesPaging
+    }
+
+    /// A desktop app of the person on the member's own host: every request and stream goes over the
+    /// member's trusted local Unix socket (`fractal.sock` in its state directory's `run/`) as
+    /// `person`, with no bearer credential or pairing. Writes act as the person only when no process
+    /// above the app carries an agent or run identity (docs/st3/client-v0/README.md,
+    /// "A person's desktop app on the local socket").
+    public init(localSocketPath: String, person: String, client: String? = nil, traceContext: (@Sendable () -> TraceContext?)? = nil, messagesPaging: Bool = false) {
+        self.baseURL = URL(string: "http://localhost")!
+        self.credential = nil
+        self.transport = .localSocket(LocalSocketEndpoint(path: localSocketPath, person: person))
         self.client = client
         self.traceContext = traceContext
         self.messagesPaging = messagesPaging
@@ -94,7 +114,7 @@ public actor FractalClient {
         // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.conversation.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -132,7 +152,7 @@ public actor FractalClient {
         if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
         if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             task.resume()
             continuation.onTermination = { @Sendable _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -155,7 +175,7 @@ public actor FractalClient {
         // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -180,7 +200,7 @@ public actor FractalClient {
         // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
         var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -207,7 +227,7 @@ public actor FractalClient {
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -237,7 +257,7 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -268,7 +288,7 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -309,6 +329,7 @@ public actor FractalClient {
     public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/harness-questions", query: query) }
     public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> { try await get("v1/client/harness-questions/\(Self.routedSessionID(id))") }
     public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
+    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> { try await get("v1/client/availability", query: person.map { [URLQueryItem(name: "person", value: $0)] } ?? []) }
     public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let kind { query.append(.init(name: "kind", value: kind)) }; if let version { query.append(.init(name: "version", value: String(version))) }; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/custom-subjects", query: query) }
     public func customSubjectsGet(id: String) async throws -> Envelope<Resource> { try await resource("custom-subjects", id: id) }
     public func privateNotesGet(uri: String) async throws -> Envelope<PrivateNotesSubject> { try await get("v1/client/private-notes/\(Self.pathSegment(uri))") }
@@ -321,12 +342,21 @@ public actor FractalClient {
     public func documentReferencesGet(subject: String) async throws -> Envelope<DocumentReferences> { try await get("v1/client/document-references", query: [.init(name: "subject", value: subject)]) }
     public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> { try await get("v1/client/publication-definition", query: [.init(name: "subject", value: subject)]) }
     public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> { var query: [URLQueryItem] = [.init(name: "mission", value: mission)]; if let revision { query.append(.init(name: "revision", value: revision)) }; return try await get("v1/client/mission-declaration", query: query) }
+    public func sourceMapGet(subject: String, revision: String? = nil) async throws -> Envelope<SubjectSourceMap> { var query: [URLQueryItem] = [.init(name: "subject", value: subject)]; if let revision { query.append(.init(name: "revision", value: revision)) }; return try await get("v1/client/source-maps", query: query) }
+    public func sourceBlobGet(hash: String, subject: String, revision: String) async throws -> Envelope<SourceBlob> { try await get("v1/client/source-blobs/\(hash)", query: [.init(name: "subject", value: subject), .init(name: "revision", value: revision)]) }
     public func subjectDefinition(subject: String, showEnvValues: Bool = false) async throws -> Envelope<SubjectDefinition> { try await get("v1/client/subject-definition", query: [.init(name: "subject", value: subject), .init(name: "show_env_values", value: showEnvValues ? "true" : "false")]) }
     public func mailBacklogSummary() async throws -> Envelope<MailBacklog> { try await get("v1/client/mail-backlog") }
     public func sloList() async throws -> Envelope<SloList> { try await get("v1/client/slo") }
     public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> { var query: [URLQueryItem] = [.init(name: "id", value: id)]; if let sinceMS { query.append(.init(name: "since_ms", value: String(sinceMS))) }; if let untilMS { query.append(.init(name: "until_ms", value: String(untilMS))) }; if let steps { query.append(.init(name: "steps", value: String(steps))) }; return try await get("v1/client/slo/history", query: query) }
     public func usagePeriod(sinceMS: UInt64? = nil, untilMS: UInt64? = nil) async throws -> Envelope<UsagePeriod> { var query: [URLQueryItem] = []; if let sinceMS { query.append(.init(name: "since_ms", value: String(sinceMS))) }; if let untilMS { query.append(.init(name: "until_ms", value: String(untilMS))) }; return try await get("v1/client/usage", query: query) }
     public func usageHubQuota() async throws -> Envelope<UsageHubQuota> { try await get("v1/client/usage/quota") }
+    public func githubPluginPullRequest(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)") }
+    public func githubPluginIssue(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/issues/\(number)") }
+    public func githubPluginConversation(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)/conversation") }
+    public func githubPluginChecks(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)/checks") }
+    public func githubPluginFiles(owner: String, repo: String, number: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/pulls/\(number)/files") }
+    public func githubPluginComment(owner: String, repo: String, commentID: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/comments/\(commentID)") }
+    public func githubPluginRun(owner: String, repo: String, runID: UInt64) async throws -> Envelope<JSONValue> { try await get("v1/client/plugins/github/\(Self.routedSessionID(owner))/\(Self.routedSessionID(repo))/runs/\(runID)") }
     public func clientsList() async throws -> Envelope<ClientConnections> { try await get("v1/client/clients") }
     public func nowList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("now", cursor: cursor, limit: limit, history: history) }
     public func machinesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("machines", cursor: cursor, limit: limit, history: history) }
@@ -400,7 +430,10 @@ public actor FractalClient {
     public func agentSuspend(id: String, idempotencyKey: String, fence: Fence, parameters: AgentSuspendParameters) async throws -> Envelope<ActionResult> { try await submit(try .agentSuspend(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func arrangementEdit(id: String, idempotencyKey: String, fence: Fence, parameters: ArrangementEditParameters) async throws -> Envelope<ActionResult> { try await submit(try .arrangementEdit(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func arrangementMembershipEdit(id: String, idempotencyKey: String, fence: Fence, parameters: ArrangementMembershipEditParameters) async throws -> Envelope<ActionResult> { try await submit(try .arrangementMembershipEdit(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func attentionDismiss(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionDismissParameters) async throws -> Envelope<ActionResult> { try await submit(try .attentionDismiss(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func attentionResolve(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionResolveParameters) async throws -> Envelope<ActionResult> { try await submit(try .attentionResolve(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func attentionSeen(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionSeenParameters) async throws -> Envelope<ActionResult> { try await submit(try .attentionSeen(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func attentionSnooze(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionSnoozeParameters) async throws -> Envelope<ActionResult> { try await submit(try .attentionSnooze(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func customReply(id: String, idempotencyKey: String, fence: Fence, parameters: CustomReplyParameters) async throws -> Envelope<ActionResult> { try await submit(try .customReply(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func harnessAnswer(id: String, idempotencyKey: String, fence: Fence, parameters: HarnessAnswerParameters) async throws -> Envelope<ActionResult> { try await submit(try .harnessAnswer(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func laneApprove(id: String, idempotencyKey: String, fence: Fence, parameters: LaneChangeParameters) async throws -> Envelope<ActionResult> { try await submit(try .laneApprove(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
@@ -457,6 +490,12 @@ public actor FractalClient {
     }
     /// Diagnostic local acceptance: no graph receipt or snapshot fence.
     public func observationsReport(_ report: ObservationReport) async throws -> ObservationResponse { try await post("v1/client/observations", report) }
+    /// Set or clear the session person's own availability. Requires write.availability; agent sessions are refused.
+    public func availabilitySet(_ request: AvailabilitySet) async throws -> Envelope<PersonAvailability> { try await self.request("v1/client/availability", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
+    /// Report one device's raw state for the session person, on every state change and again at `reportAgainAt`; the daemon derives presence and assigns the source. Requires write.presence.
+    public func presenceReport(_ report: PresenceReport) async throws -> Envelope<PresenceReportResult> { try await post("v1/client/presence", report) }
+    /// Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused.
+    public func notesSet(_ request: DirectiveNoteSet) async throws -> Envelope<DirectiveNoteSetResult> { try await self.request("v1/client/notes", query: [], method: "PUT", body: try JSONEncoder().encode(request)) }
 
     /// Replace this paired device's local-only registration. No graph receipt.
     public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }
@@ -505,7 +544,7 @@ public actor FractalClient {
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("\(fractalClientTerminalSubprotocol), fractal.cap.\(streamCapability)", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
-        let task = session.webSocketTask(with: request)
+        let task = webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
             task.resume()
@@ -521,6 +560,25 @@ public actor FractalClient {
                     } catch { continuation.finish(throwing: error); task.cancel(with: .normalClosure, reason: nil); return }
                 }
             }
+        }
+    }
+
+    private func webSocketTask(with request: URLRequest) -> any ClientWebSocket {
+        switch transport {
+        case .session(let session):
+            return session.webSocketTask(with: request)
+        case .localSocket(let endpoint):
+            return LocalWebSocket(endpoint: endpoint, request: request)
+        }
+    }
+
+    private func perform(_ request: URLRequest) async throws -> (Data, Int) {
+        switch transport {
+        case .session(let session):
+            let (data, response) = try await session.data(for: request)
+            return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+        case .localSocket(let endpoint):
+            return try await LocalHTTP.exchange(endpoint: endpoint, request: request)
         }
     }
 
@@ -572,7 +630,7 @@ public actor FractalClient {
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
         if let readAuthorization { request.setValue(readAuthorization.header, forHTTPHeaderField: "x-st3-scg-read-authorization") }
         applyTraceContext(to: &request)
-        let (data, response) = try await session.data(for: request); let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, status) = try await perform(request)
         if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
         let relatedRuns = path.hasPrefix("v1/client/agent-related-runs/")
         if status == 404 && (relatedRuns || path == "v1/client/schedules") {

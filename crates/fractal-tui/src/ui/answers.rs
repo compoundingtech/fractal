@@ -13,8 +13,21 @@ pub(super) struct PendingAnswer {
 impl Ui {
     /// Called by the live dispatcher before spawning the RPC, never after awaiting it.
     pub(super) fn begin_answer(&mut self, effect: &Effect) {
-        let Effect::Attention { id, action, reason, answer, option_notes } = effect else { return };
-        if action != "work.done" || self.pending_answers.contains_key(id) {
+        let (id, words, answer, noted) = match effect {
+            Effect::Attention { id, action, reason, answer, option_notes } if action == "work.done" => {
+                (id, reason.clone(), answer.clone(), option_notes.iter().map(|(answer, _)| answer.clone()).collect())
+            }
+            // A dismissal carries every note on the request's answers in its text
+            // (`dismissal_text`), and leaves the chosen note answer as it was.
+            Effect::Dismiss { id, .. } => (
+                id,
+                None,
+                self.note_answers.get(id).cloned(),
+                self.option_notes(id, None).into_iter().map(|(answer, _)| answer).collect(),
+            ),
+            _ => return,
+        };
+        if self.pending_answers.contains_key(id) {
             return;
         }
         let Some((position, item)) = self.world.attention.items().iter().enumerate()
@@ -23,9 +36,9 @@ impl Ui {
         self.pending_answers.insert(id.clone(), PendingAnswer {
             item: item.clone(),
             position,
-            words: reason.clone(),
-            answer: answer.clone(),
-            noted: option_notes.iter().map(|(answer, _)| answer.clone()).collect(),
+            words,
+            answer,
+            noted,
         });
         self.hide_pending_answers();
         self.refresh_tab_statuses();
@@ -175,8 +188,11 @@ mod tests {
             "{:?}", ui.effects);
     }
 
+    /// A request that offers its own `dismiss` answer is answered with it (work.done), never
+    /// with `attention.dismiss`, which st refuses there: its note is the reason and every other
+    /// note goes with it.
     #[test]
-    fn dismissal_uses_its_named_note_and_preserves_every_other_note() {
+    fn a_requests_own_dismiss_answer_is_answered_with_its_note_and_every_other_note() {
         let mut ui = saved_notes(false);
         if let Load::Ready(items) = &mut ui.world.attention {
             for item in items {
@@ -195,23 +211,54 @@ mod tests {
         assert_eq!(ui.confirm, Some('r'));
         press(&mut ui, KeyCode::Char('y'));
         assert!(matches!(&ui.effects[..], [Effect::Attention {
-            answer: Some(answer), reason: Some(text), option_notes, ..
-        }] if answer == "dismiss" && text == "  No action needed  " && option_notes == &[
+            id, action, answer: Some(answer), reason: Some(text), option_notes,
+        }] if id == "attention/first" && action == "work.done" && answer == "dismiss"
+            && text == "  No action needed  " && option_notes == &[
             ("yes".to_owned(), "A".to_owned()), ("other".to_owned(), "B".to_owned()),
         ]), "{:?}", ui.effects);
+        // Without a note of its own, the dismiss answer says so.
+        ui.effects.clear();
+        ui.conversation_state.drafts.remove("answer:attention/first:dismiss");
+        press(&mut ui, KeyCode::Char('x'));
+        press(&mut ui, KeyCode::Char('y'));
+        assert!(matches!(&ui.effects[..], [Effect::Attention { answer: Some(answer), reason: Some(text), .. }]
+            if answer == "dismiss" && text == "Dismissed without an answer."), "{:?}", ui.effects);
     }
 
     #[test]
-    fn synthetic_dismissal_preserves_every_named_note() {
+    fn dismissal_without_a_dismiss_answer_carries_every_named_note() {
         let mut ui = saved_notes(false);
         press(&mut ui, KeyCode::Char('x'));
         assert_eq!(ui.confirm, Some('r'));
         press(&mut ui, KeyCode::Char('y'));
-        assert!(matches!(&ui.effects[..], [Effect::Attention {
-            answer: Some(answer), reason: Some(text), option_notes, ..
-        }] if answer == "dismiss" && text == "Dismissed without an answer." && option_notes == &[
-            ("yes".to_owned(), "A".to_owned()), ("other".to_owned(), "B".to_owned()),
-        ]), "{:?}", ui.effects);
+        assert!(matches!(&ui.effects[..], [Effect::Dismiss { id, text: Some(text) }]
+            if id == "attention/first" && text == "Yes: A\nOther: B"), "{:?}", ui.effects);
+        // With no note at all, st's dismissal says only that it was dismissed.
+        let mut ui = note_request(None, false);
+        press(&mut ui, KeyCode::Char('x'));
+        press(&mut ui, KeyCode::Char('y'));
+        assert!(matches!(&ui.effects[..], [Effect::Dismiss { id, text: None }] if id == "attention/first"),
+            "{:?}", ui.effects);
+    }
+
+    /// A dismissal leaves Home at once like an answer; refused, the card and every note come
+    /// back, and confirmed, the notes it carried are done.
+    #[test]
+    fn a_dismissal_hides_the_card_until_st_confirms_or_refuses_it() {
+        let mut ui = saved_notes(false);
+        press(&mut ui, KeyCode::Char('x'));
+        press(&mut ui, KeyCode::Char('y'));
+        let effect = ui.effects.pop().unwrap();
+        ui.note_acted(&effect);
+        assert!(!ui.world.attention.items().iter().any(|item| item.id == "attention/first"));
+        ui.finish_answer("attention/first", false);
+        assert!(ui.world.attention.items().iter().any(|item| item.id == "attention/first"));
+        assert_eq!(ui.conversation_state.drafts["answer:attention/first:yes"], "  A  ");
+        assert_eq!(ui.conversation_state.drafts["answer:attention/first:other"], "B");
+        ui.note_acted(&effect);
+        ui.finish_answer("attention/first", true);
+        assert!(!ui.conversation_state.drafts.contains_key("answer:attention/first:yes"));
+        assert!(!ui.conversation_state.drafts.contains_key("answer:attention/first:other"));
     }
 
     #[test]
@@ -439,6 +486,7 @@ mod tests {
         let item = Attention {
             deadline: None,
             requested_at: None,
+            snoozed_until: None,
             id: "attention/first".into(),
             tier: Tier::Stopped,
             title: "Choose".into(),

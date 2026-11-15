@@ -1,5 +1,45 @@
 use super::*;
 
+/// Capture only a system-bound native work input, after its final envelope is
+/// assembled and before provider delivery. A standing turn must never inherit
+/// FRACTAL_INVOCATION_ID from the process launch.
+async fn publish_native_invocation_input(
+    client: &Client,
+    agent: &str,
+    incarnation: &str,
+    message: &MessageView,
+    text: &str,
+) -> Result<()> {
+    let Some(invocation_id) = message.tags.iter()
+        .find_map(|tag| tag.strip_prefix("fractal-invocation:")) else { return Ok(()); };
+    let result: Result<Value> = client.post("/v1/invocation-input", &json!({
+        "agent":agent, "incarnation":incarnation, "invocation_id":invocation_id,
+        "message_id":message.subject, "text":text,
+    })).await;
+    if let Err(error) = result {
+        // Evidence capture must not prevent delivery. Persist its failure when
+        // the daemon is reachable; an outage still surfaces through channel warnings.
+        let diagnostic: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+            subject: agent.into(), kind: "harness.diagnostic".into(), actor: Some(agent.into()),
+            fields: BTreeMap::from([
+                ("severity".into(), json!("warning")),
+                ("status".into(), json!("unavailable")),
+                ("code".into(), json!("invocation-input-unavailable")),
+                ("reason".into(), json!(format!("native input capture failed for {}: {error}", message.subject))),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("invocation_id".into(), json!(invocation_id)),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(format!("invocation-input-unavailable:{invocation_id}:{}", message.subject)),
+        }).await;
+        if let Err(diagnostic_error) = diagnostic {
+            return Err(error.context(format!("also could not publish unavailable evidence: {diagnostic_error}")));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn managed_declaration_result(
     result: std::result::Result<Value, GeneratedClientError>,
 ) -> Result<Value> {
@@ -2042,6 +2082,13 @@ async fn run_pi_channel(
                         }
                     };
                     let frame = pi_family_message_frame(&message, &body, identity, &attachments);
+                    if let Some(text) = frame["content"].as_str()
+                        && let Err(error) = publish_native_invocation_input(
+                            client, subject, &incarnation, &message, text,
+                        ).await
+                    {
+                        warn_pi_channel(subject, &error, &mut last_warning);
+                    }
                     stdout.write_all(serde_json::to_string(&frame)?.as_bytes()).await?;
                     stdout.write_all(b"\n").await?;
                     stdout.flush().await?;
