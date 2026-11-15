@@ -550,34 +550,35 @@ pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError
     Ok(pending)
 }
 // Keep the subject lookup outermost even when the global work queues are large.
-// Cost still grows with this subject's claims and matching proof obligations.
+// CASE skips subject history entirely for empty queues; non-empty queues retain
+// subject-outer seeks. Both checks observe the same statement snapshot.
 pub const SUBJECT_PENDING_QUERY: &str =
         "SELECT EXISTS(SELECT 1 FROM assistant_grant_attachments WHERE grant_subject=?1)
             OR EXISTS(SELECT 1 FROM assistant_grant_attachment_witnesses WHERE grant_subject=?1)
-            OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
+            OR CASE WHEN EXISTS(SELECT 1 FROM assistant_grant_dirty) THEN EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
                 CROSS JOIN assistant_grant_dirty AS dirty
-                WHERE claims.subject=?1 AND dirty.claim_id=claims.id)
-            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                WHERE claims.subject=?1 AND dirty.claim_id=claims.id) ELSE 0 END
+            OR CASE WHEN EXISTS(SELECT 1 FROM assistant_grant_dirty) THEN EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
                 CROSS JOIN assistant_grant_dirty AS dirty
-                WHERE pending.grant_subject=?1 AND dirty.claim_id=pending.claim_id)
-            OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
+                WHERE pending.grant_subject=?1 AND dirty.claim_id=pending.claim_id) ELSE 0 END
+            OR CASE WHEN EXISTS(SELECT 1 FROM assistant_grant_auth_cursor) THEN EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
                 CROSS JOIN assistant_grant_auth_cursor AS cursor
-                WHERE claims.subject=?1 AND cursor.claim_id=claims.id)
+                WHERE claims.subject=?1 AND cursor.claim_id=claims.id) ELSE 0 END
             OR EXISTS(SELECT 1 FROM assistant_grant_pending
                 WHERE grant_subject=?1 AND authenticated=0)
-            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+            OR CASE WHEN EXISTS(SELECT 1 FROM assistant_grant_recompute) THEN EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
                 CROSS JOIN assistant_grant_recompute AS work
-                WHERE pending.grant_subject=?1 AND work.claim_id=pending.claim_id)
-            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                WHERE pending.grant_subject=?1 AND work.claim_id=pending.claim_id) ELSE 0 END
+            OR CASE WHEN EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks) THEN EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
                 CROSS JOIN assistant_grant_proof_rechecks AS work
-                WHERE pending.grant_subject=?1 AND work.claim_id=pending.claim_id)
-            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                WHERE pending.grant_subject=?1 AND work.claim_id=pending.claim_id) ELSE 0 END
+            OR CASE WHEN EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations) THEN EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
                 CROSS JOIN assistant_grant_proof_invalidations AS work INDEXED BY assistant_grant_proof_invalidations_identity_index
                 WHERE work.writer=pending.origin AND work.sequence=pending.auth_sequence
                     AND work.envelope_hash=pending.auth_envelope_hash
                   AND pending.grant_subject=?1 AND pending.claim_id>work.claim_id
-                  AND (work.member_key='' OR work.member_key=pending.auth_member_key))
-            OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
+                  AND (work.member_key='' OR work.member_key=pending.auth_member_key)) ELSE 0 END
+            OR CASE WHEN EXISTS(SELECT 1 FROM assistant_grant_retractions) THEN EXISTS(SELECT 1 FROM assistant_grant_pending AS pending INDEXED BY assistant_grant_pending_subject_index
                 CROSS JOIN assistant_grant_retractions AS dirty INDEXED BY assistant_grant_retractions_writer_key_index
                 ON dirty.writer=pending.origin AND dirty.member_key=pending.auth_member_key
                 WHERE pending.grant_subject=?1
@@ -586,7 +587,7 @@ pub const SUBJECT_PENDING_QUERY: &str =
                   AND NOT EXISTS(SELECT 1 FROM assistant_grant_membership_windows AS windows
                     WHERE windows.writer=pending.origin AND windows.member_key=pending.auth_member_key
                       AND pending.auth_sequence>=windows.start
-                      AND (windows.end IS NULL OR pending.auth_sequence<=windows.end)))";
+                      AND (windows.end IS NULL OR pending.auth_sequence<=windows.end))) ELSE 0 END";
 fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
     connection.query_row(/* sqlite-large-value: allow-for-now lv-h648b9952e737 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ SUBJECT_PENDING_QUERY, [subject], |row| row.get(0)).map_err(internal)
 }

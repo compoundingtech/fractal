@@ -94,6 +94,15 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+The assistant subject-readiness regression fixtures retain inline claim history
+and queued identities solely to measure the production SQLite statement's VM
+work. Their producer modules own the corresponding test-site exceptions: the
+history copies preserve existing body/predecessor values, and queue mutations
+preserve exact claim and proof identities. A reference/chunk conversion must
+retain these cost and refusal assertions. Empty maintenance queues are checked
+inside the readiness statement with lazy `CASE` guards; nonempty queues retain
+subject-outer indexed seeks and every existing authentication fence.
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds

@@ -1664,6 +1664,131 @@ fn subject_readiness_seeks_only_its_indexed_obligations_with_large_unrelated_que
     assert_eq!(cost(&independent.subject),clean);
 }
 
+// Exercise the production query and indexes, not an EXPLAIN-plan surrogate.
+fn subject_pending_cost(connection: &rusqlite::Connection, subject: &str) -> (bool, i32, i32) {
+
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h0e2286e502a4 owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ authority::SUBJECT_PENDING_QUERY).unwrap();
+
+    let pending = statement.query_row(/* sqlite-large-value: allow-for-now lv-h79924becc4c4 owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0)).unwrap();
+    (pending, statement.get_status(StatementStatus::VmStep),
+        statement.get_status(StatementStatus::FullscanStep))
+}
+
+#[test]
+fn assistant_grant_empty_queues_skip_subject_history() {
+    let store = node("issuer", None);
+    let grant = append(&store, SUBJECT, GRANTED, fields());
+    drain_authority(&store);
+    let connection = store.connection.write();
+    let mut costs = Vec::new();
+    for history in [10, 10_000] {
+        connection.execute(
+
+            /* sqlite-large-value: allow-for-now lv-h351e673ef1be owner=smallclaims::store::assistant_grant_authority_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<?2)
+             INSERT OR IGNORE INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+             SELECT 'history-'||x,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM n CROSS JOIN claims WHERE claims.id=?1",
+            params![grant.id,history],
+        ).unwrap();
+        connection.execute(
+
+            /* sqlite-large-value: allow-for-now lv-h860ed3718c70 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO assistant_grant_pending
+             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,
+              auth_member_key,auth_sequence,auth_envelope_hash,auth_record_position)
+             SELECT id,subject,kind,origin,actor,0,1,'{}','key',7,'proof',0
+             FROM claims WHERE subject=?1", [SUBJECT],
+        ).unwrap();
+
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf7a67fc613de owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty;
+            DELETE FROM assistant_grant_auth_cursor;
+            DELETE FROM assistant_grant_recompute;
+            DELETE FROM assistant_grant_proof_rechecks;
+            DELETE FROM assistant_grant_proof_invalidations;
+            DELETE FROM assistant_grant_retractions;").unwrap();
+        let cost = subject_pending_cost(&connection, SUBJECT);
+        eprintln!("empty queues: history={history} pending={} vm_steps={} fullscan_steps={}",cost.0,cost.1,cost.2);
+        assert!(!cost.0);
+        assert_eq!(cost.2, 0);
+        costs.push(cost);
+    }
+    assert_eq!(costs[0], costs[1], "empty queues must not walk subject history");
+}
+
+#[test]
+fn assistant_grant_queue_guards_preserve_every_matching_fence_and_subject_outer_seeks() {
+    let store = node("issuer", None);
+    let grant = append(&store, SUBJECT, GRANTED, fields());
+    drain_authority(&store);
+    let connection = store.connection.write();
+    connection.execute(
+
+        /* sqlite-large-value: allow-for-now lv-ha1de1418b8ce owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE assistant_grant_pending SET authenticated=1,auth_member_key='lost-key',
+         auth_sequence=7,auth_envelope_hash='proof' WHERE claim_id=?1", [&grant.id],
+    ).unwrap();
+    // One test per guarded arm, including a pending-only dirty claim that is
+    // absent from claims, so the first dirty arm cannot mask the second.
+    for (name, insert, cleanup) in [
+
+        ("claims dirty", /* sqlite-large-value: allow-for-now lv-hb7abee1d3c34 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", /* sqlite-large-value: allow-for-now lv-h97aab8f622b3 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty"),
+
+        ("pending dirty", /* sqlite-large-value: allow-for-now lv-ha8c4c8d05086 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES('pending-only')", /* sqlite-large-value: allow-for-now lv-h6e723f23d346 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty"),
+
+        ("auth cursor", /* sqlite-large-value: allow-for-now lv-h25ad973f0978 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_auth_cursor VALUES(?1,0,0,'',-1)", /* sqlite-large-value: allow-for-now lv-h04c9ef30f056 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_auth_cursor"),
+
+        ("recompute", /* sqlite-large-value: allow-for-now lv-hf195ff869ce9 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_recompute VALUES(?1)", /* sqlite-large-value: allow-for-now lv-h33cd101f3ed9 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_recompute"),
+
+        ("proof recheck", /* sqlite-large-value: allow-for-now lv-hd8dbafedad29 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", /* sqlite-large-value: allow-for-now lv-h0abdc42f46bc owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_rechecks"),
+
+        ("proof invalidation", /* sqlite-large-value: allow-for-now lv-h0efef89dc2e7 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key) SELECT origin,7,'proof','lost-key' FROM assistant_grant_pending WHERE claim_id=?1", /* sqlite-large-value: allow-for-now lv-ha4801ddb5300 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_proof_invalidations"),
+
+        ("retraction", /* sqlite-large-value: allow-for-now lv-hf7b09a18fb7f owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence) SELECT origin,'lost-key',7,7 FROM assistant_grant_pending WHERE claim_id=?1", /* sqlite-large-value: allow-for-now lv-hdf2d9ab766b4 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_retractions"),
+    ] {
+        if name == "pending dirty" {
+            connection.execute(
+
+                /* sqlite-large-value: allow-for-now lv-h53cef4db0f7e owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending
+                 (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
+                 VALUES('pending-only',?1,'test','issuer','owner',0,1,'{}')", [SUBJECT],
+            ).unwrap();
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h039f365c6be5 owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ insert, []).unwrap();
+        } else {
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h7e1b0f302faf owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ insert, [&grant.id]).unwrap();
+        }
+        assert!(subject_pending_cost(&connection, SUBJECT).0, "{name} must refuse the subject");
+
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h02fa000841a2 owner=smallclaims::store::assistant_grant_authority_tests TODO=trace-statement-and-value-representation */ cleanup, []).unwrap();
+
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h344908bb2949 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_pending WHERE claim_id='pending-only'", []).unwrap();
+        assert!(!subject_pending_cost(&connection, SUBJECT).0, "{name} must release only when drained");
+    }
+    let mut costs = Vec::new();
+    for size in [10, 10_000] {
+        for index in costs.len()*10..size {
+            let unrelated = format!("unrelated-{index}");
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-heb0a5ddcc4ab owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&unrelated]).unwrap();
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-hc8c9ba9cee55 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_auth_cursor VALUES(?1,0,0,'',-1)", [&unrelated]).unwrap();
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h7056a15cdad5 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_recompute VALUES(?1)", [&unrelated]).unwrap();
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-he83a2055dbb9 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&unrelated]).unwrap();
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-hb6acf0c98e87 owner=smallclaims::store::assistant_grant_authority_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key) VALUES(?1,7,'proof','lost-key')", [&unrelated]).unwrap();
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h1e267ccdffa4 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence) VALUES(?1,'lost-key',7,7)", [&unrelated]).unwrap();
+        }
+        let cost = subject_pending_cost(&connection, SUBJECT);
+        eprintln!("unrelated queues: size={size} pending={} vm_steps={} fullscan_steps={}",cost.0,cost.1,cost.2);
+        assert!(!cost.0);
+        assert_eq!(cost.2, 0);
+        costs.push(cost);
+    }
+    assert_eq!(costs[0], costs[1], "nonempty queues must retain subject-outer access");
+}
+
 #[test]
 fn legacy_membership_dirty_obligations_migrate_idempotently_to_verifier_rechecks() {
     let (source,key) = source();
@@ -1746,7 +1871,8 @@ fn dirty_work_before_saved_round_robin_cursor_is_serviced_in_the_same_slice() {
     let grant = append(&store,SUBJECT,GRANTED,fields());
     drain_authority(&store);
     let mut connection = store.connection.write();
-    connection.execute(/* sqlite-large-value: allow-for-now lv-hb7abee1d3c34 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+
+    connection.execute( /* sqlite-large-value: allow-for-now lv-hab15ab022db4 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
     let sequence: i64 = connection.query_row(
         "SELECT sequence FROM assistant_grant_queue_owners WHERE queue='dirty' AND owner=?1",
         [&grant.id], |row| row.get(0),
@@ -1783,7 +1909,7 @@ fn authenticated_proof_recheck_owner_finishes_despite_lower_and_between_id_arriv
         /* sqlite-large-value: allow-for-now lv-hc29bf21ad872 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES('!m/initial')", [],
     ).unwrap();
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hd8dbafedad29 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id],
+         /* sqlite-large-value: allow-for-now lv-ha3bff3300652 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&grant.id],
     ).unwrap();
     assert!(authority::subject_ready(&connection, SUBJECT).is_err());
     let mut lifted = false;
@@ -1792,7 +1918,8 @@ fn authenticated_proof_recheck_owner_finishes_despite_lower_and_between_id_arriv
             let id = format!("{prefix}/{slice:08}");
             assert!(id.as_str()<grant.id.as_str());
             connection.execute(
-                /* sqlite-large-value: allow-for-now lv-ha3bff3300652 owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&id],
+
+                 /* sqlite-large-value: allow-for-now lv-hac794c02d24a owner=smallclaims::store::assistant_grant_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_proof_rechecks VALUES(?1)", [&id],
             ).unwrap();
         }
         // Each visit commits independently: neither the owner turn nor the

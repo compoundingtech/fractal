@@ -101,6 +101,56 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
     (status,serde_json::from_slice(&bytes).unwrap(),bytes.len())
 }
 
+// Measurement, not a constant-work assertion: nonempty queues deliberately keep
+// subject-outer access, and the summary still checks each grant independently.
+#[tokio::test]
+async fn assistant_summary_nonempty_queue_work_by_grant_count() {
+    use smallclaims::store::assistant_grant_authority as authority;
+    for grants in [2, 15, 50] {
+        let fixture = fixture(SCOPES, true).await;
+        let subject = format!("custom/client/assistant-v1-{}", fixture.grant.strip_prefix("assistant-grant/").unwrap());
+        let template = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
+        for index in 1..grants {
+            let suffix = format!("{index:024x}");
+            let mut body = template.body.clone();
+            body["fields"]["grant_id"] = json!(format!("assistant-grant/{suffix}"));
+            body["fields"]["session_actor"] = json!(format!("{PRINCIPAL}/session/assistant-grant/{suffix}"));
+            body["fields"]["credential_hash"] = json!(format!("{index:064x}"));
+            fixture.state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/assistant-v1-{suffix}"), kind: GRANTED.into(),
+                actor: template.actor.clone(), body, ..Default::default()
+            }).unwrap();
+        }
+        {
+            let connection = fixture.state.store.connection.write();
+            connection.execute(
+
+                /* sqlite-large-value: allow-for-now lv-hdc5e142681af owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+                 INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                 SELECT 'summary-history-'||x,batch_id,subject,'test.history',origin,actor,'{}','[]',accepted_at_unix_ms
+                 FROM n CROSS JOIN claims WHERE claims.id=?1", [&template.id],
+            ).unwrap();
+            // Unrelated dirty work stays queued throughout the GET, exercising
+            // the nonempty-queue arm without fencing the request's grants.
+
+            connection.execute(/* sqlite-large-value: allow-for-now lv-h1d115332e959 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty VALUES('unrelated-summary-work')", []).unwrap();
+            assert!(authority::maintenance_pending(&connection).unwrap());
+        }
+        let payload = fixture.payload("summary", "");
+        let header = fixture.header(&payload, &fixture.attestor);
+        let before = smallclaims::sqlite::work::total();
+        let started = std::time::Instant::now();
+        let (status, value, _) = fixture.request("/v1/client/assistant/summary", Some(&header)).await;
+        let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+        fixture.state.assistant_receipts.flush().await.unwrap();
+        let work = smallclaims::sqlite::work::total() - before;
+        assert_eq!(status, StatusCode::OK, "{value}");
+        assert!(work.statements > 0, "SQL instrumentation must be enabled");
+        eprintln!("summary nonempty queue: grants={grants} history=10000 statements={} vm_steps={} wall_ms={wall_ms:.3} scope=process-global-through-receipt-flush",
+            work.statements, work.vm_steps);
+    }
+}
+
 #[tokio::test]
 async fn owner_policy_response_and_bearer_read_complete_single_base_but_fence_real_backlog() {
     use smallclaims::store::assistant_grant_authority as authority;
