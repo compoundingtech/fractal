@@ -846,9 +846,6 @@ WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
-CREATE INDEX IF NOT EXISTS claims_effect_step_index
-ON claims(json_extract(body,'$.fields.bound_step_run'), subject)
-WHERE kind IN ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved');
 CREATE INDEX IF NOT EXISTS claims_run_report_to_index
 ON claims(json_extract(body, '$.fields.report_to'), subject)
 WHERE kind IN ('mission-run.created','mission-run.report-to');
@@ -19468,6 +19465,7 @@ pub fn project_mission_run_update(
             .map_err(internal)?;
         if reopening_effect {
             transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-he1edfe7bd7b2 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
                 "UPDATE run_generations SET status='running', updated_at_unix_ms=?2
                  WHERE id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
                 params![run_id, claim.accepted_at_unix_ms.to_string()],

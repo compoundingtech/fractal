@@ -182,6 +182,7 @@ impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
         resource_references::create_schema(connection)?;
+        effects::create_schema(connection)?;
         // Legacy run stamps are projection metadata, not ownership of a shared URI.
         connection.execute(
             /* sqlite-large-value: allow-for-now lv-h379d33768384 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run=NULL, owner_generation=NULL, owner_step=NULL

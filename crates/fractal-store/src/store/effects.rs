@@ -4,6 +4,16 @@ use fractal_kernel::model::EffectOwner;
 pub use fractal_schema::effects::{EffectClass, EffectRecord};
 use fractal_schema::effects::{KIND_CONFIRMED, KIND_IN_FLIGHT, KIND_INTENDED, KIND_UNRESOLVED};
 
+pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h4d33c1e58bfd owner=fractal_store::store::effects TODO=chunk-or-reference-variable-columns */
+        "CREATE INDEX IF NOT EXISTS claims_effect_step_index
+         ON claims(json_extract(body,'$.fields.bound_step_run'), subject)
+         WHERE kind IN ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved');",
+    )?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum EffectAdmission {
     Originate(EffectRecord),
@@ -43,6 +53,7 @@ fn intended_tx(tx: &Connection, id: &str) -> Result<Option<EffectRecord>, Fracta
 /// A resolution clears only episodes in its causal past, never concurrent observations.
 pub(super) fn effect_is_unresolved_tx(tx: &Connection, subject: &str) -> rusqlite::Result<bool> {
     tx.query_row(
+        /* sqlite-large-value: allow-for-now lv-hb9a49c3cca1c owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
         "WITH RECURSIVE resolved(id) AS (
            SELECT p.value FROM claims r, json_each(r.predecessors) p
            WHERE r.subject=?1 AND r.kind='effect.confirmed'
@@ -59,7 +70,7 @@ pub(super) fn effect_is_unresolved_tx(tx: &Connection, subject: &str) -> rusqlit
 fn latest_tx(tx: &Connection, id: &str) -> Result<Option<(String, EffectRecord)>, FractalError> {
     let unresolved = effect_is_unresolved_tx(tx, id).map_err(internal)?;
     let row: Option<(String, String)> = tx.query_row(
-        /* sqlite-large-value: allow-for-now lv-h115b9b22ffe0 owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
+        /* sqlite-large-value: allow-for-now lv-h01c4365780a3 owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */
         &canonical_sql("SELECT kind,id FROM claims WHERE subject=?1 AND kind IN (?2,?3,?4,?5)
          AND (?6 OR kind!=?5)
          ORDER BY CASE WHEN kind=?4 AND json_extract(body,'$.fields.resolution')='human' THEN 5
