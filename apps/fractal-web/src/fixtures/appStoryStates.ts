@@ -62,8 +62,13 @@ export const createAppStoryFixture = (state: AppStoryState): AppStoryFixture => 
   const agentRef = appStoryAgent(state)
   const agent = fixtureProjections.agents.find((row) => row.id === agentRef)
   if (agent === undefined) throw new Error(`App story world has no agent ${agentRef}`)
+  // The repair answer is still streaming, so its seat reports harness work as a live seat does; a pane shows a run in
+  // progress only for a seat that reports an active turn.
+  const world = state === 'scripted-repair'
+    ? { ...fixtureProjections, agents: fixtureProjections.agents.map((row) => row.id === agentRef ? { ...row, harness_state: Option.some('working' as const) } : row) }
+    : fixtureProjections
   const source = fixtureSource({
-    world: fixtureProjections,
+    world,
     overrides: {
       conversation: {
         [agentRef]: state === 'loading'

@@ -78,7 +78,8 @@ export function useMissionsOnFocus() {
 
 /**
  * Native pull to refresh requests fresh snapshots, or opens a fresh socket when offline.
- * Only launches and an older daemon's inventories need HTTP reads.
+ * Only launches and an older daemon's inventories need HTTP reads. Thread readers on the
+ * screen reload too, since followed thread groups show no manual refresh.
  */
 export function useRefresh(keys: readonly OnDemand[] = [], readExtra?: () => Promise<void>) {
   const { status, loadLists, actions, feed, inventoryGranted } = useStore();
@@ -87,6 +88,7 @@ export function useRefresh(keys: readonly OnDemand[] = [], readExtra?: () => Pro
     setRefreshing(true);
     if (status !== 'online') actions.reconnect();
     else if (inventoryGranted) feed?.refresh();
+    actions.refreshThreads();
     void Promise.all([loadLists(keys), readExtra?.()]).finally(() => setRefreshing(false));
   }, [status, loadLists, actions, feed, inventoryGranted, readExtra, keys.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
   return <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.overlay1} />;

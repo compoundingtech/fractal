@@ -21677,6 +21677,7 @@ pub fn append_work_wake_message(
         idempotency_key: Some(idempotency_key),
     })?;
     Ok(MessageView {
+        delivery_thread: None,
         subject: message_subject,
         from: "daemon/runtime".into(),
         to: agent.into(),

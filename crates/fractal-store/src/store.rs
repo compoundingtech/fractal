@@ -263,6 +263,7 @@ pub use attention_snapshot::{
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
+pub mod inbox;
 pub mod attention_list;
 pub mod owner_lists;
 pub mod summary_list;
@@ -309,6 +310,12 @@ pub mod message_marks;
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
+pub mod thread_delivery;
+pub mod thread_links;
+pub mod thread_metadata;
+pub mod thread_rollout;
+#[cfg(test)]
+mod claim_commit_context_tests;
 #[cfg(test)]
 mod message_routing_tests;
 pub mod message_sent;
@@ -2416,6 +2423,8 @@ pub struct Store {
     pub fractal: Arc<FractalRuntime>,
     /// Daemon-local fallback for human questions, initialized before attention starts.
     pub question_principal_default: std::sync::OnceLock<String>,
+    /// Startup attestation of the reader rollout, with configured peers to check at each write.
+    thread_write_peers: std::sync::OnceLock<BTreeSet<String>>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
@@ -2921,6 +2930,7 @@ impl Store {
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2950,6 +2960,7 @@ impl Store {
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -2980,6 +2991,7 @@ impl Store {
             resource_observations: Default::default(),
             resource_clocks: Default::default(),
             question_principal_default: Default::default(),
+            thread_write_peers: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
@@ -5863,13 +5875,18 @@ impl Store {
         &self, subjects: BTreeSet<String>, index: u64, history: bool, claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
         let subjects = self.generic_status_subject_names_at(subjects, index)?;
-        self.status_for_subject_names_at(subjects, index, history, claims)
+        let mut response = self.status_for_subject_names_at(subjects, index, history, claims)?;
+        hide_thread_messages_from_generic_status(&mut response);
+        Ok(response)
     }
 
     pub fn generic_status_subject_names_at(
         &self, mut subjects: BTreeSet<String>, index: u64,
     ) -> Result<BTreeSet<String>> {
-        subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
+        subjects.retain(|subject| {
+            !fractal_schema::notice::is_reserved_subject(subject)
+                && !fractal_schema::threads::is_reserved_subject(subject)
+        });
         if subjects.is_empty() { return Ok(subjects); }
         let connection = self.readers.get();
         let mut query = connection.prepare_cached(
@@ -5879,7 +5896,11 @@ impl Store {
         for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
             Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
             let (subject,kind) = row?;
-            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+            if fractal_schema::notice::is_reserved_kind(&kind)
+                || fractal_schema::threads::is_reserved_kind(&kind)
+            {
+                subjects.remove(&subject);
+            }
         }
         Ok(subjects)
     }
@@ -5964,11 +5985,16 @@ impl Store {
     /// A serving reduction must omit the whole subject if reserved facts contributed to it.
     /// This does not change internal reductions or authoritative claim availability.
     pub fn generic_status_subject_visible_at(&self, subject: &str, cut: u64) -> Result<bool> {
-        if fractal_schema::notice::is_reserved_subject(subject) {
+        if fractal_schema::notice::is_reserved_subject(subject)
+            || fractal_schema::threads::is_reserved_subject(subject)
+        {
             return Ok(false);
         }
         let kinds = subject_kinds_at(&self.readers.get(), subject, cut)?;
-        Ok(!kinds.iter().any(|kind| fractal_schema::notice::is_reserved_kind(kind)))
+        Ok(!kinds.iter().any(|kind| {
+            fractal_schema::notice::is_reserved_kind(kind)
+                || fractal_schema::threads::is_reserved_kind(kind)
+        }))
     }
 
     /// Generic serving status must not reduce reserved facts into fields or claim identities.
@@ -5994,6 +6020,7 @@ impl Store {
             let connection = self.readers.get();
             let cut = selected_index(current_index(&connection)?, at).map_err(anyhow::Error::new)?;
             let mut excluded = BTreeSet::new();
+            let mut selected_thread = selected.is_some_and(fractal_schema::threads::is_reserved_subject);
             let status_query = if selected.is_some() {
                 "SELECT DISTINCT subject,kind FROM claims WHERE subject=?2 AND store_index<=?1"
             } else {
@@ -6002,19 +6029,31 @@ impl Store {
             let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hdacaab2c061c owner=fractal_store::store TODO=trace-statement-and-value-representation */ status_query)?;
             for row in query.query_map(params![cut,selected], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
                 let (subject,kind) = row?;
-                if fractal_schema::notice::is_reserved_subject(&subject) || fractal_schema::notice::is_reserved_kind(&kind) {
+                if fractal_schema::threads::is_reserved_record(&subject, &kind) {
+                    selected_thread |= selected == Some(subject.as_str());
+                    excluded.insert(subject);
+                } else if fractal_schema::notice::is_reserved_subject(&subject)
+                    || fractal_schema::notice::is_reserved_kind(&kind)
+                {
                     excluded.insert(subject);
                 }
+            }
+            if selected_thread {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "thread-unavailable", "the thread is unavailable",
+                )));
             }
             if selected.is_some_and(|s| fractal_schema::notice::is_reserved_subject(s) || excluded.contains(s)) {
                 return Err(anyhow::Error::new(FractalError::new(
                     "notices-unavailable", "reserved notice facts are unavailable through generic status",
                 ).with_detail("reason", "notices-unavailable")));
             }
-            self.status_at_view_for_names_in_snapshot(
+            let mut response = self.status_at_view_for_names_in_snapshot(
                 selected, owner, at, history,
                 StatusSubjects { names: None, excluded: Some(&excluded) }, claims,
-            )
+            )?;
+            hide_thread_messages_from_generic_status(&mut response);
+            Ok(response)
         })
     }
 
@@ -11901,6 +11940,8 @@ fn append_claim_tx_admitted(
         &assistant_body
     } else { body };
     let fields = body.get("fields").unwrap_or(body);
+    refuse_untyped_thread_message(kind, |field| fields.get(field).is_some())
+        .map_err(anyhow::Error::new)?;
     if authorization.is_none() {
         assistant_write::refuse_unverified(kind, actor, fields.get("from").and_then(Value::as_str),
             ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| fields.get(*key).is_some()))
@@ -12492,6 +12533,7 @@ pub(crate) fn message_view_from(
         status: field("status").unwrap_or_else(|| "sent".into()),
         title: field("title").or_else(|| child("title")),
         in_reply_to: field("in_reply_to").or_else(|| child("in-reply-to")),
+        delivery_thread: None,
         tags: actual
             .get("tags")
             .and_then(Value::as_array)
@@ -12916,6 +12958,15 @@ fn fold_latest_parsed_values(
         merge_actual_value(&mut merged, &kind, value);
     }
     Ok(any.then_some(Value::Object(merged)))
+}
+
+/// Keep private thread messages out of serving projections of the generic status fold.
+pub fn hide_thread_messages_from_generic_status(response: &mut StatusResponse) {
+    response.subjects.retain(|subject| {
+        !subject.subject.starts_with("message/")
+            || ![&subject.actual, &subject.desired].into_iter().flatten()
+                .any(fractal_schema::threads::message_has_relation)
+    });
 }
 
 /// Apply one eligible claim in canonical order, shared by history folds and the
@@ -22369,19 +22420,15 @@ pub fn apply_effective_step_state_with_owner(
         .assigned_to
         .as_deref()
         .is_some_and(|person| person.starts_with("person/"))
-    {
-        if let Some(ask) = person_work::request(connection, &view.subject)
+        && let Some(ask) = person_work::request(connection, &view.subject)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
-        {
-            if matches!(view.status.as_str(), "ready" | "pending")
-                && !person_work::current(connection, &ask, snapshot_unix_ms)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
-            {
-                view.status = "cancelled".into();
-                view.blocked_reason =
-                    Some("the requester, originating attempt or owning run ended".into());
-            }
-        }
+        && matches!(view.status.as_str(), "ready" | "pending")
+        && !person_work::current(connection, &ask, snapshot_unix_ms)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+    {
+        view.status = "cancelled".into();
+        view.blocked_reason =
+            Some("the requester, originating attempt or owning run ended".into());
     }
     let generation_id = generation_id_from_subject(&view.generation);
     if is_terminal_run_state(&run_status)
@@ -24048,15 +24095,37 @@ pub fn append_claim_with_subject_fences(
     append_claim_with_commit_context(graph, input, fence, event_runtime, expected_subjects, observer_completion, Default::default())
 }
 
+/// These fields belong to the typed thread writer. Local ordinary sends cannot set them.
+pub(crate) fn refuse_untyped_thread_message(
+    kind: &str,
+    has_field: impl Fn(&str) -> bool,
+) -> Result<(), FractalError> {
+    if kind == "message.sent"
+        && fractal_schema::threads::MESSAGE_RELATION_FIELDS
+            .iter().any(|field| has_field(field))
+    {
+        return Err(FractalError::new("thread-delivery-required", "use a typed thread message operation"));
+    }
+    Ok(())
+}
+
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
 pub type ClaimFieldPreparation<'a> = dyn Fn(&Connection, &ClaimInput)
     -> Result<BTreeMap<String, Value>, FractalError> + Sync + 'a;
 /// Writes that belong with a newly appended claim, in its transaction; a replay runs none.
 pub type ClaimFollowUp<'a> = dyn Fn(&Transaction<'_>, &ClaimRecord) -> Result<(), FractalError> + Sync + 'a;
+pub struct ClaimSubjectSnapshot {
+    pub revision: Option<String>,
+    pub predecessors: Vec<String>,
+}
+pub type ClaimSubjectSnapshotReader<'a> = dyn Fn(&Connection) -> Result<ClaimSubjectSnapshot, FractalError> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
     pub signature: Option<&'a str>,
+    /// Already-attached secondary effect operation (id, digest), only for the
+    /// transaction-local seam. The ordinary fenced writer derives its own operation.
+    pub effect_operation: Option<(&'a str, &'a str)>,
     // Only retire_agent supplies the declaration, owner and rollout admission together.
     pub retirement_writer: bool,
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
@@ -24070,6 +24139,11 @@ pub struct ClaimCommitContext<'a> {
     pub all_run_projections: bool,
     /// Derive request fields before hashing, preserving the base operation digest format.
     pub prepare_request_fields: Option<&'a ClaimFieldPreparation<'a>>,
+    /// Current authority required for both a new append and replay of an existing receipt.
+    pub authority: Option<&'a ClaimAdmission<'a>>,
+    /// A typed domain supplies its revision and all causal parents from one admitted snapshot.
+    pub subject_snapshot: Option<&'a ClaimSubjectSnapshotReader<'a>>,
+    pub thread_delivery: bool,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Dedicated client operations publish a native receipt in the same transaction.
@@ -24084,7 +24158,7 @@ pub struct ClaimCommitContext<'a> {
 
 fn claim_operation_outcome_tx(
     transaction: &Transaction<'_>,
-    operation: Option<&(String, String)>,
+    operation: Option<(&str, &str)>,
 ) -> Result<Option<ClaimRecord>, FractalError> {
     if let Some((operation_id, request_digest)) = operation {
         if let Some((stored_digest, canonical_claim, state)) =
@@ -24095,16 +24169,16 @@ fn claim_operation_outcome_tx(
                     "idempotency-conflict",
                     "the replicated operation has conflicting requests",
                 )
-                .with_detail("operation_id", operation_id.clone()));
+                .with_detail("operation_id", operation_id));
             }
-            if stored_digest != *request_digest {
+            if stored_digest != request_digest {
                 return Err(FractalError::new(
                     "idempotency-mismatch",
                     "the idempotency key already identifies a different request",
                 )
-                .with_detail("operation_id", operation_id.clone())
+                .with_detail("operation_id", operation_id)
                 .with_detail("stored_digest", stored_digest)
-                .with_detail("request_digest", request_digest.clone()));
+                .with_detail("request_digest", request_digest));
             }
             let claim = claim_by_id_tx(transaction, &canonical_claim)
                 .map_err(internal)?
@@ -24126,7 +24200,89 @@ pub fn append_claim_with_commit_context(
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
-    let admission = |connection: &Connection| {
+    claim_commit_preflight(input, &context)?;
+    #[cfg(any(test, feature = "test-support"))]
+    let older_build = context.as_older_build;
+    #[cfg(not(any(test, feature = "test-support")))]
+    let older_build = false;
+    if !older_build
+        && (local_retention(&input.kind)
+            || local_code(input)
+            || (input.actor.is_none() && system_local_retention(&input.kind)))
+    {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
+        let connection = graph.readers.get();
+        claim_commit_admission(&connection, input, &context)?;
+        let input = identities::normalize_claim_input(&connection, input)?;
+        return append_local_observation_fenced(graph, &input, event_runtime);
+    }
+    if latest_retention(&input.kind) {
+        if context.then.is_some() {
+            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
+        }
+        let connection = graph.readers.get();
+        claim_commit_admission(&connection, input, &context)?;
+        let input = identities::normalize_claim_input(&connection, input)?;
+        return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
+    }
+    // Probe before consuming callbacks or deriving persisted request fields. On pending
+    // work the executor returns the first writer before taking the projection gate.
+    let run_fence = if context.all_run_projections || context.run_projection_subjects.len() > 1 {
+        Some(RunMutationFence::All)
+    } else {
+        context.run_projection_subjects.first().map(|subject| RunMutationFence::Run(subject))
+    };
+    run_fence::execute(graph, run_fence, Some(run_fence::API_TURN_BUDGET),
+        |transaction| execute_claim_commit_tx(
+            graph, transaction, input, None, fence, event_runtime, expected_subjects,
+            observer_completion, None, context,
+        ))
+}
+
+/// Append a typed replicated claim inside the caller's transaction and batch.
+/// This shares admission with the fenced writer without acquiring another writer lock.
+pub(crate) fn append_claim_with_commit_context_tx(
+    graph: &GraphStore,
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+    forced_batch: Option<&str>,
+    context: ClaimCommitContext<'_>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    claim_commit_preflight(input, &context)?;
+    execute_claim_commit_tx(
+        graph, transaction, input, forced_batch, None, None, None, None,
+        context.effect_operation, context,
+    )
+}
+
+fn claim_commit_preflight(
+    input: &ClaimInput,
+    context: &ClaimCommitContext<'_>,
+) -> Result<(), FractalError> {
+    if !context.thread_delivery {
+        refuse_untyped_thread_message(&input.kind, |field| input.fields.contains_key(field))?;
+    }
+    if context.assistant.is_none() {
+        assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
+            input.fields.get("from").and_then(Value::as_str),
+            ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
+    }
+    // Retirement alone validates in its serialized admission after the operation replay
+    // check. Its successor eligibility refusal must win over a generic field-reference
+    // error, while a changed idempotency key must still report a mismatch first.
+    if !context.retirement_writer {
+        validate_claim_input(input)?;
+    }
+    Ok(())
+}
+
+fn claim_commit_admission(
+    connection: &Connection,
+    input: &ClaimInput,
+    context: &ClaimCommitContext<'_>,
+) -> Result<(), FractalError> {
         message_expiry::validate_actor(&input.kind, input.actor.as_deref())?;
         if input.kind == message_expiry::KIND && !context.expiry_writer {
             return Err(FractalError::new("invalid-message-expiry", "expiry requires runtime receipt admission"));
@@ -24157,53 +24313,22 @@ pub fn append_claim_with_commit_context(
         }
         retirements::admit_mail_claim(connection, input)?;
         Ok(())
-    };
-    if context.assistant.is_none() {
-        assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
-            input.fields.get("from").and_then(Value::as_str),
-            ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"].iter().any(|key| input.fields.contains_key(*key)))?;
-    }
-    // Retirement alone validates in its serialized admission after the operation replay
-    // check. Its successor eligibility refusal must win over a generic field-reference
-    // error, while a changed idempotency key must still report a mismatch first.
-    if !context.retirement_writer {
-        validate_claim_input(input)?;
-    }
-    #[cfg(any(test, feature = "test-support"))]
-    let older_build = context.as_older_build;
-    #[cfg(not(any(test, feature = "test-support")))]
-    let older_build = false;
-    if !older_build
-        && (local_retention(&input.kind)
-            || local_code(input)
-            || (input.actor.is_none() && system_local_retention(&input.kind)))
-    {
-        if context.then.is_some() {
-            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
-        }
-        let connection = graph.readers.get();
-        admission(&connection)?;
-        let input = identities::normalize_claim_input(&connection, input)?;
-        return append_local_observation_fenced(graph, &input, event_runtime);
-    }
-    if latest_retention(&input.kind) {
-        if context.then.is_some() {
-            return Err(FractalError::new("internal", format!("{} is local; it cannot carry follow-up writes", input.kind)));
-        }
-        let connection = graph.readers.get();
-        admission(&connection)?;
-        let input = identities::normalize_claim_input(&connection, input)?;
-        return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
-    }
-    // Probe before consuming callbacks or deriving persisted request fields. On pending
-    // work the executor returns the first writer before taking the projection gate.
-    let run_fence = if context.all_run_projections || context.run_projection_subjects.len() > 1 {
-        Some(RunMutationFence::All)
-    } else {
-        context.run_projection_subjects.first().map(|subject| RunMutationFence::Run(subject))
-    };
-    run_fence::execute(graph, run_fence, Some(run_fence::API_TURN_BUDGET),
-        |transaction| -> Result<(ClaimRecord, bool), FractalError> {
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_claim_commit_tx(
+    graph: &GraphStore,
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+    forced_batch: Option<&str>,
+    fence: Option<&crate::mailbox::Fence>,
+    event_runtime: Option<&str>,
+    expected_subjects: Option<&BTreeMap<String, String>>,
+    observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
+    effect_operation: Option<(&str, &str)>,
+    context: ClaimCommitContext<'_>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    let original_input = input;
             let normalized_input = if context.signature.is_none() {
                 identities::normalize_claim_input(transaction, input)?
             } else { std::borrow::Cow::Borrowed(input) };
@@ -24224,7 +24349,16 @@ pub fn append_claim_with_commit_context(
                 prepared_input.fields = prepare(transaction, input)?;
                 &prepared_input
             } else { input };
-            let operation = identities::claim_operation(input)?;
+            if let Some(authority) = context.authority {
+                authority(transaction)?;
+            }
+            let derived_operation = if effect_operation.is_none() {
+                identities::claim_operation(input)?
+            } else {
+                None
+            };
+            let operation = effect_operation.or_else(|| derived_operation.as_ref()
+                .map(|(id, digest)| (id.as_str(), digest.as_str())));
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }
@@ -24269,12 +24403,13 @@ pub fn append_claim_with_commit_context(
                     && !(matches!(input.kind.as_str(), "message.delivered" | "message.read")
                         && message_expiry::exists(transaction, &input.subject).map_err(internal)?)
             } else { false };
-            if let Some(claim) = claim_operation_outcome_tx(transaction, operation.as_ref())? {
+            if let Some(claim) = claim_operation_outcome_tx(transaction, operation)? {
                 return Ok((claim, false));
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.
-            admission(transaction)?;
+            // Admission intentionally uses the original request, before identity normalization.
+            claim_commit_admission(transaction, original_input, &context)?;
             if let Some(expected_subjects) = expected_subjects {
                 for (subject, expected) in expected_subjects {
                     let physical_subject = identities::resolve_reference_conn(transaction, subject)?;
@@ -24297,6 +24432,8 @@ pub fn append_claim_with_commit_context(
                             "SELECT revision FROM arrangements WHERE subject=?1 AND created=1 AND retired=0",
                             [subject], |row| row.get::<_, String>(0),
                         ).optional().map_err(internal)?
+                    } else if fractal_schema::threads::is_reserved_subject(subject) {
+                        thread_metadata::metadata_revision_at(transaction, subject)?
                     } else {
                         latest_claim_id_tx(transaction, subject).map_err(internal)?
                     };
@@ -24330,8 +24467,12 @@ pub fn append_claim_with_commit_context(
                     ));
                 }
             }
+            let subject_snapshot = context.subject_snapshot
+                .map(|snapshot| snapshot(transaction)).transpose()?;
             if let Some(expected) = &input.expected_subject {
-                let actual = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
+                let actual = if let Some(snapshot) = &subject_snapshot {
+                    snapshot.revision.clone()
+                } else if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                     transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_,String>(0)).optional().map_err(internal)?
                 } else {
                     latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
@@ -24449,12 +24590,16 @@ pub fn append_claim_with_commit_context(
             {
                 return message_marks::record_tx(transaction, &graph.origin, &input.subject, &input.kind, &recipient);
             }
-            let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
-                transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?
+            let mut predecessors = if let Some(snapshot) = subject_snapshot {
+                snapshot.predecessors
             } else {
-                latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
+                let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
+                    transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?
+                } else {
+                    latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
+                };
+                predecessor.into_iter().collect::<Vec<_>>()
             };
-            let mut predecessors = predecessor.into_iter().collect::<Vec<_>>();
             // A placement handoff explicitly cites its local runtime and peer stop proof.
             // Keep same-subject evidence as causal links even when a newer declaration
             // displaced the runtime branch from the selected subject head.
@@ -24504,7 +24649,7 @@ pub fn append_claim_with_commit_context(
                 input.actor.as_deref(),
                 &body,
                 &predecessors,
-                None,
+                forced_batch,
                 false,
             )
             .map_err(claim_append_error)?;
@@ -24540,7 +24685,6 @@ pub fn append_claim_with_commit_context(
                 ).map_err(internal)?;
             }
             Ok(outcome)
-        })
 }
 
 pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {

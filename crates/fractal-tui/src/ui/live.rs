@@ -387,7 +387,13 @@ impl AnswerTiming {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Worker results transfer owned receipts to the UI without an extra allocation"
+)]
 enum Fetched {
+    ThreadWrite(u64, super::threads_live::Receipt),
+    ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
     Protocol(super::content::Key, u16, u16, super::content::Encoding),
@@ -644,6 +650,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut resources_stale = true;
     let mut resources_reading = false;
     let mut resources_generation = 0_u64;
+    let mut thread_interests = Vec::new();
     // Whether the feed was last told to follow the missions window, and until when the last time
     // one was on screen keeps it followed.
     let mut missions_sent = false;
@@ -743,6 +750,8 @@ pub fn run(context: Context) -> Result<()> {
                             version = %crate::version::short(crate::version::now()), endpoint = ?client);
                     }
                     resources_generation += 1;
+                    ui.threads.enable(false);
+                    thread_interests.clear();
                     resources_stale = true;
                     extras.inventory_supported = None;
                     extras.inventory_partial.clear();
@@ -758,6 +767,25 @@ pub fn run(context: Context) -> Result<()> {
                     body_requested.clear();
                     changed = true;
                     ui.reads.connected(Instant::now());
+                }
+                feed::Update::ThreadSupport { available, access, upgrade_required } => {
+                    ui.threads.enable(available);
+                    ui.threads.set_access(access);
+                    if upgrade_required {
+                        ui.flash_as(super::Severity::Warn, "Upgrade the connected Fractal to use threads. Your pairing is kept.");
+                    }
+                    if available { ui.threads.model(&model); }
+                    changed = true;
+                }
+                feed::Update::ThreadWindow { interest, snapshot, replace, rows, removes, order, has_more } => {
+                    if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
+                    ui.threads.window(interest, snapshot, replace, rows, removes, order, has_more);
+                    changed = true;
+                }
+                feed::Update::ThreadWindowFailed { interest, code, message, permanent } => {
+                    if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
+                    ui.threads.failure(interest, code, message, permanent);
+                    changed = true;
                 }
                 feed::Update::InventorySupport { granted, member_build } => {
                     extras.inventory_supported = Some(granted);
@@ -858,6 +886,7 @@ pub fn run(context: Context) -> Result<()> {
                     match window {
                         Window::Attention => {
                             model.now = collection;
+                            ui.threads.model(&model);
                             extras.attention_live = true;
                         }
                         Window::Missions => {
@@ -872,7 +901,10 @@ pub fn run(context: Context) -> Result<()> {
                         Window::Inventory(inventory) => match inventory {
                             Inventory::Machines => model.machines = collection,
                             Inventory::Devices => model.devices = collection,
-                            Inventory::Sessions => model.sessions = collection,
+                            Inventory::Sessions => {
+                                model.sessions = collection;
+                                ui.threads.model(&model);
+                            }
                             Inventory::Terminals => {
                                 ui.resource_sidebar.terminals = terminal_rows(collection.items);
                                 ui.resource_sidebar.terminals_has_more = collection.truncated;
@@ -1132,6 +1164,17 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
+                Fetched::ThreadEarlier(generation, id, page) => {
+                    if generation == resources_generation
+                        && let Some(error) = ui.threads.earlier_loaded(&id, page) {
+                        ui.flash_as(super::Severity::Error, error);
+                    }
+                }
+                Fetched::ThreadWrite(generation, receipt) => {
+                    if generation == resources_generation {
+                        ui.complete_thread(receipt);
+                    }
+                }
                 Fetched::Notice(notice) => ui.flash(notice),
                 Fetched::AlertOutcome(id, outcome) => {
                     if let Err(error) = outcome {
@@ -1148,7 +1191,10 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 Fetched::Session(id, outcome) => match outcome {
-                    Ok(session) => model.add_opened_session(*session),
+                    Ok(session) => {
+                        model.add_opened_session(*session);
+                        ui.threads.model(&model);
+                    },
                     Err(message) => {
                         if opens.remove(&id).is_some() {
                             super::slo::METRICS.add("open_cannot_load", 1);
@@ -1207,7 +1253,6 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Fetched::Said(query, outcome) => {
                     ui.said = Some((query, outcome));
-                    changed = true;
                 }
                 Fetched::Inventory { generation, result } => {
                     if generation != resources_generation || extras.inventory_supported != Some(false) { continue; }
@@ -1227,7 +1272,10 @@ pub fn run(context: Context) -> Result<()> {
                             match inventory {
                                 Inventory::Machines => model.machines = rows,
                                 Inventory::Devices => model.devices = rows,
-                                Inventory::Sessions => model.sessions = rows,
+                                Inventory::Sessions => {
+                                    model.sessions = rows;
+                                    ui.threads.model(&model);
+                                }
                                 _ => unreachable!(),
                             }
                         },
@@ -1485,6 +1533,39 @@ pub fn run(context: Context) -> Result<()> {
                 said_typed = None;
             }
             _ => {}
+        }
+        let wanted_threads = ui.threads.interests(&ui.main_pane());
+        if wanted_threads != thread_interests {
+            ui.threads.keep_windows(&wanted_threads);
+            let _ = commands.send(Command::Threads(wanted_threads.clone()));
+            thread_interests = wanted_threads;
+            changed = true;
+        }
+        for earlier in ui.threads.take_earlier() {
+            let reader = client.clone();
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let result = earlier.read(&reader).await;
+                let _ = tx.send(Fetched::ThreadEarlier(generation, earlier.id, result));
+            });
+        }
+        for mut write in ui.threads.writes() {
+            if !extras.live {
+                ui.complete_thread(write.offline());
+                continue;
+            }
+            let writer = client.clone();
+            if let Err(error) = ui.threads.bind(&mut write, writer.clone()) {
+                ui.complete_thread(write.not_sent(error));
+                continue;
+            }
+            let tx = fetched_tx.clone();
+            let generation = resources_generation;
+            runtime.spawn(async move {
+                let receipt = write.perform(writer).await;
+                let _ = tx.send(Fetched::ThreadWrite(generation, receipt));
+            });
         }
         // Every conversation on screen rides the feed's socket (the focused one first): st
         // pushes each change, so nothing here reads one again on a timer.
@@ -1889,11 +1970,6 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Effect::Send {
                     ref agent,
-                    ref text,
-                    ..
-                }
-                | Effect::Discuss {
-                    to: ref agent,
                     ref text,
                     ..
                 } => {
@@ -3069,32 +3145,6 @@ async fn perform(
             )
             .await?;
             Ok(("Reply sent".into(), None))
-        }
-        Effect::Discuss { to, title, text } => {
-            let (to, session) = (
-                to.clone(),
-                model
-                    .agents()
-                    .find(|candidate| candidate.header.id == to)
-                    .and_then(|agent| agent.current_session_id.clone()),
-            );
-            let id = send_message(
-                client,
-                &to,
-                text,
-                Some(title),
-                None,
-                session,
-                Vec::new(),
-                Vec::new(),
-                sent,
-                latest_snapshot(model),
-            )
-            .await?;
-            Ok((
-                "Sent; the reply will show here and in their conversation".into(),
-                id,
-            ))
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
@@ -4608,14 +4658,9 @@ mod tests {
         assert_eq!(
             store.index().unwrap(),
             reply_index,
-            "threaded replies keep the same retry receipt"
+            "ordinary conversation replies keep the same retry receipt"
         );
         for effect in [
-            Effect::Discuss {
-                to: "agent/example/worker".into(),
-                title: "Copper discussion".into(),
-                text: "Record the evidence".into(),
-            },
             Effect::CreateTerminal {
                 name: "Copper shell".into(),
             },

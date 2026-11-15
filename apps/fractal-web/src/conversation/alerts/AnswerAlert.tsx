@@ -98,8 +98,11 @@ const InlineCode = ({ text }: { readonly text: string }) => <>{text.split(/`([^`
 
 const Command = ({ children }: { readonly children: React.ReactNode }) => <code {...stylex.props(styles.command)}>{children}</code>
 
-/** Why an alert cannot be answered here and where it can be, with the exact command when there is one. */
-const elsewhere = (alert: Native.Attention, step: string | undefined): React.ReactNode => {
+/**
+ * Why an alert cannot be answered here and where it can be, with the exact command when there is one. An
+ * informational report that offers no action asks nothing, so it says nothing about answering.
+ */
+const elsewhere = (alert: Native.Attention, step: string | undefined): React.ReactNode | undefined => {
   switch (alert.attention_kind) {
     case 'harness-login': return 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
     case 'model-drift': return 'Nothing to answer: these agents keep working on another model. This clears by itself once each runs its declared model again.'
@@ -107,11 +110,13 @@ const elsewhere = (alert: Native.Attention, step: string | undefined): React.Rea
     case 'fault': return step === undefined
       ? <>This is a fault to act on, not a question. Run <Command>fractal alerts</Command> to see what it offers.</>
       : <>This is a fault to act on, not a question. Retry it with <Command>fractal work retry {step}</Command>.</>
-    default: return <>The web can't answer this kind of alert yet. Answer it with <Command>fractal alerts</Command>.</>
+    default: return alert.actions.length === 0 ? undefined : <>The web can't answer this kind of alert yet. Answer it with <Command>fractal alerts</Command>.</>
   }
 }
 
 const READ_ONLY = <>This device is read-only, so it can't answer here. Answer it from a device with control access, or with <Command>fractal alerts</Command>.</>
+/** While disconnected, or before this device's grants are read: the same "Updates paused" the threads show. */
+export const ANSWERS_PAUSED = 'Updates paused. Answer once Fractal reconnects.'
 
 type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
 
@@ -119,6 +124,7 @@ type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertAction
 export const AnswerAlert = ({
   alert,
   onAct,
+  paused = false,
   now = Date.now(),
   density = 'docked',
   pager,
@@ -128,9 +134,12 @@ export const AnswerAlert = ({
   focusRef,
   onOpenRef,
   opensRef = () => true,
+  context,
 }: {
   readonly alert: Native.Attention
   readonly onAct?: Act
+  /** Answers wait for the connection: controls show disabled with `ANSWERS_PAUSED`, never the read-only notice. */
+  readonly paused?: boolean
   readonly now?: number
   readonly density?: DecisionDensity
   readonly pager?: DecisionPosition
@@ -143,6 +152,8 @@ export const AnswerAlert = ({
   readonly onOpenRef?: (ref: string) => void
   /** Which refs that can open; any other stays a chip to copy. */
   readonly opensRef?: (ref: string) => boolean
+  /** The surface showing this alert, prefixed to its landmark name. */
+  readonly context?: string
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
   const choices = alertChoices(alert)
@@ -194,11 +205,12 @@ export const AnswerAlert = ({
     : stuck ? { tone: 'progress' as const, text: 'This asks you to pick one of its answers, so your words can\'t be sent. Clear them to send.' }
       : movedToWords ? { tone: 'progress' as const, text: answer?.key === 'words' ? 'Your words will be sent as the answer.' : `Your words go with “${answer?.label}”.` }
         : undefined
+  const unavailable = choices === null ? elsewhere(alert, step) : undefined
   // A new revision may ask something new: the card starts over, so a choice made on the old one never lets Enter answer this one.
   return <DecisionCard
     key={`${alert.id}\u0000${alert.revision}`}
     density={density}
-    label={alert.title}
+    label={context === undefined ? alert.title : `${context}: ${alert.title}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[from, KIND_WORDS[alert.attention_kind] ?? 'Alert', ...(step ? [`step ${step}`] : []), `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`, ...(deadline ? [deadline] : [])]}
     heading={plain ? <InlineCode text={question} /> : headingText}
@@ -228,7 +240,7 @@ export const AnswerAlert = ({
     {...(parts.dismiss === undefined ? {} : {
       dismiss: { label: armed ? `Confirm ${parts.dismiss.label.toLowerCase()}` : parts.dismiss.label, onPress: () => { if (armed) send(parts.dismiss!); else arm() } },
     })}
-    {...(choices === null ? { unavailable: elsewhere(alert, step) } : onAct === undefined ? { unavailable: READ_ONLY } : {})}
+    {...(unavailable !== undefined ? { unavailable } : choices === null ? {} : paused ? { unavailable: ANSWERS_PAUSED } : onAct === undefined ? { unavailable: READ_ONLY } : {})}
     {...(status === undefined ? {} : { status })}
     {...(pager === undefined ? {} : { pager })}
     {...(onFold === undefined ? {} : { onFold })}

@@ -101,6 +101,36 @@ test('aborted legacy signals use AbortError with and without global DOMException
     assert.equal(fetches, 0);
 });
 
+test('thread HTTP reads honor portable AbortSignals before and after transport', async () => {
+    const portable = () => {
+        const controller = new AbortController();
+        Object.defineProperties(controller.signal, { throwIfAborted: { value: undefined }, reason: { value: undefined } });
+        return controller;
+    };
+    const duringRead = portable();
+    let fetches = 0;
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async (_url, options) => {
+            fetches++;
+            assert.equal(options.signal, duringRead.signal);
+            return {
+                ok: true,
+                json: async () => {
+                    duringRead.abort();
+                    return { api_version: 'st3.client.v0', snapshot, value: { id: 'thread/one' } };
+                },
+            };
+        },
+    });
+    const beforeRead = portable();
+    beforeRead.abort();
+    await assert.rejects(client.threadGet('thread/one', { signal: beforeRead.signal }), { name: 'AbortError' });
+    assert.equal(fetches, 0);
+    await assert.rejects(client.threadGet('thread/one', { signal: duringRead.signal }), { name: 'AbortError' });
+    assert.equal(fetches, 1);
+});
+
 test('actual delayed WebSocket upgrade distinguishes readiness and contains malformed frames', async t => {
     const http = require('node:http');
     const { once } = require('node:events');
@@ -314,6 +344,17 @@ test('commands windows use existing snapshot and changes frames with resource di
     assert.deepEqual(changed.items, [completed]);
 });
 
+test('thread reads reject path segments outside the daemon ID grammar before fetching', async () => {
+    const client = new FractalClient({
+        baseUrl: 'https://example.test',
+        fetchImpl: async () => assert.fail('invalid thread ID reached transport'),
+    });
+    for (const id of ['thread/..', 'thread/a/b', 'thread/%2f', 'thread/', 'thread/é', 'x'.repeat(129)]) {
+        await assert.rejects(() => client.threadGet(id), /Invalid thread identifier/);
+        await assert.rejects(() => client.threadTimeline(id), /Invalid thread identifier/);
+    }
+});
+
 test('every HTTP API keeps cancellation in transport options, including all manifest reads and actions', async () => {
     const manifest = require('../../../docs/st3/client-v0/schemas/operations.json');
     const methodName = id => {
@@ -328,6 +369,9 @@ test('every HTTP API keeps cancellation in transport options, including all mani
             case 'device-command.get': return ['device-command/example', { wait: true }, options];
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': case 'usage-hub.quota': return [options];
             case 'arrangements.list': case 'read-positions.list': return ['person/example', {}, options];
+            case 'thread.get': return ['thread/example', options];
+            case 'thread.timeline': return ['thread/example', {}, options];
+            case 'thread.list': return [{ agent_id: 'agent/example' }, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
             case 'arrangements.memberships': return ['example', 'arrangement-id', 'person/example', {}, options];
             case 'conversation.search': return ['needle', {}, options];

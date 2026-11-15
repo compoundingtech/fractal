@@ -103,7 +103,7 @@ class Gateway {
       if (this.abortSend) throw new TypeError('Failed to fetch')
       if (this.failSend) return new Response(JSON.stringify({
         api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unavailable',
-        message: 'Forced send outage', retryable: true, request_id: 'request/forced', details: {},
+        message: 'Forced send outage', retryable: true, request_id: 'request/forced', details: { applied: 'none' },
       }), { status: 503, headers: { 'content-type': 'application/json' } })
       return new Response(JSON.stringify({ api_version: 'st3.client.v0', snapshot, value: {
         kind: 'action-result', action_id: action.id, operation_id: 'operation/send',
@@ -653,7 +653,6 @@ describe('ConversationPane composer/send binding', () => {
   it.each([
     { echoFirst: false, affectedId: undefined },
     { echoFirst: true, affectedId: undefined },
-    { echoFirst: false, affectedId: 'message/gateway-assigned' },
   ])('keeps the own-send row and turn mounted through acknowledgement ($echoFirst, $affectedId)', async ({ echoFirst, affectedId }) => {
     // The real kit scroller runs against deterministic jsdom dimensions; browser replay
     // separately checks measured row geometry in a fully styled lane. Only the lane is
@@ -707,6 +706,18 @@ describe('ConversationPane composer/send binding', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps an acknowledgement for a different message unconfirmed on its original row', async () => {
+    await prepareSendPane()
+    gateway!.sendMessageId = 'message/gateway-assigned'
+    await submitDraft()
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
+    expect(userRows()).toHaveLength(1)
+    expect(userRows()[0]!.textContent).toContain('hello')
+    expect(container.querySelector('[data-testid="send-unconfirmed"]')!.textContent).toContain('Not confirmed yet')
+    expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
+    expect(gateway!.actions).toHaveLength(1)
+  })
+
   it('keeps the Sent row across a newer read that omits it (Fractal #1977), with no resend', async () => {
     await prepareSendPane()
     const send = vi.spyOn(live!.source.attachments!, 'send')
@@ -723,12 +734,12 @@ describe('ConversationPane composer/send binding', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it('retries two network failures and then succeeds with exactly one action per retry and the original key', async () => {
+  it('retries unconfirmed sends with one action per user retry and the original key', async () => {
     await prepareSendPane()
     const send = vi.spyOn(live!.source.attachments!, 'send')
     gateway!.abortSend = true
     await submitDraft()
-    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
     const firstKey = gateway!.actions[0]!.idempotency_key
     const rowId = userRows()[0]!.getAttribute('data-item-id')
     const sendRows = () => userRows().filter(row => row.getAttribute('data-item-id') === rowId)
@@ -736,8 +747,8 @@ describe('ConversationPane composer/send binding', () => {
       gateway!.conversationFrame(scratchSeat, [prompt(10, 'Previous prompt'), entry(11, 'Unrelated response')])
       live!.registry.refresh(live!.source.grants)
       await settle()
-      const retry = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-failure"] button')]
-        .find(button => button.textContent === 'Retry')
+      const retry = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-unconfirmed"] button')]
+        .find(button => button.textContent === 'Send again')
       expect(retry).toBeDefined()
       expect(retry!.disabled).toBe(false)
       let resolve!: () => void
@@ -760,13 +771,13 @@ describe('ConversationPane composer/send binding', () => {
       await until(() => sendRows()[0]?.getAttribute('data-send-state') === 'pending')
       expect(sendRows()[0]!.getAttribute('data-item-id')).toBe(rowId)
       resolve()
-      await until(() => sendRows()[0]?.getAttribute('data-send-state') === (attempt < 3 ? 'failed' : 'sent'))
+      await until(() => sendRows()[0]?.getAttribute('data-send-state') === (attempt < 3 ? 'unconfirmed' : 'sent'))
       expect(gateway!.actions.map(action => action.idempotency_key)).toEqual(Array(attempt + 1).fill(firstKey))
       expect(sendRows()).toHaveLength(1)
     }
   })
 
-  it('keeps a server refusal on its row and retries it with the original key', async () => {
+  it('keeps an explicitly unapplied server refusal on its row and retries it with the original key', async () => {
     await prepareSendPane()
     gateway!.failSend = true
     await submitDraft()
@@ -784,17 +795,19 @@ describe('ConversationPane composer/send binding', () => {
     expect(userRows()).toHaveLength(1)
   })
 
-  it('keeps network failure on the row, never in composer footer or status text', async () => {
+  it('keeps network ambiguity as a neutral row status with an available composer', async () => {
     await prepareSendPane()
     gateway!.abortSend = true
     await submitDraft()
-    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
     await settle()
-    expect(container.querySelector('[data-testid="send-failure"]')!.textContent).toContain("Couldn't send")
+    expect(container.querySelector('[data-testid="send-unconfirmed"]')!.textContent).toContain('Not confirmed yet')
+    expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
+    expect(container.querySelector('[data-testid="send-unconfirmed"]')!.getAttribute('role')).toBe('status')
     const footer = container.querySelector('textarea')!.closest('form')!
     expect(footer.textContent).not.toMatch(/failed|fetch|couldn't send/i)
     expect(container.querySelector('textarea')!.disabled).toBe(false)
-    const disclosure = container.querySelector<HTMLButtonElement>('[data-testid="send-failure"] button[aria-expanded]')!
+    const disclosure = container.querySelector<HTMLButtonElement>('[data-testid="send-unconfirmed"] button[aria-expanded]')!
     flushSync(() => disclosure.click())
     expect(paneText()).not.toContain('Failed to fetch')
     expect([...container.querySelectorAll('[role="status"]')].map(status => status.textContent).join(' '))
