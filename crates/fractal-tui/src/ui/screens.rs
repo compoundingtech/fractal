@@ -215,7 +215,12 @@ fn legend(entries: &[(&str, Color, &str)]) -> Vec<Line<'static>> {
 
 // --------------------------------------------------------------------- home
 
-pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> Listing {
+/// Now's list. `sending` names the episodes whose override is on its way to st.
+pub fn home_list(
+    world: &World,
+    closed: &std::collections::HashSet<String>,
+    sending: &std::collections::HashSet<String>,
+) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
     let mut attention = world
@@ -260,8 +265,14 @@ pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> L
         let mut second = vec![span("   ", theme::dim())];
         // A closed ask that resolved by itself takes the person's own answer from here too; the
         // hint leads, so a narrow list cuts the rest of the line, not the key.
-        if is_closed && auto_resolved_for(world, closed, &item.id).is_some_and(AutoResolved::overridable) {
-            second.push(span(format!("o {OVERRIDE_LABEL} · "), theme::fg(theme::ACCENT)));
+        match auto_resolved_for(world, closed, &item.id).filter(|_| is_closed) {
+            Some(ask) if sending.contains(&ask.episode) => {
+                second.push(span("sending your answer… · ", theme::fg(theme::ACCENT)));
+            }
+            Some(ask) if ask.overridable() => {
+                second.push(span(format!("o {OVERRIDE_LABEL} · "), theme::fg(theme::ACCENT)));
+            }
+            _ => {}
         }
         if let Some(waiting) = &item.waiting {
             second.push(span(format!("{waiting} · "), theme::dim()));
@@ -302,8 +313,9 @@ pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> L
         },
     );
     // What resolved by itself is listed below what is open, once the alerts have loaded: the
-    // person may still give their own answer for seven days.
-    let auto = world.auto_resolved.ready().filter(|list| !list.items.is_empty());
+    // person may still give their own answer for seven days. A read that stopped short says so
+    // even when it found none.
+    let auto = world.auto_resolved.ready().filter(|list| !list.items.is_empty() || !list.complete);
     if let (Some(list), ListState::Ready | ListState::Empty(_)) = (auto, &state) {
         if let ListState::Empty(none) = state {
             items.push(Item::Note(Line::from(span(format!(" ✓ {none}"), theme::fg(theme::GREEN)))));
@@ -315,7 +327,11 @@ pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> L
             color: theme::OVERLAY1,
         });
         for ask in &list.items {
-            let mut second = vec![span("   ", theme::dim()), span(format!("{} asked · ", ask.asker), theme::dim())];
+            let mut second = vec![span("   ", theme::dim())];
+            if sending.contains(&ask.episode) {
+                second.push(span("sending your answer… · ", theme::fg(theme::ACCENT)));
+            }
+            second.push(span(format!("{} asked · ", ask.asker), theme::dim()));
             second.push(match &ask.default {
                 Some(label) => span(format!("“{label}” applied"), theme::soft()),
                 None => span("timed out", theme::soft()),
@@ -381,11 +397,18 @@ pub fn auto_resolved_for<'w>(
     asks.iter().find(|ask| ask.episode == episode)
 }
 
-/// An auto-resolved ask, and the alternative marked while its chooser is open.
+/// An auto-resolved ask, and the state of the person's own answer to it.
 #[derive(Clone, Copy)]
 pub struct Overriding<'a> {
     pub ask: &'a AutoResolved,
+    /// The alternative marked while the chooser is open.
     pub chooser: Option<usize>,
+    /// The changes being written for a marked answer that requests them, and the cursor in them.
+    pub words: Option<(&'a str, usize)>,
+    /// Why the last Enter sent nothing.
+    pub error: Option<&'a str>,
+    /// The person's answer is on its way to st.
+    pub sending: bool,
 }
 
 /// What an auto-resolved ask leaves the person: `o` to give their own answer, its chooser (the
@@ -406,6 +429,10 @@ fn override_section(card: &mut Doc, overriding: Overriding<'_>, inner: usize) {
         );
         return;
     }
+    if overriding.sending {
+        card.wrap(&[run("Sending your answer…", theme::fg(theme::ACCENT))], inner);
+        return;
+    }
     if ask.alternatives.is_empty() {
         card.wrap(&[run("It names no other answer to give instead.", theme::dim())], inner);
         return;
@@ -415,22 +442,47 @@ fn override_section(card: &mut Doc, overriding: Overriding<'_>, inner: usize) {
         return;
     };
     card.section("your answer", None, inner);
-    for (index, (_, label)) in ask.alternatives.iter().enumerate() {
+    for (index, answer) in ask.alternatives.iter().enumerate() {
         let start = card.lines.len();
-        card.lines(super::alerts::option_lines(index == marked, true, index + 1, label, theme::text(), inner));
+        card.lines(super::alerts::option_lines(index == marked, true, index + 1, &answer.label, theme::text(), inner));
         if let Some(key) = char::from_digit(index as u32 + 1, 10) {
             for line in start..card.lines.len() {
                 card.targets.push(super::doc::Target { line, column: 0, width: inner as u16, hit: Hit::Key(key) });
             }
         }
     }
+    let needs_words = ask.alternatives.get(marked).is_some_and(|answer| answer.words);
+    if let Some((text, cursor)) = overriding.words {
+        card.blank();
+        words_box(
+            card,
+            &format!("what should change · {} reads this", ask.asker),
+            text,
+            Some(cursor),
+            "say what should change; Enter sends it with your answer",
+            None,
+            inner,
+        );
+    } else if needs_words {
+        card.wrap(&[run("   this answer needs your words: Enter opens a box for what should change", theme::dim())], inner);
+    }
+    if let Some(error) = overriding.error {
+        card.wrap(&[run(error, theme::fg(theme::RED))], inner);
+    }
     card.blank();
     card.wrap(&[run(override_copy(&ask.asker), theme::soft())], inner);
     card.blank();
-    card.buttons(&[
-        ("enter", "Send", Hit::Enter, theme::ACCENT),
-        ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
-    ]);
+    if overriding.words.is_some() {
+        card.buttons(&[
+            ("enter", "Send with these words", Hit::Enter, theme::ACCENT),
+            ("esc", "Back to the answers", Hit::Escape, theme::OVERLAY1),
+        ]);
+    } else {
+        card.buttons(&[
+            ("enter", if needs_words { "Write what should change" } else { "Send" }, Hit::Enter, theme::ACCENT),
+            ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
+        ]);
+    }
 }
 
 /// An auto-resolved ask's card on Now: what was asked, who asked, the default that applied and
@@ -464,8 +516,14 @@ fn auto_resolved_detail(world: &World, id: &str, width: usize, drafts: &Drafts<'
         None => card.field("applied", "nothing: it timed out without a default", inner, theme::soft()),
     }
     card.blank();
-    let chooser = drafts.overriding.filter(|overriding| overriding.ask.id == ask.id).and_then(|overriding| overriding.chooser);
-    override_section(&mut card, Overriding { ask, chooser }, inner);
+    let overriding = drafts.overriding.filter(|overriding| overriding.ask.id == ask.id).unwrap_or(Overriding {
+        ask,
+        chooser: None,
+        words: None,
+        error: None,
+        sending: false,
+    });
+    override_section(&mut card, overriding, inner);
     card.blank();
     doc.card(&format!("resolved · {} ago", ask.resolved), theme::SAPPHIRE, false, card, width);
     doc
@@ -522,13 +580,33 @@ pub fn link(doc: &mut Doc, prefix: &str, label: &str, subject: &str) {
 }
 
 fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, width: usize) {
+    words_box(
+        doc,
+        title,
+        drafts.text.unwrap_or(""),
+        drafts.editing.then_some(drafts.cursor),
+        placeholder,
+        Some(Hit::Composer),
+        width,
+    );
+}
+
+/// A box of words: `cursor` while it has the keys, the placeholder while it is empty, and `click`
+/// on every line of it.
+fn words_box(
+    doc: &mut Doc,
+    title: &str,
+    body: &str,
+    cursor: Option<usize>,
+    placeholder: &str,
+    click: Option<Hit>,
+    width: usize,
+) {
     let mut inner = Doc::new();
-    let body = drafts.text.unwrap_or("");
-    if body.is_empty() && !drafts.editing {
+    if body.is_empty() && cursor.is_none() {
         inner.line(Line::from(span(placeholder.to_owned(), theme::dim())));
     } else {
-        let at = drafts.editing.then_some(drafts.cursor);
-        for runs in super::edit::lines(body, at, theme::text()) {
+        for runs in super::edit::lines(body, cursor, theme::text()) {
             inner.lines(text::wrap(&runs, width.saturating_sub(4), &[], &[], None));
         }
         // What is wanted stays in view under the cursor until something is typed.
@@ -545,7 +623,7 @@ fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, 
     let start = doc.lines.len();
     doc.card(
         title,
-        if drafts.editing {
+        if cursor.is_some() {
             theme::ACCENT
         } else {
             theme::OVERLAY1
@@ -554,14 +632,15 @@ fn text_box(doc: &mut Doc, title: &str, drafts: &Drafts<'_>, placeholder: &str, 
         inner,
         width,
     );
-    let end = doc.lines.len();
-    for line in start..end {
-        doc.targets.push(super::doc::Target {
-            line,
-            column: 0,
-            width: width as u16,
-            hit: Hit::Composer,
-        });
+    if let Some(hit) = click {
+        for line in start..doc.lines.len() {
+            doc.targets.push(super::doc::Target {
+                line,
+                column: 0,
+                width: width as u16,
+                hit: hit.clone(),
+            });
+        }
     }
 }
 

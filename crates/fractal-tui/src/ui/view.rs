@@ -285,8 +285,17 @@ pub struct AutoResolved {
     /// Whether st still takes the person's own answer (`action_parameters["work.override"]`):
     /// a default applied and the seven days are not over.
     pub open: bool,
-    /// The request's named answers other than the default, as (id, label), in its order.
-    pub alternatives: Vec<(String, String)>,
+    /// The request's named answers other than the default, in its order.
+    pub alternatives: Vec<OverrideAnswer>,
+}
+
+/// A named answer the person may give instead of the default that applied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverrideAnswer {
+    pub id: String,
+    pub label: String,
+    /// It requests changes, which st takes only with the changes in words.
+    pub words: bool,
 }
 
 impl AutoResolved {
