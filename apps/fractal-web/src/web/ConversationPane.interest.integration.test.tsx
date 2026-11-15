@@ -83,6 +83,7 @@ class Gateway {
   readonly commands: CollectionCommand[] = []
   grantSend = false
   failSend = false
+  ambiguousSend = false
   abortSend = false
   snapshotFailure: string | undefined
   sendGate: Promise<void> | undefined
@@ -101,9 +102,10 @@ class Gateway {
       this.echoId = this.sendMessageId ?? `message/${[...digest.slice(0, 8)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`
       await this.sendGate
       if (this.abortSend) throw new TypeError('Failed to fetch')
-      if (this.failSend) return new Response(JSON.stringify({
+      if (this.failSend || this.ambiguousSend) return new Response(JSON.stringify({
         api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unavailable',
-        message: 'Forced send outage', retryable: true, request_id: 'request/forced', details: { applied: 'none' },
+        message: 'Forced send outage', retryable: true, request_id: 'request/forced',
+        ...(this.failSend ? { details: { applied: 'none' } } : {}),
       }), { status: 503, headers: { 'content-type': 'application/json' } })
       return new Response(JSON.stringify({ api_version: 'st3.client.v0', snapshot, value: {
         kind: 'action-result', action_id: action.id, operation_id: 'operation/send',
@@ -716,6 +718,19 @@ describe('ConversationPane composer/send binding', () => {
     expect(container.querySelector('[data-testid="send-unconfirmed"]')!.textContent).toContain('Not confirmed yet')
     expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
     expect(gateway!.actions).toHaveLength(1)
+    const firstAction = gateway!.actions[0]!
+    const row = userRows()[0]!
+    gateway!.sendMessageId = undefined
+    const resend = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="send-unconfirmed"] button')]
+      .find(button => button.textContent === 'Send again')!
+    flushSync(() => resend.click())
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
+    expect(gateway!.actions).toHaveLength(2)
+    expect(gateway!.actions[1]).toMatchObject({
+      id: firstAction.id, idempotency_key: firstAction.idempotency_key, parameters: firstAction.parameters,
+    })
+    expect(userRows()).toHaveLength(1)
+    expect(userRows()[0]).toBe(row)
   })
 
   it('keeps the Sent row across a newer read that omits it (Fractal #1977), with no resend', async () => {
@@ -740,7 +755,8 @@ describe('ConversationPane composer/send binding', () => {
     gateway!.abortSend = true
     await submitDraft()
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
-    const firstKey = gateway!.actions[0]!.idempotency_key
+    const firstAction = gateway!.actions[0]!
+    const firstKey = firstAction.idempotency_key
     const rowId = userRows()[0]!.getAttribute('data-item-id')
     const sendRows = () => userRows().filter(row => row.getAttribute('data-item-id') === rowId)
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -772,7 +788,11 @@ describe('ConversationPane composer/send binding', () => {
       expect(sendRows()[0]!.getAttribute('data-item-id')).toBe(rowId)
       resolve()
       await until(() => sendRows()[0]?.getAttribute('data-send-state') === (attempt < 3 ? 'unconfirmed' : 'sent'))
-      expect(gateway!.actions.map(action => action.idempotency_key)).toEqual(Array(attempt + 1).fill(firstKey))
+      expect(gateway!.actions.map(action => ({
+        id: action.id, idempotency_key: action.idempotency_key, parameters: action.parameters,
+      }))).toEqual(Array(attempt + 1).fill({
+        id: firstAction.id, idempotency_key: firstKey, parameters: firstAction.parameters,
+      }))
       expect(sendRows()).toHaveLength(1)
     }
   })
@@ -782,7 +802,8 @@ describe('ConversationPane composer/send binding', () => {
     gateway!.failSend = true
     await submitDraft()
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'failed')
-    const firstKey = gateway!.actions[0]!.idempotency_key
+    const firstAction = gateway!.actions[0]!
+    const firstKey = firstAction.idempotency_key
     const failure = container.querySelector('[data-testid="send-failure"]')!
     flushSync(() => failure.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click())
     expect(failure.textContent).toContain('The message could not be sent. Check your connection and retry.')
@@ -792,7 +813,24 @@ describe('ConversationPane composer/send binding', () => {
     flushSync(() => retry.click())
     await until(() => userRows()[0]?.getAttribute('data-send-state') === 'sent')
     expect(gateway!.actions.map(action => action.idempotency_key)).toEqual([firstKey, firstKey])
+    expect(gateway!.actions[1]).toMatchObject({ id: firstAction.id, parameters: firstAction.parameters })
     expect(userRows()).toHaveLength(1)
+  })
+
+  it('keeps an ambiguous server outage unconfirmed with Send again rather than failure feedback', async () => {
+    await prepareSendPane()
+    gateway!.ambiguousSend = true
+    await submitDraft()
+    await until(() => userRows()[0]?.getAttribute('data-send-state') === 'unconfirmed')
+    expect(userRows()).toHaveLength(1)
+    const notice = container.querySelector('[data-testid="send-unconfirmed"]')!
+    expect(notice.textContent).toContain('Not confirmed yet')
+    const resend = [...notice.querySelectorAll<HTMLButtonElement>('button')]
+      .find(button => button.textContent === 'Send again')
+    expect(resend).toBeDefined()
+    expect(resend!.disabled).toBe(false)
+    expect(container.querySelector('[data-testid="send-failure"]')).toBeNull()
+    expect(gateway!.actions).toHaveLength(1)
   })
 
   it('keeps network ambiguity as a neutral row status with an available composer', async () => {
