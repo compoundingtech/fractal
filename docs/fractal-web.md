@@ -580,6 +580,47 @@ headless Chromium, checks with Fractal that each step finished with that answer,
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
+## Fractal web threads connected preview
+
+`node apps/fractal-web/scripts/threads-live-preview.mjs serve` runs the real app against a real,
+isolated daemon for reviewing Threads; Storybook's `Fractal/App/Inbox threads` stories stay local
+fixtures. `serve` makes a throwaway instance (`threadspreview`, under its own HOME in
+`/var/tmp/fractal-threadspreview`) with `thread_writes = true` and agent/example/manager as the
+explicit `inbox_fallback_agent`, person/avery, program seats agent/example/atlas and
+agent/example/manager, and one full-control owner device paired through the client gateway. The
+browser's own credential comes from Fractal's browser pairing (`browser_pairing_login` is set for
+the instance): the owner device asks, the script approves the "Pair browser" ask from that device as
+avery would from the Inbox, and the browser redeems its one-use key, so the daemon grants it
+`thread-browser-send`. It seeds two atlas asks (one with an earlier thread, one with no thread) and
+the human gate of mission `example/release-notes`, whose discussion falls back to the Manager, with
+one thread so the Missions view lists it. Vite then serves the app on `127.0.0.1:5317` through
+`WF_ST_GATEWAY`/`WF_ST_AUTHORIZATION`, with the browser's credential.
+
+The asks name Atlas as their requester through `work ask --as agent/example/atlas`; the seeded
+thread messages are all person-authored, and the program seats never write on their own. The
+fixture's login shell disables Unix peer ancestry binding, so `ST_AGENT`, `FRACTAL_AGENT` or `--as`
+do not establish the bound-agent authority that agent replies and linking an ask require.
+`agent-reply` (Atlas answers the checklist thread, the Manager the mission thread) and `link-ask`
+(Atlas links a new follow-up ask to the checklist thread) act as those declared agents through the
+local identity header on the daemon's own socket; the client socket serves paired devices only. Only
+a fixture executable with declared-agent attribution binds that header; any other build refuses it
+and writes nothing. Do not read person replies as agent evidence.
+
+`up` seeds without serving. `agent-reply` and `link-ask` write as agents while the app is open, so
+the unread and linked-ask states arrive live. `offline` and `online` stop and restart the daemon for the paused and
+reconnect states, `revoke` revokes the browser pairing as the app's own revoke does (the refused
+state), and `down` removes the instance.
+The script needs a systemd user manager, `pty`, and `FRACTAL_BINARY` set to the test-support
+`fractal-fixture` built from this checkout
+(`cargo build --locked -p fractal --features test-support --bin fractal-fixture`).
+
+The preview is connected, not production: the app, its SDK, the paired gateway and the daemon are
+real, but the daemon is the fixture executable, which turns off host process-ancestry binding and uses
+its own login shell. Each Fractal command runs in a transient user unit, and on hosts where the user
+service manager's environment cannot be read, the release binary refuses those callers as
+`foreign-agent-actor`. Read the preview's results as connected-fixture results, never as results of
+the installed runtime.
+
 ## Sidebar migration
 
 Importing `custom.fractal.sidebar` history into arrangements is client-owned. The legacy

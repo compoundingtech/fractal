@@ -291,6 +291,13 @@ describe('AnswerAlert', () => {
     expect(fault).not.toContain('in Fractal')
   })
 
+  it('does not ask for an answer to an informational report without actions', () => {
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'custom.garden.report', title: 'Worker report ready', detail: 'Checks are complete.', actions: [] })} now={now} />)
+    expect(html).toContain('Checks are complete.')
+    expect(html).not.toContain('answer this kind of alert')
+    expect(html).not.toContain('This device is read-only')
+  })
+
   it('shows one of several alerts with a pager', () => {
     const html = renderToStaticMarkup(
       <AgentAlerts alerts={[item({ id: 'attention/one', title: 'First?' }), item({ id: 'attention/two', title: 'Second?' })]} onAct={sent} />,

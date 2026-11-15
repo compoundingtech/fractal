@@ -181,3 +181,10 @@ manifest or shards. The bounded history window preserves the unchanged 8 MiB/fil
 Committed wire fixtures have independent test cases, each under the ordinary test deadline,
 so catalog growth does not combine every file into one wall-clock budget. The tests and CLI
 use the same strict per-file decoder; all non-underscore world directories and JSON files remain covered.
+
+The decode CLI probes the anchor and a random clock up to 400 years **after** it. Durable
+thread events use nonnegative `accepted_at_unix_ms` on the wire; a pre-epoch scenario clock
+cannot represent their historical offsets as valid wire values. Rebasing still shifts every
+listed instant by exactly `now - anchor`, without clamping. Its calendar range is not a promise
+that every wire type accepts every clock: strict decoding continues to reject negative thread
+timestamps, including invalid authored values.

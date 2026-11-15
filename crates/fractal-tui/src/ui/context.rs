@@ -235,7 +235,6 @@ impl Ui {
             note_answer: None,
             noted_answers: Vec::new(),
             answer_error: None,
-            chat: None,
             form: Default::default(),
         };
         let doc = screens::home_detail(&self.world, Some(subject), 120, &drafts);
@@ -647,11 +646,6 @@ mod tests {
         for item in ui.world.attention.items() {
             let (_, items) = ui.subject_menu(&item.id).unwrap();
             assert!(items[0].0.starts_with("Open item"));
-            assert!(
-                items
-                    .iter()
-                    .any(|(_, action)| *action == activate(Some(&item.id), Hit::Key('t')))
-            );
             let doc = screens::home_detail(
                 &ui.world,
                 Some(&item.id),
@@ -665,7 +659,6 @@ mod tests {
                     note_answer: None,
                     noted_answers: Vec::new(),
                     answer_error: None,
-                    chat: None,
                     form: Default::default(),
                 },
             );

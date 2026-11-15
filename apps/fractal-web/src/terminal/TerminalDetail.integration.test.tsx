@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { SdkChunkFailure } from '../data/lazySdk.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { observed, unavailable, waiting, type Feed, type Grants } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable, waiting, type Feed, type Grants } from '../data/source.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { gatewayTerminalInput } from './terminal-input-port.ts'
 import { makeActionTerminalInput } from './actionTerminalInput.ts'
@@ -253,7 +253,7 @@ const live = async (session: FakeSession, text: string) => {
 describe('terminal detail', () => {
   it.each([
     ['loading', waiting, 'Loading terminal…'],
-    ['unauthorized', unavailable({ reason: 'unauthorized', detail: 'private diagnostic', retryable: true }), "This browser's access to the daemon has expired or was revoked. Pair the device again."],
+    ['unauthorized', unavailable({ reason: 'unauthorized', detail: 'private diagnostic', retryable: true }), credentialExpiredMessage],
     ['ungranted', unavailable({ reason: 'ungranted', detail: 'Terminal viewing is not permitted.' }), 'Terminal viewing is not permitted.'],
     ['unsupported', unavailable({ reason: 'unsupported', detail: 'This gateway does not provide terminals.' }), 'This gateway does not provide terminals.'],
     ['failed', unavailable({ reason: 'failed', detail: 'This agent has no terminal.', code: 'no-terminal' }), 'This agent has no terminal.'],

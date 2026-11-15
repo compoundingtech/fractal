@@ -420,3 +420,12 @@ and admitting lease; confirmed draws include a provider reference and evidence.
 The v32 fixed sweep retains the exact `NEVER_TRIMS` set `[179]`. That seed still
 trims on every modern node after its old build is excused and the next cut falls due;
 all other fixed seeds trim. The per-seed and majority trim-coverage assertions remain enforced.
+
+Thread metadata uses `typed_thread_metadata_converges_after_replication_and_restart`
+rather than adding typed-only inputs to the frozen generic corpora. The test creates
+and renames a thread on different members, closes it, exchanges the real operation
+claims, restarts both members, and checks owner visibility and receipt recovery.
+Ask-link admission and replication have dedicated thread store coverage. Keep main's
+selected v32 corpus and measured `NEVER_TRIMS` unchanged; optional thread message fields do
+not justify rewriting frozen snapshots or importing the older thread-only v17
+snapshot. Generated current-registry snapshots remain verification artifacts.
