@@ -6512,6 +6512,35 @@ impl Store {
         )
     }
 
+    /// Visit claims accepted strictly before `end`, newest first, seeking through the
+    /// subject/kind acceptance index rather than visiting newer claims. Canonical tie order
+    /// and the callback's stopping rule are the same as [`Self::claims_in_order`].
+    /// `visit` must not read the store while the statement is open.
+    pub fn claims_in_order_before(
+        &self,
+        subject: &str,
+        kind: &str,
+        end: u128,
+        mut visit: impl FnMut(&ClaimRecord) -> bool,
+    ) -> Result<()> {
+        crate::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        let end = end.to_string();
+        // SQLite cannot seek a row-value inequality whose first element is an indexed
+        // expression. Acceptance times are canonical decimal strings: seek equal-width
+        // timestamps first, then shorter ones, preserving numeric newest-first order.
+        for same_length in [true, false] {
+            let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h95abb0715157 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &claims_in_order_before_query(same_length))?;
+            let mut rows = statement.query(params![subject, kind, end])?;
+            while let Some(row) = rows.next()? {
+                if !visit(&claim_from_row(row)?) {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The newest of `subject`'s claims of `kind` that `matches` accepts, reading back from the
     /// newest only until one does: `claims_for(..).into_iter().rev().find(matches)`, bounded.
     #[track_caller]
@@ -10515,6 +10544,24 @@ pub fn claims_in_order_query(newest_first: bool) -> String {
         "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind=?2 ORDER BY {order}"
+    )
+}
+
+/// One of two disjoint newest-first ranges below `?3`, a decimal millisecond string.
+/// Read `same_length=true` first, then false. Scalar constraints let SQLite seek all
+/// needed parts of the existing expression index rather than filtering newer timestamps.
+pub fn claims_in_order_before_query(same_length: bool) -> String {
+    let bound = if same_length {
+        "length(claims.accepted_at_unix_ms)=length(?3) AND claims.accepted_at_unix_ms<?3"
+    } else {
+        "length(claims.accepted_at_unix_ms)<length(?3)"
+    };
+    format!(
+        "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_accepted_index
+         JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND claims.kind=?2
+           AND {bound}
+         ORDER BY {CANONICAL_ORDER_DESC}"
     )
 }
 
