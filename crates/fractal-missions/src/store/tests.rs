@@ -12165,7 +12165,7 @@ mission "{mission}" state="ready" {{
     let planned = store.mission(&intent, IntentInput {
         kdl: source, source_name: None,
     }).unwrap();
-    store.apply(&intent, &planned.subject_tokens, "admission-watch").unwrap();
+    store.apply(&intent, &planned.subject_tokens, &format!("admission-watch-{}", uuid::Uuid::now_v7())).unwrap();
     policies.iter().map(|(name, _)| {
         let subject = format!("subscription/{name}");
         let spec = crate::graph::subscription_spec(&intent.subjects[&subject].desired).unwrap();
@@ -13447,7 +13447,7 @@ fn relevant_admission_frontier_lookup_is_bounded_across_history_and_subscription
 
 #[test]
 fn relevant_admission_preserves_each_mission_frontier_when_a_subscription_switches_back() {
-    let store = Store::open_memory("node").unwrap();
+    let store = Store::open_memory("controller").unwrap();
     let mut subscriptions = publish_admission_watch(
         &store, &[("relevant", r#"admission "relevant-changes""#)],
     );
@@ -13466,7 +13466,7 @@ fn relevant_admission_preserves_each_mission_frontier_when_a_subscription_switch
     // The all-status mission frontier is authoritative across rebuild and replication,
     // independently of the one current pending request for this subscription/resource.
     store.rebuild_claim_projections().unwrap();
-    let replica = Store::open_memory("replica").unwrap();
+    let replica = Store::open_memory("worker").unwrap();
     replicate_fully(&store, &replica);
     subscriptions = publish_admission_watch_for_mission(
         &replica, &[("relevant", r#"admission "relevant-changes""#)], "admission-review",

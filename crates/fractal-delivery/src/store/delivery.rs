@@ -8,6 +8,8 @@ use smallclaims::store::canonical::CANONICAL_ORDER_DESC;
 
 // The frontier retains finished winners as an anti-resurrection fence. Neither candidate
 // selection nor completion probes visit historical relevant-change requests.
+// Unary + removes the claim ID's TEXT affinity so the closer's JSON-expression index
+// seeks both subject and request, rather than scanning every receipt for the subscription.
 pub(super) const PENDING_SUBSCRIPTION_REQUESTS_SQL: &str = "
     WITH candidates(id) AS MATERIALIZED (
         SELECT id FROM claims INDEXED BY claims_subscription_legacy_requests
@@ -23,7 +25,7 @@ pub(super) const PENDING_SUBSCRIPTION_REQUESTS_SQL: &str = "
     WHERE NOT EXISTS (
         SELECT 1 FROM claims finished INDEXED BY claims_subscription_request_closer
         WHERE finished.subject=?1
-          AND json_extract(finished.body,'$.fields.request')=request.id
+          AND json_extract(finished.body,'$.fields.request')=+request.id
           AND finished.kind IN ('subscription.mission-started','subscription.mission-failed',
                                 'subscription.mission-request-cancelled')
     )

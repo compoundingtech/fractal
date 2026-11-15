@@ -298,6 +298,9 @@ impl Store {
         project_replicated_mission_runs(&transaction)?;
         rebuild_planning_tx(&transaction).map_err(internal)?;
         custom::flush(&transaction).map_err(internal)?;
+        // This compatibility importer bypasses the normal replication projector hooks;
+        // publish their queued request/admission winners before callers can read them.
+        subscription_request_frontier::flush(&transaction).map_err(internal)?;
         let accepted_heads = replica_heads(&transaction).map_err(internal)?;
         let accepted_through = accepted_heads.get(&input.peer).copied().unwrap_or(0);
         let missing_sequences = missing_ranges

@@ -1,5 +1,20 @@
 use super::*;
 
+fn replicate_admission(source: &Store, target: &Store) {
+    for _ in 0..64 {
+        let exchange = exchange_from(source, &target.replication_inventory().unwrap());
+        if exchange.envelopes.is_empty() {
+            break;
+        }
+        receive_and_project(target, &exchange.peer, &exchange);
+    }
+    assert_eq!(
+        target.replication_inventory().unwrap().digest,
+        source.replication_inventory().unwrap().digest,
+        "the admission replica caught up",
+    );
+}
+
 #[test]
 fn relevant_admission_discovers_a_return_after_a_replicated_change_despite_a_stale_mirror() {
     for (field, changed) in [
@@ -27,7 +42,7 @@ fn relevant_admission_discovers_a_return_after_a_replicated_change_despite_a_sta
                 Value::Object(item_facts("resource/admission-repo", "pull_requests", 4, None, &original)),
             )]),
         };
-        replicate_fully(&local, &remote);
+        replicate_admission(&local, &remote);
         let revision = local.selected_desired_revision("observer/admission-repo").unwrap().unwrap();
         let next_check = now_ms() + 120_000;
         let observe = |store: &Store, pull: &Value, next_check| {
@@ -41,9 +56,22 @@ fn relevant_admission_discovers_a_return_after_a_replicated_change_despite_a_sta
         changed_pull[field] = changed;
         observe(&remote, &changed_pull, next_check);
         assert_eq!(admission_requests(&remote, "relevant").len(), 2, "{field}");
-        replicate_fully(&remote, &local);
+        replicate_admission(&remote, &local);
         // Replication updates the graph, not this poller's private mirror, which still holds A.
         assert_eq!(mirror.items["resource/admission-repo/pull-request/4"][field], original[field]);
+        let facts = json!({"repository_id": 17, "pull_requests": [original.clone()]});
+        let prepared = resource_preparation::read_inputs(&local.readers.get(), resource_preparation::Observation {
+            observer: "observer/admission-repo", desired_revision: &revision, attempt: None,
+            resource: "resource/admission-repo", facts: &facts, subscriptions: &subscriptions,
+            mirrored: Some(&mirror),
+        }).unwrap();
+        assert_eq!(prepared.active_subscriptions, subscriptions, "{field}: durable policy remains active");
+        assert_eq!(
+            prepared.recorded_items["resource/admission-repo/pull-request/4"].as_ref().unwrap().0[field],
+            changed_pull[field],
+            "{field}: the replicated graph overrides the private mirror",
+        );
+        assert!(!prepared.discovered.is_empty(), "{field}: the return is discovered");
         observe(&local, &original, next_check + 1);
         observe(&local, &original, next_check + 2);
         let requests = admission_requests(&local, "relevant");
@@ -82,12 +110,16 @@ fn ready_head_only_preparation_keeps_the_mirror_baseline_for_noncompact_facts() 
             Value::Object(item_facts("resource/admission-repo", "pull_requests", 4, None, &original)),
         )]),
     };
-    replicate_fully(&local, &remote);
+    replicate_admission(&local, &remote);
     let mut changed = original.clone();
     changed["body_digest"] = json!("body-b");
     // A noncompact observer records B even though default admission ignores body changes.
     observe_admission_pulls(&remote, &subscriptions, json!([changed]));
-    replicate_fully(&remote, &local);
+    replicate_admission(&remote, &local);
+    let graph = fractal_store::store::resources::preparation_observation(
+        &local.readers.get(), "resource/admission-repo/pull-request/4",
+    ).unwrap().actual.unwrap();
+    assert_eq!(graph["facts"]["body_digest"], "body-b", "the replicated graph differs from the mirror");
     let revision = local.selected_desired_revision("observer/admission-repo").unwrap().unwrap();
     let facts = json!({"repository_id": 17, "pull_requests": [original]});
     let prepared = resource_preparation::read_inputs(&local.readers.get(), resource_preparation::Observation {
@@ -95,6 +127,7 @@ fn ready_head_only_preparation_keeps_the_mirror_baseline_for_noncompact_facts() 
         resource: "resource/admission-repo", facts: &facts, subscriptions: &subscriptions,
         mirrored: Some(&mirror),
     }).unwrap();
+    assert_eq!(prepared.active_subscriptions, subscriptions, "the durable default policy remains active");
     assert_eq!(prepared.recorded_items["resource/admission-repo/pull-request/4"].as_ref().unwrap().0["body_digest"], "body-a");
     assert!(prepared.discovered.is_empty());
     assert_eq!(admission_requests(&local, "default").len(), 1);

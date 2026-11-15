@@ -524,13 +524,16 @@ fn superseding_subscription_runs_inherit_immutable_policy_and_pass_the_stale_fen
             .reconcile_subscription_missions(&store.desired_subjects().unwrap())
             .unwrap();
         let mut source = store.active_mission_runs_for_mission("review").unwrap().pop().unwrap();
+        // Subscription delivery starts a root run; supersession is a separate lineage edge.
+        assert!(source.parent_step_run.is_none());
         for (key, goal) in [("second", "Review the next revision."), ("third", "Review another revision.")] {
             apply_source(&store, &SOURCE.replace("Review one immutable pull request snapshot.", goal), key);
             store.supersede_mission_publications().unwrap();
             let predecessor = store.mission_run(&source.subject).unwrap().unwrap();
             let successor = store.mission_run(predecessor.superseded_by.as_deref().unwrap()).unwrap().unwrap();
             assert_eq!(successor.parent_step_run, source.parent_step_run);
-            assert!(successor.parent_step_run.is_some());
+            assert!(successor.parent_step_run.is_none());
+            assert_eq!(successor.supersedes.as_deref(), Some(source.subject.as_str()));
             assert_eq!(successor.inputs, source.inputs);
             let created = store.latest_claim(&successor.subject, Some("mission-run.created")).unwrap().unwrap();
             if relevant {
@@ -712,6 +715,9 @@ fn replicated_relevant_requests_coalesce_without_resurrecting_superseded_work() 
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
     assert!(left.pending_subscription_mission_requests("subscription/reviews").unwrap().is_empty());
+    right.import_replication("left", &left.export_replication(0).unwrap()).unwrap();
+    assert!(right.pending_subscription_mission_requests("subscription/reviews").unwrap().is_empty(),
+        "replicated completion must retain the canonical winner's anti-resurrection fence");
     request(&left, &snapshot, "default-one");
     request(&left, &snapshot, "default-two");
     assert_eq!(left.pending_subscription_mission_requests("subscription/reviews").unwrap().len(), 2);

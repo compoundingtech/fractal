@@ -67,6 +67,12 @@ fn frontier_query_cost(store: &Store) -> (Vec<String>, i32) {
 #[test]
 fn relevant_request_hot_query_is_bounded_with_pending_and_finished_latest() {
     let store = Store::open_memory("node").unwrap();
+    let plan = query_plan(&store,
+        &canonical_sql(super::delivery::PENDING_SUBSCRIPTION_REQUESTS_SQL),
+        ["subscription/reviews"]);
+    assert!(plan.iter().any(|detail|
+        detail.contains("claims_subscription_request_closer (subject=? AND <expr>=?)")),
+        "completion must seek the exact request, not scan subscription receipts: {plan:?}");
     let mut costs = Vec::new();
     let mut next = 0;
     for history in [8, 128, 1024] {
@@ -149,6 +155,28 @@ fn concurrent_relevant_frontiers_converge_on_canonical_winner_and_keep_finished_
         ["subscription/reviews"], |row| row.get(0),
     ).unwrap();
     assert_eq!(winner[0].id, expected);
+    for graph in [&left, &right] {
+        let connection = graph.readers.get();
+        let (projected, stored_key): (String, Vec<u8>) = connection.query_row(
+            "SELECT claim_id,head_key FROM local_subscription_request_frontier WHERE subject=?1",
+            ["subscription/reviews"], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let sql_winner: String = connection.query_row(
+            &canonical_sql("SELECT claims.id FROM claims WHERE subject=?1 AND kind='subscription.mission-requested'
+                ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+            ["subscription/reviews"], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(projected, sql_winner, "incremental projection must match canonical SQL");
+        assert_eq!(stored_key, smallclaims::store::canonical::sortable_key(
+            &smallclaims::store::canonical::claim_key(&connection, &sql_winner).unwrap()));
+        drop(connection);
+        let mut connection = graph.connection.write();
+        let tx = connection.transaction().unwrap();
+        fractal_store::store::subscription_request_frontier::rebuild(&tx).unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        assert_eq!(graph.pending_subscription_mission_requests("subscription/reviews").unwrap()[0].id, expected);
+    }
     finish_frontier_request(&left, &expected);
     right.import_replication("left", &left.export_replication(0).unwrap()).unwrap();
     assert!(right.pending_subscription_mission_requests("subscription/reviews").unwrap().is_empty());
