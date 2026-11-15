@@ -602,8 +602,9 @@ fixture's login shell disables Unix peer ancestry binding, so `ST_AGENT`, `FRACT
 do not establish the bound-agent authority that agent replies and linking an ask require.
 `agent-reply` (Atlas answers the checklist thread, the Manager the mission thread) and `link-ask`
 (Atlas links a new follow-up ask to the checklist thread) act as those declared agents through the
-local identity header. Only a fixture executable with declared-agent attribution binds that header;
-any other build answers 403 and writes nothing. Do not read person replies as agent evidence.
+local identity header on the daemon's own socket; the client socket serves paired devices only. Only
+a fixture executable with declared-agent attribution binds that header; any other build refuses it
+and writes nothing. Do not read person replies as agent evidence.
 
 `up` seeds without serving. `agent-reply` and `link-ask` write as agents while the app is open, so
 the unread and linked-ask states arrive live. `offline` and `online` stop and restart the daemon for the paused and
