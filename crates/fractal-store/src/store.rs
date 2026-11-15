@@ -36,6 +36,7 @@ pub mod accountable_tests;
 pub mod custom;
 pub mod model_drift;
 mod notice_authority;
+pub mod ask_digest;
 mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]

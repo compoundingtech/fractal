@@ -102,9 +102,9 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
     },
     "NoticeClaimId": {"type": "string", "x-st-brand": "NoticeClaimId", "pattern": "^[0-9a-f]{64}$"},
-    "NoticeId": {"type": "string", "x-st-brand": "NoticeId", "pattern": "^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "NoticeSourceId": {"type": "string", "x-st-brand": "NoticeSourceId", "pattern": "^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "NoticeActor": {"type": "string", "x-st-ref": ["agent", "person"], "pattern": "^(?:agent|person)/[^\\s]+$"},
+    "NoticeId": {"type": "string", "x-st-brand": "NoticeId", "pattern": "^custom/attention/snapshot/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$"},
+    "NoticeSourceId": {"type": "string", "x-st-brand": "NoticeSourceId", "pattern": "^custom/attention/source/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$"},
+    "NoticeActor": {"type": "string", "x-st-brand": "NoticeActor", "pattern": "^(?:(?:agent|person)/[^\\s]+|daemon/runtime)$"},
     "NoticeAgent": {"type": "string", "x-st-ref": "agent", "pattern": "^(?:agent)/[^\\s]+$"},
     "NoticePerson": {"type": "string", "x-st-ref": "person", "pattern": "^(?:person)/[^\\s]+$"},
     "NoticeLink": {
@@ -115,14 +115,41 @@
       }
     },
     "NoticeSource": {
-      "description": "Execution-context provenance; repository and cwd are informational, never authenticated sender evidence.",
+      "description": "Execution-context provenance and optional native daemon digest details; repository and cwd are informational, never authenticated sender evidence.",
       "type": "object", "additionalProperties": false, "required": ["host"],
       "properties": {
         "host": {"type": "string", "x-st-ref": "host", "pattern": "^(?:host)/[^\\s]+$"},
+        "digest": {"type": "array", "items": {"$ref": "#/$defs/NoticeDigestRow"}},
         "agent": {"$ref": "#/$defs/NoticeAgent"},
         "repo": {"type": "string"},
         "pty": {"type": "string", "x-st-ref": "pty", "pattern": "^(?:pty)/[^\\s]+$"},
         "cwd": {"type": "string"}
+      }
+    },
+    "NoticeDigestOverride": {
+      "type": "object", "additionalProperties": false, "required": ["target_id", "episode"],
+      "properties": {"target_id": {"type": "string", "minLength": 1}, "episode": {"type": "string", "minLength": 1}}
+    },
+    "NoticeDigestActions": {
+      "type": "object", "additionalProperties": false, "required": ["work.override"],
+      "properties": {"work.override": {"$ref": "#/$defs/NoticeDigestOverride"}}
+    },
+    "NoticeDigestDefaultAnswer": {
+      "type": "object", "additionalProperties": false, "required": ["id", "label"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}}
+    },
+    "NoticeDigestRow": {
+      "description": "An automatically resolved ask. Override parameters are omitted after the seven-day override window; absent optional fields are never null.",
+      "type": "object", "additionalProperties": false,
+      "required": ["title", "requester_id", "resolved_at", "target_id", "episode"],
+      "properties": {
+        "title": {"type": "string", "minLength": 1},
+        "requester_id": {"type": "string", "minLength": 1},
+        "default_answer": {"$ref": "#/$defs/NoticeDigestDefaultAnswer"},
+        "resolved_at": {"$ref": "#/$defs/NoticeTimestamp"},
+        "target_id": {"type": "string", "minLength": 1},
+        "episode": {"type": "string", "minLength": 1},
+        "action_parameters": {"$ref": "#/$defs/NoticeDigestActions"}
       }
     },
     "NoticeCreated": {
