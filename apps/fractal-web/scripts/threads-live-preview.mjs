@@ -25,11 +25,11 @@
  *
  * Agents in this instance are program seats: they never write on their own. The asks name Atlas
  * as their requester via `work ask --as`, and the seeded thread messages are person-authored.
- * `agent-reply` (Atlas answers the checklist thread, the Manager the mission thread) and `link-ask`
- * (Atlas links a new follow-up ask to the checklist thread) act as those declared agents through
- * the local identity header. They need a fixture executable with declared-agent attribution; any
- * other build refuses them with 403, because the fixture disables Unix peer ancestry binding and
- * device pairing grants person authority, not agent authority. Do not read person replies as agent evidence.
+ * `agent-reply` is unavailable: it fails with the missing BoundAgent prerequisite rather than
+ * writing a person-authored substitute. The fixture supplies Person ancestry, not agent binding,
+ * even when the local identity header names a declared agent. `link-ask` also needs bound agent
+ * authority and is refused by this fixture. Device pairing grants person authority, not agent
+ * authority. Do not read person replies as agent evidence.
  * `offline` stops the daemon (the app shows its paused and reconnecting states), `online` starts
  * it again, `revoke` revokes the browser pairing (the app falls back to its refused state;
  * `serve` pairs a new device on the next start), and `down` removes everything.
@@ -251,9 +251,9 @@ function discussGate() {
 }
 
 /**
- * A declared agent acts through the local identity header on the daemon's own Unix socket; the client socket
- * serves paired devices only. Only a fixture executable with declared-agent attribution binds the header as
- * that agent; any other build refuses it, and nothing is written.
+ * The local identity header attributes the session; it does not supply BoundAgent authority.
+ * fractal-fixture disables ancestry and supplies Person instead (crates/fractal-api-core/src/api.rs:
+ * 7533–7538, 7586–7587 at 4ed88def), so agent thread.reply is refused, even for a declared seat.
  */
 async function actAs(agent, type, parameters) {
   const as = { 'x-st3-person': agent }
@@ -269,12 +269,9 @@ async function actAs(agent, type, parameters) {
   console.log(`${type} as ${agent}: completed`)
 }
 
-/** Atlas answers the checklist thread and the Manager answers the mission gate thread. */
+/** This fixture cannot bind Atlas or the Manager as an agent, regardless of their process tree. */
 async function agentReplies() {
-  await actAs(agents.atlas, 'thread.reply', { target_id: readFileSync(marker('seeded'), 'utf8').trim(),
-    content: 'Yes: the migration is step 4, and I added the rollback right after it.' })
-  await actAs(agents.manager, 'thread.reply', { target_id: readFileSync(marker('mission-thread'), 'utf8').trim(),
-    content: 'They are: the breaking changes open the notes, under “Before you upgrade”.' })
+  throw new Error('agent-reply unavailable: missing BoundAgent prerequisite. fractal-fixture disables Unix peer ancestry and supplies Person ancestry; declaring or starting an agent does not bind it. No reply was sent; person-authored substitution is not agent evidence.')
 }
 
 /** Atlas asks a follow-up and links it to the checklist thread, as the ask's bound requesting agent. */
