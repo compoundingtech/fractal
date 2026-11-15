@@ -373,6 +373,18 @@ mod tests {
         let selected=locator(&token,&native.id).unwrap();
         assert!(selected.conversation_semantics);
         assert_eq!(located_value(&native,&selected).unwrap(),source_item.pointer(pointer).unwrap().clone());
+        // ChaCha20's ciphertext covers this exact selection byte; changing it without
+        // the owner's authentication tag must fail before the locator is interpreted.
+        let plain=serde_json::to_vec(&selected).unwrap();
+        let marker=br#""conversation_semantics":true"#;
+        let position=plain.windows(marker.len()).position(|bytes| bytes==marker).unwrap()
+            + marker.len()-4;
+        let mut flipped=URL_SAFE_NO_PAD.decode(token.strip_prefix("v2.").unwrap()).unwrap();
+        flipped[aead::NONCE_LEN+position]^=1;
+        assert!(locator(&format!("v2.{}",URL_SAFE_NO_PAD.encode(flipped)),&native.id).is_err());
+        let mut forged=serde_json::to_value(&selected).unwrap();
+        forged["conversation_semantics"]=json!(false);
+        assert!(locator(&format!("v2.{}",URL_SAFE_NO_PAD.encode(serde_json::to_vec(&forged).unwrap())),&native.id).is_err());
         let mut session=ClientSession::local(Some("person/example")).unwrap();
         session.conversation_blocks=true;
         let legacy=read(&native,&session,&native.id).unwrap();
