@@ -302,7 +302,7 @@ it('lines rows up in a shared list with a trailing age column and never shows a 
         <ThreadPanel thread={{ title: 'Worker check', state: 'closed' }} inList messageCount={1}>Second</ThreadPanel>
       </div>)
     })
-    const [first, second] = [...host.querySelectorAll('[data-thread-panel] > button')]
+    const [first, second] = [...host.querySelectorAll('[data-thread-panel] button[aria-expanded]')]
     if (!first || !second) throw new Error('Expected two row headers')
     // Age is the header's final column; a row without one leaves its metadata at the end.
     expect(first.lastElementChild?.matches('[data-thread-age]')).toBe(true)
@@ -344,12 +344,48 @@ it('gives the dedicated view a heading with its origin, and lets an embedded row
       </ThreadPanel>)
     })
     expect(host.querySelector('[data-thread-origin]')).toBeNull()
-    const header = host.querySelector<HTMLButtonElement>('[data-thread-panel] > button')
+    const header = host.querySelector<HTMLButtonElement>('[data-thread-panel] button')
     expect(header?.hasAttribute('aria-expanded')).toBe(false)
     await act(async () => header?.click())
     expect(activate).toHaveBeenCalledTimes(1)
     expect(expansion).not.toHaveBeenCalled()
     expect(host.querySelector('textarea')).toBeNull()
+  } finally {
+    await act(async () => root.unmount())
+    host.remove()
+  }
+})
+
+it('keeps keyboard focus on the disclosure as the unread action appears and disappears', async () => {
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  const markRead = async () => undefined
+  const render = (unread: boolean) => act(async () => {
+    root.render(<ThreadPanel thread={{ title: 'PR #42', state: 'open' }} messageCount={3} unread={unread}
+      onMarkRead={unread ? markRead : undefined} canMarkRead>
+      <textarea aria-label="Thread message" />
+    </ThreadPanel>)
+  })
+  try {
+    await render(true)
+    const header = host.querySelector<HTMLButtonElement>('button[aria-expanded]')!
+    await act(async () => header.focus())
+    expect(document.activeElement).toBe(header)
+    await act(async () => header.click())
+    expect(host.querySelector('button[aria-expanded]')).toBe(header)
+    expect(header.getAttribute('aria-expanded')).toBe('true')
+    expect(document.activeElement).toBe(header)
+    expect(host.querySelector('[aria-label="Mark visible replies read"]')).not.toBeNull()
+
+    // A replicated read update also removes the action without moving the focused disclosure.
+    await render(false)
+    expect(host.querySelector('[aria-label="Mark visible replies read"]')).toBeNull()
+    expect(host.querySelector('button[aria-expanded]')).toBe(header)
+    expect(document.activeElement).toBe(header)
+    await act(async () => header.click())
+    expect(header.getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(header)
   } finally {
     await act(async () => root.unmount())
     host.remove()
