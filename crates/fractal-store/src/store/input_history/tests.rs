@@ -42,7 +42,7 @@ fn frozen_membership_current_repairs_and_authorization_errors() {
     let second=store.append_claim(&sent("message/second","person/ada","agent/worker","session/one")).unwrap();
     let q=Query {limit:200,..query(&store)};
     store.append_claim(&sent("message/later","person/ada","agent/worker","session/one")).unwrap();
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2c2001d69ecf owner=fractal_store::store::input_history::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&second.id]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hcf630123788a owner=fractal_store::store::input_history::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&second.id]).unwrap();
     let page=store.input_history_candidates(&q, |_|Ok(true)).unwrap();
     assert_eq!(page.entries.iter().map(|e|&e.claim_id).collect::<Vec<_>>(),vec![&first.id]);
     assert!(store.input_history_candidates(&q, |_|anyhow::bail!("source authorization unavailable")).is_err());
@@ -108,7 +108,7 @@ fn canonical_subject_winners_and_order_survive_opposite_replication() {
     for store in [&forward,&reverse] {
         let page=store.input_history_candidates(&Query {person:winner.actor.as_deref().unwrap(),limit:200,..query(store)}, |_|Ok(true)).unwrap();
         assert_eq!(page.entries.iter().filter(|e|e.message_id=="message/same").map(|e|&e.claim_id).collect::<Vec<_>>(),vec![&winner.id]);
-        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hcf630123788a owner=fractal_store::store::input_history::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&winner.id]).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2c2001d69ecf owner=fractal_store::store::input_history::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",[&winner.id]).unwrap();
         for person in ["person/ada","person/other"] {
             assert!(store.input_history_candidates(&Query {person,limit:200,..query(store)}, |_|Ok(true)).unwrap().entries.iter().all(|e|e.message_id!="message/same"));
         }
