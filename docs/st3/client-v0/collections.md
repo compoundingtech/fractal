@@ -326,7 +326,7 @@ session starts with its own availability and must not inherit the previous windo
 Older-page responses independently report whether there are entries before that page; once
 the session's start is reached, later live deltas do not reopen older-history paging.
 
-`fractal missions ls --watch`, `fractal attention ls --watch`, `fractal agents ls --watch`,
+`fractal missions ls --watch`, `fractal alerts ls --watch`, `fractal agents ls --watch`,
 and `fractal work ls --watch` consume this same transport.
 
 ## Summary

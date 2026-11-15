@@ -5198,7 +5198,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
         assert!(returned.elapsed() < Duration::from_secs(10));
         for node in [&a, &b] {
             assert_eq!(down_observations(node, "traveller").await, 0);
-            let attention = node.st_json(&["attention", "ls"]);
+            let attention = node.st_json(&["alerts", "ls"]);
             assert!(
                 attention["value"]["items"]
                     .as_array()
