@@ -4,6 +4,8 @@ import { Button, VisuallyHidden } from 'react-aria-components'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
+import type { ThreadRefusal } from './threadSource.ts'
 
 import { colorVars as c, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
@@ -32,12 +34,12 @@ export interface ThreadPanelProps {
   readonly origin?: React.ReactNode
   readonly onHideDraft?: () => void
   readonly onOpenInTab?: () => void
-  readonly onRename?: (title: string, titleRevision: string) => Promise<string | undefined>
-  readonly onChangeState?: (state: ThreadPanelSummary['state']) => Promise<string | undefined>
+  readonly onRename?: (title: string, titleRevision: string) => Promise<ThreadRefusal | undefined>
+  readonly onChangeState?: (state: ThreadPanelSummary['state']) => Promise<ThreadRefusal | undefined>
   readonly pendingChange?: string
   readonly retryPending?: boolean
-  readonly onRetryChange?: () => Promise<string | undefined>
-  readonly onMarkRead?: () => Promise<string | undefined>
+  readonly onRetryChange?: () => Promise<ThreadRefusal | undefined>
+  readonly onMarkRead?: () => Promise<ThreadRefusal | undefined>
   readonly canMarkRead?: boolean
   /** Mount the timeline demand and composer only while this presentation is expanded. */
   readonly children: React.ReactNode
@@ -62,7 +64,7 @@ export function ThreadPanel({
     restoreRename.current = false
     actions.current?.querySelector<HTMLElement>('[data-thread-rename]')?.focus()
   }, [rename])
-  const [error, setError] = React.useState<string>()
+  const [error, setError] = React.useState<ThreadRefusal>()
   const [pending, setPending] = React.useState(false)
   // Changes act at once; this names the confirmed result, so the reader sees what happened without a dialog.
   const [flash, setFlash] = React.useState<string>()
@@ -76,7 +78,7 @@ export function ThreadPanel({
     const timer = setTimeout(() => setFlash(undefined), FLASH_MS)
     return () => clearTimeout(timer)
   }, [flash, held])
-  const run = async (action: () => Promise<string | undefined>, onSuccess?: () => void) => {
+  const run = async (action: () => Promise<ThreadRefusal | undefined>, onSuccess?: () => void) => {
     setPending(true)
     setError(undefined)
     setFlash(undefined)
@@ -85,7 +87,7 @@ export function ThreadPanel({
       if (failure === undefined) onSuccess?.()
       else setError(failure)
     } catch {
-      setError('The thread change could not be confirmed. Refresh to check its current state.')
+      setError({ detail: 'The thread change could not be confirmed. Refresh to check its current state.' })
     } finally {
       setPending(false)
     }
@@ -118,7 +120,7 @@ export function ThreadPanel({
   const metadata = count === null && status === null ? null
     : <span {...stylex.props(styles.metadata)}>{count}{count !== null && status !== null ? ' · ' : null}{status}</span>
   const ageCell = age === undefined ? null : <span data-thread-age="" {...stylex.props(styles.age)}>{age}</span>
-  const feedback = error === undefined ? null : <p role="alert" {...stylex.props(styles.error)}>{error}</p>
+  const feedback = error === undefined ? null : <ThreadRefusalAlert refusal={error} />
   const title = <span {...stylex.props(styles.title, !embedded && styles.paneTitle)} title={thread.title}>{thread.title}</span>
   // Rows keep the dot's column when read, so titles stay aligned down a list; a dedicated view has no rows to align.
   const unreadDot = embedded || unread ? <span {...stylex.props(styles.dot)}>{unread ? <>
@@ -216,7 +218,6 @@ const styles = stylex.create({
   pending: { color: c.fgMuted, fontSize: t.metaSize },
   flash: { display: 'flex', alignItems: 'center', gap: s.xs, color: c.fgSoft, fontSize: t.metaSize,
     animationName: { default: flashIn, '@media (prefers-reduced-motion: reduce)': 'none' }, animationDuration: m.fast, animationTimingFunction: 'ease-out' },
-  error: { margin: 0, color: c.dangerFg, fontSize: t.metaSize },
   input: { minWidth: 0, height: g.controlSm, boxSizing: 'border-box', paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid',
     borderColor: { default: c.borderStrong, ':focus-visible': c.primary }, borderRadius: r.sm, outline: 'none', backgroundColor: c.controlFill,
     color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize, fontWeight: t.weightMedium },

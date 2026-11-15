@@ -25,7 +25,7 @@ const episode = 'claim/thread-story/review'
 const existingId = 'thread/worker-tests'
 const closedId = 'thread/rollout-notes'
 const actor = 'person/operator'
-type Scenario = 'existing' | 'empty' | 'closed' | 'multiple' | 'custom-source' | 'clock-skew' | 'loading' | 'refused' | 'failed' | 'offline' | 'unconfirmed'
+type Scenario = 'existing' | 'empty' | 'closed' | 'multiple' | 'custom-source' | 'clock-skew' | 'loading' | 'refused' | 'failed' | 'offline' | 'unconfirmed' | 'refused-action' | 'refused-thread'
 
 function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'timestamp' | 'action' = 'timestamp') {
   const agentRef = 'agent/build-host-a/worker-tests'
@@ -97,6 +97,8 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
   // Read-state fixtures: each states only what the fixture source reports, never agent progress.
   const failing = Atom.make(scenario === 'failed')
   const unconfirmed = Atom.make<string | undefined>(scenario === 'unconfirmed' ? 'rename' : undefined)
+  // The fixture's own refusal reason, in the place a daemon's reason would stand; the sentence above it is the app's.
+  const refusal = (detail: string) => scenario === 'refused-action' ? { detail, explanation: 'This fixture refuses every thread change.' } : undefined
   const threads: ThreadSource = {
     access: Atom.make({ read: true, inboxOrigins: true, actor, actions: new Set<string>(readOnly
       ? [] : ['thread.start', 'thread.reply', 'thread.rename', 'thread.close', 'thread.reopen', 'thread.read']) }),
@@ -111,6 +113,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
       } })),
     reload: () => registry.set(failing, false),
     detail: id => Atom.make(get => {
+      if (scenario === 'refused-thread') return unavailable({ reason: 'ungranted', detail: 'You no longer have access to this thread.', explanation: 'This fixture withdrew the thread from this connection.' })
       const row = get(summaries).find(candidate => candidate.id === id)
       return row === undefined ? unavailable({ reason: 'failed', detail: 'Fixture thread unavailable' }) : observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: { summary: row, snapshotId: 'snapshot/thread-story' } })
     }),
@@ -119,6 +122,8 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     retryChange: async () => { registry.set(unconfirmed, undefined); return undefined },
     draft: drafts,
     start: async (_draft, input) => {
+      const refused = refusal("Couldn't start this thread.")
+      if (refused !== undefined) return { _tag: 'Refused', ...refused }
       const id = `thread/story-${++next}`
       registry.set(summaries, [...registry.get(summaries), summary(id, input.title, 'open', 0, false)])
       registry.set(origins, { ...registry.get(origins), [id]: input.origin.source_id })
@@ -126,8 +131,15 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
       registry.set(currentThread, id)
       return { _tag: 'Sent', threadId: id }
     },
-    reply: async input => { append(input.target_id, input.content, input.thread_quote_id); return { _tag: 'Sent', threadId: input.target_id } },
+    reply: async input => {
+      const refused = refusal("Couldn't send your reply.")
+      if (refused !== undefined) return { _tag: 'Refused', ...refused }
+      append(input.target_id, input.content, input.thread_quote_id)
+      return { _tag: 'Sent', threadId: input.target_id }
+    },
     rename: async (observation, title) => {
+      const refused = refusal("Couldn't rename this thread.")
+      if (refused !== undefined) return refused
       const id = observation.summary.id
       const event = Native.decodeUnknownSync(Native.ThreadTimelineEvent)({
         kind: 'thread.renamed', id: `event/story-${++next}`, actor_id: actor, accepted_at_unix_ms: now + next,
@@ -138,6 +150,8 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
       return undefined
     },
     changeState: async (observation, state) => {
+      const refused = refusal(state === 'closed' ? "Couldn't close this thread." : "Couldn't reopen this thread.")
+      if (refused !== undefined) return refused
       const id = observation.summary.id
       const event = Native.decodeUnknownSync(Native.ThreadTimelineEvent)({
         kind: state === 'closed' ? 'thread.closed' : 'thread.reopened', id: `event/story-${++next}`,
@@ -241,7 +255,7 @@ const meta = {
 } satisfies Meta<Args>
 export default meta
 
-export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'AgentThreads:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'CloseConfirmation:contract-fixture', 'LatestPreview:contract-fixture'] as const
+export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'AgentThreads:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'CloseConfirmation:contract-fixture', 'RefusedAction:contract-fixture', 'RefusedThread:contract-fixture', 'LatestPreview:contract-fixture'] as const
 type Story = StoryObj<typeof meta>
 
 export const AllStates: Story = {
@@ -387,6 +401,30 @@ export const CloseConfirmation: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Reopen thread' }))
     await waitFor(() => expect(canvasElement.querySelector('[data-thread-confirmed]')?.textContent).toMatch(/^Reopened “.+”\.$/))
     await expect(await canvas.findByRole('button', { name: 'Close thread' })).toBeTruthy()
+  },
+}
+/** A refused change names what failed, with the source's reason on its own line; the thread stays as it was. */
+export const RefusedAction: Story = {
+  args: { placement: 'tab', scenario: 'refused-action' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: 'Close thread' }, { timeout: 60_000 }))
+    const alert = await canvas.findByRole('alert')
+    await expect(alert.querySelectorAll('p')).toHaveLength(2)
+    await expect(alert.querySelector('p')?.textContent).toBe("Couldn't close this thread.")
+    await expect(alert.querySelector('[data-thread-refusal-reason]')?.textContent).toBe('This fixture refuses every thread change.')
+    await expect(canvas.getByRole('button', { name: 'Close thread' })).toBeTruthy()
+  },
+}
+/** One thread withdrawn from a connection that still reads threads: the notice names this thread, then the source's reason. */
+export const RefusedThread: Story = {
+  args: { placement: 'tab', scenario: 'refused-thread' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const title = await canvas.findByText('You no longer have access to this thread.', {}, { timeout: 60_000 })
+    const status = title.closest('[role="status"]')
+    await expect(status?.querySelector('[data-system-state-explanation]')?.textContent).toBe('This fixture withdrew the thread from this connection.')
+    await expect(canvas.queryByRole('button', { name: /^Retry/ })).toBeNull()
   },
 }
 
