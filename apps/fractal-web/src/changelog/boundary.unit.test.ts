@@ -42,6 +42,12 @@ describe('public changelog boundary', () => {
         .toThrow('Public build leaked private changelog modules')
   })
 
+  it('rejects private modules behind virtual and Vite filesystem prefixes', () => {
+    for (const prefix of ['\0', '/@fs', '\0/@fs'])
+      expect(() => assertPublicChangelogBoundary({ ...clean, modules: [`${prefix}${privateDirectory}/mod.ts?raw`] }))
+        .toThrow('Public build leaked private changelog modules')
+  })
+
   it('does not classify a similarly named neighbouring directory as private', () => {
     const privateDirectoryRealpath = '/real-checkout/private/.changelog'
     expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectoryRealpath,

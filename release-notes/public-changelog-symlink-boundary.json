@@ -27,6 +27,6 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Public web builds reject private changelog graph imports through either the configured path or its real filesystem path. Private builds and runtime protocols are unchanged."
+    "detail": "Public web builds reject private changelog graph imports through either the configured directory or its native real filesystem path, including virtual and Vite filesystem module IDs. A symlinked registry file does not move the protected directory. Private builds and runtime protocols are unchanged."
   }
 }

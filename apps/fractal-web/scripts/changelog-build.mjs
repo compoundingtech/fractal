@@ -63,7 +63,7 @@ export const prepareChangelogBuild = async ({ privateBuild, deployment, registri
     privateDirectory: hasPrivate ? dirname(registries.private).replaceAll('\\', '/') : undefined,
     // Vite resolves symlinked imports to their real location by default. Keep
     // both identities: preserveSymlinks may leave the configured path in a graph.
-    privateDirectoryRealpath: hasPrivate ? dirname(realpathSync(registries.private)).replaceAll('\\', '/') : undefined,
+    privateDirectoryRealpath: hasPrivate ? realpathSync.native(dirname(registries.private)).replaceAll('\\', '/') : undefined,
     compile: (build) => compileChangelog({ build, sources, audience, inventory }),
   }
 }
@@ -89,8 +89,10 @@ export const assertPublicChangelogBoundary = ({ manifest, privateEntries, privat
   if (privateInManifest.length > 0)
     throw new Error(`${leak} entries into its manifest: ${privateInManifest.map(({ id }) => id).join(', ')}`)
   const privateRoots = [privateDirectory, privateDirectoryRealpath].filter((directory) => directory !== undefined)
-  const privateModules = modules.filter((id) =>
-    privateRoots.some((directory) => id.replaceAll('\\', '/').startsWith(`${directory}/`)))
+  const privateModules = modules.filter((id) => {
+    const path = id.replace(/^\0/u, '').replace(/^\/@fs(?=\/)/u, '').replaceAll('\\', '/')
+    return privateRoots.some((directory) => path.startsWith(`${directory}/`))
+  })
   if (privateModules.length > 0) throw new Error(`${leak} modules: ${privateModules.join(', ')}`)
   const body = texts.join('\n')
   for (const entry of privateEntries)
