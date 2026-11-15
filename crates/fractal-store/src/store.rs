@@ -380,6 +380,7 @@ mod run_eta_review_tests;
 pub mod client_summary;
 pub mod unread_mail;
 pub mod agent_messages;
+pub mod input_history;
 pub mod coordination;
 pub mod agent_view;
 pub mod conversation_reads;
