@@ -1737,6 +1737,7 @@ fn conversation_open_local_marked(
         native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
             .max(extent.native_latest()),
         source_generation,
+        semantic_revision: session.conversation_semantics.then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION),
     });
     remember_cursor(&cursor, mark.transcript_seen);
     Ok((json!({"next_cursor":cursor}), page, mark))
@@ -4752,10 +4753,12 @@ struct ConversationPosition {
     stream_position: u64,
     native_sequence: u64,
     source_generation: u64,
+    /// Absent for the exact legacy cursor shape; semantic selections fence their projection.
+    semantic_revision: Option<u32>,
 }
 
 fn conversation_cursor(state: &AppState, session_id: &str, position: ConversationPosition) -> String {
-    format!(
+    let mut cursor = format!(
         "conversation-cursor/{}/{}/{}.{}.{}.{}.{}",
         state.node,
         session_id.trim_start_matches("session/"),
@@ -4764,7 +4767,12 @@ fn conversation_cursor(state: &AppState, session_id: &str, position: Conversatio
         position.native_sequence,
         position.source_generation,
         position.stream_position,
-    )
+    );
+    if let Some(revision) = position.semantic_revision {
+        use std::fmt::Write as _;
+        write!(cursor, ".semantics-{revision}").expect("writing to a String cannot fail");
+    }
+    cursor
 }
 
 fn conversation_position(
@@ -4787,10 +4795,14 @@ fn conversation_position(
                 native_sequence: parts.next()?.parse().ok()?,
                 source_generation: parts.next()?.parse().ok()?,
                 stream_position: 0,
+                semantic_revision: None,
             };
             // A cursor from before the stream has no stream part: it has read none of the stream.
             if let Some(stream) = parts.next() {
                 result.stream_position = stream.parse().ok()?;
+            }
+            if let Some(semantic) = parts.next() {
+                result.semantic_revision = Some(semantic.strip_prefix("semantics-")?.parse().ok()?);
             }
             parts.next().is_none().then_some(result)
         })
@@ -4803,6 +4815,22 @@ fn conversation_position(
                 Value::Bool(true),
             )])),
         })
+}
+
+fn fence_conversation_semantics(
+    position: ConversationPosition,
+    session: &ClientSession,
+    session_id: &str,
+) -> Result<(), ApiError> {
+    let revision = session.conversation_semantics
+        .then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION);
+    if position.semantic_revision != revision {
+        return Err(conversation_replay_gap(
+            session_id, "semantic-projection",
+            "the semantic projection changed; refresh the newest conversation page",
+        ));
+    }
+    Ok(())
 }
 
 fn conversation_read_now(
@@ -5050,6 +5078,9 @@ fn conversation_read_now_unbounded(
     let position = after
         .map(|cursor| conversation_position(state, session_id, cursor))
         .transpose()?;
+    if let Some(position) = position {
+        fence_conversation_semantics(position, session, session_id)?;
+    }
     let (page, source_generation, native_replay, suppressed_sequence, extent) =
         conversation_first_page_at_generation(
             state, &snapshot, session, session_id,
@@ -5264,6 +5295,7 @@ fn conversation_read_now_unbounded(
         stream_position: stream_latest,
         native_sequence: native_latest,
         source_generation,
+        semantic_revision: session.conversation_semantics.then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION),
     });
     let mut value = json!({"kind":"conversation-changes", "session_id":session_id, "items":items, "next_cursor":next_cursor});
     if let Some(header) = page.get("header") {
@@ -5451,6 +5483,12 @@ async fn conversation_changes_local_marked(
     wait_ms: u64,
     kept: Option<ConversationMark>,
 ) -> Result<(Value, ConversationMark), ApiError> {
+    let position = after
+        .map(|cursor| conversation_position(state, session_id, cursor))
+        .transpose()?;
+    if let Some(position) = position {
+        fence_conversation_semantics(position, session, session_id)?;
+    }
     let mut changed = state.event_notify.subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms.min(30_000));
     let mut mark = match kept {
@@ -5462,8 +5500,7 @@ async fn conversation_changes_local_marked(
     let mut quiet = None;
     if let Some(cursor) = after
         && let Some(seen) = issued_transcript(cursor)
-        && let Ok(ConversationPosition { store_index, local_position, stream_position, .. }) =
-            conversation_position(state, session_id, cursor)
+        && let Some(ConversationPosition { store_index, local_position, stream_position, .. }) = position
     {
         let mut since = ConversationMark {
             store_index,
@@ -5474,7 +5511,13 @@ async fn conversation_changes_local_marked(
         };
         if !since.changed(state)? {
             mark = since;
-            quiet = Some(json!({"kind":"conversation-changes", "session_id":session_id, "items":[], "next_cursor":cursor}));
+            let mut value = json!({"kind":"conversation-changes", "session_id":session_id, "items":[], "next_cursor":cursor});
+            if session.conversation_semantics {
+                value["header"] = json!({
+                    "projection_revision": fractal_kernel::transcript_semantics::PROJECTION_REVISION,
+                });
+            }
+            quiet = Some(value);
         }
     }
     loop {
@@ -19960,11 +20003,132 @@ mission "example/zero-run" state="ready" {
             stream_position: 0,
             native_sequence: 0,
             source_generation: 0,
+            semantic_revision: None,
         });
         conversation_changes_local(&owner, &session, &session_id, Some(&unknown), 0)
             .await
             .unwrap();
         assert_eq!(rebuilds(), 3);
+    }
+
+    #[tokio::test]
+    async fn quiet_conversation_changes_preserve_negotiated_revision_header() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let agent = "agent/quiet-semantics";
+        let incarnation = "quiet-semantics:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: agent.into(), kind: "runtime.observed".into(), actor: Some(agent.into()),
+            fields: serde_json::from_value(json!({
+                "status":"running", "runtime_id":"quiet-semantics",
+                "incarnation_id":incarnation, "terminal":false,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(agent, incarnation);
+        for semantics in [false, true] {
+            let mut session = ClientSession::local(Some("person/example")).unwrap();
+            session.conversation_blocks = true;
+            session.conversation_semantics = semantics;
+            let first = conversation_changes(
+                State(state.clone()), Extension(session.clone()), AxumPath(session_id.clone()),
+                Query(ConversationQuery { after: None, wait_ms: Some(0) }),
+            ).await.unwrap().0;
+            if semantics {
+                assert_eq!(first["header"]["projection_revision"],
+                    json!(fractal_kernel::transcript_semantics::PROJECTION_REVISION));
+            } else {
+                assert!(first["header"].get("projection_revision").is_none());
+            }
+            let mut cursor = first["next_cursor"].as_str().unwrap().to_owned();
+            // Exercise both the immediate quiet reply and the unchanged timeout reply.
+            for wait_ms in [0, 50] {
+                let quiet = conversation_changes(
+                    State(state.clone()), Extension(session.clone()), AxumPath(session_id.clone()),
+                    Query(ConversationQuery { after: Some(cursor.clone()), wait_ms: Some(wait_ms) }),
+                ).await.unwrap().0;
+                let mut expected = json!({
+                    "kind":"conversation-changes", "session_id":session_id,
+                    "items":[], "next_cursor":cursor,
+                });
+                if semantics {
+                    expected["header"] = json!({
+                        "projection_revision":fractal_kernel::transcript_semantics::PROJECTION_REVISION,
+                    });
+                }
+                assert_eq!(quiet, expected);
+                cursor = quiet["next_cursor"].as_str().unwrap().to_owned();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn conversation_changes_fence_semantic_selection_and_revision_on_unchanged_source() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let agent = "agent/changes-semantics";
+        let incarnation = "changes-semantics:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: agent.into(), kind: "runtime.observed".into(), actor: Some(agent.into()),
+            fields: serde_json::from_value(json!({
+                "status":"running", "runtime_id":"changes-semantics",
+                "incarnation_id":incarnation, "terminal":false,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(agent, incarnation);
+        for semantics in [false, true] {
+            let mut session = ClientSession::local(Some("person/example")).unwrap();
+            session.conversation_blocks = true;
+            session.conversation_semantics = semantics;
+            let first = conversation_changes(
+                State(state.clone()), Extension(session.clone()), AxumPath(session_id.clone()),
+                Query(ConversationQuery { after: None, wait_ms: Some(0) }),
+            ).await.unwrap().0;
+            let cursor = first["next_cursor"].as_str().unwrap();
+            let position = conversation_position(&state, &session_id, cursor).unwrap();
+            if semantics {
+                assert_eq!(position.semantic_revision,
+                    Some(fractal_kernel::transcript_semantics::PROJECTION_REVISION));
+            } else {
+                assert_eq!(cursor, format!(
+                    "conversation-cursor/{}/{}/{}.{}.{}.{}.{}",
+                    state.node, session_id.trim_start_matches("session/"),
+                    position.store_index, position.local_position, position.native_sequence,
+                    position.source_generation, position.stream_position,
+                ));
+            }
+            let mut other_selection = session.clone();
+            other_selection.conversation_semantics = !semantics;
+            // These issued cursors would otherwise take the unchanged-source quiet shortcut.
+            let error = conversation_changes(
+                State(state.clone()), Extension(other_selection.clone()), AxumPath(session_id.clone()),
+                Query(ConversationQuery { after: Some(cursor.to_owned()), wait_ms: Some(0) }),
+            ).await.unwrap_err();
+            assert_eq!(error.code, "cursor-gap");
+            assert_eq!(error.status, StatusCode::GONE);
+            assert_eq!(error.details["full_resync"], json!(true));
+            // Replay must apply the same fence even without the issued-cursor shortcut.
+            let error = conversation_read_now(&state, &other_selection, &session_id, Some(cursor)).unwrap_err();
+            assert_eq!(error.code, "cursor-gap");
+            assert_eq!(error.details["full_resync"], json!(true));
+            if semantics {
+                let stale = conversation_cursor(&state, &session_id, ConversationPosition {
+                    semantic_revision: Some(fractal_kernel::transcript_semantics::PROJECTION_REVISION - 1),
+                    ..position
+                });
+                remember_cursor(&stale, issued_transcript(cursor).unwrap());
+                let error = conversation_changes(
+                    State(state.clone()), Extension(session.clone()), AxumPath(session_id.clone()),
+                    Query(ConversationQuery { after: Some(stale.clone()), wait_ms: Some(0) }),
+                ).await.unwrap_err();
+                assert_eq!(error.code, "cursor-gap");
+                assert_eq!(error.details["full_resync"], json!(true));
+                let error = conversation_read_now(&state, &session, &session_id, Some(&stale)).unwrap_err();
+                assert_eq!(error.code, "cursor-gap");
+                assert_eq!(error.details["full_resync"], json!(true));
+            }
+        }
     }
 
     #[test]

@@ -3517,12 +3517,16 @@ Mixed legacy bodies lacking independent text produce an explicit source diagnost
 Without opt-in, semantic metadata is removed and existing fallback bodies are unchanged.
 
 `header.projection_revision` identifies the selected revision even on an empty
-negotiated page/change response. It is revision metadata, not a `{value,source,as_of}`
-header fact. Native fold/cache identity, collection fingerprints and authenticated
-paging cursors fence the projection revision; an obsolete cursor requires resync
-without rewriting native source history. Legacy cursors retain their existing shape.
+negotiated page/change response, including unchanged zero-wait polls and long-poll timeouts.
+It is revision metadata, not a `{value,source,as_of}` header fact. Native fold/cache
+identity, collection fingerprints, authenticated paging cursors and changes cursors fence
+the projection selection and revision; an obsolete cursor requires resync without rewriting
+native source history. Legacy cursors retain their existing shape.
 The new header omits legacy window-summed cost: clients derive only explicitly scoped
 usage from normalized facts, never treat the old header sum as a semantic total.
+Content-array annotations classify each native part by its source offset and discriminator,
+not by the legacy normalized block kind: an unfamiliar text-bearing part remains inspector-only,
+and a missing discriminator is a source diagnostic rather than conversation prose.
 
 Category counts are derived over the client's loaded window using stable source/part
 identities, excluding `source_record` sidecars. They are not whole-session totals;
