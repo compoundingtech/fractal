@@ -77,7 +77,7 @@ fn candidate_names(old: &str, home_manager_name: Option<&str>) -> Vec<String> {
 
 #[cfg(target_os = "linux")]
 pub(super) fn native() -> Result<Services> {
-    systemd(fractal_runtime::systemd::snapshot()?.as_ref())
+    systemd(fractal_runtime::systemd::snapshot_after_admission()?.as_ref())
 }
 
 #[cfg(target_os = "linux")]
