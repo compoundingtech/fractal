@@ -7,7 +7,7 @@ import { createRoot } from 'react-dom/client'
 import ts from 'typescript'
 import { afterEach, expect, it, vi } from 'vitest'
 import * as Native from '@fractal/client/schema/read'
-import type { ThreadSummary } from '@fractal/client/schema/read'
+import type { Snapshot, ThreadSummary } from '@fractal/client/schema/read'
 
 // Exercise the production native paging, exact-summary hooks and JSX with real
 // React mount/update/cleanup. Only native hosts and the timeline body are ports;
@@ -24,7 +24,7 @@ function production(dependencies: Record<string, unknown>) {
   const input = [
     between('function sameHead', '\ntype ThreadClient'),
     between('function ContextThreadList', '\nexport function ThreadScreen'),
-    between('function threadSummaryLine', '\nfunction EmbeddedThreadHeader'),
+    between('function threadSummaryLine', '\nexport function InboxThread'),
     between('function useThreadSummary', '\nfunction threadTextIssue'),
   ].join('\n') + '\nexports.ContextThreadList = ContextThreadList;'
   const { outputText } = ts.transpileModule(input, { compilerOptions: {
@@ -35,7 +35,7 @@ function production(dependencies: Record<string, unknown>) {
   return exported.ContextThreadList!
 }
 
-type Window = { items: ThreadSummary[]; hasMore: boolean }
+type Window = { items: ThreadSummary[]; hasMore: boolean; snapshot: Snapshot }
 type Handlers = { onWindow: (window: Window) => void; onIssue: (issue: string, refused: boolean) => void }
 
 // Fixtures go through the generated schema so ids and revisions carry their
@@ -45,11 +45,17 @@ const decodeSummary = Native.decodeUnknownSync(Native.ThreadSummary)
 const changed = (base: ThreadSummary, fields: SummaryChange): ThreadSummary => decodeSummary({ ...base, ...fields })
 const summary = (id: number): ThreadSummary => decodeSummary({ id: `thread/${id}`, agent_id: 'agent/reviewer', title: `Review ${id}`,
   state: 'open', unread: true, message_count: 2, revision: 'fence/one', title_revision: 'title/one' })
-const window = (items: ThreadSummary[], hasMore = false): Window => ({ items, hasMore })
+let observation = 0
+const snapshot = (): Snapshot => {
+  const index = ++observation
+  return Native.decodeUnknownSync(Native.Snapshot)({ id: `snapshot/${index}`, store_index: index,
+    host_id: 'host/native-summary', created_at: '2026-11-15T00:00:00Z', projection_version: 'client-projection.v0' })
+}
+const window = (items: ThreadSummary[], hasMore = false): Window => ({ items, hasMore, snapshot: snapshot() })
 
 // One mounted production list with a 40-row head and one older continuation
 // row. `live` decides whether the paired feed serves this client at all.
-function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) => Promise<{ value: ThreadSummary }> }) {
+function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) => Promise<{ value: ThreadSummary; snapshot: Snapshot }> }) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   const host = document.createElement('div')
   document.body.append(host)
@@ -73,8 +79,8 @@ function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) =>
   }
   const client = {
     threadList: vi.fn(async (query: { cursor?: string }) => ({ value: query.cursor
-      ? { items: [summaries.get(older.id)!], next_cursor: null } : { items: head, next_cursor: 'older-page' } })),
-    threadGet: vi.fn(threadGet ?? (async (id: string) => ({ value: summaries.get(id)! }))),
+      ? { items: [summaries.get(older.id)!], next_cursor: null } : { items: head, next_cursor: 'older-page' }, snapshot: snapshot() })),
+    threadGet: vi.fn(threadGet ?? (async (id: string) => ({ value: summaries.get(id)!, snapshot: snapshot() }))),
   }
   const bodyMounted = vi.fn()
   function Body({ thread }: { thread: ThreadSummary }) {
@@ -93,7 +99,8 @@ function mount({ live, threadGet }: { live: boolean; threadGet?: (id: string) =>
     useRef: React.useRef, useState: React.useState, useCallback: React.useCallback, useMemo: React.useMemo, useEffect: React.useEffect,
     useFocusEffect: (callback: React.EffectCallback) => React.useEffect(callback, [callback]),
     useStore: () => ({ threadRefresh: 0, feed }), useWindowDimensions: () => ({ height: 800 }),
-    useTextAppearance: () => ({ palette: {} }), THREAD_WINDOW_SIZE: 40, View, ScrollView: View, Pressable, T: Text,
+    useTextAppearance: () => ({ palette: {}, color: (value: string) => value }),
+    useTitleLines: () => 2, useThreadViewports: () => [], THREAD_WINDOW_SIZE: 40, View, ScrollView: View, Pressable, T: Text,
     ThreadViewport: ({ children }: { children: React.ReactNode }) => children, ThreadBody: Body,
     theme: {}, errorText: String, ClientError: class extends Error {},
     Button: ({ label, onPress, disabled }: { label: string; onPress: () => void; disabled: boolean }) => <button disabled={disabled} onClick={onPress}>{label}</button>,
@@ -207,9 +214,9 @@ it('caches the exact REST summary of an expanded older thread when no live feed 
 })
 
 it('a collapsed thread ignores its in-flight REST read and any frame for its released follow', async () => {
-  const pending: Array<(value: { value: ThreadSummary }) => void> = []
+  const pending: Array<(value: { value: ThreadSummary; snapshot: Snapshot }) => void> = []
   const view = mount({ live: true, threadGet: () => {
-    const { promise, resolve } = Promise.withResolvers<{ value: ThreadSummary }>()
+    const { promise, resolve } = Promise.withResolvers<{ value: ThreadSummary; snapshot: Snapshot }>()
     pending.push(resolve)
     return promise
   } })
@@ -226,7 +233,7 @@ it('a collapsed thread ignores its in-flight REST read and any frame for its rel
     expect(host.querySelector('[data-body]')).toBeNull()
     // Late answers for the cancelled reader must not reach the context cache.
     await act(async () => {
-      for (const resolve of pending) resolve({ value: changed(older, { title: 'Late REST title', revision: 'fence/late' }) })
+      for (const resolve of pending) resolve({ value: changed(older, { title: 'Late REST title', revision: 'fence/late' }), snapshot: snapshot() })
       released.onWindow(window([changed(older, { title: 'Late live title', revision: 'fence/late' })]))
       released.onIssue('Late refusal', true)
     })
