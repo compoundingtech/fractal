@@ -683,9 +683,9 @@ fn cycle(connection: &Connection, source: &str, dependency: &str) -> Result<bool
 }
 fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let mut history = claims(tx, subject)?;
-    notice_authority::retain_authenticated_digest_sources(tx, subject, &mut history)?;
     tx.execute(/* sqlite-large-value: allow-for-now lv-h5f040aa46115 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM custom_dependencies WHERE source=?1", [subject])?;
     notice_authority::record_dependencies(tx, subject, &history)?;
+    notice_authority::retain_authenticated_digest_sources(tx, subject, &mut history)?;
     let Some((hash, m, registration_state)) = registration(tx, subject)? else {
         if fractal_schema::notice::is_reserved_subject(subject) {
             let body = json!({"id":subject,"kind":"custom-subject","state":"unavailable","error":"notices unavailable: pinned registration is missing or mismatched"});

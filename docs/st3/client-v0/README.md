@@ -56,9 +56,19 @@ and snapshot writes require the bound notice-owner member; ordinary notices
 remain producer-owned. The existing reviewed storage manifests are unchanged:
 the native digest validator admits only the exact `daemon/runtime` producer
 for digest snapshots while validating the remaining snapshot fields normally.
-Immutable source identity, keyed by person and date, prevents duplicate emission on retries
-and owner handover; prior-owner notices otherwise follow normal fail-closed
-authority revalidation. These records do not register a notice client surface.
+Immutable source identity, keyed by person and date, prevents duplicate emission on retries.
+Historical authentication requires the pin belong to the selected declaration's predecessor
+lineage, with conflicting declaration heads failing closed until resolved. It folds that
+lineage and the emission writer's declarations through its batch sequence. A former owner cannot mint
+new sources pinned to a declaration superseded in its own writer chain; real emissions
+before that handover remain authenticated. The replicated envelope has no cross-writer
+knowledge frontier, so it cannot establish whether a writer had imported another
+writer's handover when emitting. Digests are informational derived graph records, not
+an exactly-once execution authority. Concurrent authenticated sources converge to one
+source per person/date, preferring the reader's current bound owner and then the lowest
+claim ID, never receiver arrival order. This bounds partitioned former-owner emissions
+to one selected notice rather than a duplicate or source conflict. Snapshots still
+require current-owner authority. These records do not register a notice client surface.
 Generic seat-summary visibility and reduction use one pinned read snapshot and
 effective claim cut. Exact incarnation summaries neither use nor advance the shared
 subject cache; unrelated claim backlogs do not trigger its maintenance. The reduction

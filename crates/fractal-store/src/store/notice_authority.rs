@@ -5,7 +5,7 @@
 //! conflicted, invalid or ended binding fails closed, with no election. Ordinary producer
 //! sources never depend on the binding; daemon-owned digest sources do.
 //! Digest emission history pins its exact owner declaration and checks the historical member
-//! window; current ownership still fences every new local source and snapshot write.
+//! window and declaration lineage in the writer's chain, never today's owner.
 use super::*;
 use crate::fleet::MemberState;
 use crate::notice_owner::{self, NoticeOwner};
@@ -280,39 +280,137 @@ fn validate_digest_writer(
     anyhow::ensure!(actor == notice::RUNTIME_ACTOR && position.origin == bound.member
         && membership.keys_for(position.origin, position.sequence).contains(&bound.member_key),
         "notices unavailable: only the bound notice owner's daemon writes daemon notices");
+    validate_digest_owner_at(connection, id, position)?;
     Ok(())
+}
+
+/// Fold the declarations evidenced by the writer's sequence and the pinned declaration's
+/// predecessor closure. Receiver-local arrival indexes cannot establish writer causality.
+fn validate_digest_owner_at(connection: &Connection, pinned: &str, position: Position<'_>) -> Result<()> {
+    let selected = current_desired_row_tx(connection, notice_owner::SUBJECT)?
+        .ok_or_else(|| anyhow::Error::new(FractalError::new("pending-digest-owner", notice_owner::SUBJECT)))?;
+    if !desired_conflicts_at(connection, notice_owner::SUBJECT, Some(&selected.claim_id), None)?.is_empty() {
+        return Err(anyhow::Error::new(FractalError::new("pending-digest-owner", notice_owner::SUBJECT)));
+    }
+    let mut lineage = connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-h749b68b8a498 owner=fractal_store::store::notice_authority TODO=trace-statement-and-value-representation */ "WITH RECURSIVE lineage(id) AS (
+             VALUES(?1)
+             UNION
+             SELECT predecessor.value FROM lineage
+             JOIN claims c ON c.id=lineage.id, json_each(c.predecessors) predecessor
+         )
+         SELECT lineage.id,c.id FROM lineage LEFT JOIN claims c ON c.id=lineage.id",
+    )?;
+    let mut established = false;
+    for row in lineage.query_map([&selected.claim_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))? {
+        let (id, present) = row?;
+        if present.is_none() {
+            return Err(anyhow::Error::new(FractalError::new("pending-digest-owner", id)));
+        }
+        established |= id == pinned;
+    }
+    anyhow::ensure!(established, "notices unavailable: owner declaration is outside the selected owner lineage");
+    let mut statement = connection.prepare_cached(
+        /* sqlite-large-value: allow-for-now lv-ha93c329bbcab owner=fractal_store::store::notice_authority TODO=trace-statement-and-value-representation */ "WITH RECURSIVE known(id) AS (
+             SELECT c.id FROM claims c JOIN batches b ON b.id=c.batch_id
+             WHERE c.subject=?1 AND c.kind='intent.desired'
+               AND (c.id=?2 OR (c.origin=?3 AND b.replica_sequence<=?4))
+             UNION
+             SELECT predecessor.value FROM known
+             JOIN claims c ON c.id=known.id, json_each(c.predecessors) predecessor
+         )
+         SELECT known.id,c.body,c.predecessors FROM known LEFT JOIN claims c ON c.id=known.id
+         WHERE c.id IS NULL OR (c.subject=?1 AND c.kind='intent.desired'
+           AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=c.id AND state='repaired'))",
+    )?;
+    let mapped = statement.query_map(params![notice_owner::SUBJECT, pinned, position.origin, position.sequence],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)))?;
+    let mut rows = Vec::new();
+    for row in mapped {
+        let (id, body, predecessors) = row?;
+        let Some(body) = body else {
+            return Err(anyhow::Error::new(FractalError::new("pending-digest-owner", id)));
+        };
+        rows.push((id, body, predecessors.unwrap_or_else(|| "[]".into())));
+    }
+    let referenced = rows.iter().flat_map(|(_, _, predecessors)|
+        serde_json::from_str::<Vec<String>>(predecessors).unwrap_or_default()).collect::<BTreeSet<_>>();
+    anyhow::ensure!(rows.iter().filter(|(id, _, _)| !referenced.contains(id)).count() == 1,
+        "notices unavailable: conflicting owner declarations at digest emission");
+    anyhow::ensure!(select_desired_row(rows)?.is_some_and(|selected| selected.claim_id == pinned),
+        "notices unavailable: owner declaration was superseded before digest emission");
+    Ok(())
+}
+
+pub(super) enum DigestSourceAuthority {
+    Authenticated,
+    Deferred(String),
+    Rejected,
 }
 
 /// Authenticate immutable emissions independently of today's owner. Raw claim existence,
 /// daemon actor names and payload host strings are not emission evidence.
-pub(super) fn authenticated_digest_source(connection: &Connection, claim: &ClaimRecord) -> Result<bool> {
+pub(super) fn digest_source_authority(connection: &Connection, claim: &ClaimRecord) -> Result<DigestSourceAuthority> {
     if !claim.subject.starts_with(notice::DIGEST_SOURCE_PREFIX)
         || claim.kind != "custom.attention.notice-created" {
-        return Ok(false);
+        return Ok(DigestSourceAuthority::Rejected);
     }
     let repaired: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND state='repaired')",
         [&claim.id], |row| row.get(0),
     )?;
-    if repaired { return Ok(false); }
+    if repaired { return Ok(DigestSourceAuthority::Rejected); }
     let fields = custom::fields(claim);
     let manifest = &notice::manifests()[0];
     if fields.get("_registration").and_then(Value::as_str) != Some(notice::HASHES[0])
         || fractal_schema::custom::validate_fields(&manifest.claims[&claim.kind], &fields).is_err()
         || validate_digest_identity(&claim.subject, claim.actor.as_deref().unwrap_or_default(), &fields).is_err() {
-        return Ok(false);
+        return Ok(DigestSourceAuthority::Rejected);
     }
+    let Some(id) = fields.get("source").and_then(|source| source.get("owner_claim")).and_then(Value::as_str) else {
+        return Ok(DigestSourceAuthority::Rejected);
+    };
+    let Some(declaration) = claim_by_id_tx(connection, id)? else {
+        return Ok(DigestSourceAuthority::Deferred(id.to_owned()));
+    };
     let position = Position::written(connection, claim)?;
     match validate_digest_writer(connection, claim.actor.as_deref().unwrap_or_default(), &fields, Some(position)) {
-        Ok(()) => Ok(true),
+        Ok(()) => Ok(DigestSourceAuthority::Authenticated),
         Err(error) if error.downcast_ref::<rusqlite::Error>().is_some() => Err(error),
-        Err(_) => Ok(false),
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.code == "pending-digest-owner") => {
+            let pending = error.downcast_ref::<FractalError>().expect("matched pending owner error");
+            Ok(DigestSourceAuthority::Deferred(pending.message.clone()))
+        }
+        Err(_) => {
+            if declaration.subject == notice_owner::SUBJECT && declaration.kind == "intent.desired"
+                && let Ok(desired) = serde_json::from_value::<DesiredSubject>(declaration.body)
+                && let Ok(bound) = notice_owner::parse(&desired.desired) {
+                let membership = fleet_membership_tx(connection)?;
+                if position.origin == bound.member
+                    && matches!(membership.state(position.origin), MemberState::NotMember) {
+                    return Ok(DigestSourceAuthority::Deferred("fleet-membership".into()));
+                }
+            }
+            Ok(DigestSourceAuthority::Rejected)
+        }
     }
+}
+
+pub(super) fn authenticated_digest_source(connection: &Connection, claim: &ClaimRecord) -> Result<bool> {
+    Ok(matches!(digest_source_authority(connection, claim)?, DigestSourceAuthority::Authenticated))
 }
 
 pub(super) fn retain_authenticated_digest_sources(
     connection: &Connection, subject: &str, history: &mut Vec<ClaimRecord>,
 ) -> Result<()> {
+    if let Some(suffix) = subject.strip_prefix(notice::DIGEST_SNAPSHOT_PREFIX) {
+        let source_id = format!("{}{suffix}", notice::DIGEST_SOURCE_PREFIX);
+        let mut sources = custom::claims(connection, &source_id)?;
+        retain_authenticated_digest_sources(connection, &source_id, &mut sources)?;
+        history.retain(|claim| sources.first().is_some_and(|source|
+            custom::fields(claim).get("creation_claim").and_then(Value::as_str) == Some(source.id.as_str())));
+    }
     if subject.starts_with(notice::DIGEST_SOURCE_PREFIX) {
         let mut failure = None;
         history.retain(|claim| match authenticated_digest_source(connection, claim) {
@@ -320,6 +418,14 @@ pub(super) fn retain_authenticated_digest_sources(
             Err(error) => { failure = Some(error); false }
         });
         if let Some(error) = failure { return Err(error); }
+        // A partitioned former owner cannot prove what another writer had declared.
+        // Identity is already (person, date): converge on one immutable input rather
+        // than making arrival order decide visibility or turning duplicates into conflict.
+        let current_owner = owner(connection).ok().map(|(owner, _)| owner.member);
+        if let Some(selected) = history.iter().min_by_key(|claim|
+            (current_owner.as_deref() != Some(claim.origin.as_str()), claim.id.as_str())).map(|claim| claim.id.clone()) {
+            history.retain(|claim| claim.id == selected);
+        }
     }
     Ok(())
 }

@@ -43,11 +43,28 @@ impl Store {
                 }
                 (person,id,date,u128::try_from(end)?,Some(serde_json::from_str::<Value>(&payload)?))
             } else {
+                const SCAN_KEY: &str = "ask_digest_person_scan_v1";
+                let generation: Option<String> = tx.query_row(
+                    "SELECT value FROM meta WHERE key='ask_digest_pending_generation_v1'", [], |r| r.get(0)).optional()?;
+                let token = format!("{owner_claim}/{}/{timezone}/{at}/{}", generation.as_deref().unwrap_or("0"), window.date);
+                let saved: Option<String> = tx.query_row("SELECT value FROM meta WHERE key=?1", [SCAN_KEY], |r| r.get(0)).optional()?;
+                let (saved_token, mut after_person, mut wake): (String,String,u128) = saved
+                    .map(|value| serde_json::from_str(&value)).transpose()?.unwrap_or_default();
+                if saved_token != token || wake <= now {
+                    after_person.clear();
+                    wake = window.next_deadline;
+                }
+                // Seek directly beyond each person's entire pending range. A future person
+                // must not block a different person's missed digest; each continuation examines
+                // one person, retaining the earliest future wake across the bounded traversal.
                 let candidate: Option<(String,i64)> = tx.query_row(
-                    "SELECT person,resolved_at FROM local_ask_digest_pending INDEXED BY local_ask_digest_oldest
-                     WHERE staged_source IS NULL AND person IS NOT NULL ORDER BY resolved_at,resolution_id LIMIT 1", [],
+                    "SELECT person,resolved_at FROM local_ask_digest_pending INDEXED BY local_ask_digest_due
+                     WHERE staged_source IS NULL AND person>?1 ORDER BY person,resolved_at,resolution_id LIMIT 1", [&after_person],
                     |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-                let Some((person, earliest)) = candidate else { return Ok(waiting) };
+                let Some((person, earliest)) = candidate else {
+                    tx.execute(/* sqlite-large-value: allow-for-now lv-h167f521211c1 owner=fractal_store::store::ask_digest TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [SCAN_KEY])?;
+                    return Ok(AskDigestPass { next_deadline: Some(wake), ..waiting });
+                };
                 let covered: Option<i64> = tx.query_row("SELECT covered_through FROM local_ask_digest_sources
                     WHERE person=?1 ORDER BY covered_through DESC LIMIT 1", [&person], |r| r.get(0)).optional()?;
                 // A policy reload selects only the next end. Previously covered instants are
@@ -61,7 +78,10 @@ impl Store {
                     end = next_boundary(end, &timezone, &at)?;
                 };
                 if end > now {
-                    return Ok(AskDigestPass { next_deadline: Some(end.min(window.next_deadline)), ..waiting });
+                    wake = wake.min(end);
+                    tx.execute(/* sqlite-large-value: allow-for-now lv-h02042a7dc741 owner=fractal_store::store::ask_digest TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                        params![SCAN_KEY,serde_json::to_string(&(token,person,wake))?])?;
+                    return Ok(continued);
                 }
                 (person,id,date,end,None)
             };
@@ -143,7 +163,7 @@ fn reclaim_previous_owner(tx: &Transaction<'_>, current: &str) -> Result<bool> {
         if changed != 0 { return Ok(true); }
         tx.execute(/* sqlite-large-value: allow-for-now lv-h4e5cdd0bdcce owner=fractal_store::store::ask_digest TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_ask_digest_draft WHERE owner=?1", [&previous])?;
     }
-    tx.execute(/* sqlite-large-value: allow-for-now lv-h02042a7dc741 owner=fractal_store::store::ask_digest TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![KEY,current])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hf26fcae76171 owner=fractal_store::store::ask_digest TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", params![KEY,current])?;
     Ok(false)
 }
 
