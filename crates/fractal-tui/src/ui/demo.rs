@@ -182,6 +182,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn demo_sidebar_renders_the_ready_scenario_layout() {
+        use super::super::{Ui, glass};
+        use ratatui::{Terminal, backend::TestBackend};
+        let demo = load().unwrap();
+        let mut ui = Ui::new(demo.world);
+        ui.resource_sidebar.arrangements = demo.arrangements;
+        ui.glasses = glass::Glasses::open(None, None);
+        ui.glasses.sidebar.shown = true;
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let shown = (0..44).map(|y| {
+            (0..160).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+        }).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("Implementation"), "{shown}");
+        assert!(shown.contains("Review"), "{shown}");
+        assert!(shown.contains("Atlas Builder"), "{shown}");
+        assert!(!shown.contains("Sidebar layout unavailable"), "{shown}");
+        assert!(!shown.contains("NotReady"), "{shown}");
+    }
+
+    #[test]
     fn demo_rebases_inventory_instants_but_keeps_relative_ages() {
         let first = load_at(SLICES, 1_700_000_000_000).unwrap().world;
         let later = load_at(SLICES, 1_700_000_060_000).unwrap().world;
