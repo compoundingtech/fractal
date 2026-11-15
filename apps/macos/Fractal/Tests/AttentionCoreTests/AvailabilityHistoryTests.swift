@@ -4,6 +4,7 @@ import XCTest
 
 @testable import AttentionCore
 @testable import AttentionTray
+@testable import TrayViews
 
 /// `GET v1/client/availability/history` mapped onto the panel's history, the views it derives,
 /// and when the model reads it.
@@ -103,6 +104,53 @@ final class AvailabilityHistoryTests: XCTestCase {
     XCTAssertEqual(request.bucketSeconds, 3600)
     XCTAssertEqual(calendar.startOfDay(for: request.from), request.from)
     XCTAssertEqual(calendar.dateComponents([.day], from: request.from, to: calendar.startOfDay(for: now)).day, 27)
+  }
+
+  @MainActor
+  func testLastDayIncludesTheSameFirstBucketInChartAndHeaderWhenReadEndsMidHour() {
+    let buckets = (0..<25).map { index in
+      Self.bucket(at: Self.start.addingTimeInterval(Double(index) * 3600), available: 3600, away: 0)
+    }
+    let end = Self.start.addingTimeInterval(24.5 * 3600)
+    let last = AttentionCore.AvailabilityHistory.Bucket(
+      start: buckets[24].start, end: end, status: WordSeconds([.available: 1800]),
+      source: WordSeconds([.presence: 1800]), presence: nil,
+      interruptions: WordSeconds([.all: 1800]), deadlineClock: WordSeconds([.run: 1800]))
+    let history = Self.history(Array(buckets.prefix(24)) + [last], to: end)
+    let drawn = HistoryPeriod.lastDay(history)
+    XCTAssertEqual(HistoryPeriod.lastDayStart(history), Self.start)
+    XCTAssertEqual(drawn.first?.start, Self.start, "the cutoff crosses this first hour")
+    let captionTotal = drawn.reduce(AttentionCore.AvailabilityHistory.Mix()) { $0 + $1.mix }
+    XCTAssertEqual(captionTotal.available, 24.5 * 3600)
+    XCTAssertEqual(history.total(since: HistoryPeriod.lastDayStart(history), until: end), captionTotal)
+    XCTAssertEqual(AvailabilityHistorySection.aside(.history(history), style: .today), "24 h 30 min available")
+  }
+
+  @MainActor
+  func testWeekLabelsFollowThe25HourBerlinAutumnDay() throws {
+    try assertWeekLabels(month: 10, day: 25, hours: 25, elapsedAtSix: 7)
+  }
+
+  @MainActor
+  func testWeekLabelsFollowThe23HourBerlinSpringDay() throws {
+    try assertWeekLabels(month: 3, day: 29, hours: 23, elapsedAtSix: 5)
+  }
+
+  @MainActor
+  private func assertWeekLabels(month: Int, day: Int, hours: Double, elapsedAtSix: Double) throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Berlin"))
+    let start = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: month, day: day)))
+    XCTAssertEqual(WeekStrips.span(start, calendar), hours * 3600)
+    for hour in [0, 6, 12, 18, 24] {
+      let elapsed = hour == 0 ? 0 : hour == 24 ? hours : elapsedAtSix + Double(hour - 6)
+      let fraction = HourAxis.fraction(hour: hour, day: start, calendar: calendar)
+      XCTAssertEqual(fraction, elapsed / hours, accuracy: 0.000001)
+      if hour < 24 {
+        let stripTime = start.addingTimeInterval(fraction * WeekStrips.span(start, calendar))
+        XCTAssertEqual(calendar.component(.hour, from: stripTime), hour, "label must align with its local bucket")
+      }
+    }
   }
 
   func testTimeWords() {
