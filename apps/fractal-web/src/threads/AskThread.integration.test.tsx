@@ -116,7 +116,7 @@ it.each([
     }
     await vi.waitFor(() => expect(findStart()).toBeDefined())
     const button = findStart()
-    expect(host.querySelector('[data-testid="alert-details"]')?.textContent).toContain('Ask agent/example/atlas about this item without answering it.')
+    expect(host.querySelector('[data-testid="alert-details"]')?.textContent).toContain('Ask atlas about this item without answering it.')
     await act(async () => button?.click())
     const composer = host.querySelector('[data-testid="alert-details"] [aria-label="Message composer, Review PR #42"]')
     expect(composer).not.toBeNull()
@@ -126,7 +126,7 @@ it.each([
     expect(Array.from(panel?.querySelectorAll('button') ?? []).some(each => each.textContent === 'Send' || each.getAttribute('aria-label') === 'Send')).toBe(true)
     expect(panel?.querySelector<HTMLInputElement>('input')?.value).toBe('Review PR #42')
     expect([...(panel?.querySelectorAll('label') ?? [])].map(label => label.textContent)).toContain('Thread title')
-    expect(panel?.textContent).toContain('To agent/example/atlas')
+    expect(panel?.textContent).toContain('To atlas')
     if (kind === 'agent-request') expect(host.querySelector('[data-testid="alert-details"] [data-alert-kind="agent-request"]')?.textContent).toContain('Merge')
     expect(answer).not.toHaveBeenCalled()
     expect(open).not.toHaveBeenCalled()

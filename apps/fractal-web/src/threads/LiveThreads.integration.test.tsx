@@ -137,6 +137,76 @@ it('marks the section paused once and holds it until the gateway is live again, 
   } finally { await view.dispose() }
 })
 
+it.each([
+  ['fails to reach Fractal', () => { throw new TypeError('Failed to fetch') }],
+  ['gets a 503 from the gateway', () => refusal(503, 'unavailable')],
+] as const)('marks an Inbox item paused with Retry when an open thread’s messages later %s while its list and detail stay live', async (_case, broken) => {
+  let timelineDown = false
+  const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    reply: url => url.pathname.endsWith('/threads') ? page(url.searchParams.get('recently_closed') === 'true' ? [] : [row('thread/one', 'Release checklist')])
+      : url.pathname.endsWith('/timeline') ? timelineDown ? broken() : page([{ kind: 'message', id: 'message/first', actor_id: agent,
+        content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null }])
+      : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  const heading = () => view.host.querySelector('h3')
+  try {
+    const header = () => view.host.querySelector<HTMLButtonElement>('[data-thread-panel][aria-label="Release checklist"] button')
+    await vi.waitFor(() => expect(header()).not.toBeNull())
+    if (header()?.getAttribute('aria-expanded') !== 'true') await act(async () => header()?.click())
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The checklist is complete.'))
+    expect(heading()?.getAttribute('aria-label')).toBe('Threads, 1')
+    expect(view.button('Retry: Updates paused')).toBeUndefined()
+    // Every thread read runs again; only the messages fail, and the gateway stays live.
+    timelineDown = true
+    await act(async () => view.threads.reload?.())
+    await vi.waitFor(() => expect(heading()?.getAttribute('aria-label')).toBe('Threads, 1, updates paused'))
+    expect(view.host.querySelectorAll('[data-threads-paused]')).toHaveLength(1)
+    expect(view.host.textContent).toContain('The checklist is complete.')
+    expect(view.button('Retry: Updates paused')).toBeDefined()
+    timelineDown = false
+    await act(async () => view.button('Retry: Updates paused')?.click())
+    await vi.waitFor(() => expect(heading()?.getAttribute('aria-label')).toBe('Threads, 1'))
+    expect(view.host.querySelectorAll('[data-threads-paused]')).toHaveLength(0)
+    expect(view.button('Retry: Updates paused')).toBeUndefined()
+    expect(view.host.textContent).toContain('The checklist is complete.')
+  } finally { silence.mockRestore(); await view.dispose() }
+})
+
+it('marks a thread in its own tab paused with Retry when its messages later fail while its detail stays live', async () => {
+  let timelineDown = false
+  const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    reply: url => url.pathname.endsWith('/timeline') ? timelineDown ? refusal(502, 'bad-gateway') : page([{ kind: 'message', id: 'message/first', actor_id: agent,
+      content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null }])
+      : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The checklist is complete.'))
+    expect(view.host.querySelector('[data-threads-paused]')).toBeNull()
+    timelineDown = true
+    await act(async () => view.threads.reload?.())
+    await vi.waitFor(() => expect(view.host.querySelector('[data-threads-paused]')?.textContent).toContain('Updates paused'))
+    expect(view.host.textContent).toContain('The checklist is complete.')
+    timelineDown = false
+    await act(async () => view.button('Retry: Updates paused')?.click())
+    await vi.waitFor(() => expect(view.host.querySelector('[data-threads-paused]')).toBeNull())
+  } finally { silence.mockRestore(); await view.dispose() }
+})
+
+it('names an agent by its short name, never its id, while the roster has no row for it', async () => {
+  // The mounted roster holds no agents, so every agent read is unavailable.
+  const view = await mount(<LiveInboxThreads alert={ask} />, { actions: ['thread.start'], reply: () => page([]) })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Ask atlas about this item without answering it.'))
+    await act(async () => view.button('Start thread')?.click())
+    expect(view.host.textContent).toContain('To atlas')
+    expect(view.host.textContent).not.toContain(agent)
+    // The exact id stays available as the name's title.
+    expect([...view.host.querySelectorAll('[title]')].map(each => [each.textContent, each.getAttribute('title')])).toContainEqual(['atlas', agent])
+  } finally { await view.dispose() }
+})
+
 it('offers Retry after a failed read and shows the threads it then observes', async () => {
   let broken = true
   const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -307,7 +377,7 @@ it('titles a first send from its first line when a sibling thread already uses t
     await act(async () => view.button('Start thread')?.click())
     const title = () => view.host.querySelector<HTMLInputElement>('input')
     expect(title()?.value).toBe('Release checklist')
-    expect(view.host.textContent).toContain(`To ${agent}`)
+    expect(view.host.textContent).toContain('To atlas')
     await type(view.host.querySelector('textarea'), 'Check the rollback step\nIt was skipped last time.')
     expect(title()?.value).toBe('Check the rollback step')
     await act(async () => view.button('Send')?.click())

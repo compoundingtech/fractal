@@ -5,7 +5,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Button, Input, Label, TextField } from 'react-aria-components'
 import type { ThreadListQuery } from '@fractal/client'
-import type { Attention, ThreadMessageEvent, ThreadSummary } from '@fractal/client/schema/read'
+import type { Attention, ThreadMessageEvent, ThreadSummary, ThreadTimelinePage } from '@fractal/client/schema/read'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -65,6 +65,26 @@ function useUpdatesPaused(stale: boolean): boolean {
 function useGatewayLive(): boolean | undefined {
   const gateway = useGatewaySync()?.status._tag
   return gateway === undefined ? undefined : gateway === 'Live'
+}
+
+/**
+ * An open thread's own reads (its detail and newest messages) can go stale while its section's list stays live.
+ * The thread reports that here, so the section's one "Updates paused" marker covers it and offers Retry.
+ */
+const StaleThreadReads = React.createContext<((threadId: string) => () => void) | undefined>(undefined)
+
+function useStaleThreadReads(): readonly [boolean, (threadId: string) => () => void] {
+  const [stale, setStale] = React.useState<ReadonlySet<string>>(() => new Set())
+  const report = React.useCallback((threadId: string) => {
+    setStale(current => current.has(threadId) ? current : new Set(current).add(threadId))
+    return () => setStale(current => {
+      if (!current.has(threadId)) return current
+      const next = new Set(current)
+      next.delete(threadId)
+      return next
+    })
+  }, [])
+  return [stale.size > 0, report]
 }
 
 /**
@@ -151,10 +171,14 @@ export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonl
     canStart={alert.state === 'open'} onOpenThread={onOpenThread} />
 }
 
-/** The observed agent name, else its exact id: never a guessed role. */
+/** The last segment of an actor id ("atlas"): what the UI shows when no observed name exists. Ids stay out of the text. */
+const shortActorName = (id: string) => id.split('/').at(-1) || id
+
+/** The observed agent name, else its short name with the exact id as the title: never a guessed role. */
 function AgentName({ id }: { readonly id: string }) {
   const agent = useAgent(id)
-  return <>{(agent._tag === 'Observed' ? agent.value?.name : undefined) ?? id}</>
+  const name = agent._tag === 'Observed' ? agent.value?.name : undefined
+  return name === undefined ? <span title={id}>{shortActorName(id)}</span> : <>{name}</>
 }
 
 function InboxThreadsContent({ source, agent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
@@ -171,7 +195,10 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   const query = React.useMemo(() => ({ origin_source: originSource, origin_episode: episode }), [originSource, episode])
   const list = useAtomValue(source.list(query))
   const narrow = React.useContext(NarrowLayoutContext)
-  const paused = useUpdatesPaused(list._tag === 'Observed' && list.freshness === 'stale')
+  const [threadReadsStale, reportStale] = useStaleThreadReads()
+  // A stale read keeps what it last showed; Retry reads every thread projection on this item again.
+  const readsStale = (list._tag === 'Observed' && list.freshness === 'stale') || threadReadsStale
+  const paused = useUpdatesPaused(readsStale)
   const draftKey = `inbox:${JSON.stringify([originSource, episode])}`
   const draft = useAtomValue(source.draft(draftKey))
   const gatewayLive = useGatewayLive()
@@ -203,9 +230,10 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
     ? threadTitleFromAsk(firstLine) : askTitle
   const startTitle = threadTitleFromAsk(titleInput?.trim() || suggested)
   const saved = draft.content.trim() !== ''
-  return <section aria-labelledby={headingId} {...stylex.props(styles.inbox)}>
+  return <StaleThreadReads.Provider value={reportStale}><section aria-labelledby={headingId} {...stylex.props(styles.inbox)}>
     <div {...stylex.props(styles.headingRow)}>
       <h3 id={headingId} aria-label={countedName('Threads', count, paused)} {...stylex.props(styles.inboxHeading)}><CountedLabel label="Threads" count={count} paused={paused} /></h3>
+      {readsStale ? <ActionButton aria-label="Retry: Updates paused" onPress={source.reload}>Retry</ActionButton> : null}
       {/* The start control keeps one place at the end of the heading, however many threads open below it. */}
       {!offerStart || agent === undefined || starting ? null : <div ref={startArea} {...stylex.props(styles.startArea)}>
         <ActionButton variant="outline" onPress={() => setStarting(true)}>{saved ? 'Continue draft' : <><Icon name="plus" size={12} />Start thread</>}</ActionButton>
@@ -228,7 +256,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
       </ThreadPanel>
       : count === 0 && focused === undefined ? <p {...stylex.props(styles.note)}>Ask <AgentName id={agent} /> about this item without answering it.</p> : null}
     <ThreadListPage source={source} query={query} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
-  </section>
+  </section></StaleThreadReads.Provider>
 }
 
 /** Pending first sends survive the Inbox source that originally hosted their editor. */
@@ -241,12 +269,14 @@ function PendingInboxStarts({ source, items, onOpenThread }: OpenThread & { read
   const starts = useAtomValue(source.pendingStarts?.() ?? noPendingStarts).filter(start => !items.some(item =>
     item.source_id === start.parameters.origin.source_id && item.episode === start.parameters.origin.episode))
   const [focused, setFocused] = React.useState<string>()
+  const [threadReadsStale, reportStale] = useStaleThreadReads()
   if (starts.length === 0 && focused === undefined) return null
-  return <section aria-label="Thread recovery" {...stylex.props(styles.recovery)}>
+  return <StaleThreadReads.Provider value={reportStale}><section aria-label="Thread recovery" {...stylex.props(styles.recovery)}>
     <h3 {...stylex.props(styles.note)}>Thread recovery</h3>
+    {threadReadsStale ? <SystemNotice kind="stale" scope="inline" title="Updates paused" onRetry={source.reload} /> : null}
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
     {starts.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
-  </section>
+  </section></StaleThreadReads.Provider>
 }
 
 function PendingStartPanel({ source, start, onSent }: {
@@ -288,7 +318,9 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
 }) {
   const { read, upgradeRequired, unknown, failure } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
-  const paused = useUpdatesPaused(detail._tag === 'Observed' && detail.freshness === 'stale')
+  // The thread reports its own detail and newest messages going stale; embedded, its section carries the marker.
+  const [threadReadsStale, reportStale] = useStaleThreadReads()
+  const paused = useUpdatesPaused(threadReadsStale)
   // A thread in its own tab keeps its status in the thread's measure, where its heading would be.
   const status = (notice: React.ReactNode) => embedded ? notice : <div {...stylex.props(styles.dedicatedNotice)}>{notice}</div>
   if (upgradeRequired) return status(<ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="thread" />)
@@ -299,17 +331,20 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
   // Reading again cannot bring back a thread Fractal says does not exist.
   if (detail._tag === 'Unavailable' && detail.code === 'not-found') return status(<SystemNotice kind="empty" scope="inline" title="Fractal has no thread at this link." />)
   if (detail._tag !== 'Observed') return status(<ReadStatus feed={detail} subject="thread" onRetry={source.reload} />)
-  return <>
-    {/* Embedded threads share their section's one marker; a thread in its own tab carries it above its heading. */}
-    {embedded || !paused ? null : <div data-threads-paused="" {...stylex.props(styles.dedicatedNotice)}>
-      <SystemNotice kind="stale" scope="inline" connection title="Updates paused" />
+  const thread = <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
+  if (embedded) return thread
+  return <StaleThreadReads.Provider value={reportStale}>
+    {/* A thread in its own tab carries the marker above its heading; Retry only when one of its reads went stale. */}
+    {!paused ? null : <div data-threads-paused="" {...stylex.props(styles.dedicatedNotice)}>
+      <SystemNotice kind="stale" scope="inline" connection={!threadReadsStale} title="Updates paused" {...(threadReadsStale ? { onRetry: source.reload } : {})} />
     </div>}
-    <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
-  </>
+    {thread}
+  </StaleThreadReads.Provider>
 }
 
 const noPendingChange = Atom.make<string | undefined>(undefined)
 const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
+const idleTimeline = Atom.make<Feed<ThreadTimelinePage>>(waiting)
 const noPendingStarts = Atom.make<readonly RetainedThreadStart[]>([])
 
 function LiveThread({ source, thread, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
@@ -331,6 +366,11 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
     : detail._tag === 'Unavailable' && detail.code === 'not-found' ? <SystemNotice kind="empty" scope="inline" title="Fractal no longer has this thread." />
     : <ReadStatus feed={detail} subject="thread" onRetry={source.reload} />
   const summary = observation?.summary ?? thread
+  // Same page the timeline shows; a stale one keeps its messages, and the section says updates paused.
+  const timeline = useAtomValue(observation === undefined ? idleTimeline : source.timeline(thread.id))
+  const readsStale = (detail._tag === 'Observed' && detail.freshness === 'stale') || (timeline._tag === 'Observed' && timeline.freshness === 'stale')
+  const reportStale = React.useContext(StaleThreadReads)
+  React.useEffect(() => readsStale && reportStale !== undefined ? reportStale(thread.id) : undefined, [readsStale, reportStale, thread.id])
   const agent = useAgent(summary.agent_id)
   const agentName = agent._tag === 'Observed' ? agent.value?.name : undefined
   const retryChange = source.retryChange
@@ -512,7 +552,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
       : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
     <ol {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
-        const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You' : event.actor_id === agentId && agentName !== undefined ? agentName : event.actor_id.split('/').at(-1) ?? event.actor_id
+        const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You' : event.actor_id === agentId && agentName !== undefined ? agentName : shortActorName(event.actor_id)
         const date = new Date(event.accepted_at_unix_ms)
         const iso = Number.isFinite(date.getTime()) ? date.toISOString() : undefined
         const time = iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>
