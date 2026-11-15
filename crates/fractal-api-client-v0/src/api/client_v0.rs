@@ -1552,6 +1552,7 @@ async fn prompt_call_waits(
     // The entries as the conversation keeps them, whatever this session's own reads negotiate.
     let mut entries = session.clone();
     entries.conversation_blocks = false;
+    entries.conversation_semantics = false;
     let page = conversation_page(state, &entries, &session_id, None, CLIENT_MAX_PAGE_ITEMS).await?;
     Ok(Some(crate::api::prompt_card::call_waits_among(
         page["items"].as_array().map_or(&[][..], Vec::as_slice),
@@ -1583,6 +1584,7 @@ async fn conversation_page(
                         session_id: session_id.to_owned(),
                         limit,
                         cursor: None,
+                        conversation_semantics: session.conversation_semantics,
                     },
                 },
             )
@@ -1639,6 +1641,7 @@ async fn conversation_changes_value(
                         session_id: session_id.to_owned(),
                         after: after.map(str::to_owned),
                         wait_ms,
+                        conversation_semantics: session.conversation_semantics,
                     },
                 },
             )
@@ -5562,6 +5565,7 @@ pub async fn conversation_changes(
                         session_id,
                         after: query.after,
                         wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
+                        conversation_semantics: session.conversation_semantics,
                     },
                 },
             )
@@ -5666,6 +5670,7 @@ async fn conversation_stream_socket(
                                 session_id: session_id.clone(),
                                 after: after_input.clone(),
                                 wait_ms: 10_000,
+                                conversation_semantics: session.conversation_semantics,
                             },
                         },
                     )
@@ -16555,6 +16560,29 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn conversation_semantics_negotiation_requires_blocks_and_rejects_unknown_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (features, expected) in [
+            ("", Some(false)),
+            ("custom-subjects.v1", Some(false)),
+            ("conversation-blocks.v1", Some(false)),
+            ("conversation-semantics.v1", None),
+            ("conversation-blocks.v1, conversation-semantics.v1", Some(true)),
+            ("conversation-blocks.v1, conversation-semantics.v2", None),
+            ("conversation-blocks.v1, conversation-semantics.v1, conversation-semantics.v2", None),
+        ] {
+            let request = Request::builder().uri("/v1/client/capabilities")
+                .header("x-st3-features", features).body(Body::empty()).unwrap();
+            let result = authenticate(&state, &request, "unix");
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap().conversation_semantics, expected, "{features}"),
+                None => assert_eq!(result.unwrap_err().code, "unsupported-capability", "{features}"),
+            }
+        }
+    }
+
+    #[test]
     fn model_drift_attention_is_its_own_feature_not_implied_by_custom_forms() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16843,19 +16871,24 @@ subscription "watch/source" {
         let session = authenticate(&state, &request, "fabric-loopback").unwrap();
         assert!(!session.messages_paging);
         assert!(!revalidate_session(&state, &session).unwrap().messages_paging);
+        assert!(!session.conversation_semantics);
+        assert!(!revalidate_session(&state, &session).unwrap().conversation_semantics);
         let mut negotiated_request = Request::builder()
             .uri("/v1/client/collections/stream")
             .header(AUTHORIZATION, format!("Bearer {credential}"))
-            .header("x-st3-features", "conversation-blocks.v1, messages-paging.v2")
+            .header("x-st3-features", "conversation-blocks.v1, conversation-semantics.v1, messages-paging.v2")
             .body(Body::empty())
             .unwrap();
         let session = authenticate(&state, &negotiated_request, "fabric-loopback").unwrap();
         assert!(session.messages_paging);
+        assert!(session.conversation_semantics);
         let refreshed = revalidate_session(&state, &session).unwrap();
         assert!(refreshed.messages_paging);
         assert!(refreshed.conversation_blocks);
+        assert!(refreshed.conversation_semantics);
         negotiated_request.headers_mut().remove("x-st3-features");
         assert!(!authenticate(&state, &negotiated_request, "fabric-loopback").unwrap().messages_paging);
+        assert!(!authenticate(&state, &negotiated_request, "fabric-loopback").unwrap().conversation_semantics);
         state
             .store
             .append_client_operation_claim(&ClaimInput {
@@ -21644,6 +21677,25 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    #[test]
+    fn native_cursor_expires_when_semantic_projection_changes_without_source_change() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, session_id, _, source, _) =
+            page_fixture(root.path(), "semantic-generation", 6, 0);
+        let snapshot = new_client_snapshot(&state);
+        let mut session = ClientSession::local(Some("person/alex")).unwrap();
+        session.conversation_blocks = true;
+        session.conversation_semantics = true;
+        let first = native_slice_page(&state, &snapshot, &session, &session_id,
+            &ClientListQuery { limit: Some(2), ..Default::default() }, &source).unwrap().0;
+        let encoded = first["page"]["next_cursor"].as_str().unwrap();
+        let query = ClientListQuery { cursor: Some(encoded.to_owned()), ..Default::default() };
+        native_slice_page(&state, &snapshot, &session, &session_id, &query, &source).unwrap();
+        session.conversation_semantics = false;
+        assert_expired_without_resync(
+            native_slice_page(&state, &snapshot, &session, &session_id, &query, &source).unwrap_err());
+    }
+
     /// The header summarizes the newest entries with its own bounded read. Echoes appended after
     /// a page cursor was issued leave the continuation itself readable (appends keep a cursor
     /// valid) but hide the whole head: the continuation is an expired page cursor, not a page
@@ -24857,6 +24909,7 @@ mission "example/zero-run" state="ready" {
             custom_forms: false,
             model_drift_attention: false,
             conversation_blocks: false,
+            conversation_semantics: false,
             conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,

@@ -1952,6 +1952,7 @@ use super::*;
             session_id: "invented".into(),
             limit: 20,
             cursor: None,
+            conversation_semantics: false,
         };
         assert_eq!(
             deadline(&request(
@@ -1966,6 +1967,7 @@ use super::*;
                 session_id: "invented".into(),
                 after: None,
                 wait_ms,
+                conversation_semantics: false,
             };
             assert_eq!(
                 forwarded_deadline(&read),
@@ -2043,6 +2045,7 @@ use super::*;
                         session_id: "invented".into(),
                         after: None,
                         wait_ms: 10_000,
+                        conversation_semantics: false,
                     },
                 })
                 .unwrap(),
@@ -2102,6 +2105,7 @@ use super::*;
                         session_id: "invented".into(),
                         limit: 20,
                         cursor: None,
+                        conversation_semantics: false,
                     },
                 })
                 .unwrap(),
@@ -2297,6 +2301,7 @@ use super::*;
                         session_id: "invented".into(),
                         after: None,
                         wait_ms: 10_000,
+                        conversation_semantics: false,
                     },
                 })
                 .unwrap(),

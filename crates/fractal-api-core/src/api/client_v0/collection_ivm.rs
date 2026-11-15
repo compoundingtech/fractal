@@ -99,8 +99,29 @@ pub struct Candidate {
 fn authority(session: &ClientSession) -> String {
     json!({"actor":session.actor,"authority":session.authority_actor,
         "grant":session.pairing_grant,"scopes":session.scopes,
+        "conversation_semantics":session.conversation_semantics,
+        "semantic_revision":session.conversation_semantics.then_some(fractal_kernel::transcript_semantics::PROJECTION_REVISION).unwrap_or(0),
         "custom_forms":session.custom_forms,"model_drift_attention":session.model_drift_attention,"conversation_blocks":session.conversation_blocks,"transport":session.transport})
     .to_string()
+}
+
+#[cfg(test)]
+mod semantic_authority_tests {
+    use super::*;
+
+    #[test]
+    fn collection_authority_separates_negotiated_semantic_projection() {
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let legacy = authority(&session);
+        session.conversation_semantics = true;
+        let semantic = authority(&session);
+        assert_ne!(legacy, semantic);
+        let legacy: Value = serde_json::from_str(&legacy).unwrap();
+        let semantic: Value = serde_json::from_str(&semantic).unwrap();
+        assert_eq!(legacy["semantic_revision"], 0);
+        assert_eq!(semantic["semantic_revision"], fractal_kernel::transcript_semantics::PROJECTION_REVISION);
+    }
 }
 
 fn authorize(
