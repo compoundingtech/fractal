@@ -1,0 +1,14 @@
+MISSION RUNS
+  mission-run/garden/deploy/1  running  mission/garden/deploy
+    status: running
+    revision: rev-abc
+    host: orchid
+    started: 1000
+    updated: 2000
+    prepare  completed
+    deploy  claimed
+  mission-run/garden/deploy/2  terminal  mission/garden/deploy
+    status: completed
+    revision: rev-def
+    More steps exist; inspect this run with fractal missions show.
+  More runs match; narrow --mission-prefix or increase --limit (maximum 500).

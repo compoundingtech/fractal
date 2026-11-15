@@ -25,6 +25,7 @@ mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
+pub mod mission_run_query;
 pub mod step_executions;
 mod mission_supersession;
 pub mod seats;
@@ -1292,6 +1293,10 @@ ON mission_runs(root_run_id, created_at_unix_ms, id);
 -- The runs that have not finished, a few of every run a fleet has made. The predicate is
 -- OPEN_MISSION_RUN, which queries repeat so the planner uses this index.
 CREATE INDEX IF NOT EXISTS mission_runs_open_index ON mission_runs(created_at_unix_ms, id)
+WHERE status NOT IN ('completed','failed','cancelled');
+-- Additive migration for prefix-scoped active run queries on existing stores.
+CREATE INDEX IF NOT EXISTS mission_runs_open_mission_page_index
+ON mission_runs(mission_id, created_at_unix_ms DESC, id DESC)
 WHERE status NOT IN ('completed','failed','cancelled');
 
 CREATE TABLE IF NOT EXISTS mission_run_deadlines (

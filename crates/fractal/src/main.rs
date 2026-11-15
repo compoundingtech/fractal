@@ -1302,6 +1302,18 @@ enum MissionViewCommand {
         #[arg(long, add = ArgValueCompleter::new(Complete(Entity::Mission)))]
         mission: Option<String>,
     },
+    /// List bounded run and step summaries for a mission ID prefix.
+    Runs {
+        /// Literal mission ID prefix to select.
+        #[arg(long)]
+        mission_prefix: String,
+        /// Only include active runs.
+        #[arg(long)]
+        active: bool,
+        /// Maximum runs to return (1 through 500).
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+    },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
     /// What one run waits on: each open step, whom it waits on and since when, open asks, the

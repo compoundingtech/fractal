@@ -190,6 +190,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
+        .route("/v1/client/mission-runs", get(mission_runs_by_prefix))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
         .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
@@ -4259,6 +4260,38 @@ pub async fn missions(
         replicated: None,
     };
     Ok((Extension(snapshot), Json(page)))
+}
+
+#[derive(Deserialize)]
+pub struct MissionRunsQuery {
+    mission_prefix: String,
+    #[serde(default)]
+    active: bool,
+    limit: Option<usize>,
+}
+
+/// Prefix-indexed automation read, deliberately independent of the fleet tree.
+pub async fn mission_runs_by_prefix(
+    State(state): State<AppState>,
+    Extension(snapshot): Extension<ClientSnapshot>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<MissionRunsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    if !(1..=500).contains(&query.limit.unwrap_or(100)) {
+        return Err(ApiError::bad(FractalError::new(
+            "validation-failed", "run limit must be 1 through 500",
+        )));
+    }
+    let store = state.store.clone();
+    let page = super::blocking_store(move || {
+        store.mission_runs_by_prefix(
+            &query.mission_prefix,
+            query.active,
+            query.limit.unwrap_or(100),
+        )
+    }).await?;
+    Ok(Json(json!({ "snapshot": snapshot, "value": page })))
 }
 
 /// A single read of the projections used by mission show, agent tree, and seat queues.

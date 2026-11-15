@@ -1222,6 +1222,66 @@ fn missions_tree_fixture_renders_all_sections() {
 }
 
 #[test]
+fn missions_runs_query_fixture_renders_summaries_and_truncation() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/mission-runs-query.json"
+    )).expect("valid mission runs query fixture");
+    assert_eq!(
+        launch_cli::render_mission_runs_query(&fixture),
+        include_str!("../tests/fixtures/mission-runs-query.txt")
+    );
+    assert_eq!(
+        launch_cli::render_mission_runs_query(&json!({
+            "snapshot": {}, "value": {"runs": [], "truncated": false}
+        })),
+        "MISSION RUNS\n  none\n"
+    );
+}
+
+#[test]
+fn missions_runs_query_requires_prefix_and_bounds_limit() {
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "runs", "--mission-prefix", "mission/garden/",
+    ]).expect("bounded run query parses");
+    let Command::Missions {
+        command: MissionViewCommand::Runs { mission_prefix, active, limit },
+    } = cli.command else {
+        panic!("expected missions runs");
+    };
+    assert_eq!(mission_prefix, "mission/garden/");
+    assert!(!active);
+    assert_eq!(limit, 100);
+    assert_eq!(
+        launch_cli::mission_runs_path(&mission_prefix, active, limit),
+        "/v1/client/mission-runs?mission_prefix=mission%2Fgarden%2F&active=false&limit=100"
+    );
+
+    let cli = Cli::try_parse_from([
+        "fractal", "missions", "runs", "--mission-prefix", "mission/a &b/",
+        "--active", "--limit", "500", "--json",
+    ]).expect("active run query accepts maximum limit and JSON");
+    assert!(cli.json);
+    let Command::Missions {
+        command: MissionViewCommand::Runs { mission_prefix, active, limit },
+    } = cli.command else {
+        panic!("expected missions runs");
+    };
+    assert!(active);
+    assert_eq!(limit, 500);
+    assert_eq!(
+        launch_cli::mission_runs_path(&mission_prefix, active, limit),
+        "/v1/client/mission-runs?mission_prefix=mission%2Fa%20%26b%2F&active=true&limit=500"
+    );
+    assert!(Cli::try_parse_from(["fractal", "missions", "runs"]).is_err());
+    for limit in ["0", "501", "-1"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "missions", "runs", "--mission-prefix", "mission/garden/",
+            "--limit", limit,
+        ]).is_err(), "must reject limit {limit}");
+    }
+}
+
+#[test]
 fn a_conversation_reads_as_tui_shows_it_and_raw_keeps_every_entry() {
     let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h55886ab30a77 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude.json"
