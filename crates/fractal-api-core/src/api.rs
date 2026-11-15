@@ -345,6 +345,7 @@ pub struct ClientMessageRequestId(String);
 pub struct ClientListQuery {
     pub limit: Option<usize>,
     pub cursor: Option<String>,
+    pub paging_contract: Option<String>,
     #[serde(default)]
     pub history: bool,
     pub person: Option<String>,
@@ -1413,6 +1414,12 @@ async fn response_envelope_unbounded(
     let request = request.unwrap_or_else(|| Request::new(Body::empty()));
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
+        (None, Ok(_)) if client_request && request.uri().query().is_some_and(|query| {
+            query.split('&').any(|pair| urlencoding::decode(pair.split('=').next().unwrap_or(""))
+                .is_ok_and(|name| name == "paging_contract"))
+        }) && request_route != "/v1/client/arrangements/{person_name}/{uuid}/memberships" => {
+            client_v0::membership_paging::error(client_v0::membership_paging::UNSUPPORTED).into_response()
+        }
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
         // handler on a blocking thread so a busy projection or replication pass cannot
         // occupy an async worker needed to accept another call. Read workers are admitted
