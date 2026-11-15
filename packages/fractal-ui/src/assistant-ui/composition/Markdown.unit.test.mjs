@@ -341,6 +341,29 @@ test('raw pre with explicit code has one code holder and keeps its text', () => 
   }
 })
 
+test('raw pre preserves nested formatting text with and without explicit code holders', async () => {
+  const { JSDOM } = await import('jsdom')
+  for (const holder of [false, true]) for (const tag of ['b', 'span', 'em']) {
+    const body = `before <${tag}>KEEP <strong>nested</strong></${tag}> after\nsecond`
+    const source = `<pre>${holder ? `<code>${body}</code>` : body}<script>SECRET</script><!-- HIDDEN --></pre>`
+    const dom = new JSDOM(block(source))
+    assert.equal(dom.window.document.querySelector('[data-testid="markdown-code"] code')?.textContent, 'before KEEP nested after\nsecond')
+    assert.doesNotMatch(dom.window.document.body.textContent, /SECRET|HIDDEN/)
+    dom.window.close()
+  }
+})
+
+test('depth flattening filters hidden HTML before exposing nested list text', () => {
+  for (const depth of [18, 32, 64]) {
+    const source = Array.from({ length: depth }, (_, index) => '  '.repeat(index) + '- ' + (index === depth - 1 ? 'Visible <script>SECRET</script><!-- HIDDEN --> tail' : 'item')).join('\n')
+    assert.equal(markdownNeedsFallback(source), false)
+    const html = block(source)
+    assert.match(html, /Visible/)
+    assert.match(html, /tail/)
+    assert.doesNotMatch(html, /SECRET|HIDDEN|&lt;script/)
+  }
+})
+
 test('security payloads cannot create executable elements, attributes or URL schemes', async () => {
   const { safeLinkHref } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-html-policy.ts')
   for (const source of [

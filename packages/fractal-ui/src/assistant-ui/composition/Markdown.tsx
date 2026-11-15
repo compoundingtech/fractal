@@ -5,7 +5,7 @@ import { HoverCard } from '../entity/HoverCard'
 import { ResourceEntityCard } from '../entity/ResourceCard'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
-import type { Root } from 'hast'
+import type { Root, RootContent } from 'hast'
 import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
 import { createLazyChunk } from '../../lazy-chunk'
@@ -262,10 +262,13 @@ const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: stri
   </div>
 })
 
+// Raw pre blocks may contain policy-approved formatting; its descendant words are still code.
+const codeText = (node: RootContent): string => node.type === 'text' ? node.value : 'children' in node ? node.children.map(codeText).join('') : ''
+
 function CodeFence({ node }: React.ComponentProps<'pre'> & ExtraProps) {
   const codeNode = node?.children.find(child => child.type === 'element' && child.tagName === 'code')
   if (codeNode?.type !== 'element') return null
-  const code = codeNode.children.map(child => child.type === 'text' ? child.value : '').join('')
+  const code = codeText(codeNode)
   const classes = codeNode.properties.className
   const language = /(?:^|\s)language-([^\s]+)/.exec(Array.isArray(classes) ? classes.join(' ') : String(classes ?? ''))?.[1] ?? ''
   return <CodeBlock code={code} language={language} />

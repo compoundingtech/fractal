@@ -1007,7 +1007,17 @@ fn without_html_tags(text: &str) -> String {
             rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
             continue;
         }
-        let Some(end) = tag[1..].find(['<', '>']).map(|end| end + 1) else {
+        let mut quote = None;
+        let Some(end) = tag.bytes().enumerate().skip(1).find_map(|(at, byte)| {
+            if let Some(delimiter) = quote {
+                if byte == delimiter { quote = None; }
+            } else if matches!(byte, b'"' | b'\'') {
+                quote = Some(byte);
+            } else if matches!(byte, b'<' | b'>') {
+                return Some(at);
+            }
+            None
+        }) else {
             visible.push_str(tag);
             return visible;
         };
@@ -1878,6 +1888,18 @@ mod tests {
             }
             let unclosed = format!("<{name}>hidden</{name}ure>LEAK");
             assert_eq!(quote(&unclosed), None, "{unclosed}");
+        }
+    }
+
+    #[test]
+    fn excerpts_respect_quoted_html_attribute_boundaries() {
+        for source in [
+            r#"<img alt="<script>">Visible comment"#,
+            "<img alt='<style>'>Visible comment",
+            r#"<span title="a > b <script>">Visible comment</span>"#,
+            "<span title='a > b <!-- hidden -->'>Visible comment</span>",
+        ] {
+            assert_eq!(quote(source).as_deref(), Some("> Visible comment"), "{source}");
         }
     }
 

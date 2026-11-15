@@ -214,8 +214,8 @@ export function remarkHtmlPolicy() {
     }
     parent.children = root.map(node => { delete (node as { loose?: boolean }).loose; return node })
   }
-  // Bounding Markdown nesting first keeps `rebuild`'s recursion shallow; the second pass bounds what HTML added.
-  return (tree: Node) => { capDepth(tree, 0); rebuild(tree); capDepth(tree, 0) }
+  // Bound recursion without turning raw HTML into visible text before it has passed the policy.
+  return (tree: Node) => { capDepth(tree, 0, true); rebuild(tree); capDepth(tree, 0) }
 }
 
 export interface MarkdownParsedTree { tree?: Node }
@@ -299,24 +299,27 @@ export function filteredMarkdownText(source: string): string {
 const STRUCTURAL = new Set(['blockquote', 'details', 'dl', 'ol', 'table', 'tbody', 'tfoot', 'thead', 'tr', 'ul'])
 const blockName = (node: Node): boolean => /^(?:address|blockquote|details|div|dl|h[1-6]|hr|ol|p|pre|summary|table|ul)$/.test(node.data?.hName ?? '')
 
-/** The words of a subtree, read without recursion: the subtree may be thousands of levels deep. */
-function plainText(root: Node): string {
-  const words: string[] = []
+/** Flatten iteratively: over-depth subtrees may be thousands of levels deep. Keep HTML typed until filtering. */
+function flatContent(root: Node): Node[] {
+  const content: Node[] = []
   const pending: Node[] = [root]
   while (pending.length > 0) {
     const node = pending.pop()!
-    if (node.value !== undefined) words.push(node.value)
-    else if (node.children !== undefined) for (let index = node.children.length - 1; index >= 0; index--) pending.push(node.children[index]!)
+    if (node.value !== undefined) {
+      if (content.length > 0) content.push({ type: 'text', value: ' ' })
+      content.push({ type: node.type === 'html' ? 'html' : 'text', value: node.value })
+    } else if (node.children !== undefined) for (let index = node.children.length - 1; index >= 0; index--) pending.push(node.children[index]!)
   }
-  return words.join(' ').replace(/\s+/g, ' ').trim()
+  return content
 }
 
-function capDepth(node: Node, depth: number): void {
+function capDepth(node: Node, depth: number, preserveHtml = false): void {
   if (node.children === undefined) return
-  node.children = node.children.map(child => {
-    if (!NESTING.has(child.type) || depth + 1 <= HTML_POLICY.maxDepth) { capDepth(child, NESTING.has(child.type) ? depth + 1 : depth); return child }
-    const text = { type: 'text', value: plainText(child) }
-    if (node.type === 'list') return { type: 'listItem', children: [{ type: 'paragraph', children: [text] }] }
-    return FLOW.has(node.type) ? { type: 'paragraph', children: [text] } : text
+  node.children = node.children.flatMap(child => {
+    if (!NESTING.has(child.type) || depth + 1 <= HTML_POLICY.maxDepth) { capDepth(child, NESTING.has(child.type) ? depth + 1 : depth, preserveHtml); return child }
+    const content = flatContent(child)
+    const children = preserveHtml ? content : [{ type: 'text', value: content.map(part => part.value).join('').replace(/\s+/g, ' ').trim() }]
+    if (node.type === 'list') return { type: 'listItem', children: [{ type: 'paragraph', children }] }
+    return FLOW.has(node.type) ? { type: 'paragraph', children } : children
   })
 }
