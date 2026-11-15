@@ -35,6 +35,20 @@ describe('public changelog boundary', () => {
     expect(() => assertPublicChangelogBoundary({ ...clean, modules: [...clean.modules, `${privateDirectory}/mod.ts`] }))
       .toThrow('Public build leaked private changelog modules')
   })
+  it('rejects configured and real private paths, including query-bearing module IDs', () => {
+    const privateDirectoryRealpath = '/real-checkout/private/.changelog'
+    for (const directory of [privateDirectory, privateDirectoryRealpath])
+      expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectoryRealpath, modules: [`${directory}/mod.ts?raw`] }))
+        .toThrow('Public build leaked private changelog modules')
+  })
+
+  it('does not classify a similarly named neighbouring directory as private', () => {
+    const privateDirectoryRealpath = '/real-checkout/private/.changelog'
+    expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectoryRealpath,
+      modules: [`${privateDirectory}-public/mod.ts`, `${privateDirectoryRealpath}-public/mod.ts`],
+    })).not.toThrow()
+  })
+
 })
 
 describe('build identity evaluation', () => {

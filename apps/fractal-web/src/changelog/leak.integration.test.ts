@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -78,7 +78,18 @@ describe('public changelog build gate', () => {
 
   it('fails when a private changelog module enters the public graph', async () => {
     const registry = privateRegistry()
-    await expect(buildPublic(`import leaked from ${JSON.stringify(join(root, 'private/.changelog', syntheticFile))}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
+    await expect(buildPublic(`import { changelogDeployment as leaked } from ${JSON.stringify(registry)}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('rejects a neutral private export through a symlinked registry even when entry text is tree-shaken', async () => {
+    privateRegistry()
+    const alias = join(root, 'private-link')
+    symlinkSync(join(root, 'private'), alias, 'dir')
+    const registry = join(alias, '.changelog/mod.ts')
+    // Only the neutral deployment string reaches output. The private module
+    // graph itself must fail; the separate entry-text test cannot cover this.
+    await expect(buildPublic(`import { changelogDeployment as leaked } from ${JSON.stringify(registry)}\nglobalThis.leak = leaked`, { public: publicRegistry, private: registry }))
       .rejects.toThrow('Public build leaked private changelog modules')
   })
 

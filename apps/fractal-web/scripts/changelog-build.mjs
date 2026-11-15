@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -61,6 +61,9 @@ export const prepareChangelogBuild = async ({ privateBuild, deployment, registri
     entryIds: entries.map(({ id }) => id),
     privateEntries,
     privateDirectory: hasPrivate ? dirname(registries.private).replaceAll('\\', '/') : undefined,
+    // Vite resolves symlinked imports to their real location by default. Keep
+    // both identities: preserveSymlinks may leave the configured path in a graph.
+    privateDirectoryRealpath: hasPrivate ? dirname(realpathSync(registries.private)).replaceAll('\\', '/') : undefined,
     compile: (build) => compileChangelog({ build, sources, audience, inventory }),
   }
 }
@@ -81,12 +84,13 @@ export const evaluateBuildIdentityModule = async (code) => {
  * from the private changelog directory, and no private entry id, title, summary or link in any
  * emitted chunk or asset.
  */
-export const assertPublicChangelogBoundary = ({ manifest, privateEntries, privateDirectory, modules, texts }) => {
+export const assertPublicChangelogBoundary = ({ manifest, privateEntries, privateDirectory, privateDirectoryRealpath = undefined, modules, texts }) => {
   const privateInManifest = manifest?.entries.filter(({ visibility }) => visibility !== 'public') ?? []
   if (privateInManifest.length > 0)
     throw new Error(`${leak} entries into its manifest: ${privateInManifest.map(({ id }) => id).join(', ')}`)
-  const privateModules = privateDirectory === undefined ? []
-    : modules.filter((id) => id.replaceAll('\\', '/').startsWith(`${privateDirectory}/`))
+  const privateRoots = [privateDirectory, privateDirectoryRealpath].filter((directory) => directory !== undefined)
+  const privateModules = modules.filter((id) =>
+    privateRoots.some((directory) => id.replaceAll('\\', '/').startsWith(`${directory}/`)))
   if (privateModules.length > 0) throw new Error(`${leak} modules: ${privateModules.join(', ')}`)
   const body = texts.join('\n')
   for (const entry of privateEntries)

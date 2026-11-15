@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Reject private changelog modules in public web builds when the registry is reached through a symbolic link.",
+  "replay": {
+    "status": "none",
+    "detail": "No daemon claim replay or stored history changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database or wire schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or coordination rule changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption or startup migration required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No stored state changes; remove private imports before retrying a rejected public build."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Public web builds reject private changelog graph imports through either the configured path or its real filesystem path. Private builds and runtime protocols are unchanged."
+  }
+}
