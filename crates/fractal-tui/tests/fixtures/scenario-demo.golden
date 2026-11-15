@@ -2,30 +2,30 @@
  sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  ◆1 Inbox                                                                   +
- ▾ Everything else 7                    │   somebody is stopped on you  │ ╭─ UNPLACED · WAITING 1M ─────────────────╮
- ▾ Agents 4                             │ ▌ ? unplaced Worker typech…   │ │                                         │
-   Atlas Builder                        │ ▌   waited 1m                 │ │ Worker typecheck fails after the rename │
-   Atlas Docs                           │                               │ │ ? unplaced · 1m ago                     │
-   Atlas Migrator                       │                               │ │ mission  example/atlas · Rename fetchUser
-   Atlas Reviewer                       │                               │ │ agent    Atlas Builder                  │
- ▾ Missions 1                           │                               │ │                                         │
-   example/atlas · Rename fetchUser to l│                               │ │ syncAvatars calls loadUser without the  │
- ▾ Machines 2                           │                               │ │ session. Thread the session through, or │
-   foundry                              │                               │ │ keep a one-argument overload?           │
-   meadow                               │                               │ │                                         │
-                                        │                               │ │ Fractal does not say what this is: this │
-                                        │                               │ │ host's Fractal is older, or has not     │
-                                        │                               │ │ presented it yet. Answer it with        │
-                                        │                               │ │ fractal alerts.                         │
-                                        │                               │ │                                         │
-                                        │                               │ │  c  Reply with fields                   │
-                                        │                               │ │                                         │
-                                        │                               │ │ related ─────────────────────────────── │
-                                        │                               │ │ agent     agent/example/atlas/builder   │
-                                        │                               │ │                                         │
-                                        │                               │ │  g  Go to the mission                   │
-                                        │                               │ │                                         │
-                                        │                               │ ╰─────────────────────────────────────────╯
+ ▾ Everything else 7                    │   somebody is stopped on you  │ ┏━ REQUEST · WAITING 1M ━━━━━━━━━━━━━━━━━━┓
+ ▾ Agents 4                             │ ▌ ◆ request  Worker typech…   │ ┃                                         ┃
+   Atlas Builder                        │ ▌   waited 1m                 │ ┃ Worker typecheck fails after the rename ┃
+   Atlas Docs                           │                               │ ┃ ◆ request · 1m ago                      ┃
+   Atlas Migrator                       │                               │ ┃ mission  example/atlas · Rename fetchUser
+   Atlas Reviewer                       │                               │ ┃ agent    Atlas Builder                  ┃
+ ▾ Missions 1                           │                               │ ┃                                         ┃
+   example/atlas · Rename fetchUser to l│                               │ ┃ syncAvatars calls loadUser without the  ┃
+ ▾ Machines 2                           │                               │ ┃ session. Thread the session through, or ┃
+   foundry                              │                               │ ┃ keep a one-argument overload?           ┃
+   meadow                               │                               │ ┃                                         ┃
+                                        │                               │ ┃  c  Reply with fields                   ┃
+                                        │                               │ ┃ Reply using the choices and fields      ┃
+                                        │                               │ ┃ shown above.                            ┃
+                                        │                               │ ┃                                         ┃
+                                        │                               │ ┃ related ─────────────────────────────── ┃
+                                        │                               │ ┃ agent     Atlas Builder                 ┃
+                                        │                               │ ┃                                         ┃
+                                        │                               │ ┃  g  Go to the mission    l  Remind me in
+                                        │                               │ ┃                                         ┃
+                                        │                               │ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                                        │                               │
+                                        │                               │
+                                        │                               │
                                         │                               │
                                         │                               │
                                         │ ──────────────────────────────│
@@ -38,13 +38,13 @@
  / Filter:                          +New│  list:agents                                                                +
  ▾ Everything else 7                    │   stopped ─────────────────────────────────────────────────────────────── 4
  ▾ Agents 4                             │ ▌ ? Atlas Builder                                                codex   1m
-   Atlas Builder                        │ ▌   example/atlas/builder
+   Atlas Builder                        │ ▌   Atlas Builder
    Atlas Docs                           │   ? Atlas Docs                                                  claude  55m
-   Atlas Migrator                       │     example/atlas/docs
+   Atlas Migrator                       │     Atlas Docs
    Atlas Reviewer                       │   ? Atlas Migrator                                              claude   4s
- ▾ Missions 1                           │     example/atlas/migrator
+ ▾ Missions 1                           │     Atlas Migrator
    example/atlas · Rename fetchUser to l│   ? Atlas Reviewer                                              claude  12m
- ▾ Machines 2                           │     example/atlas/reviewer
+ ▾ Machines 2                           │     Atlas Reviewer
    foundry                              │
    meadow                               │
                                         │
@@ -207,7 +207,7 @@
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                          +New│  ◆ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ? Atlas Builder  running · older Fractal                    codex · meadow
- ▾ Agents 4                             │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-renam
+ ▾ Agents 4                             │    Atlas Builder  ·  worktree · branch builder/load-user-rename · ~/src/atla
    Atlas Builder                        │    mission example/atlas · Rename fetchUser to loadUser › step-3
    Atlas Docs                           │ ──────────────────────────────────────────────────────────── ctrl+d details ─
    Atlas Migrator                       │  Can you check why the worker typecheck fails after the rename?
@@ -230,7 +230,7 @@
                                         │                                                                             ┃
                                         │  starting · transcript unavailable until the harness writes its first line  ┃
                                         │                                                                             ┃
-                                        │  ◆ 1 alert · ? Worker typecheck fails after the rename ▸ show · Ctrl+N
+                                        │  ◆ 1 alert · ◆ Worker typecheck fails after the rename ▸ show · Ctrl+N
                                         │ ─────────────────────────────────────────────────────────────────────────────
                                         │ › Message Atlas Builder · type or click
                                         │
@@ -241,7 +241,7 @@
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
  / Filter:                              +New│  ◆ Atlas Builder                                                                                                +
  ▾ Everything else 7                        │  ? Atlas Builder  running · older Fractal                 codex · meadow   │ details                    × close
- ▾ Agents 4                                 │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-re  │ now ──────────────────────────────
+ ▾ Agents 4                                 │    Atlas Builder  ·  worktree · branch builder/load-user-rename · ~/src/a  │ now ──────────────────────────────
    Atlas Builder                            │    mission example/atlas · Rename fetchUser to loadUser › step-3           │ example/atlas · Rename fetchUser to
    Atlas Docs                               │ ────────────────────────────────────────────────── ctrl+d hide details ▸ ─ │ held since 38m ago
    Atlas Migrator                           │                                                                            │
@@ -257,14 +257,14 @@
                                             │ ────── delivery paused · channel not verified yet                          │ host     meadow
                                             │                                                                          ┃ │ worktree worktree · branch builder/
                                             │  starting · transcript unavailable until the harness writes its first l… ┃ │
-                                            │                                                                          ┃ │ agent/example/atlas/builder
+                                            │                                                                          ┃ │
                                             │                                                                          ┃ │
                                             │  Can you check why the worker typecheck fails after the rename?          ┃ │
                                             │                                                                          ┃ │
                                             │                                                                          ┃ │
                                             │  starting · transcript unavailable until the harness writes its first l… ┃ │
                                             │                                                                          ┃ │
-                                            │  ◆ 1 alert · ? Worker typecheck fails after the rename ▸ show · Ctrl+N     │
+                                            │  ◆ 1 alert · ◆ Worker typecheck fails after the rename ▸ show · Ctrl+N     │
                                             │ ────────────────────────────────────────────────────────────────────────── │
                                             │ › Message Atlas Builder · type or click                                    │
                                             │                                                                            │
@@ -276,7 +276,7 @@
  / Filter:                          +New│  ◆ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ← Return · Ctrl+\   Atlas Builder · demo terminal
  ▾ Agents 4                             │  Ctrl-C and Ctrl-D need a second press to reach the agent
-   Atlas Builder                        │  ◆ 1 alert · ? Worker typecheck fails after the rename ▸ show
+   Atlas Builder                        │  ◆ 1 alert · ◆ Worker typecheck fails after the rename ▸ show
    Atlas Docs                           │ scenario harness ready
    Atlas Migrator                       │ $ pnpm -r typecheck
    Atlas Reviewer                       │ packages/api typecheck: Done
