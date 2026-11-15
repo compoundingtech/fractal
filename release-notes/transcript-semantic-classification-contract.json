@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add native transcript semantic categories, classifier and shared conformance vectors without advertising a new projection capability.",
+  "replay": { "status": "none", "detail": "The new classifier does not replace the current normalizer or rebuild retained transcripts." },
+  "schema": { "status": "none", "detail": "No database, storage-version or generated wire schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules or fleet coordination behavior changes." },
+  "compatibility": { "status": "none", "detail": "Internal classification API and fixtures only; existing client negotiation and transcript rendering remain unchanged." },
+  "downtime": { "status": "none", "detail": "No deployment or service restart is required by this contract change." },
+  "manual": { "status": "none", "detail": "No operator migration steps are required." },
+  "recovery": { "status": "none", "detail": "No persisted state changes; reverting the classifier does not require data recovery." }
+}

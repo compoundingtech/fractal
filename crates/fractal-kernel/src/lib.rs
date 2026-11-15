@@ -17,6 +17,7 @@ pub mod disk;
 /// Offline signed gate observations in immutable git notes refs.
 pub mod evidence;
 pub mod native_views;
+pub mod transcript_semantics;
 pub mod conversation_header;
 /// Pairing grants a device the client gateway over Fabric; revoking it removes the grant.
 pub mod fabric_gateway;
