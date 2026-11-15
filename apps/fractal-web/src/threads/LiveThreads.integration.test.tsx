@@ -475,6 +475,26 @@ it('names the thread sender by its roster name, never by its raw id or the path 
   }
 })
 
+it('names the st3 reconciler Fractal in a thread, even when the roster names it', async () => {
+  const reconciler = 'agent/st3/reconciler'
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    agents: [decodeNative(AgentRow)({ kind: 'agent', id: reconciler, name: 'Reconciler', host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable',
+      state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })],
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.closed', id: 'event/closed', actor_id: reconciler, accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z') },
+      { kind: 'message', id: 'message/first', actor_id: reconciler, content: 'Reconciled the mission run.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Reconciled the mission run.'))
+    const sender = view.host.querySelector('li strong')
+    expect(sender?.textContent).toBe('Fractal')
+    expect(sender?.getAttribute('title')).toBe(reconciler)
+    expect(view.host.querySelector('[data-thread-event="thread.closed"]')?.textContent).toMatch(/^Fractal closed the thread/)
+    expect(view.host.textContent).not.toMatch(/Reconciler|reconciler/)
+  } finally { await view.dispose() }
+})
+
 it.each([['lost', true], ['held elsewhere', false]] as const)('focuses a thread tab composer only when focus was %s', async (_, lost) => {
   const outside = document.createElement('button')
   document.body.append(outside)

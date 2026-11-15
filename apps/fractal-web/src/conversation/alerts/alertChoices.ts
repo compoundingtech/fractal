@@ -3,7 +3,7 @@ import { Option } from 'effect'
 
 import { alertsIn, alertConversations } from '../../../../../clients/typescript/fractal-views/homeView.ts'
 import { ANSWERS, isRequest, personAnswer, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
-import { agentDisplayName, type AgentNames } from '../../data/agentName.ts'
+import { agentDisplayName, FRACTAL_NAME, isFractalMachinery, type AgentNames } from '../../data/agentName.ts'
 import type { AlertAction } from './alert-action-port.ts'
 
 // What an alert offers, separate from how it looks: the answers the Fractal terminal UI and the phone give (a structured
@@ -119,12 +119,13 @@ export const webLink = (url: string | undefined): string | undefined => {
 }
 
 /**
- * A name read from an id: the roster's name for an agent, else its short name; a person's short name; Fractal for its
- * own runtime. Step, mission and custom ids are addresses, not names.
+ * A name read from an id: Fractal for its own machinery (the daemon and the st3 reconciler), checked before the
+ * roster, which names the reconciler like any agent; the roster's name for an agent, else its short name; a person's
+ * short name. Step, mission and custom ids are addresses, not names.
  */
 const actorName = (id: string, names: AgentNames | undefined, served?: string): string | undefined =>
-  id.startsWith('agent/') ? names?.(id) ?? agentDisplayName({ id, name: served })
-    : id.startsWith('daemon/') ? 'Fractal'
+  isFractalMachinery(id) ? FRACTAL_NAME
+    : id.startsWith('agent/') ? names?.(id) ?? agentDisplayName({ id, name: served })
       : id.startsWith('person/') ? id.slice('person/'.length).split('/')[0] || undefined
         : undefined
 
@@ -139,7 +140,7 @@ export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source
   const raisedBy = Option.getOrUndefined(alert.presentation?.raised_by ?? Option.none())
   if (raisedBy === undefined) return actorName(alert.requester_id ?? alert.source_id, names)
   const label = raisedBy.label.trim()
-  if (raisedBy.id.startsWith('agent/') || raisedBy.id.startsWith('daemon/')) return actorName(raisedBy.id, names, label)
+  if (raisedBy.id.startsWith('agent/') || isFractalMachinery(raisedBy.id)) return actorName(raisedBy.id, names, label)
   return label === '' || label === raisedBy.id ? actorName(raisedBy.id, names) : label
 }
 

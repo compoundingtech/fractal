@@ -9,7 +9,9 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { useAttentionDecode, useNow } from '../data/react.tsx'
+import type { AgentNames } from '../data/agentName.ts'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
+import { useAgentNames } from '../data/useAgentNames.ts'
 import { LivePendingInboxStarts, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 import { DecodeNotice } from './LiveRoster.tsx'
@@ -37,6 +39,7 @@ export const AlertsTab = ({ onOpen, selected, onSelect }: {
       feed={feed}
       decode={useAttentionDecode()}
       now={now}
+      agentNames={useAgentNames()}
       onOpen={onOpen}
       footer={<><LivePendingInboxStarts items={currentItems} onOpenThread={onOpen} /><LiveRecentlyClosedThreads onOpenThread={onOpen} /></>}
       {...(selected === undefined ? {} : { selected })}
@@ -49,7 +52,7 @@ export const AlertsTab = ({ onOpen, selected, onSelect }: {
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row stays reachable.
  */
-export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, footer }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, footer, agentNames }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly decode?: RosterDecode
   readonly now: number
@@ -61,8 +64,10 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
   readonly onSelect?: (id: string) => void
   /** Shown after the rows: thread recovery and recently closed threads. */
   readonly footer?: React.ReactNode
+  /** Roster names by agent id, so a row names who raised it as its card and the sidebar do. */
+  readonly agentNames?: AgentNames | undefined
 }): React.ReactNode => {
-  const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
+  const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now, agentNames) : []), [feed, now, agentNames])
   const shownIds = React.useMemo(() => new Set(feed._tag === 'Observed' ? feed.value.map((row) => row.id) : []), [feed])
   const region = React.useRef<HTMLDivElement>(null)
   const message = React.useRef<HTMLParagraphElement>(null)

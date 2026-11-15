@@ -1,5 +1,7 @@
 // Who a Fractal message is from, and how machine mail reads as one quiet row.
 
+import { isFractalMachinery } from '../data/agentName.ts'
+
 /** The participant fields of a timeline `message` body this module reads. */
 export interface MailParticipants {
   readonly author?: string | undefined
@@ -15,14 +17,15 @@ export const mailAuthor = (body: MailParticipants): string | undefined => body.a
 
 /**
  * `person`: a person wrote it, the only mail that earns the person's blue bar. `machine`: Fractal
- * itself (a wake, a restart handoff). An unnegotiated read drops a daemon's `from` without naming an
- * author, so a header that names a recipient and no writer is machine too, never a person. `agent`:
- * any other named writer (an agent, a step, an assistant principal).
+ * itself (a wake, a restart handoff, the st3 reconciler: see `isFractalMachinery`). An unnegotiated
+ * read drops a daemon's `from` without naming an author, so a header that names a recipient and no
+ * writer is machine too, never a person. `agent`: any other named writer (an agent, a step, an
+ * assistant principal).
  */
 export type MailOrigin = 'person' | 'machine' | 'agent'
 export const mailOrigin = (body: MailParticipants): MailOrigin => {
   const author = mailAuthor(body)
-  if (author === undefined || author.startsWith('daemon/')) return 'machine'
+  if (author === undefined || isFractalMachinery(author)) return 'machine'
   return author.startsWith('person/') ? 'person' : 'agent'
 }
 

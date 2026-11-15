@@ -259,6 +259,31 @@ describe('AnswerAlert', () => {
     expect(runtime).not.toContain('daemon/runtime')
   })
 
+  it('names the st3 reconciler Fractal, served or not, even when the roster names it, as attention.rs is_fractal does', () => {
+    const reconciler = 'agent/st3/reconciler'
+    const roster = (id: string) => (id === reconciler ? 'Reconciler' : id === seat ? 'Atlas' : undefined)
+    const raisedBy = (id: string, label: string) => ({ tier: 'stopped', kind: 'request', agent: null, raised_by: Option.some({ id, label }), waiting: null })
+    const shown = [
+      // Served as Fractal serves its machinery: label 'st'.
+      item({ requester_id: reconciler, presentation: raisedBy(reconciler, 'st') }),
+      // No presentation: the requester alone.
+      item({ requester_id: reconciler }),
+    ].flatMap((alert) => [
+      renderToStaticMarkup(<AnswerAlert alert={alert} onAct={sent} now={now} />),
+      renderToStaticMarkup(<AnswerAlert alert={alert} onAct={sent} now={now} agentNames={roster} />),
+    ])
+    for (const html of shown) {
+      expect(html).toContain('>Fractal · Request')
+      expect(html).toContain('aria-label="Your answer to Fractal"')
+      expect(html).not.toMatch(/>(st|reconciler|Reconciler) · /)
+    }
+    expect(renderToStaticMarkup(<AnswerAlert alert={item({ requester_id: undefined, presentation: raisedBy('daemon/runtime', 'st') })} onAct={sent} now={now} agentNames={roster} />))
+      .toContain('>Fractal · Request')
+    // An ordinary agent keeps its roster name.
+    expect(renderToStaticMarkup(<AnswerAlert alert={item({ requester_id: seat, presentation: raisedBy(seat, 'example/atlas') })} onAct={sent} now={now} agentNames={roster} />))
+      .toContain('>Atlas · Request')
+  })
+
   it('says how long is left before an ask resolves by itself and what then applies', () => {
     const deadline = DateTime.makeUnsafe(Date.parse(at) + 3 * 3_600_000 + 5 * 60_000)
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ request: decision, deadline_at: deadline, default_answer: { id: 'hold', label: 'Hold' } })} onAct={sent} now={now} />))

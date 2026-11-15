@@ -1,4 +1,4 @@
-import { agentDisplayName } from '../data/agentName.ts'
+import { agentDisplayName, FRACTAL_NAME, isFractalMachinery } from '../data/agentName.ts'
 import type { ConversationItem, Role, Sender, TextItem } from './model.ts'
 
 /** The media type used by Fractal's wire-compatible omp custom-message projection. */
@@ -34,17 +34,17 @@ export const roleSender = ({
       ? { kind: 'human', label: 'You', via: 'harness' }
       : { kind: 'system', label: 'System' }
 
-/** Fractal subjects carry provenance in their explicit subject prefix. */
+/** Fractal subjects carry provenance in their explicit subject prefix; Fractal's own machinery reads as Fractal. */
 export const deliverySender = (from: string | undefined): Sender =>
-  from?.startsWith('daemon/') === true
-    ? { kind: 'system', label: 'Fractal', via: 'daemon' }
+  from !== undefined && isFractalMachinery(from)
+    ? { kind: 'system', label: FRACTAL_NAME, via: 'daemon' }
     : from?.startsWith('agent/') === true
     ? { kind: 'st-agent', label: agentDisplayName({ id: from }), via: 'st' }
     : from?.startsWith('human/') === true ||
         from?.startsWith('user/') === true ||
         from?.startsWith('person/') === true
       ? { kind: 'human', label: from.slice(from.indexOf('/') + 1), via: 'wf / st' }
-      : { kind: 'system', label: from ?? 'Fractal', via: 'st' }
+      : { kind: 'system', label: from ?? FRACTAL_NAME, via: 'st' }
 
 /** Fractal's native injection is an explicit envelope, not a human message merely because role=user. */
 export const proseItem = (item: TextItem): TextItem => {

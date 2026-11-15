@@ -40,7 +40,7 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
   const store = useAlertAnswersStore()
   const { feed, onAct, onAnswer, paused } = useAlertAnswers(ux)
   const agentNames = useAgentNames()
-  const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
+  const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now, agentNames) : []), [feed, now, agentNames])
   const open = rows.filter((row) => !store.hidden(row.item))
   const row = open.find((each) => each.id === id)
   const records = [...store.getSnapshot().pending.values()]

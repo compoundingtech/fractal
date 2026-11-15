@@ -2,7 +2,17 @@ import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
 import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
-import { frozenTranscript, mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
+import { frozenTranscript, mapConversationFeed, openableImageUrl, participantName, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
+
+describe('participantName', () => {
+  it('names Fractal machinery Fractal before the roster, and an ordinary agent by its roster name', () => {
+    const names = (ref: string) => (ref === 'agent/st3/reconciler' ? 'Reconciler' : ref === 'agent/example/atlas' ? 'Atlas' : undefined)
+    expect(participantName('agent/st3/reconciler', names)).toEqual({ label: 'Fractal', ref: 'agent/st3/reconciler' })
+    expect(participantName('agent/st3/reconciler', undefined)).toEqual({ label: 'Fractal', ref: 'agent/st3/reconciler' })
+    expect(participantName('daemon/runtime', names)).toEqual({ label: 'Fractal', ref: 'daemon/runtime' })
+    expect(participantName('agent/example/atlas', names)).toEqual({ label: 'Atlas', ref: 'agent/example/atlas' })
+  })
+})
 
 const at = (seconds: number) => `2026-10-08T12:00:${String(seconds).padStart(2, '0').slice(-2)}.000Z`
 const sender = { kind: 'human', label: 'Reader' } as const

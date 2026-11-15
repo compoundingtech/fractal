@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Web only, against the same daemons. A roster name that is the agent's id, or the id without 'agent/' (the label Fractal gives a seat that declares no name), now shows as the id's last part, for example 'atlas'; the full id stays in the hover title of thread senders, launch previews and a mission's stuck agent. A request card names who asked as the roster names that agent, else by the served raised-by name under the same rule, and Fractal for its own runtime. Alert answers and a mission's stuck-step line say 'agent's terminal' and 'its agent' instead of 'seat'. The connected threads preview now declares its seats as 'Atlas' and 'Manager'."
+    "detail": "Web only, against the same daemons. A roster name that is the agent's id, or the id without 'agent/' (the label Fractal gives a seat that declares no name), now shows as the id's last part, for example 'atlas'; the full id stays in the hover title of thread senders, launch previews and a mission's stuck agent. A request card and its Inbox row name who asked as the roster names that agent, else by the served raised-by name under the same rule. Fractal's own machinery, the daemon and the st3 reconciler (the ids attention presentation already serves as Fractal), reads as 'Fractal' wherever it asks or writes: request cards, Inbox rows, thread senders, conversation participants and delivered messages, and its mail shows as a quiet wake row rather than as agent mail. Alert answers and a mission's stuck-step line say 'agent's terminal' and 'its agent' instead of 'seat'. The connected threads preview now declares its seats as 'Atlas' and 'Manager'."
   },
   "downtime": {
     "status": "none",

@@ -17,6 +17,17 @@ export const agentDisplayName = ({ id, name }: { readonly id: string; readonly n
   return label === '' || label === id || `agent/${label}` === id ? shortAgentName(id) : label
 }
 
+/** How a person reads Fractal's own machinery as the one who asked or wrote. */
+export const FRACTAL_NAME = 'Fractal'
+
+/**
+ * Whether an actor is Fractal's own machinery rather than an agent or a person: the daemon, or the st3 reconciler,
+ * which runs as an agent seat. Mirrors `is_fractal` in crates/fractal-ui-model/src/attention.rs exactly; the served
+ * `raised_by` labels these 'st'. A requester or sender is checked here before any roster lookup, so the reconciler
+ * reads as Fractal even though the roster names it.
+ */
+export const isFractalMachinery = (id: string): boolean => id.startsWith('daemon/') || id === 'agent/st3/reconciler'
+
 /** A roster lookup by agent id; roster names are already display names (see `fleetFromAgents`). */
 export type AgentNames = (id: string) => string | undefined
 

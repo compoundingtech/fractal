@@ -61,4 +61,16 @@ describe('Alerts tab projection', () => {
     expect(alertsTabRows([item({ default_answer: { id: 'skip', label: 'Skip' } })], now)[0]!.line2).toBe('')
     expect(alertsTabRows([item({ requester_id: 'agent/not-served', step_run_id: 'step-run/not-served' })], now)[0]!.line2).toBe('')
   })
+
+  it('names who raised a row as its card does: Fractal for its machinery, the roster name, never a raw label', () => {
+    const names: Partial<Record<string, string>> = { 'agent/st3/reconciler': 'Reconciler', 'agent/example/atlas': 'Atlas' }
+    const roster = (id: string) => names[id]
+    const raised = (id: string, label: string) => alertsTabRows([item({ presentation: { ...presented('stopped'), raised_by: { id, label } } })], now, roster)[0]!.line2
+    // Fractal serves its own machinery as 'st'; the roster's name for the reconciler does not apply either.
+    expect(raised('agent/st3/reconciler', 'st')).toBe('Fractal')
+    expect(raised('daemon/runtime', 'st')).toBe('Fractal')
+    expect(raised('agent/example/atlas', 'example/atlas')).toBe('Atlas')
+    // Without a roster row, a nameless seat's path label reads as its last segment.
+    expect(raised('agent/example/nameless', 'example/nameless')).toBe('nameless')
+  })
 })

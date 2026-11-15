@@ -11,7 +11,7 @@ import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import { Schema } from 'effect'
 import { ConversationItem, type RunStatus, type SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
-import { agentDisplayName, shortAgentName } from '../data/agentName.ts'
+import { agentDisplayName, FRACTAL_NAME, isFractalMachinery, shortAgentName } from '../data/agentName.ts'
 import { credentialExpiredMessage, credentialExpiredTitle, type ConversationPage, type Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
 import { toolKindFor } from '../conversation/toolClassification.ts'
@@ -160,11 +160,14 @@ const quietMachineRows = (items: readonly KitConversationItem[]): KitConversatio
   })
 }
 
-/** A participant as the transcript names it: the roster name, else the ref's last segment; `ref` is the full path for hover. */
+/**
+ * A participant as the transcript names it: Fractal for its own machinery, before the roster (which names the st3
+ * reconciler like any agent); else the roster name, else the ref's last segment. `ref` is the full path for hover.
+ */
 export interface ParticipantName { readonly label: string; readonly ref?: string }
 export const participantName = (ref: string | undefined, names: TranscriptTurnOptions['names']): ParticipantName | undefined => {
   if (ref === undefined || ref === '') return undefined
-  if (ref.startsWith('daemon/')) return { label: 'Fractal', ref }
+  if (isFractalMachinery(ref)) return { label: FRACTAL_NAME, ref }
   const named = names?.(ref)
   if (ref.startsWith('agent/')) return { label: agentDisplayName({ id: ref, name: named }), ref }
   if (named !== undefined && named !== '') return { label: named, ref }
