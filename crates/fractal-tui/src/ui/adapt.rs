@@ -693,7 +693,11 @@ fn auto_resolved_at(model: &Model, read: &Load<fractal_client::AutoResolvedAsks>
                     .iter()
                     .flat_map(|request| &request.answers)
                     .filter(|answer| default.is_none_or(|default| default.id != answer.id))
-                    .map(|answer| (answer.id.clone(), answer.label.clone()))
+                    .map(|answer| OverrideAnswer {
+                        id: answer.id.clone(),
+                        label: answer.label.clone(),
+                        words: answer.outcome.as_deref() == Some("request_changes"),
+                    })
                     .collect(),
             }
         })

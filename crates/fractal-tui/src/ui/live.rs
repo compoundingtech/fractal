@@ -422,8 +422,9 @@ enum Fetched {
     SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
     /// The person's asks that resolved by themselves, or why st could not say.
     AutoResolved { generation: u64, outcome: Result<fractal_client::AutoResolvedAsks, String> },
-    /// st accepted the person's own answer to an auto-resolved ask: the list is read again.
-    Overridden,
+    /// st answered the person's own answer to the auto-resolved ask of `episode`; accepted, the
+    /// list is read again.
+    Overridden { episode: String, accepted: bool },
     /// st's conversation search for the palette's query, or why st could not say.
     Said(String, Result<fractal_client::ConversationSearch, String>),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
@@ -1301,7 +1302,10 @@ pub fn run(context: Context) -> Result<()> {
                         Err(why) => extras.auto_resolved = Load::Failed(why),
                     }
                 }
-                Fetched::Overridden => auto_stale = true,
+                Fetched::Overridden { episode, accepted } => {
+                    ui.finish_override(&episode, accepted);
+                    auto_stale |= accepted;
+                }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::ReadPositions { generation, outcome } => {
                     if generation == resources_generation {
@@ -1984,7 +1988,10 @@ pub fn run(context: Context) -> Result<()> {
             };
             let optimistic_answer = alert.as_ref().is_some_and(|id| ui.pending_answers.contains_key(id));
             let shell = matches!(effect, Effect::CreateTerminal { .. });
-            let overrides = matches!(effect, Effect::Override { .. });
+            let overrides = match &effect {
+                Effect::Override { episode, .. } => Some(episode.clone()),
+                _ => None,
+            };
             let client = client.clone();
             let tx = fetched_tx.clone();
             let person = person.clone();
@@ -2019,8 +2026,9 @@ pub fn run(context: Context) -> Result<()> {
                 if shell && let Ok((_, Some(terminal))) = &outcome {
                     let _ = tx.send(Fetched::TerminalStarted(terminal.clone()));
                 }
-                if overrides && outcome.is_ok() {
-                    let _ = tx.send(Fetched::Overridden);
+                // Either way st answered: the row offers `o` again, and once taken it is read anew.
+                if let Some(episode) = overrides {
+                    let _ = tx.send(Fetched::Overridden { episode, accepted: outcome.is_ok() });
                 }
                 match outcome {
                     Ok((notice, _)) => {
@@ -3062,8 +3070,8 @@ async fn perform(
                 .await?;
             Ok(("Dismissed".into(), None))
         }
-        Effect::Override { target_id, episode, answer, label } => {
-            crate::override_ask(client, &target_id, &episode, &answer, &label)
+        Effect::Override { target_id, episode, answer, text, label } => {
+            crate::override_ask(client, &target_id, &episode, &answer, text.as_deref(), &label)
                 .await
                 .map(|notice| (notice, None))
         }

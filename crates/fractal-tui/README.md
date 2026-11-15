@@ -158,9 +158,12 @@ last seven days under `Auto-resolved` (`↻`): the title, who asked, the default
 when. `o` on one (or on a `Recently closed` row of the same ask) uses your answer instead: digits
 choose one of its other answers, Enter sends it as `work.override`, Esc cancels. The chooser says
 what that does: "Your answer replaces the default. Work already done on the default is not
-undone; <asker> is told." `o` is not offered once Fractal no longer takes an override or the ask
-has no other answer. The list is read when Inbox opens, when the alerts change and after an
-override is accepted, never on a timer.
+undone; <asker> is told." An answer that requests changes first opens a box for them: Enter sends
+the answer with the words (empty words are refused), Esc goes back to the answers. Until Fractal
+answers, the row says `sending your answer…` and `o` offers no second answer. `o` is not offered
+once Fractal no longer takes an override or the ask has no other answer. The list is read when
+Inbox opens, when the alerts change and after an override is accepted, never on a timer; a read
+that stopped at its limit says so, even when it found none.
 
 On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
 `✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends
