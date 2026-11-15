@@ -68,11 +68,11 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
             }).with_context(|| format!("demo scenario fleet-mid-refactor/{name}.json"))?;
         let decoded = slice.decode()
             .with_context(|| format!("demo scenario fleet-mid-refactor/{name}.json strict decode failed"))?;
-        if name == "attention" {
-            if let Some(rows) = slice.state.get("topic_threads") {
-                topic_threads = serde_json::from_value::<Vec<TopicThread>>(rows.clone())
-                    .context("demo scenario fleet-mid-refactor/attention.json topic_threads")?;
-            }
+        if name == "attention"
+            && let Some(rows) = slice.state.get("topic_threads")
+        {
+            topic_threads = serde_json::from_value::<Vec<TopicThread>>(rows.clone())
+                .context("demo scenario fleet-mid-refactor/attention.json topic_threads")?;
         }
         for item in decoded {
             // Validate replay too, but the initial screen is the slice's initial state.
