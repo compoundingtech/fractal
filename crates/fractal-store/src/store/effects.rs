@@ -126,7 +126,7 @@ pub(super) fn effect_views_for_step_tx(connection: &Connection, step: &str) -> r
 
 fn append_effect_tx(tx: &Transaction<'_>, origin: &str, kind: &str, record: &EffectRecord) -> Result<(), FractalError> {
     // Bind every observed episode. A concurrent unresolved receipt remains fenced on merge.
-    let mut statement = tx.prepare_cached("SELECT id FROM claims WHERE subject=?1")?;
+    let mut statement = tx.prepare_cached("SELECT id FROM claims WHERE subject=?1").map_err(internal)?;
     let predecessors = statement.query_map([&record.effect_id], |row| row.get::<_, String>(0))
         .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
     append_claim_tx(tx, origin, &record.effect_id, kind,
@@ -363,18 +363,19 @@ impl Store {
             if live { continue; }
             if record.provider == "native-message" {
                 let key = format!("native-effect-message/{}", record.operation_id);
-                match self.operation_claim(&key) {
-                    Ok(Some(message)) => {
+                if operation_conflicted_tx(&self.readers.get(), &operation_id_for_key(&key))? {
+                    self.unresolved_message_effect(&record, "idempotency-conflict", "daemon/runtime")?;
+                    changed = true;
+                    continue;
+                }
+                match self.operation_claim(&key).map_err(internal)? {
+                    Some(message) => {
                         if let Err(error) = self.confirm_message_effect(&record, &message, "daemon/runtime") {
                             if error.code != "effect-evidence-mismatch" { return Err(error); }
                             self.unresolved_message_effect(&record, error.code, "daemon/runtime")?;
                         }
                     }
-                    Ok(None) => { self.unresolved_message_effect(&record, "delivery-unknown", "daemon/runtime")?; }
-                    Err(error) if error.code == "idempotency-conflict" => {
-                        self.unresolved_message_effect(&record, error.code, "daemon/runtime")?;
-                    }
-                    Err(error) => return Err(error),
+                    None => { self.unresolved_message_effect(&record, "delivery-unknown", "daemon/runtime")?; }
                 }
             } else {
                 self.unresolved_message_effect(&record, "provider-readback-unavailable", "daemon/runtime")?;
