@@ -50,7 +50,7 @@ fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Resul
 }
 
 fn pascal(name: &str) -> String {
-    name.split(['_', '-'])
+    name.split(['_', '-', '.'])
         .map(|part| {
             let mut c = part.chars();
             c.next()
@@ -105,7 +105,11 @@ fn emit(name: &str, node: &Value, out: &mut String) -> Result<()> {
                 out.push_str("#[serde(default, deserialize_with = \"present\", skip_serializing_if = \"Option::is_none\")]\n");
                 format!("Option<{child_name}>")
             };
-            writeln!(out, "pub {field}: {ty},")?;
+            let identifier = field.replace('.', "_");
+            if identifier != *field {
+                writeln!(out, "#[serde(rename = {field:?})]")?;
+            }
+            writeln!(out, "pub {identifier}: {ty},")?;
         }
         out.push_str("}\n");
     } else {
@@ -186,4 +190,27 @@ fn pattern_check(out: &mut String, pattern: &str, name: &str) -> Result<()> {
         "static {name}: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new({pattern:?}).expect(\"supported pattern\"));"
     )?;
     check(out, &format!("{name}.is_match(&value)"), "pattern")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dotted_action_keys_keep_their_wire_name_with_valid_rust_identifiers() {
+        let mut output = String::new();
+        emit("Actions", &json!({
+            "type":"object","additionalProperties":false,"required":["work.override"],
+            "properties":{"work.override":{"$ref":"#/$defs/NoticeDigestOverride"}}
+        }), &mut output).unwrap();
+        assert!(output.contains("#[serde(rename = \"work.override\")]"));
+        assert!(output.contains("pub work_override: ActionsWorkOverride"));
+        assert!(output.contains("pub type ActionsWorkOverride = NoticeDigestOverride"));
+        assert_eq!(crate::lower_camel_snake("work.override"), "workOverride");
+        let typescript = crate::ts_object(&json!({
+            "type":"object","additionalProperties":false,"required":["work.override"],
+            "properties":{"work.override":{"$ref":"#/$defs/NoticeDigestOverride"}}
+        })).unwrap();
+        assert!(typescript.contains("\"work.override\": NoticeDigestOverride"));
+    }
 }

@@ -27,6 +27,10 @@
 
 [kinds]
 "harness.invocation" = { class = "durable" }
+"effect.intended" = { class = "durable" }
+"effect.in-flight" = { class = "durable" }
+"effect.confirmed" = { class = "durable" }
+"effect.unresolved" = { class = "durable" }
 "harness.invocation-artifact" = { class = "durable" }
 "deploy.go" = { class = "durable" }
 "deploy.go-revoked" = { class = "durable" }
@@ -249,6 +253,7 @@
 "work.person-asked" = { class = "durable" }
 "work.person-cancelled" = { class = "durable" }
 "work.person-done" = { class = "durable" }
+"work.person-override" = { class = "durable" }
 "work.person-reassigned" = { class = "durable" }
 "work.progress" = { class = "durable" }
 "work.released" = { class = "durable" }

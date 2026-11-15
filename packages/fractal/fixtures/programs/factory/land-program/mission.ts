@@ -46,6 +46,12 @@ export default Fractal.mission(
     reportTo: factory,
     timeout: '2h',
     stalledAfter: '10m',
+    retry: {
+      on: ['HostUnavailable', 'SlotLost'],
+      attempts: 4,
+      delays: ['2m', '10m', '30m'],
+      within: '2h',
+    },
     concurrentRuns: 8,
     authority: {
       publish: ['scratch/*'],

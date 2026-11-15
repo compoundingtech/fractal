@@ -16,6 +16,7 @@ macro_rules! message_desired_recipient_match {
 // Store methods by domain (the crate plan's domain rules); core stays in this file.
 pub mod attention;
 pub mod delivery;
+pub mod effects;
 pub mod message_expiry;
 pub mod deploy;
 pub mod host_holds;
@@ -36,6 +37,9 @@ pub mod accountable_tests;
 pub mod custom;
 pub mod model_drift;
 mod notice_authority;
+pub mod ask_digest;
+mod ask_digest_cache;
+mod ask_digest_payload;
 mod transaction_work;
 pub mod assistant_write;
 #[cfg(feature = "test-support")]
@@ -2903,6 +2907,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
@@ -2932,6 +2937,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
@@ -2966,6 +2972,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         host_holds::create_schema(&graph.connection.write())?;
         resource_membership::create_schema(&graph.connection.write()).map_err(anyhow::Error::new)?;
+        ask_digest_cache::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
@@ -10042,25 +10049,14 @@ pub fn insert_local_observation_tx(
             .and_then(|body| body.get("semantics"))
             .and_then(Value::as_str)
             == Some("response")
-        // A terminal response may carry identity/timing but no accounting observations.
-        // Keep that timeline evidence without reserving a spend receipt or inventing a
-        // zero-token, zero-cost response from missing counters.
-        && input.fields.get("body").is_some_and(|usage| {
+    {
+        // Identity-only responses retain their joins without becoming zero-cost spend.
+        let has_accounting = input.fields.get("body").is_some_and(|usage| {
             ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "total_tokens"]
-                .iter()
-                .any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+                .iter().any(|key| usage.get(*key).and_then(Value::as_u64).is_some())
                 || usage.get("cost").and_then(Value::as_f64)
                     .is_some_and(|cost| cost.is_finite() && cost >= 0.0)
-        })
-    {
-        let desired: Option<(Option<String>, Option<String>, Option<String>)> = transaction
-            .query_row(
-                "SELECT owner_run, owner_generation, owner_step FROM desired WHERE subject=?1",
-                [&input.subject],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(internal)?;
+        });
         let incarnation = input
             .fields
             .get("incarnation_id")
@@ -10074,19 +10070,6 @@ pub fn insert_local_observation_tx(
             .get("observed_at_unix_ms")
             .and_then(Value::as_u64)
             .map_or(observed_at, |at| (at as u128).min(observed_at));
-        let active_step: Option<(String, String, String)> = transaction
-            .query_row(
-                "SELECT subject, 'mission-run/' || run_id, 'run-generation/' || generation_id
-                 FROM step_runs WHERE lease_owner=?1 AND lease_incarnation=?2
-                   AND CAST(lease_expires_at_unix_ms AS INTEGER)>?3
-                   AND COALESCE(CAST(activated_at_unix_ms AS INTEGER), 0)<=?3
-                   AND status IN ('claimed', 'working', 'submitted')
-                 ORDER BY updated_at_unix_ms DESC LIMIT 1",
-                params![input.subject, incarnation, responded_at as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(internal)?;
         let execution = step_executions::response_execution(transaction, &input.subject, incarnation, responded_at)
             .map_err(internal)?;
         let execution_owner: Option<(String, String)> = if let Some((_, step)) = &execution {
@@ -10095,23 +10078,16 @@ pub fn insert_local_observation_tx(
                 [step], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional().map_err(internal)?
         } else { None };
-        let owner_run = if execution.is_some() {
-            execution_owner.as_ref().map(|item| item.0.as_str()).unwrap_or("")
-        } else {
-            active_step.as_ref().map(|item| item.1.as_str())
-                .or_else(|| desired.as_ref().and_then(|item| item.0.as_deref())).unwrap_or("")
-        };
-        let owner_step = execution.as_ref().map(|item| item.1.as_str()).or_else(|| active_step
-            .as_ref()
-            .map(|item| item.0.as_str()))
-            .or_else(|| desired.as_ref().and_then(|item| item.2.as_deref()))
-            .unwrap_or("");
-        let owner_generation = if execution.is_some() {
-            execution_owner.as_ref().map(|item| item.1.as_str())
-        } else {
-            active_step.as_ref().map(|item| item.2.as_str())
-                .or_else(|| desired.as_ref().and_then(|item| item.1.as_deref()))
-        };
+        let invocation = step_executions::response_invocation(transaction, &input.subject, incarnation,
+            execution.as_ref().map(|item| item.0.as_str())).map_err(internal)?;
+        let owner_attempt: Option<u32> = if let Some((id, _)) = &execution {
+            transaction.query_row("SELECT json_extract(body,'$.fields.attempt') FROM claims WHERE id=?1",
+                [id], |row| row.get(0)).optional().map_err(internal)?.flatten()
+        } else { None };
+        // Launch lineage identifies the process, not whichever work it later performed.
+        let owner_run = execution_owner.as_ref().map(|item| item.0.as_str()).unwrap_or("");
+        let owner_step = execution.as_ref().map(|item| item.1.as_str()).unwrap_or("");
+        let owner_generation = execution_owner.as_ref().map(|item| item.1.as_str());
         let usage = &input.fields["body"];
         let model = usage
             .get("model")
@@ -10166,11 +10142,22 @@ pub fn insert_local_observation_tx(
             "mission_run_id": if owner_run.is_empty() { None } else { Some(owner_run) },
             "generation_id": owner_generation,
             "step_id": if owner_step.is_empty() { None } else { Some(owner_step) },
-            "execution_id": execution.as_ref().map(|item| item.0.as_str()),
         });
+        // New evidence fields are optional, not nullable defaults. A relay must not
+        // invent them when an older owner omitted them.
+        if let Some((execution, _)) = &execution {
+            body["fields"]["attribution"]["execution_id"] = json!(execution);
+        }
+        if let Some(invocation) = &invocation {
+            body["fields"]["attribution"]["invocation_id"] = json!(invocation.invocation_id);
+        }
+        if let Some(attempt) = owner_attempt {
+            body["fields"]["attribution"]["attempt"] = json!(attempt);
+        }
         body["fields"]["host"] = Value::String(origin.to_owned());
         // What st charged this response, so the OpenTelemetry history carries the same cost
         // the graph's totals do.
+        if has_accounting {
         body["fields"]["spend"] = json!({
             "cost_microusd": cost_microusd,
             "basis": if reported_cost.is_some() {
@@ -10182,13 +10169,14 @@ pub fn insert_local_observation_tx(
             },
             "pricing": crate::pricing::PRICING_REVISION,
         });
+        }
         let source_id = input
             .fields
             .get("source_id")
             .and_then(Value::as_str)
             .or_else(|| input.fields.get("entry_id").and_then(Value::as_str))
             .unwrap_or("");
-        let new_response = responded_at
+        let new_response = has_accounting && responded_at
             >= observed_at.saturating_sub(USAGE_RESPONSE_HORIZON_MS)
             && transaction
                 .execute(
@@ -18114,6 +18102,7 @@ fn try_project_simple_replication_inner_tx(
                     | "work.person-asked"
                     | "work.person-reassigned"
                     | "work.person-done"
+                    | "work.person-override"
                     | "work.person-cancelled"
                     | "doc.bound"
                     | "mission.published"
@@ -18160,7 +18149,7 @@ fn try_project_simple_replication_inner_tx(
         // before its ask, or a later local update, has the same result as canonical replay.
         if matches!(
             claim.kind.as_str(),
-            "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-cancelled"
+            "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-override" | "work.person-cancelled"
         ) && !local_ask_applied && let Some(aggregate) = aggregate_of_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
         {
@@ -19051,7 +19040,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-override','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -19359,6 +19348,17 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    // The durable effect subject, not the last work-state reason, owns this fence.
+    // Check before every step/work projection, including person waits and retries.
+    if claim.subject.starts_with("step-run/")
+        && effects::step_has_unresolved_effect_tx(transaction, &claim.subject).map_err(internal)?
+    {
+        transaction.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h4550e7b9ce6d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE step_runs SET status='blocked', blocked_reason='effect-unresolved' WHERE subject=?1",
+        ).map_err(internal)?.execute(/* sqlite-large-value: allow-for-now lv-h1f1e37b98c1e owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&claim.subject]).map_err(internal)?;
+        return Ok(());
+    }
     if person_work::project(transaction, claim)? {
         return Ok(());
     }
@@ -21133,6 +21133,7 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
     definition_hash: row.get(3)?,
     status: row.get(4)?,
     attempt: row.get::<_, u32>(5)?,
+    retry: None,
     assigned_to: row.get(6)?,
     available_to: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
     agentless: row.get(8)?,
@@ -21454,6 +21455,7 @@ fn apply_step_definition(view: &mut StepRunView, mission: &MissionSpec) {
         view.queue_position = step.queue_position;
         view.timeout_ms = step.timeout_ms;
         view.fresh_context = step.fresh_context;
+        view.retry = (step.retry != crate::model::RetrySpec::default()).then(|| step.retry.clone());
     }
 }
 
@@ -22396,6 +22398,12 @@ pub fn apply_effective_step_state_with_owner(
         view.claimant = None;
         view.claim_incarnation = None;
         view.claim_expires_at_unix_ms = None;
+        return Ok(());
+    }
+    // Lease expiry is not authority to retry an unresolved external effect.
+    if effects::step_has_unresolved_effect_tx(connection, &view.subject)? {
+        view.status = "blocked".into();
+        view.blocked_reason = Some("effect-unresolved".into());
         return Ok(());
     }
     if step_claim_expired(view, snapshot_unix_ms) {

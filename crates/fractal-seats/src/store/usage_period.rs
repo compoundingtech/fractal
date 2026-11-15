@@ -85,6 +85,40 @@ mod tests {
     }
 
     #[test]
+    fn period_keeps_claim_partitions_and_optional_invocation_attempt_joins() {
+        let snapshot = |execution: Option<&str>, invocation: Option<&str>, attempt: Option<u32>, at, total| {
+            let mut fields = json!({
+                "semantics":"response_rollup","incarnation_id":"same-incarnation",
+                "owner_step":"step-run/r/g/build","owner_run":"mission-run/r",
+                "model":"same-model","account":"same-account","host":"same-host",
+                "observed_at_unix_ms":at,"total_tokens":total,"cost_microusd":total,
+            });
+            if let Some(id) = execution { fields["execution_id"] = json!(id); }
+            if let Some(id) = invocation { fields["invocation_id"] = json!(id); }
+            if let Some(attempt) = attempt { fields["attempt"] = json!(attempt); }
+            Ok(("agent/example.worker".into(), 0, json!({"fields":fields}).to_string()))
+        };
+        let rows = [
+            snapshot(None, None, None, 5u64, 100u64),
+            snapshot(None, None, None, 15, 110),
+            snapshot(Some("claim/one"), Some("invocation/turn-one"), Some(1), 5, 10),
+            snapshot(Some("claim/one"), Some("invocation/turn-one"), Some(1), 15, 30),
+            snapshot(Some("claim/two"), Some("invocation/turn-two"), Some(2), 16, 7),
+        ];
+        let (rows, _) = Store::usage_period_data_from_rows(rows, 10, 20).unwrap();
+        assert_eq!(rows.len(), 3, "reclaims on one incarnation/model are separate cumulative series");
+        assert_eq!(rows.iter().map(|row| row["total_tokens"].as_u64().unwrap()).sum::<u64>(), 37);
+        let known = rows.iter().find(|row| row["execution_id"] == "claim/one").unwrap();
+        assert_eq!(known["invocation_id"], "invocation/turn-one");
+        assert_eq!(known["attempt"], 1);
+        assert_eq!(known["total_tokens"], 20);
+        let unknown = rows.iter().find(|row| row.get("execution_id").is_none()).unwrap();
+        assert!(unknown.get("invocation_id").is_none());
+        assert!(unknown.get("attempt").is_none());
+        assert_eq!(unknown["total_tokens"], 10, "legacy cumulative history is retained");
+    }
+
+    #[test]
     fn indexed_boundaries_match_full_fold_with_ties_restarts_and_daily_windows() {
         let store = fixture(12_000);
         for (since, until) in [

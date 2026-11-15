@@ -175,6 +175,74 @@ engine which of the run's program attempts left their step (ended, failed, timed
 cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
 cancels the child runs and asks the attempt still waits on (§6).
 
+#### Native retries and resource retirement
+
+The outer step's native `retry` policy has these KDL fields:
+
+| Field | Meaning |
+|---|---|
+| `attempts 4` | Total attempts, including the first; an integer from 1 through 100. Defaults to 1. |
+| `backoff "2m"` | Existing uniform retry delay; defaults to zero. |
+| `delays "2m" "10m" "30m"` | Positive per-retry durations, overriding `backoff`; the final entry repeats when more retries remain. |
+| `within "2h"` | Optional positive whole-policy window from the first attempt's start, not a per-attempt timeout. The window need not cover the sum of scheduled delays: a pending retry that becomes due after the window expires fails finally without starting another attempt, including after a daemon restart. |
+| `on "HostUnavailable" "SlotLost"` | Allowlist of `_tag` values from the durable failed program result. An absent list preserves the legacy any-failure policy. |
+
+The stored `RetrySpec` names these fields `attempts`, `backoff_ms`, `schedule_ms`,
+`window_ms`, and `on_error_tags`. Empty schedules/tag lists and an absent window are
+omitted from serialization, preserving existing revision hashes and canonical KDL
+for policies that use only `attempts` and `backoff`.
+
+Classification uses the current attempt's durable final program result, not arbitrary
+inner-step failures or error-message text. With `on`, a missing or unlisted result
+`_tag` is final; an engine failure with no durable failed program result (for example,
+a host dying before reporting its exit) remains retryable. Attempts and `within`
+still bound those engine failures. The tag names are program-defined, not a closed
+engine enum. `within` limits admission of another attempt; it neither interrupts
+an already running attempt nor replaces the step's per-attempt timeout.
+
+For example, this policy permits four total attempts, with delays of two, ten,
+and thirty minutes, within two hours of the first start:
+
+```kdl
+retry {
+  attempts 4
+  delays "2m" "10m" "30m"
+  within "2h"
+  on "HostUnavailable" "SlotLost"
+}
+```
+
+Retry is retire-then-readmit, not overlapping replacement. Before attempt N+1
+can acquire resource-lane membership, attempt N's program termination must be
+confirmed and its owned lane memberships, lane-run resources, and groups must
+finish retirement. A failed or incomplete retirement blocks admission; reaching
+the retry's due time is necessary but is not proof that the previous attempt
+released its resources. Re-admission receives the new attempt's ownership identity,
+so stale cleanup cannot retire the successor's resources.
+
+The policy window continues to run while retirement is pending. Its deadline wakes
+the blocked retry even if no child exits and no custody event arrives. A retry whose
+window expires during that wait fails finally instead of starting, even when the
+old scope finishes retirement at the same wake. A pending or uncertain retirement
+sets the step to `blocked`, with a reason visible in `missions show` naming the
+operator recovery path: cancel the mission run, or release/recover the retained
+resource custody. A persistent retirement wait also raises the standard reconcile
+fault in operator attention; successful retirement, window expiry, or leaving the
+active run closes that fault.
+
+External `flock` tickets are kernel-held locks owned by the effect process (and
+any descendants retaining its file descriptor), not native resource-lane memberships.
+They are released by process exit/closing the last lock descriptor. Scheduling a
+retry or retiring a native lane does not itself release a live process's ticket;
+effect-process termination must finish before the next attempt can rely on release.
+
+`fractal missions show <run>` displays each configured step retry policy, its current
+attempt/total attempts, and `next due unix ms` while a retry has a persisted due time.
+`--json` exposes the same policy as `steps[].retry` (using the stored field names
+above), the current `steps[].attempt`, and `steps[].not_before_unix_ms` for the
+scheduled retry. Default policies are omitted. A due retry can still be waiting
+for retirement or another admission fence.
+
 For publication supersession, sending `cancel` is not sufficient to admit the replacement.
 The engine waits for that host's matching `cancelled` acknowledgement (or host exit), then
 fences recorded leftover effect groups by verified boot/process-start identity. A failed
@@ -600,7 +668,9 @@ named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `Chil
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
 mission `input`, `missions start` checks the inputs against it, and the program receives the decoded
 value. The success value is encoded with `intent.output` and journaled under the reserved key
-`$result`; a typed failure is encoded with its `_tag` and fields and fails the step with it.
+`$result`; a typed failure is encoded with its `_tag` and fields, journaled under the same key as
+a failed result, and fails the step with it. Retry classification reads this attempt's durable
+failure rather than an inner effect's possibly caught error.
 
 A program waiting on an ask or a child run stays loaded in the host. A replaced host replays the
 program to the same wait.

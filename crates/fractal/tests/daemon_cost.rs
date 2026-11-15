@@ -594,6 +594,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     ("POST /v1/work/cancel-ask", "cancels a person ask"),
     (
+        "POST /v1/work/override",
+        "requires a deadline-resolved structured ask, absent from this cost fixture; native CLI round trip and person and episode fences are covered by client_v0_cli::cli_person_override_replaces_a_deadline_default_once",
+    ),
+    (
         "POST /v1/work/mission/{*subject}",
         "publishes a step's mission",
     ),

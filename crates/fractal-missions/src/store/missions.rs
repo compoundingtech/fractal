@@ -780,7 +780,7 @@ fn retry_step_tx(
     subject: &str,
     actor: Option<&str>,
     reason: &str,
-    backoff_ms: u64,
+    delay_ms: u64,
     receipt_key: Option<&str>,
 ) -> Result<bool> {
     let current: Option<StepRetryRow> = transaction
@@ -832,7 +832,7 @@ fn retry_step_tx(
         return Ok(false);
     }
     let now = now_ms();
-    let not_before = now.saturating_add(backoff_ms as u128);
+    let not_before = now.saturating_add(delay_ms as u128);
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-hc71c13a84a5f owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='pending', attempt=?2, worker_reported=0, lease_owner=NULL,
                 lease_incarnation=NULL, lease_expires_at_unix_ms=NULL, blocked_reason=?3,
@@ -943,7 +943,10 @@ fn set_mission_run_state_tx(
             return Ok(false);
         }
     }
-    if (current_phase.starts_with("cleanup-") && phase != "terminal")
+    // Cleanup cannot move backwards, but it can park in its current phase while
+    // durable evidence prevents terminalization.
+    if (current_phase.starts_with("cleanup-") && phase != "terminal"
+        && !(phase == current_phase && status == "blocked"))
         || (current_phase == "final-cancelled"
             && !matches!(phase, "final-cancelled" | "cleanup-cancelled" | "terminal"))
     {
@@ -1867,6 +1870,11 @@ pub trait MissionsStore {
             id: &str,
         ) -> Result<(MissionRunView, Option<MissionSpec>)>;
     fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>>;
+    /// Earliest ready/working state of attempt one, retained in claims across retries.
+    /// A never-activated step has no start, regardless of its creation time.
+    fn first_step_attempt_started_at(&self, subject: &str) -> Result<Option<u128>>;
+    /// Next future retry eligibility time for pending current-generation local work.
+    fn next_step_retry_deadline(&self, origin: &str) -> Result<Option<u128>>;
     /// Cancel `run` at `expected_generation`, requested by `actor`. A run as `actor` cancels
     /// only itself and the runs it started.
     fn request_mission_run_cancellation_at_generation(
@@ -5276,6 +5284,60 @@ impl MissionsStore for Store {
             .into_iter()
             .filter_map(|value| value.parse::<u128>().ok())
             .min())
+    }
+
+    fn first_step_attempt_started_at(&self, subject: &str) -> Result<Option<u128>> {
+        let subject = normalize_step_run(subject);
+        let connection = self.readers.get();
+        let started_at: Option<String> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms FROM claims
+                 WHERE subject=?1 AND kind='step-run.state'
+                   AND json_extract(body, '$.fields.status') IN ('ready','working')
+                   AND COALESCE(json_extract(body, '$.fields.attempt'), 1)=1
+                   AND store_index<COALESCE((
+                     SELECT MIN(store_index) FROM claims
+                     WHERE subject=?1 AND kind='step-run.retried'
+                   ), 9223372036854775807)
+                 ORDER BY length(accepted_at_unix_ms), accepted_at_unix_ms
+                 LIMIT 1",
+                [&subject],
+                |row| row.get(0),
+            )
+            .optional()?;
+        started_at.map(|value| value.parse().map_err(Into::into)).transpose()
+    }
+
+    fn next_step_retry_deadline(&self, origin: &str) -> Result<Option<u128>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(
+            "SELECT step_runs.not_before_unix_ms
+             FROM step_runs
+             JOIN mission_runs ON mission_runs.id=step_runs.run_id
+             WHERE step_runs.generation_id=mission_runs.current_generation_id
+               AND step_runs.status='pending'
+               AND step_runs.not_before_unix_ms IS NOT NULL
+               AND mission_runs.status IN ('running','standing','blocked')
+               AND mission_runs.phase NOT LIKE 'cleanup-%'
+               AND EXISTS (
+                 SELECT 1 FROM claims
+                 WHERE claims.subject='mission-run/' || mission_runs.id
+                   AND claims.kind='mission-run.created'
+                   AND claims.origin=?1
+               )",
+        )?;
+        let deadlines = statement
+            .query_map([origin], |row| row.get::<_, String>(0))?;
+        let now = now_ms();
+        let mut next = None;
+        for deadline in deadlines {
+            if let Ok(deadline) = deadline?.parse::<u128>()
+                && deadline > now
+            {
+                next = Some(next.map_or(deadline, |current: u128| current.min(deadline)));
+            }
+        }
+        Ok(next)
     }
 
     fn request_mission_run_cancellation(

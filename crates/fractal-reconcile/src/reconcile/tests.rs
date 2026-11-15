@@ -2,6 +2,105 @@
     mod agent_review_loop_branches;
 
     #[test]
+    fn invocation_transcripts_require_closed_exact_launch_and_verified_native_binding() {
+        for case in ["exact", "running", "vanished", "wrong-incarnation", "wrong-session",
+            "unsupported", "unproven-stop"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let subject = "agent/example/transcript";
+            apply_source(&store,
+                "version 2\nagent \"example/transcript\" { workspace \"/tmp\"; command \"true\"; }",
+                "transcript-fixture");
+            let desired = store.desired_subject_with_writer(subject).unwrap().unwrap().0;
+            let mut member = desired.member.clone().unwrap();
+            member.driver = Some(if case == "unsupported" { "codex" } else { "omp" }.into());
+            let operation_id = uuid::Uuid::now_v7().to_string();
+            member.tags.insert(start_jobs::OPERATION_TAG.into(), operation_id.clone());
+            let invocation = format!("invocation/{operation_id}");
+            let mut operation = RuntimeStartOperation {
+                id: operation_id.clone(), subject: subject.into(), owner: "fixture".into(),
+                body: serde_json::json!({"subject":desired,
+                    "selected_token":store.selected_desired_token(subject).unwrap().unwrap(),
+                    "request":null, "member":desired.member, "launch_member":member, "reason":"fixture"}),
+                revoked_by:None, finished:false, result:None, applied:false,
+                cleanup_verified:false, dispatched:false, receipted:false,
+            };
+            if case != "unproven-stop" {
+                store.admit_runtime_start(&mut operation, 2).unwrap();
+                assert!(store.invocation_launch_member(&invocation).unwrap().is_some());
+            }
+            store.append_claim(&ClaimInput { subject:subject.into(), kind:"harness.invocation".into(),
+                actor:None, fields:serde_json::from_value(serde_json::json!({
+                    "invocation_id":invocation, "operation_id":operation_id, "agent":subject,
+                    "phase":"started", "incarnation":"exact-incarnation", "harness":member.driver
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            if case == "exact" {
+                store.append_claim(&ClaimInput { subject:subject.into(), kind:"harness.invocation".into(),
+                    actor:None, fields:serde_json::from_value(serde_json::json!({
+                        "invocation_id":"invocation/turn-capture", "operation_id":"turn-capture",
+                        "agent":subject, "phase":"started", "incarnation":"exact-incarnation",
+                        "parent_invocation_id":invocation, "event_key":"message/turn"
+                    })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            }
+            let runtime_fields = |status: &str, incarnation: &str| BTreeMap::from([
+                ("status".into(), Value::from(status)),
+                ("incarnation_id".into(), Value::from(incarnation)),
+                ("runtime_id".into(), Value::from(member.runtime_id.clone())),
+                ("terminal".into(), Value::from(member.terminal)),
+            ]);
+            let bound_incarnation = if case == "wrong-incarnation" { "other-incarnation" } else { "exact-incarnation" };
+            store.append_claim(&ClaimInput { subject:subject.into(), kind:"runtime.observed".into(),
+                actor:None, fields:runtime_fields("running", bound_incarnation),
+                evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            let transcript = root.path().join("native.jsonl");
+            fs::write(&transcript, format!("{}\n{}\n",
+                serde_json::json!({"type":"session","id":"native-exact","cwd":root.path()}),
+                serde_json::json!({"type":"message","id":"m1","message":{
+                    "role":"user","content":"token=fixture-secret"}}))).unwrap();
+            let binding = store.append_claim(&ClaimInput {
+                subject:subject.into(), kind:"harness.session-file".into(), actor:Some(subject.into()),
+                fields:serde_json::from_value(serde_json::json!({
+                    "harness":member.driver, "incarnation_id":bound_incarnation,
+                    "session_id":if case == "wrong-session" { "native-other" } else { "native-exact" },
+                    "path":transcript,
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+            let runtime = Arc::new(FakeRuntime::default());
+            let mut reconciler = Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()));
+            reconciler.driver_state_dir = root.path().join("drivers");
+            let status = match case { "running" => "running", "vanished" => "vanished", _ => "stopped" };
+            // Exercise the actual observation writer, including its unchanged-observation retry.
+            for _ in 0..2 {
+                reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+            }
+            let claims = store.claims_for(subject, Some("harness.invocation-artifact")).unwrap();
+            let captured = claims.iter().filter(|claim| claim.body["fields"]["status"] == "retained").collect::<Vec<_>>();
+            if case == "exact" {
+                assert_eq!(captured.len(), 1);
+                let artifact: crate::invocation_artifacts::InvocationArtifact =
+                    serde_json::from_value(captured[0].body["fields"]["artifact"].clone()).unwrap();
+                assert_eq!(artifact.incarnation.as_deref(), Some("exact-incarnation"));
+                assert_eq!(artifact.native_session_id.as_deref(), Some("native-exact"));
+                assert_eq!(artifact.binding_claim.as_deref(), Some(binding.id.as_str()));
+                assert_eq!(artifact.invocation_id, invocation);
+                assert!(store.invocation_receipts(&invocation).unwrap().iter().any(|receipt|
+                    receipt.transcript_ref == Some(format!("sha256:{}", artifact.sha256))));
+                assert!(store.invocation_receipts("invocation/turn-capture").unwrap().iter()
+                    .all(|receipt| receipt.transcript_ref.is_none()));
+                assert!(!claims.iter().any(|claim|
+                    claim.body["fields"]["invocation_id"] == "invocation/turn-capture"
+                        && claim.body["fields"]["status"] == "retained"));
+                let bytes = crate::invocation_artifacts::read(root.path(), &artifact, now_ms()).unwrap().unwrap();
+                assert!(!String::from_utf8(bytes).unwrap().contains("fixture-secret"));
+                fs::write(&transcript, "not the original transcript").unwrap();
+                reconciler.record_once(subject, "runtime.observed", runtime_fields(status, "exact-incarnation")).unwrap();
+                assert_eq!(store.claims_for(subject, Some("harness.invocation-artifact")).unwrap().len(), claims.len());
+            } else {
+                assert!(captured.is_empty(), "{case} must never retain guessed or live bytes");
+            }
+        }
+    }
+
+    #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;
         use fractal_runtime::PRIORITY_ENV;
@@ -136,6 +235,7 @@
     mod program_engine;
     mod program_faults;
     mod program_children;
+    mod native_retry;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -29565,7 +29665,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn inherited_nested_work_keeps_one_parent_alert() {
-        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { executions: None, subject: subject.into(),
+        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { retry: None, executions: None, subject: subject.into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: path.into(),
@@ -29736,7 +29836,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn busy_agent_keeps_cross_run_work_queued_without_wake_deadline() {
-        let mut first = StepRunView { executions: None, subject: "step-run/older/work".into(),
+        let mut first = StepRunView { retry: None, executions: None, subject: "step-run/older/work".into(),
         run: "mission-run/older".into(),
         generation: "run-generation/older".into(),
         step: "work".into(),
@@ -30246,7 +30346,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
 
     #[test]
     fn only_the_assignee_host_arms_a_work_wake_deadline() {
-        let step = StepRunView { executions: None, subject: "step-run/run-1/work".into(),
+        let step = StepRunView { retry: None, executions: None, subject: "step-run/run-1/work".into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: "work".into(),
@@ -30952,6 +31052,159 @@ mission "fresh" state="ready" {
             .find(|message| message.subject == wake.subject)
             .unwrap();
         assert_eq!(after.status, "closed", "the local working report took up the wake");
+    }
+
+    fn unresolved_effect_fence_case(case: &str) {
+        struct ClockReset;
+        impl Drop for ClockReset {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = ClockReset;
+        smallclaims::store::set_thread_clock(Some(1_800_000_000_000));
+        let seat = SeatQueueFixture::new();
+        if case == "dependency-completion" {
+            apply_source(&seat.store, r#"
+version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "queued" state="ready" {
+  goal "Do not complete around an unresolved effect."
+  completion { depends-on { step "finished" completed } }
+  step "work" { assigned-to "agent/node.worker" }
+  step "finished" {
+    agentless
+    gate "wait for the test" { field "state" "resource/never" is "ready" }
+  }
+  finally {
+    step "cleanup" {
+      agentless
+      gate "wait for the test" { field "state" "resource/never" is "ready" }
+    }
+  }
+}
+"#, "effect-mission-completion");
+        }
+        // Unlike the queue-order helper, this fixture needs no sleep or distinct join times.
+        let run = seat.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "queued".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/requester".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: format!("unresolved-{case}"),
+        }).unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let step = SeatQueueFixture::step(&run, "work");
+        seat.work(&step, "claim", "effect-worker-claim").unwrap();
+        let claimed = seat.store.step_run(&step).unwrap().unwrap();
+        let owner = crate::model::EffectOwner {
+            mission: "mission/queued".into(), key: "announce".into(), step: step.clone(),
+            attempt: claimed.attempt, incarnation: "seat-one".into(),
+        };
+        let crate::store::effects::EffectAdmission::Originate(effect) =
+            seat.store.admit_message_effect(&owner, SEAT, SEAT, "original-payload", SEAT).unwrap()
+        else { panic!("the creation host must admit the original effect"); };
+        if case == "submitted" {
+            seat.work(&step, "complete", "effect-worker-submitted").unwrap();
+            assert!(seat.store.step_run(&step).unwrap().unwrap().worker_reported);
+        }
+        seat.store.unresolved_message_effect(&effect, "delivery is unknown", SEAT).unwrap();
+        let messages = seat.store.messages(None, true).unwrap().len();
+        match case {
+            "expired" => {
+                smallclaims::store::set_thread_clock(Some(claimed.claim_expires_at_unix_ms.unwrap() + 1));
+            }
+            "stopped" => {
+                let actual = seat.store.latest_claim(SEAT, Some("runtime.observed")).unwrap().unwrap();
+                let mut fields: BTreeMap<String, Value> =
+                    serde_json::from_value(actual.body["fields"].clone()).unwrap();
+                fields.insert("status".into(), serde_json::json!("stopped"));
+                seat.store.append_claim(&ClaimInput {
+                    subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
+                    fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                assert!(seat.store.work_claim_is_orphaned(&claimed).unwrap());
+            }
+            "late-projection" => {
+                // A worker submission arrives after parking, followed by a late daemon readiness
+                // decision. Neither may replace the durable fence with its own status/reason.
+                seat.store.append_claim(&ClaimInput {
+                    subject: step.clone(), kind: "work.submitted".into(), actor: Some(SEAT.into()),
+                    fields: BTreeMap::from([
+                        ("attempt".into(), serde_json::json!(claimed.attempt)),
+                        ("submitted_incarnation".into(), serde_json::json!("seat-one")),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                seat.store.append_claim(&ClaimInput {
+                    subject: step.clone(), kind: "step-run.state".into(),
+                    actor: Some("daemon/runtime".into()),
+                    fields: BTreeMap::from([("status".into(), serde_json::json!("ready"))]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            "submitted" => {}
+            "dependency-completion" => {
+                for path in ["finished", "cleanup"] {
+                    let subject = SeatQueueFixture::step(&run, path);
+                    seat.store.set_step_state(&subject, "completed", None).unwrap();
+                    assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().status, "completed");
+                }
+            }
+            _ => unreachable!(),
+        }
+        for _ in 0..3 {
+            let view = seat.store.step_run(&step).unwrap().unwrap();
+            assert_eq!(view.status, "blocked", "{case}");
+            assert_eq!(view.blocked_reason.as_deref(), Some("effect-unresolved"), "{case}");
+            seat.reconciler.evaluate_mission_runs().unwrap();
+        }
+        let view = seat.store.step_run(&step).unwrap().unwrap();
+        assert_eq!(view.status, "blocked", "{case}");
+        assert_eq!(view.blocked_reason.as_deref(), Some("effect-unresolved"), "{case}");
+        assert_eq!(seat.store.messages(None, true).unwrap().len(), messages,
+            "an unresolved effect must not originate a replacement message or work wake");
+        assert!(seat.store.claims_for(&step, Some("step-run.state")).unwrap().iter()
+            .all(|claim| claim.body["fields"]["status"] != "completed"));
+        assert_ne!(seat.store.mission_run(&run.id).unwrap().unwrap().status, "completed");
+        if case == "dependency-completion" {
+            let blocked = seat.store.mission_run(&run.id).unwrap().unwrap();
+            assert_eq!(blocked.status, "blocked");
+            assert_eq!(blocked.phase, "normal", "dependency completion must not select final");
+            for phase in ["final", "cleanup-completed"] {
+                seat.store.set_mission_run_state(&run.id, "running", phase, None).unwrap();
+                for _ in 0..3 {
+                    seat.reconciler.evaluate_mission_runs().unwrap();
+                    let blocked = seat.store.mission_run(&run.id).unwrap().unwrap();
+                    assert_eq!(blocked.status, "blocked", "{phase}");
+                    assert_eq!(blocked.phase, phase);
+                }
+            }
+            assert_eq!(seat.store.messages(None, true).unwrap().len(), messages);
+        }
+    }
+
+    #[test]
+    fn unresolved_effect_fences_expired_work_lease() {
+        unresolved_effect_fence_case("expired");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_stopped_worker_incarnation() {
+        unresolved_effect_fence_case("stopped");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_submitted_step_completion() {
+        unresolved_effect_fence_case("submitted");
+    }
+
+    #[test]
+    fn late_work_and_step_state_projections_preserve_unresolved_effect_fence() {
+        unresolved_effect_fence_case("late-projection");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_dependency_completion_and_final_success() {
+        unresolved_effect_fence_case("dependency-completion");
     }
 
     #[test]

@@ -3023,6 +3023,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             read("deadline/subscription-retries", &|| {
                 self.store.next_subscription_mission_retry_deadline()
             }),
+            read("deadline/step-retries", &|| {
+                self.store.next_step_retry_deadline(&self.host)
+            }),
             self.delayed_restarts
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -4307,6 +4310,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.reconcile_provider_capacity_retries(&desired)
         });
         self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
+        self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
         });
@@ -10892,6 +10896,96 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Status alone is not a stopped provider: require the exact launch's complete scope and
+    /// producer closure before reading its durably bound native file.
+    fn retain_stopped_invocation_transcripts(&self, observation: &crate::model::ClaimRecord) -> Result<()> {
+        use crate::invocation_artifacts as artifacts;
+        use crate::external_sessions::find_bound_pi_family_transcript;
+        use crate::external_sessions::ExternalDriver;
+        self.store.record_invocation_runtime_end(observation)?;
+        let fields = &observation.body["fields"];
+        if !matches!(fields["status"].as_str(), Some("stopped" | "exited")) {
+            return Ok(());
+        }
+        let Some(incarnation) = fields["incarnation_id"].as_str() else { return Ok(()); };
+        let mut invocations = BTreeMap::new();
+        for receipt in self.store.agent_invocation_receipts(&observation.subject)? {
+            if receipt.incarnation.as_deref() == Some(incarnation) {
+                invocations.insert(receipt.invocation_id.clone(), receipt);
+            }
+        }
+        if invocations.is_empty() { return Ok(()); }
+        let Some(state) = self.driver_state_dir.parent() else { return Ok(()); };
+        let mut stopped_launches = BTreeMap::new();
+        for receipt in invocations.values() {
+            let Some(member) = self.store.invocation_launch_member(&receipt.invocation_id)? else { continue; };
+            let member: MemberSpec = serde_json::from_value(member)?;
+            if member.tags.get(start_jobs::OPERATION_TAG) == Some(&receipt.operation_id)
+                && fields["runtime_id"].as_str() == Some(member.runtime_id.as_str())
+                && self.runtime.start_operation_closed(&member)?
+            {
+                stopped_launches.insert(receipt.invocation_id.clone(), member.driver);
+            }
+        }
+        let binding = self.store.claims_for(&observation.subject, Some("harness.session-file"))?
+            .into_iter().rev().find(|claim|
+                claim.origin == self.store.origin()
+                    && claim.actor.as_deref() == Some(observation.subject.as_str())
+                    && claim.body["fields"]["incarnation_id"].as_str() == Some(incarnation));
+        let retained = self.store.claims_for(&observation.subject, Some("harness.invocation-artifact"))?;
+        for invocation in invocations.keys() {
+            // Captured bytes and identity metadata are immutable, including after deletion/expiry.
+            if let Some(claim) = retained.iter().find(|claim| claim.body["fields"]["invocation_id"] == *invocation
+                && claim.body["fields"]["kind"] == "transcript"
+                && claim.body["fields"]["artifact"].is_object()) {
+                let artifact = serde_json::from_value(claim.body["fields"]["artifact"].clone())?;
+                self.store.record_invocation_transcript_reference(&invocations[invocation], &artifact)?;
+                continue;
+            }
+            let unavailable = |reason| artifacts::unavailable(&self.store,
+                &observation.subject, invocation, "transcript", reason);
+            // A whole native session is launch-context evidence, not an exact standing-turn
+            // transcript interval. Only an admitted, positively closed launch can own it.
+            let Some(harness) = stopped_launches.get(invocation) else {
+                unavailable("exact-stopped-launch-transcript-unverified")?;
+                continue;
+            };
+            let Some(binding) = binding.as_ref() else {
+                unavailable("exact-native-binding-unavailable")?;
+                continue;
+            };
+            let bound = &binding.body["fields"];
+            if harness.as_deref() != bound["harness"].as_str() {
+                unavailable("native-provider-identity-unverified")?;
+                continue;
+            }
+            let driver = match bound["harness"].as_str() {
+                Some("pi") => ExternalDriver::Pi,
+                Some("omp") => ExternalDriver::Omp,
+                _ => { unavailable("provider-transcript-unsupported")?; continue; }
+            };
+            let (Some(path), Some(native_id)) = (bound["path"].as_str(), bound["session_id"].as_str()) else {
+                unavailable("exact-native-binding-unavailable")?;
+                continue;
+            };
+            let Ok(Some(session)) = find_bound_pi_family_transcript(driver, Path::new(path), native_id) else {
+                unavailable("native-transcript-identity-unverified")?;
+                continue;
+            };
+            let Ok(mut artifact) = artifacts::capture_transcript(state, invocation, &session.transcript, now_ms()) else {
+                unavailable("native-transcript-capture-failed")?;
+                continue;
+            };
+            artifact.incarnation = Some(incarnation.into());
+            artifact.native_session_id = Some(native_id.into());
+            artifact.binding_claim = Some(binding.id.clone());
+            artifact.harness = bound["harness"].as_str().map(str::to_owned);
+            artifacts::record(&self.store, &observation.subject, &artifact)?;
+            self.store.record_invocation_transcript_reference(&invocations[invocation], &artifact)?;
+        }
+        Ok(())
+    }
+
     fn record_once_with_evidence(
         &self,
         subject: &str,
@@ -10921,6 +11015,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.record_runtime_observation_admission(subject, false)?;
                 if let Some(previous) = previous {
                     self.store.record_invocation_runtime_end(previous)?;
+                    self.retain_stopped_invocation_transcripts(previous)?;
                 }
             }
             return Ok(());
@@ -10947,6 +11042,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             self.store.append_claim(&input)?
         };
+        if kind == "runtime.observed" {
+            self.retain_stopped_invocation_transcripts(&record)?;
+        }
         if crate::store::local_observation_position(&record).is_some() {
             // Only this node reads a local observation, and it cannot advance a mission.
             self.event_notify
@@ -11059,7 +11157,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 "mission-run" | FIRST_READINESS_FAULT_SCOPE | run_report::REPORT_FAULT_SCOPE => {
                     !active.contains(subject)
                 }
-                "step" | crate::program_journal::STALLED_FAULT_SCOPE | crate::program_journal::HOST_FAULT_SCOPE => {
+                "step" | crate::program_journal::STALLED_FAULT_SCOPE | crate::program_journal::HOST_FAULT_SCOPE
+                    | program_resources::RETRY_RETIREMENT_FAULT_SCOPE => {
                     !active_steps.contains(subject)
                 }
                 _ => false,
@@ -11554,6 +11653,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.evaluate_mission_run(run, &mission)
     }
 
+    // Both normal evaluation and the direct cleanup entrypoint must honor this fence.
+    fn unresolved_effect_run_fence(&self, run: &MissionRunView) -> Result<Option<bool>> {
+        if self.store.mission_run_has_unresolved_effect(&run.id)? {
+            return Ok(Some(self.store.set_mission_run_state(
+                &run.id, "blocked", &run.phase, Some("effect-unresolved"),
+            )?));
+        }
+        Ok(None)
+    }
+
     fn evaluate_mission_run(&self, run: &MissionRunView, mission: &MissionSpec) -> Result<bool> {
         let idle_cutover = self.store.supersede_idle_mission_run(run, mission)?;
         if idle_cutover == Some(true) {
@@ -11573,6 +11682,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         if run.phase == "supersession-waiting" {
             return self.evaluate_active_mission_run(run, None);
+        }
+        // A durable unresolved effect blocks the run before mission-level dependency
+        // completion, final-phase selection, and cleanup can bypass the per-step fence.
+        if let Some(changed) = self.unresolved_effect_run_fence(run)? {
+            return Ok(changed);
         }
         if run.phase.starts_with("cleanup-") {
             return self.reconcile_mission_run_cleanup(run);
@@ -11826,6 +11940,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             let step_changed = self
                 .isolate("step", &view.subject, || -> Result<bool> {
                     let mut changed = false;
+                    // An unresolved native effect forbids lease recovery, gate evaluation and
+                    // completion, even when a later work report replaced the visible reason.
+                    if self.store.step_has_unresolved_effect(&view.subject)? {
+                        return self.store.set_step_state(
+                            &view.subject,
+                            "blocked",
+                            Some("effect-unresolved"),
+                        );
+                    }
                     let eligible_phase = ((run.phase == "normal"
                         || run.phase == "revision-draining")
                         && !step.spec.finally)
@@ -11847,7 +11970,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             changed |= self.store.retry_step(
                                 &view.subject,
                                 "the step repeat policy permits another attempt",
-                                step.spec.retry.backoff_ms,
+                                step.spec.retry.delay_ms(view.attempt),
                             )?;
                         }
                         return Ok(changed);
@@ -11954,10 +12077,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                         || lane_blocked
                         || ready_missing_agent
                     {
-                        if view
-                            .not_before_unix_ms
-                            .is_some_and(|not_before| not_before > now_ms())
+                        if let Some(not_before) = view.not_before_unix_ms
+                            && not_before > now_ms()
                         {
+                            smallclaims::touched::note_due(not_before);
+                            return Ok(changed);
+                        }
+                        if view.attempt > 1 && self.step_retry_window_expired(step.spec, view)? {
+                            changed |= self.store.set_step_state(
+                                &view.subject,
+                                "failed",
+                                Some("the retry policy window expired before the attempt could start"),
+                            )?;
                             return Ok(changed);
                         }
                         if !self.step_dependencies_hold(run, &step, &views)? {
@@ -12383,6 +12514,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_mission_run_cleanup(&self, run: &MissionRunView) -> Result<bool> {
+        if let Some(changed) = self.unresolved_effect_run_fence(run)? {
+            return Ok(changed);
+        }
         // A child can still own execution after its superseded parent ended.
         // Preserve its cleanup confirmation and recovery path as well.
         let mut supersession_cleanup = run.superseded_by.is_some();
@@ -12636,9 +12770,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
-    /// A failed step has no attempt left when it used its retries, or when it is a loop that
-    /// stopped: a loop that ends on a stop rule or at its exhaustion has said it is finished,
-    /// and another attempt would only run the rounds the rule just ended.
+    fn step_retry_window_expired(
+        &self,
+        spec: &StepSpec,
+        view: &crate::model::StepRunView,
+    ) -> Result<bool> {
+        let Some(window) = spec.retry.window_ms else { return Ok(false) };
+        Ok(self.store.first_step_attempt_started_at(&view.subject)?
+            .is_some_and(|anchor| now_ms() > anchor.saturating_add(u128::from(window))))
+    }
+
+    /// A failed step has no attempt left when its policy is exhausted, or its loop
+    /// stopped: another attempt would only run the rounds the rule just ended.
     fn failed_step_is_final(
         &self,
         run: &MissionRunView,
@@ -12650,6 +12793,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         if view.attempt >= spec.retry.attempts {
             return Ok(true);
+        }
+        if self.step_retry_window_expired(spec, view)? {
+            return Ok(true);
+        }
+        if spec.program.is_some() && !spec.retry.on_error_tags.is_empty() {
+            let mut before = None;
+            loop {
+                let journal = self.store.claims_for_subject_kind_at(
+                    &view.subject, program::JOURNAL_KIND, before, true, 64,
+                )?;
+                // Only a durable program exit is subject to the tag allowlist. Engine
+                // failures (including a host dying before reporting an exit) remain eligible.
+                if let Some(failure) = journal.claims.iter().find(|claim| {
+                    let fields = &claim.body["fields"];
+                    fields["attempt"].as_u64() == Some(u64::from(view.attempt))
+                        && fields["key"] == program::RESULT_KEY
+                        && fields["status"] == "failed"
+                }) {
+                    let tag = failure.body.pointer("/fields/error/_tag").and_then(Value::as_str);
+                    if !tag.is_some_and(|tag| spec.retry.on_error_tags.iter().any(|allowed| allowed == tag)) {
+                        return Ok(true);
+                    }
+                    break;
+                }
+                let Some(cursor) = journal.next_cursor else { break };
+                before = Some(cursor);
+            }
         }
         if spec.loop_spec.is_none() {
             return Ok(false);
@@ -15062,6 +15232,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     definition_hash: step.spec.definition_hash.clone(),
                     status: "pending".into(),
                     attempt: 1,
+                    retry: None,
                     assigned_to: None,
                     available_to: Vec::new(),
                     agentless: true,
@@ -15133,6 +15304,31 @@ impl<R: RuntimeControl> Reconciler<R> {
         view: &crate::model::StepRunView,
         program: &crate::model::ProgramSpec,
     ) -> Result<bool> {
+        const RETIREMENT_WAIT: &str = "waiting for previous attempt resource retirement";
+        let waiting = view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with(RETIREMENT_WAIT));
+        let retirement = self.retire_previous_step_resources(&run.subject, view);
+        if (waiting || !matches!(retirement, Ok(true))) && self.step_retry_window_expired(step.spec, view)? {
+            self.record_fault(&view.subject, program_resources::RETRY_RETIREMENT_FAULT_SCOPE, Ok(()))?;
+            return self.store.set_step_state(&view.subject, "failed",
+                Some("the retry policy window expired while waiting for previous attempt resource retirement"));
+        }
+        if !matches!(retirement, Ok(true)) {
+            if let Some(window) = step.spec.retry.window_ms
+                && let Some(anchor) = self.store.first_step_attempt_started_at(&view.subject)?
+            {
+                // Window expiry must wake this wait even if custody never changes.
+                smallclaims::touched::note_due(anchor.saturating_add(u128::from(window)).saturating_add(1));
+            }
+            let detail = retirement.err().map(|error| format!(": {error:#}")).unwrap_or_default();
+            let reason = format!(
+                "{RETIREMENT_WAIT}{detail}; cancel the mission run or release/recover the retained resource custody"
+            );
+            self.record_fault(&view.subject, program_resources::RETRY_RETIREMENT_FAULT_SCOPE,
+                Err(anyhow::anyhow!("{reason}")))?;
+            return self.store.set_step_state(&view.subject, "blocked", Some(&reason));
+        }
+        self.record_fault(&view.subject, program_resources::RETRY_RETIREMENT_FAULT_SCOPE, Ok(()))?;
+        let changed = waiting && self.store.set_step_state(&view.subject, "working", None)?;
         let dispatch = program::Dispatch {
             step: view.subject.clone(),
             attempt: view.attempt,
@@ -15142,14 +15338,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             env: run_variables(run, step, view).into_iter().filter(|(name, _)| name.starts_with("ST_")).collect(),
             cwd: run.workspace.clone(),
         };
-        match self.program_engine().dispatch(dispatch)? {
+        Ok(changed | match self.program_engine().dispatch(dispatch)? {
             // A step that left this attempt already says why in its state.
-            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => Ok(false),
+            program::Dispatched::Running | program::Dispatched::Started | program::Dispatched::Left(_) => false,
             // The step keeps its state; `reconcile_program_faults` raises `program/host` from
             // `ProgramEngine::host_fault` and dispatches it again at a deadline.
-            program::Dispatched::HostDown(_) => Ok(false),
-            program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason)),
-        }
+            program::Dispatched::HostDown(_) => false,
+            program::Dispatched::Refused(reason) => self.store.set_step_state(&view.subject, "failed", Some(&reason))?,
+        })
     }
 
     /// Start or resolve what the programs of `run` wait on (§6). It runs inside the run's
@@ -16560,6 +16756,27 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(deadline) = pass.next_deadline {
             self.arm_deadline_at(
                 "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
+    }
+
+    /// Wake immediately when a hot reload changes the daily boundary, even if no claim changed.
+    pub fn set_ask_digest_policy(&self, config: &crate::config::AsksConfig) -> Result<()> {
+        if self.store.set_ask_digest_policy(config)? {
+            self.signal_changed();
+        }
+        Ok(())
+    }
+
+    /// Publish each person's daily auto-resolution digest and wake at its next local boundary.
+    fn reconcile_ask_digests(&self) -> Result<bool> {
+        let pass = self.store.reconcile_ask_digests_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "ask-digest",
                 deadline,
                 crate::reconcile_telemetry::WakeCause::Deadline,
             );
