@@ -92,14 +92,16 @@ const openUpgrade = async (port: number, path: string, headers: Record<string, s
     }
     socket.on('data', data); socket.once('error', error); socket.once('close', closed)
   })
-  socket.write(`GET ${path} HTTP/1.1\r\nHost: fixture\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n${Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join('')}\r\n`)
+  socket.write(`GET ${path} HTTP/1.1\r\nHost: ${headers.host ?? 'fixture'}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n${Object.entries(headers).filter(([name]) => name !== 'host').map(([name, value]) => `${name}: ${value}\r\n`).join('')}\r\n`)
   return reply
 }
 
 it('admits tagged HTTP reads and collections upgrades using only the preview credential', async () => {
   const origin = 'https://preview.example'
-  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
-  const headers = { host: 'fixture', origin, 'tailscale-node-tags': 'tag:dev-host', cookie: `fractal_device=${'a'.repeat(43)}` }
+  let listener: string | undefined
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => listener }))
+  listener = new URL(setup.base).host
+  const headers = { host: listener, origin, 'tailscale-node-tags': 'tag:dev-host', cookie: `fractal_device=${'a'.repeat(43)}` }
   expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(200)
   expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('101')
   expect(setup.received).toHaveLength(2)
@@ -108,8 +110,10 @@ it('admits tagged HTTP reads and collections upgrades using only the preview cre
 
 it('keeps person login upgrades and paired-browser credential selection', async () => {
   const origin = 'https://preview.example'
-  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
-  const headers = { host: 'fixture', origin, 'tailscale-user-login': 'robin@example.com', cookie: `fractal_device=${'a'.repeat(43)}` }
+  let listener: string | undefined
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => listener }))
+  listener = new URL(setup.base).host
+  const headers = { host: listener, origin, 'tailscale-user-login': 'robin@example.com', cookie: `fractal_device=${'a'.repeat(43)}` }
   expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(200)
   expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('101')
   for (const received of setup.received) expect(received.auth).toBe(`Bearer ${'a'.repeat(43)}`)
@@ -117,8 +121,10 @@ it('keeps person login upgrades and paired-browser credential selection', async 
 
 it('refuses tag pairing, write HTTP and non-read upgrade paths before the gateway', async () => {
   const origin = 'https://preview.example'
-  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
-  const headers = { host: 'fixture', origin, 'tailscale-node-tags': 'tag:dev-host' }
+  let listener: string | undefined
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => listener }))
+  listener = new URL(setup.base).host
+  const headers = { host: listener, origin, 'tailscale-node-tags': 'tag:dev-host' }
   for (const path of ['/v1/client/actions', '/_fractal/pair/start', '/_fractal/pair/redeem', '/_fractal/pair/status', '/v1/client/pairing/browser-requests']) {
     expect((await fetch(setup.base + path, { method: 'POST', headers })).status).toBe(403)
     expect(await openUpgrade(setup.port, path, headers)).toContain('403')
@@ -133,8 +139,10 @@ it.each([
   { 'tailscale-node-tags': 'tag:dev-host', 'tailscale-user-login': 'unknown@example.com' },
 ])('refuses unknown, missing and ambiguous identity on HTTP and upgrades (%j)', async identity => {
   const origin = 'https://preview.example'
-  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
-  const headers: Record<string, string> = { host: 'fixture', origin, ...identity }
+  let listener: string | undefined
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => listener }))
+  listener = new URL(setup.base).host
+  const headers: Record<string, string> = { host: listener, origin, ...identity }
   expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(403)
   expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('403')
   expect(setup.received).toHaveLength(0)

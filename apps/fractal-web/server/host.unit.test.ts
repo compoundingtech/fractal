@@ -66,7 +66,7 @@ describe('tag identity', () => {
   it('fails closed for ambiguous identities and never treats a tag as a login', () => {
     for (const login of ['robin@example.com', 'unknown@example.com', 'tag:dev-host'])
       expect(decide(request({ ...headers, 'tailscale-user-login': login, 'tailscale-node-tags': 'tag:dev-host' }))).toBe(false)
-    expect(admit(request({ ...headers, 'tailscale-node-tags': 'tag:dev-host' }))).toBe(false)
+    expect(admit(request({ ...headers, host: 'atlas.example.ts.net:8443', 'tailscale-node-tags': 'tag:dev-host' }))).toBe(false)
   })
   it('keeps host, Origin and originless upgrade checks for tags', () => {
     const tag = { 'tailscale-node-tags': 'tag:dev-host' }
