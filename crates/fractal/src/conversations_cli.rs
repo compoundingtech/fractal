@@ -443,7 +443,7 @@ pub(super) async fn run_message(
         MessageCommand::ReplyInThread { thread, quote, body, idempotency_key } => {
             let actor = fractal_drivers::contracts::env("ST_AGENT")
                 .filter(|actor| actor.starts_with("agent/"))
-                .context("a topic-thread reply needs a bound agent seat")?;
+                .context("a topic-thread reply needs a bound agent")?;
             let body = read_message_body(Some(body), None, std::io::stdin().lock())?;
             let key = idempotency_key.unwrap_or_else(|| {
                 let input = json!([&actor, &thread, &quote, &body, message_key_hour()]);

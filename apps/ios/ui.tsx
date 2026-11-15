@@ -61,13 +61,14 @@ export function SchemeScreen({ children }: { children: ReactNode }) {
   return <AppearanceScope.Provider value="scheme"><View style={{ flex: 1, backgroundColor: palette.base }}>{children}</View></AppearanceScope.Provider>;
 }
 
-/** Wrapping, inset grouped row. The label carries meaning without a glyph legend. */
-export function GroupedRow({ title, context, onPress, onLongPress }: { title: string; context: string; onPress: () => void; onLongPress?: () => void }) {
+/** Wrapping, inset grouped row. The label carries meaning without a glyph legend; without `onPress` it only reads. A read-only row is not `disabled`: VoiceOver would call it dimmed. */
+export function GroupedRow({ title, context, onPress, onLongPress, hint = 'Opens alert details' }: { title: string; context: string; onPress?: () => void; onLongPress?: () => void; hint?: string }) {
   const colors = useSystemColors();
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${title}. ${context}`} accessibilityHint="Opens alert details" onPress={onPress} onLongPress={onLongPress}
-    style={({ pressed }) => ({ marginHorizontal: 16, padding: 16, minHeight: 60, borderRadius: 10, backgroundColor: pressed ? colors.separator : colors.grouped, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator, flexDirection: 'row', alignItems: 'center', gap: 12 })}>
+  const interactive = onPress !== undefined || onLongPress !== undefined;
+  return <Pressable accessibilityRole={onPress ? 'button' : 'text'} accessibilityLabel={`${title}. ${context}`} accessibilityHint={onPress ? hint : undefined} onPress={onPress} onLongPress={onLongPress}
+    style={({ pressed }) => ({ marginHorizontal: 16, padding: 16, minHeight: 60, borderRadius: 10, backgroundColor: pressed && interactive ? colors.separator : colors.grouped, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator, flexDirection: 'row', alignItems: 'center', gap: 12 })}>
     <View style={{ flex: 1, gap: 6 }}><T bold>{title}</T><T dim>{context}</T></View>
-    <Text accessible={false} style={{ color: colors.secondary, fontSize: 22 }}>›</Text>
+    {onPress ? <Text accessible={false} style={{ color: colors.secondary, fontSize: 22 }}>›</Text> : null}
   </Pressable>;
 }
 
@@ -112,9 +113,9 @@ export function Note({ children, tone = 'dim' }: { children: ReactNode; tone?: '
   return <T style={styles.note} color={tone === 'warning' ? theme.waiting : tone === 'fault' ? theme.fault : theme.overlay0}>{children}</T>;
 }
 
-export function Button({ label, onPress, disabled = false, color = theme.accent, style }: { label: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
+export function Button({ label, accessibilityLabel = label, hint, onPress, disabled = false, color = theme.accent, style }: { label: string; accessibilityLabel?: string; hint?: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
   const appearance = useTextAppearance();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={hint} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
     <T bold color={color}>{label}</T>
   </Pressable>;
 }

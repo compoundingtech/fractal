@@ -11,19 +11,22 @@ appId: com.compoundingtech.fractal.starter
   }
 # Wait for the injected inline error to finish changing the group layout.
 - { "extendedWaitUntil": { "visible": ".*Fixture thread read failed.*", "timeout": 30000 } }
-- { "scrollUntilVisible": { "element": { "text": "^Retry$" }, "direction": "DOWN", "timeout": 30000 } }
+- {
+    "scrollUntilVisible":
+      { "element": { "text": "^Retry loading Writable thread — fixture$" }, "direction": "DOWN", "timeout": 30000 },
+  }
 # Re-center AFTER injection using a gesture inside the nested Threads viewport.
 - swipe:
     start: 85%, 70%
     end: 85%, 45%
     duration: 600
 - { "assertVisible": "^Open thread$" }
-- { "assertVisible": "^Retry$" }
+- { "assertVisible": "^Retry loading Writable thread — fixture$" }
 - { "assertNotVisible": "^Refresh thread$" }
 - { "takeScreenshot": "error-with-retry" }
 # PREVIEW_FINAL_ASSERTIONS
 - { "assertVisible": ".*Fixture thread read failed.*" }
-- { "assertVisible": "^Retry$" }
+- { "assertVisible": "^Retry loading Writable thread — fixture$" }
 - { "assertVisible": "^Open thread$" }
 - { "assertNotVisible": "^Refresh thread$" }
 - {
@@ -33,11 +36,11 @@ appId: com.compoundingtech.fractal.starter
         "env": { "CONTROL_JSON": '{"state":"ready","broadcast":false}' },
       },
   }
-- { "tapOn": "^Retry$" }
+- { "tapOn": "^Retry loading Writable thread — fixture$" }
 - {
     "extendedWaitUntil":
       { "visible": ".*Disposable fixture thread; no real agent or authority is affected.*", "timeout": 30000 },
   }
 - { "assertNotVisible": ".*Fixture thread read failed.*" }
-- { "assertNotVisible": "^Retry$" }
+- { "assertNotVisible": "^Retry loading Writable thread — fixture$" }
 - { "assertVisible": "^Open thread$" }

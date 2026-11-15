@@ -820,7 +820,7 @@ mod tests {
         drop(receiver);
         let upgraded = test_state(receiver_root.path());
         assert_eq!(upgraded.store.readers.get().pragma_query_value(None, "user_version",
-            |row| row.get::<_, u32>(0)).unwrap(), 22);
+            |row| row.get::<_, u32>(0)).unwrap(), fractal_schema::STORAGE_VERSION);
         let report = upgraded.store.validate_replication_backlog().unwrap();
         assert_eq!(report.valid, 2);
         assert_eq!(report.invalid, 0);

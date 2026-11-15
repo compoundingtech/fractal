@@ -238,7 +238,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         legacy_request: None, person: person.into(), title: "Review the worker".into(),
         reason: "Discuss the review without answering the ask.".into(), actor: agent.into(),
         step: None, new_run: None, incarnation: None, request: None,
-        deadline_ms: None, default_answer: None, idempotency_key: "native-thread-origin".into(),
+        deadline_ms: None, default_answer: None, priority: None, idempotency_key: "native-thread-origin".into(),
     }).unwrap();
     let ask_item = store.attention_items(Some(person)).unwrap().into_iter()
         .find(|item| item.subject == ask.subject).unwrap();
@@ -2254,16 +2254,14 @@ fn an_active_message_box_keeps_alt_chords_from_thread_actions() {
     assert!(matches!(&ui.threads.focused, Some((_, Input::Reply(_)))));
 }
 
-type ShortcutCase = (char, fn(String) -> thread::Tap);
-
 #[test]
 fn inbox_thread_detail_keeps_bare_action_letters() {
     let id = "thread/worker";
     let inbox = Pane::Home(Some(id.into()));
     let mut threads = observed_threads(ThreadState::Open);
     threads.set_access(ThreadAccess { mark_read: true, ..threads.access });
-    let cases: [ShortcutCase; 4] = [
-        ('z', thread::Tap::Close),
+    let cases = [
+        ('z', thread::Tap::Close as fn(String) -> thread::Tap),
         ('n', thread::Tap::Rename),
         ('v', thread::Tap::MarkVisibleRead),
         ('p', thread::Tap::OpenTab),

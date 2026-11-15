@@ -204,7 +204,7 @@ const build = (ctx: FactoryContext): Slices => {
       raised_by: null,
       waiting: null,
     },
-  }
+  } satisfies ReturnType<typeof resources.attention>
   const attention: Slice<'attention'> = {
     kind: 'attention',
     variant: 'default',

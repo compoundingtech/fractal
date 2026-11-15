@@ -4562,6 +4562,11 @@ jobs:
               "apps/fractal-web/src/changelog/**",
               # The dev-bar build and changes stories render the real segment.
               "apps/fractal-web/src/telemetry/BuildChangesSegment.tsx",
+              # SettingsDialog and AvailabilityPanel stories render the availability section.
+              "apps/fractal-web/src/availability/AvailabilityEditor.tsx",
+              "apps/fractal-web/src/availability/AvailabilityPanel.tsx",
+              "apps/fractal-web/src/availability/availability.fixtures.ts",
+              "apps/fractal-web/src/availability/availabilityModel.ts",
               "apps/fractal-web/src/embed/**",
               "apps/fractal-web/src/web/AlertDetailsPane.tsx",
               "apps/fractal-web/src/web/AlertFlashBand.tsx",
@@ -4612,8 +4617,10 @@ jobs:
               "apps/fractal-web/src/data/asking.ts",
               "apps/fractal-web/src/data/attachmentSchema.ts",
               "apps/fractal-web/src/data/attention.ts",
-              "apps/fractal-web/src/data/contextOccupancy.ts",
+              # Workspace stories bundle ConversationPane's browser pairing state and thread send capability checks.
               "apps/fractal-web/src/data/browserPairing.ts",
+              "apps/fractal-web/src/data/conversationPort.ts",
+              "apps/fractal-web/src/data/contextOccupancy.ts",
               "apps/fractal-web/src/data/fixtureSource.ts",
               "apps/fractal-web/src/data/lazySdk.ts",
               "apps/fractal-web/src/data/nativeDeclarations.ts",
@@ -4726,6 +4733,12 @@ jobs:
               "apps/fractal-web/src/terminal/TerminalResize.tsx",
               "apps/fractal-web/src/terminal/terminalText.ts",
               "apps/fractal-web/src/terminal/TerminalViewport.tsx",
+              # ThreadWorkspace and LiveAgentWorkspace stories bundle the production thread pane, including lazy chunks.
+              "apps/fractal-web/src/threads/LiveThreads.tsx",
+              "apps/fractal-web/src/threads/ThreadEditor.tsx",
+              "apps/fractal-web/src/threads/ThreadPanel.tsx",
+              "apps/fractal-web/src/threads/ThreadRefusalAlert.tsx",
+              "apps/fractal-web/src/threads/threadSource.ts",
               "apps/fractal-web/src/ui-compat/components.tsx",
               "apps/fractal-web/src/ui-compat/foundations.ts",
               "apps/fractal-web/src/ui-compat/live-theme.stylex.ts",

@@ -26,7 +26,7 @@ const closedId = 'thread/rollout-notes'
 const actor = 'person/operator'
 type Scenario = 'existing' | 'empty' | 'closed' | 'multiple' | 'custom-source' | 'clock-skew' | 'loading' | 'refused' | 'failed' | 'offline' | 'unconfirmed' | 'refused-action' | 'refused-thread'
 
-function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'timestamp' | 'action' = 'timestamp') {
+function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'timestamp' | 'action' = 'timestamp', mission?: Native.Mission) {
   const agentRef = 'agent/build-host-a/worker-tests'
   const registry = AtomRegistry.make()
   const now = scenario === 'clock-skew' ? Date.parse('2026-11-09T13:00:00Z') : Date.now()
@@ -40,7 +40,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
     ConversationItem.cases.Text.make({ id: 'conversation/worker-report', role: 'assistant', text: 'Worker tests pass on Linux. The macOS job is still running. The Inbox report is ready for follow-up discussion.', attachments: [], streaming: false, at: new Date(now - 2 * 60_000).toISOString() }),
   ]
   const base = { source: fixtureSource({ world: {
-    ...fixtureProjections, now, agents: [agent], missions: [], attention: [], events: [],
+    ...fixtureProjections, now, agents: [agent], missions: mission === undefined ? [] : [mission], attention: [], events: [],
     conversations: { [agentRef]: { items: conversation, hasOlder: false } }, terminals: {}, envelopes: {}, proposed: {},
   } }) }
   const originSource = scenario === 'custom-source' ? 'custom/garden/report/v1/origin' : askId
@@ -114,7 +114,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
       : scenario === 'refused' ? unavailable({ reason: 'unauthorized', detail: credentialExpiredMessage })
       : get(failing) ? unavailable({ reason: 'failed', detail: 'Fractal could not load threads.' })
       : observed({ freshness: scenario === 'offline' ? 'stale' : 'live', value: {
-        items: get(summaries).filter(row => 'recently_closed' in query ? row.state === 'closed'
+        items: get(summaries).filter(row => 'mission_id' in query && query.mission_id !== mission?.id ? false : 'recently_closed' in query ? row.state === 'closed'
           : 'origin_source' in query ? get(origins)[row.id] === query.origin_source && query.origin_episode === episode : true),
         next_cursor: Option.none(),
       } })),
@@ -215,8 +215,8 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
 
 type Args = { readonly placement: 'inbox' | 'tab'; readonly connection: 'local' | 'read-only'; readonly scenario: Scenario; readonly ordering?: 'timestamp' | 'action' }
 
-function createThreadScene({ placement, connection, scenario, ordering = 'timestamp' }: Args) {
-  const fixture = createThreadStory(connection === 'read-only', scenario, ordering)
+function createThreadScene({ placement, connection, scenario, ordering = 'timestamp' }: Args, supplied?: ReturnType<typeof createThreadStory>) {
+  const fixture = supplied ?? createThreadStory(connection === 'read-only', scenario, ordering)
   const href = (surface: Args['placement']) => {
     const thread = fixture.registry.get(fixture.currentThread)
     return workspaceHref(fixture.agentRef, surface === 'tab' && thread !== undefined
@@ -249,6 +249,19 @@ function ThreadWorkspace(args: Args) {
   return <ThreadScene scene={scene} />
 }
 
+/** Inject fixtures and navigation only; both contexts render their actual production workspace. */
+function ContextThreadWorkspace({ context }: { readonly context: 'agent' | 'mission' }) {
+  const [scene] = React.useState(() => {
+    const mission = context === 'mission' ? fixtureProjections.missions[0]! : undefined
+    const fixture = createThreadStory(false, 'existing', 'timestamp', mission)
+    const scene = createThreadScene({ placement: 'inbox', connection: 'local', scenario: 'existing' }, fixture)
+    fixture.registry.set(fixtureSidebarState(fixture.source.gateway ?? fixture.source.mode).tab, context === 'mission' ? 'missions' : 'agents')
+    scene.navigation.navigate(workspaceHref(fixture.agentRef, context === 'mission' ? `${mission!.id}:detail` : '', ''))
+    return scene
+  })
+  return <ThreadScene scene={scene} />
+}
+
 // A harness around the production workspace, not a module suite: the spaced title keeps it out of the
 // one-module-per-`Fractal/App/<Module>` identity check, like 'Alerts tab' and 'Composer images'.
 const meta = {
@@ -272,6 +285,7 @@ export const scenarioExemptions = [
   'EmptyStart:contract-fixture',
   'LatestPreview:contract-fixture',
   'Loading:contract-fixture',
+  'MissionThreads:contract-fixture',
   'MultipleThreads:contract-fixture',
   'ReadOnly:contract-fixture',
   'Refused:contract-fixture',
@@ -334,27 +348,44 @@ export const CustomInboxSource: Story = {
   },
 }
 
-/** The agent view pins one collapsed summary; a row opens the thread in its own tab instead of expanding in place. */
+/** Both contexts use the same inline thread panel; opening a tab remains an explicit secondary action. */
+const embeddedContextPlay: Story['play'] = async ({ canvasElement }) => {
+  delete canvasElement.dataset.threadContextPreviewProof
+  const strip = await waitFor(() => {
+    const element = canvasElement.querySelector<HTMLDetailsElement>('details[aria-label="Threads"]')
+    if (element === null) throw new Error('no thread group yet')
+    return element
+  }, { timeout: 60_000 })
+  await expect(strip.open).toBe(false)
+  await expect(strip.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 2')
+  await userEvent.click(strip.querySelector('summary')!)
+  await waitFor(() => expect(strip.open).toBe(true))
+  const row = () => within(strip).getAllByRole('button', { name: /Worker tests/ })[0]!
+  await expect(row()).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(row())
+  await waitFor(() => expect(row()).toHaveAttribute('aria-expanded', 'true'))
+  await within(strip).findByRole('textbox', { name: 'Message' })
+  await expect(within(strip).getByRole('button', { name: 'Open in tab' })).toBeVisible()
+  const dock = canvasElement.querySelector('[data-testid="conversation-composer-dock"]')
+  if (dock !== null) {
+    await expect(strip.closest('[data-testid="transcript-scroll"]')).not.toBeNull()
+    await expect(dock.contains(strip)).toBe(false)
+  }
+  // Multiple groups stay independent and inline; the preview remains in its original context.
+  await userEvent.click(within(strip).getByRole('button', { name: /Rollout notes/ }))
+  await waitFor(() => expect(strip.querySelectorAll('textarea')).toHaveLength(2))
+  await expect(canvasElement.querySelector('[data-thread-origin]')).toBeNull()
+  canvasElement.dataset.threadContextPreviewProof = 'passed'
+}
 export const AgentThreads: Story = {
-  play: async ({ canvasElement }) => {
-    const strip = await waitFor(() => {
-      const element = canvasElement.querySelector<HTMLDetailsElement>('details[aria-label="Threads"]')
-      if (element === null) throw new Error('no thread strip yet')
-      return element
-    }, { timeout: 60_000 })
-    await expect(strip.open).toBe(false)
-    await expect(strip.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 2')
-    await userEvent.click(strip.querySelector('summary')!)
-    await waitFor(() => expect(strip.open).toBe(true))
-    const row = within(strip).getAllByRole('button', { name: /Worker tests/ })[0]!
-    await expect(row.hasAttribute('aria-expanded')).toBe(false)
-    await userEvent.click(row)
-    await waitFor(() => expect(canvasElement.querySelector('[data-thread-origin]')?.textContent).toBe('With Worker tests'), { timeout: 10_000 })
-    await expect(strip.querySelector('textarea')).toBeNull()
-  },
+  render: () => <ContextThreadWorkspace context="agent" />,
+  play: embeddedContextPlay,
+}
+export const MissionThreads: Story = {
+  render: () => <ContextThreadWorkspace context="mission" />,
+  play: embeddedContextPlay,
 }
 
-/** Read states state only what the source reports; none of them invent agent progress. */
 export const Loading: Story = {
   args: { scenario: 'loading' },
   play: async context => {
@@ -503,7 +534,18 @@ export const LatestPreview: Story = {
     await userEvent.click(scenarios.getByRole('radio', { name: 'Conversation' }))
     await userEvent.click(scenarios.getByRole('radio', { name: 'Inbox source' }))
     await canvas.findByTestId('alert-details', {}, { timeout: 60_000 })
-    await expect(canvas.getByRole('tab', { name: /^Alerts\b/ })).toHaveAttribute('aria-selected', 'true')
+    // Below 900px the sidebar tabs are accessible only while the Agents drawer is open.
+    // Close it afterwards so its modal scrim does not cover the remaining preview controls.
+    const navigation = await waitFor(() => canvas.queryByRole('tab', { name: /^Alerts\b/ })
+      ?? canvas.getByRole('button', { name: 'Expand sidebar' }))
+    if (navigation.getAttribute('role') === 'tab') await expect(navigation).toHaveAttribute('aria-selected', 'true')
+    else {
+      await userEvent.click(navigation)
+      const drawer = within(await canvas.findByRole('dialog', { name: 'Agents' }))
+      await expect(await drawer.findByRole('tab', { name: /^Alerts\b/ })).toHaveAttribute('aria-selected', 'true')
+      await userEvent.click(drawer.getByRole('button', { name: 'Close agents' }))
+      await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
+    }
     await expect(surfaces.getByRole('radio', { name: 'Thread tab' })).toBeDisabled()
     await userEvent.click(await canvas.findByRole('button', { name: 'Start thread' }))
     await userEvent.type(await canvas.findByRole('textbox', { name: 'Message' }), 'Verify cancellation before merge.')

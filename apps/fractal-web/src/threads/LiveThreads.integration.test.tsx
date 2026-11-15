@@ -14,8 +14,9 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { credentialExpiredMessage, type ConversationPage } from '../data/source.ts'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
-import { LiveAgentThreads, LiveInboxThreads, LiveThreadPane } from './LiveThreads.tsx'
+import { LiveAgentThreads, LiveInboxThreads, LiveMissionThreads, LiveThreadPane } from './LiveThreads.tsx'
 import { gatewayThreads } from './threadSource.ts'
+import { ConversationPane } from '../web/ConversationPane.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -40,8 +41,8 @@ const live: FeedSyncObservation = { status: { _tag: 'Live', since: 0 }, observed
 type Reply = (url: URL, init: RequestInit | undefined) => Response | Promise<Response>
 
 /** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, and `unreachable` fails every request, capabilities included. */
-async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable }: {
-  readonly actions?: readonly string[]; readonly reply: Reply; readonly capabilities?: () => Response | undefined; readonly unreachable?: () => boolean
+async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation }: {
+  readonly actions?: readonly string[]; readonly reply: Reply; readonly capabilities?: () => Response | undefined; readonly unreachable?: () => boolean; readonly conversation?: ConversationPage
 }) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
@@ -65,7 +66,7 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
   const threads = gatewayThreads(client, registry)
   const source = { ...fixtureSource({ world: {
     now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents: [], missions: [], attention: [ask],
-    conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
+    conversations: conversation === undefined ? {} : { [agent]: conversation }, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }), threads, sync: {
     gateway,
     agents: Atom.make(initialFeedSync<readonly DecodedAgent[]>(0)),
@@ -97,26 +98,54 @@ const type = (element: HTMLTextAreaElement | HTMLInputElement | null | undefined
   element?.dispatchEvent(new Event('input', { bubbles: true }))
 })
 
-it('pins agent threads as one collapsed summary whose rows open the thread in its own tab', async () => {
+it.each(['agent', 'mission'] as const)('expands independent %s threads inline, preserves their drafts, and opens a tab only explicitly', async surface => {
   const open = vi.fn()
-  const view = await mount(<LiveAgentThreads agentId={agent} onOpenThread={open} />, {
+  const summaries = [row('thread/one', 'Release checklist'), row('thread/two', 'Rollout notes', 'closed')]
+  const view = await mount(surface === 'agent'
+    ? <LiveAgentThreads agentId={agent} onOpenThread={open} />
+    : <LiveMissionThreads missionId="mission/example/release" onOpenThread={open} />, {
     actions: ['thread.reply'],
-    reply: url => url.pathname.endsWith('/threads') ? page([row('thread/one', 'Release checklist'), row('thread/two', 'Rollout notes', 'closed')]) : page([]),
+    reply: url => {
+      if (url.pathname.endsWith('/threads')) return page(summaries)
+      const summary = summaries[url.pathname.includes('two') ? 1 : 0]!
+      return url.pathname.endsWith('/timeline') ? page([{ kind: 'message', id: `message/${summary.id}`, actor_id: agent,
+        content: `History for ${summary.title}.`, accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null }])
+        : Response.json({ ...base, value: summary })
+    },
   })
+  const panel = (title: string) => view.host.querySelector<HTMLElement>(`[data-thread-panel][aria-label="${title}"]`)
+  const header = (title: string) => panel(title)?.querySelector<HTMLButtonElement>('button[aria-expanded]')
+  const draft = (title: string) => panel(title)?.querySelector<HTMLTextAreaElement>('textarea')
   try {
     await vi.waitFor(() => expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 2'))
-    expect(view.host.querySelector('summary')?.textContent).toBe('Threads 2')
-    const details = view.host.querySelector('details')
-    expect(details?.open).toBe(false)
-    expect(details?.getAttribute('aria-label')).toBe('Threads')
-    // Both rows share one list; neither carries its own disclosure.
-    const header = view.host.querySelector<HTMLButtonElement>('[data-thread-panel][aria-label="Release checklist"] button')
-    expect(view.host.querySelectorAll('[data-thread-panel]')).toHaveLength(2)
-    expect(header?.hasAttribute('aria-expanded')).toBe(false)
-    await act(async () => header?.click())
-    expect(open).toHaveBeenCalledExactlyOnceWith('thread/one')
-    expect(view.host.querySelector('textarea')).toBeNull()
+    expect(view.host.querySelector('details')?.open).toBe(false)
     expect(view.requests.some(url => url.pathname.endsWith('/timeline'))).toBe(false)
+    await act(async () => view.host.querySelector('summary')?.click())
+    expect(header('Release checklist')?.getAttribute('aria-expanded')).toBe('false')
+    expect(header('Rollout notes')?.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => header('Release checklist')?.click())
+    await vi.waitFor(() => expect(panel('Release checklist')?.textContent).toContain('History for Release checklist.'))
+    expect(open).not.toHaveBeenCalled()
+    expect(header('Release checklist')?.getAttribute('aria-expanded')).toBe('true')
+    expect(header('Rollout notes')?.getAttribute('aria-expanded')).toBe('false')
+    await type(draft('Release checklist'), 'Keep the checklist draft.')
+    await act(async () => header('Rollout notes')?.click())
+    await vi.waitFor(() => expect(panel('Rollout notes')?.textContent).toContain('History for Rollout notes.'))
+    await type(draft('Rollout notes'), 'Keep the rollout draft.')
+    expect(view.host.querySelectorAll('textarea')).toHaveLength(2)
+    // Collapsing one thread must not collapse its sibling or navigate away.
+    await act(async () => header('Release checklist')?.click())
+    expect(draft('Release checklist')).toBeNull()
+    expect(draft('Rollout notes')?.value).toBe('Keep the rollout draft.')
+    await act(async () => header('Release checklist')?.click())
+    await vi.waitFor(() => expect(draft('Release checklist')?.value).toBe('Keep the checklist draft.'))
+    expect(open).not.toHaveBeenCalled()
+    const openInTab = [...panel('Rollout notes')!.querySelectorAll('button')].find(button => button.textContent === 'Open in tab')
+    expect(openInTab).toBeDefined()
+    await act(async () => openInTab?.click())
+    expect(open).toHaveBeenCalledExactlyOnceWith('thread/two')
+    expect(draft('Release checklist')?.value).toBe('Keep the checklist draft.')
+    expect(draft('Rollout notes')?.value).toBe('Keep the rollout draft.')
   } finally { await view.dispose() }
 })
 
@@ -504,5 +533,37 @@ it('keeps a thread tab loading while Fractal has not answered which thread opera
     await act(async () => {})
     expect(view.host.textContent).toContain('Loading thread')
     expect(view.host.textContent).not.toContain('does not support threads')
+  } finally { await view.dispose() }
+})
+
+it.each(['empty', 'unavailable'] as const)('keeps agent threads in the main reading scroll with an %s conversation and the ordinary composer docked outside', async conversation => {
+  const view = await mount(<ConversationPane agentRef={agent} agentName="Atlas" onOpenTool={() => {}} />, {
+    actions: ['thread.reply'],
+    ...(conversation === 'empty' ? { conversation: { items: [], hasOlder: false, observation: { empty: true } } } : {}),
+    reply: url => url.pathname.endsWith('/threads') ? page([row('thread/one', 'Release checklist')])
+      : url.pathname.endsWith('/timeline') ? page([{ kind: 'message', id: 'message/first', actor_id: agent,
+        content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null }])
+      : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('summary')?.getAttribute('aria-label')).toBe('Threads, 1'))
+    const dock = view.host.querySelector('[data-testid="conversation-composer-dock"]')
+    const ordinaryInput = dock?.querySelector('textarea')
+    expect(ordinaryInput).toBeDefined()
+    expect(ordinaryInput).not.toBeNull()
+    const scroll = view.host.querySelector<HTMLElement>(conversation === 'empty' ? '[data-testid="transcript-scroll"]' : '[data-testid="conversation-history-host"]')
+    expect(scroll).not.toBeNull()
+    if (conversation === 'unavailable') {
+      expect(view.host.querySelector('[data-testid="transcript-unavailable"]')).not.toBeNull()
+      expect(scroll?.style.overflow).toBe('auto')
+    }
+    const panel = view.host.querySelector('[data-thread-panel][aria-label="Release checklist"]')
+    expect(scroll?.contains(panel)).toBe(true)
+    expect(scroll?.contains(dock)).toBe(false)
+    await act(async () => view.host.querySelector('summary')?.click())
+    await act(async () => panel?.querySelector<HTMLButtonElement>('button[aria-expanded]')?.click())
+    await vi.waitFor(() => expect(panel?.textContent).toContain('The checklist is complete.'))
+    expect(dock?.querySelector('textarea')).toBe(ordinaryInput)
+    expect(panel?.querySelector('textarea')).not.toBe(ordinaryInput)
   } finally { await view.dispose() }
 })

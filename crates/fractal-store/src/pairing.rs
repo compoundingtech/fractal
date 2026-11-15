@@ -10,6 +10,9 @@ use smallclaims::claim::{ClaimInput, ClaimRecord};
 pub const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.glasses",
     "control.glasses",
     "read.arrangements",

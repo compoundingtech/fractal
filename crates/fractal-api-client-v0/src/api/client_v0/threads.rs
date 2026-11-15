@@ -1606,6 +1606,7 @@ mission "owner-decision" state="ready" {
             idempotency_key:"human-owner-source".into(),
         }).unwrap();
         let source = run.steps.into_iter().find(|step|step.step=="review").unwrap();
+        state.store.set_step_state(&source.subject, "ready", None).unwrap();
         assert_eq!(source.assigned_to.as_deref(),Some(person));
         let item = state.store.attention_items(Some(person)).unwrap().into_iter()
             .find(|item|item.subject==source.subject).expect("the authored step is in the real Inbox");

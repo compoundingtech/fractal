@@ -1470,8 +1470,14 @@ impl Threads {
                 can_reopen: self.access.reopen,
             },
             &world.person,
-            |actor| actor.starts_with("agent/")
-                .then(|| super::screens::subject_label(world, actor)),
+            |actor| {
+                world
+                    .agents
+                    .items()
+                    .iter()
+                    .find(|agent| agent.id == actor)
+                    .map(|agent| agent.name.clone())
+            },
             &chrono::Utc::now().to_rfc3339(),
             width,
         );

@@ -36,7 +36,7 @@ fn seed_scratch_threads() {
     let intent = fractal_daemon::graph::parse_intent(&source, store.origin()).unwrap();
     store.apply_internal(&intent, "preview-declare-agents").unwrap();
 
-    let person = "person/avery";
+    let person = "person/fixture";
     let botanist = "agent/glasshouse/botanist";
     let surveyor = "agent/glasshouse/surveyor";
 
@@ -186,7 +186,7 @@ fn seed_scratch_trial_asks() {
     ] {
         let input = fractal_daemon::model::PersonAskRequest {
             legacy_request: None,
-            person: "person/avery".into(),
+            person: "person/fixture".into(),
             title: title.into(),
             reason: "Scratch-only TUI trial. Start a thread to discuss this decision; leave the ask unanswered while testing rename, close and reopen.".into(),
             actor: agent.into(),
@@ -196,11 +196,12 @@ fn seed_scratch_trial_asks() {
             request: None,
             deadline_ms: None,
             default_answer: None,
+            priority: None,
             idempotency_key: key.into(),
         };
         let ask = store.ask_person(&input).unwrap();
         assert_eq!(store.ask_person(&input).unwrap().subject, ask.subject, "reseed is idempotent");
-        assert!(store.attention_items(Some("person/avery")).unwrap().iter().any(|item| item.subject == ask.subject));
+        assert!(store.attention_items(Some("person/fixture")).unwrap().iter().any(|item| item.subject == ask.subject));
         println!("TRIAL ASK subject={} requester={agent} idempotency_key={key} title={title}", ask.subject);
     }
 }
@@ -225,7 +226,7 @@ async fn seed_scratch_read_only_pairing() {
     let state = AppState {
         browser_pairing_login: None,
         seat_admission: Default::default(),
-        owning_person: Some("person/avery".into()),
+        owning_person: Some("person/fixture".into()),
         store,
         notify: Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
@@ -243,12 +244,12 @@ async fn seed_scratch_read_only_pairing() {
         private_notes: Default::default(),
         planner_default: Default::default(),
     };
-    let local = client_v0::ClientSession::local(Some("person/avery")).unwrap();
+    let local = client_v0::ClientSession::local(Some("person/fixture")).unwrap();
     let Json(challenge) = client_v0::pairing_begin(
         State(state.clone()), Extension(local.clone()),
         Json(serde_json::from_value(serde_json::json!({
             "api_version": fractal_client::API_VERSION,
-            "person_id": "person/avery",
+            "person_id": "person/fixture",
             "device_name": "Synthetic read-only threads preview",
             "scopes": ["read.projections"],
         })).unwrap()),

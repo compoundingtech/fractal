@@ -74,11 +74,9 @@ fn retire(store: &Store) -> ClaimRecord {
     append(store, &input, ClaimCommitContext { retirement_writer: true, ..Default::default() }).unwrap().0
 }
 
-fn write_counts(connection: &Connection) -> Vec<u64> {
+fn write_counts(connection: &Connection) -> [u64; 5] {
     ["claims", "batches", "operations", "expected_claim_signatures", "local_native_delivery_receipts_v2"]
-        .into_iter()
-        .map(|table| connection.query_row(/* sqlite-large-value: allow-for-now lv-hd6a86ab6caec owner=fractal_store::store::claim_commit_context_tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap())
-        .collect()
+        .map(|table| connection.query_row(/* sqlite-large-value: allow-for-now lv-hb8649a6d1afe owner=fractal_store::store::claim_commit_context_tests TODO=trace-statement-and-value-representation */ &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get::<_, u64>(0)).unwrap())
 }
 
 fn create_thread_tx(store: &Store, tx: &Transaction<'_>, thread: &str, first: &str) -> ClaimRecord {

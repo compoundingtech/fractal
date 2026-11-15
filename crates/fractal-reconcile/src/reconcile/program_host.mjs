@@ -85,6 +85,8 @@ const main = () => {
 
   const spawnEffect = (run, { id, argv: requested, options = {} }) => {
     const reply = (message) => run.ended || run.worker.postMessage({ t: 'spawned', id, ...message })
+    if (run.resourceMembership != null)
+      return reply({ error: 'Lane-bound programs must use native resource execution; republish this program with the resource-capable SDK.' })
     const argv =
       options.priority === 'background'
         ? process.platform === 'darwin'
@@ -126,12 +128,17 @@ const main = () => {
   const start = (message) => {
     const previous = runs.get(message.step)
     if (previous !== undefined) end(previous)
-    const worker = new Worker(fileURLToPath(import.meta.url), { workerData: message })
+    // Context is per attempt, never a mutation of the shared host's environment.
+    const worker = new Worker(fileURLToPath(import.meta.url), {
+      workerData: message,
+      env: { ...process.env, ...message.env },
+    })
     const run = {
       step: message.step,
       attempt: message.attempt,
       cwd: message.cwd,
       env: message.env,
+      resourceMembership: message.resourceMembership,
       worker,
       groups: new Set(),
       ended: false,
@@ -154,6 +161,8 @@ const main = () => {
         case 'journal':
         case 'run':
         case 'ask':
+        case 'resource':
+        case 'resource-cancel':
           // The daemon decides; the worker waits for its answer.
           return send({ ...message, ...ids })
         default:
@@ -241,6 +250,7 @@ const worker = async () => {
       step: start.step,
       attempt: start.attempt,
       run: start.run,
+      resourceMembership: start.resourceMembership ?? undefined,
       payload: start.payload,
       env: start.env,
       cwd: start.cwd,
@@ -255,6 +265,14 @@ const worker = async () => {
       record: (entry) => request({ t: 'journal', ...entry }),
       child: (child) => request({ t: 'run', key: child.key, mission: child.mission, input: child.input }),
       ask: (ask) => request({ t: 'ask', ...ask }),
+      resource: (resource, signal) => {
+        const pending = request({ t: 'resource', ...resource })
+        const n = seq
+        const cancel = () => parentPort.postMessage({ t: 'resource-cancel', ...resource, seq: n })
+        if (signal?.aborted) cancel()
+        else signal?.addEventListener('abort', cancel, { once: true })
+        return pending.finally(() => signal?.removeEventListener('abort', cancel))
+      },
       spawn: (argv, options) =>
         new Promise((resolve, reject) => {
           const id = ++spawned

@@ -155,7 +155,7 @@ const styles = stylex.create({
   steps: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },
   step: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: s.md, fontSize: t.metaSize },
   stepWord: { color: c.fgMuted, minWidth: '5.5rem' },
-  link: { padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.primary, fontSize: t.denseSize, cursor: 'pointer', textDecoration: 'underline' },
+  link: { padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.primaryFg, fontSize: t.denseSize, cursor: 'pointer', textDecoration: 'underline' },
   note: { flexBasis: '100%', paddingInlineStart: 'calc(1.25rem + 5.5rem + 24px)', color: c.fgMuted, fontSize: t.denseSize },
   notice: { color: c.fgMuted, fontSize: t.metaSize, padding: s.md },
 })

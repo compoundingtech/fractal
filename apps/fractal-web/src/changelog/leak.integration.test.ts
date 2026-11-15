@@ -101,6 +101,31 @@ describe('public changelog build gate', () => {
       .rejects.toThrow('Public build leaked private changelog modules')
   })
 
+  it('rejects a neutral registry export through a registry-file symlink outside the private directory', async () => {
+    const registry = privateRegistry()
+    const targetDirectory = join(root, 'registry-target')
+    writeRegistry(targetDirectory, `...publicSources, { file: '${syntheticFile}', source: synthetic, visibility: 'private' }`,
+      `import { changelogSources as publicSources } from ${JSON.stringify(publicRegistry)}\nexport const changelogDeployment = 'live'\nexport const neutral = 'synthetic-neutral-export'\n`)
+    rmSync(registry)
+    symlinkSync(join(targetDirectory, 'mod.ts'), registry)
+    await expect(buildPublic(`import { neutral } from ${JSON.stringify(join(targetDirectory, 'mod.ts'))}\nglobalThis.leak = neutral`, { public: publicRegistry, private: registry }))
+      .rejects.toThrow('Public build leaked private changelog modules')
+  })
+
+  it('permits a neutral module in a neighbouring directory of a registry-file symlink target', async () => {
+    const registry = privateRegistry()
+    const targetDirectory = join(root, 'registry-target')
+    writeRegistry(targetDirectory, `...publicSources, { file: '${syntheticFile}', source: synthetic, visibility: 'private' }`,
+      `import { changelogSources as publicSources } from ${JSON.stringify(publicRegistry)}\nexport const changelogDeployment = 'live'\n`)
+    rmSync(registry)
+    symlinkSync(join(targetDirectory, 'mod.ts'), registry)
+    const neighbour = `${targetDirectory}-public`
+    mkdirSync(neighbour)
+    writeFileSync(join(neighbour, 'mod.ts'), "export const neutral = 'synthetic-public-neighbour'\n")
+    await expect(buildPublic(`import { neutral } from ${JSON.stringify(join(neighbour, 'mod.ts'))}\nglobalThis.allowed = neutral`, { public: publicRegistry, private: registry }))
+      .resolves.toContain('synthetic-public-neighbour')
+  })
+
   it('uses native on-disk casing for a differently cased private registry path (requires a case-insensitive filesystem)', async ({ skip }) => {
     privateRegistry()
     const registry = join(root, 'PRIVATE/.changelog/mod.ts')

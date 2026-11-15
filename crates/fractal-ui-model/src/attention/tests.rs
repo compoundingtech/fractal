@@ -97,6 +97,11 @@ fn each_kind_has_its_group_and_card() {
             Some(Tier::Stopped),
             Some(Kind::Login),
         ),
+        (
+            json!({"attention_kind": "host-hold"}),
+            Some(Tier::Stopped),
+            Some(Kind::Request),
+        ),
         (json!({"attention_kind": "fault"}), None, Some(Kind::Fault)),
         (json!({"attention_kind": "unread-message"}), None, None),
     ] {

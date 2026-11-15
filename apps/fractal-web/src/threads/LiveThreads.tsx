@@ -25,9 +25,9 @@ const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. You
 /** The same words the alert answer box uses for a device without control access. */
 const readOnlyThread = 'Read-only on this device. Reply from a device with control access.'
 
-/** Above the agent's composer the strip takes the alerts' reading lane; it renders nothing, lane included, when empty. */
+/** The host places the same embedded thread group in its conversation reading lane. */
 export function LiveAgentThreads({ agentId, onOpenThread }: OpenThread & { readonly agentId: string }) {
-  return <ThreadGroup query={{ agent_id: agentId }} label="Threads" placement="pane" lane onOpenThread={onOpenThread} />
+  return <ThreadGroup query={{ agent_id: agentId }} label="Threads" placement="pane" onOpenThread={onOpenThread} />
 }
 
 export function LiveMissionThreads({ missionId, onOpenThread }: OpenThread & { readonly missionId: string }) {
@@ -40,9 +40,9 @@ export function LiveRecentlyClosedThreads({ onOpenThread }: OpenThread) {
 
 type Placement = 'pane' | 'sidebar'
 
-function ThreadGroup({ query, label, placement, lane = false, onOpenThread }: OpenThread & { readonly query: ThreadListQuery; readonly label: string; readonly placement: Placement; readonly lane?: boolean }) {
+function ThreadGroup({ query, label, placement, onOpenThread }: OpenThread & { readonly query: ThreadListQuery; readonly label: string; readonly placement: Placement }) {
   const source = useDataSource().threads
-  return source === undefined ? null : <ThreadGroupContent source={source} query={query} label={label} placement={placement} lane={lane} onOpenThread={onOpenThread} />
+  return source === undefined ? null : <ThreadGroupContent source={source} query={query} label={label} placement={placement} onOpenThread={onOpenThread} />
 }
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
@@ -112,20 +112,20 @@ const countedName = (label: string, count: number | undefined, paused: boolean) 
   `${label}${count === undefined || count === 0 ? '' : `, ${count}`}${paused ? ', updates paused' : ''}`
 
 /**
- * The agent and mission views pin a one-line summary, collapsed until opened; it lists collapsed rows only and each
- * opens the thread in its own tab, so no timeline or composer stacks above the agent's own composer.
+ * A one-line group opens independent embedded thread disclosures in the host's reading lane.
+ * Recently closed sidebar rows navigate to a tab; embedded rows keep that navigation as an explicit action.
  */
-function ThreadGroupContent({ source, query, label, placement, lane, onOpenThread }: OpenThread & {
+function ThreadGroupContent({ source, query, label, placement, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
   readonly query: ThreadListQuery
   readonly label: string
   readonly placement: Placement
-  readonly lane: boolean
 }) {
   const narrow = React.useContext(NarrowLayoutContext)
   const { read, upgradeRequired, failure } = useAtomValue(source.access)
   const list = useAtomValue(source.list(query))
-  const paused = useUpdatesPaused(list._tag === 'Observed' && list.freshness === 'stale')
+  const [readsStale, reportStale] = useStaleThreadReads()
+  const paused = useUpdatesPaused(readsStale || (list._tag === 'Observed' && list.freshness === 'stale'))
   const [open, setOpen] = React.useState(false)
   // Only a complete first page states how many threads there are.
   const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
@@ -138,11 +138,11 @@ function ThreadGroupContent({ source, query, label, placement, lane, onOpenThrea
         <CountedLabel label={label} count={count} paused={paused} />
       </summary>
       <div {...stylex.props(styles.foldBody, placement === 'sidebar' && styles.foldBodySidebar)}>
-        <ThreadListPage source={source} query={query} opensInTab onOpenThread={onOpenThread} />
+        {readsStale ? <ActionButton aria-label="Retry: Updates paused" onPress={source.reload}>Retry</ActionButton> : null}
+        <ThreadListPage source={source} query={query} opensInTab={placement === 'sidebar'} onOpenThread={onOpenThread} />
       </div>
     </details>
-  return content === null || !lane ? content
-    : <div {...stylex.props(styles.agentLane)}><div {...stylex.props(styles.agentLaneMeasure)}>{content}</div></div>
+  return <StaleThreadReads.Provider value={reportStale}>{content}</StaleThreadReads.Provider>
 }
 
 /** Collapsed rows share one bordered list so their columns line up; later pages join the same list. */
@@ -603,9 +603,6 @@ function ReadStatus({ feed, subject, onRetry }: {
 }
 
 const styles = stylex.create({
-  // The agent strip sits in the conversation pane's column, inset and measured like the alerts above it.
-  agentLane: { flexShrink: 0, minWidth: 0, boxSizing: 'border-box', paddingInline: s.section },
-  agentLaneMeasure: { maxWidth: g.lane, marginInline: 'auto' },
   // The pinned strip and its fold follow AgentTodos: a hairline above, one summary line, a chevron slot and a muted count.
   fold: { minWidth: 0, fontSize: t.metaSize },
   strip: { flexShrink: 0, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: c.border },

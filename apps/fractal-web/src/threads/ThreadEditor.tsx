@@ -49,4 +49,3 @@ export function ThreadEditor({ source, destination, label, send, onSent, inputRe
       })} />
   </>
 }
-

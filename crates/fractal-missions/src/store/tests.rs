@@ -4040,6 +4040,7 @@ fn standalone_person_ask(store: &Store) -> StepRunView {
     use crate::store::person_work::PersonWorkStore;
 
     store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -4859,6 +4860,7 @@ fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
         idempotency_key: "part-work-claim".into(),
     }).unwrap();
     let ask = store.ask_person(&crate::model::PersonAskRequest {
+        priority: None,
         deadline_ms: None,
         default_answer: None,
         legacy_request: None,
@@ -9925,6 +9927,12 @@ version 2
 
 #[test]
 fn a_revision_keeps_the_old_generation_and_fences_its_work() {
+    for action in ["complete", "fail", "release"] {
+        revision_keeps_old_generation_and_fences_its_work(action);
+    }
+}
+
+fn revision_keeps_old_generation_and_fences_its_work(terminal_action: &str) {
     let store = Store::open_memory("node").unwrap();
     let publish = |source: &str, key: &str| {
         let intent = crate::graph::parse_test_intent(source, "node").unwrap();
@@ -10010,6 +10018,9 @@ version 2
     store
         .work_action(&active, "claim", &request("generation-claim"))
         .unwrap();
+    let invocation = store.agent_invocation_receipts(&worker).unwrap().into_iter()
+        .find(|receipt| receipt.owner_step.as_deref() == Some(active.as_str())).unwrap().invocation_id;
+    let trace = store.start_invocation_trace(&invocation, &worker, &[]);
     store
         .work_action(&active, "progress", &request("generation-progress"))
         .unwrap();
@@ -10103,10 +10114,19 @@ version 2
         "cancelled"
     );
     let submitted = store
-        .work_action(&active, "complete", &request("carried-complete"))
+        .work_action(&active, terminal_action, &request("carried-terminal"))
         .unwrap();
     assert_eq!(submitted.subject, carried.subject);
-    assert_eq!(submitted.status, "verifying");
+    assert_eq!(submitted.status, match terminal_action {
+        "complete" => "verifying", "fail" => "failed", "release" => "ready", _ => unreachable!(),
+    });
+    let ended = store.invocation_receipts(&invocation).unwrap().into_iter()
+        .find(|receipt| receipt.phase == fractal_schema::invocation::InvocationPhase::Ended)
+        .expect("the routed terminal ends the original invocation");
+    assert_eq!(ended.owner_step.as_deref(), Some(active.as_str()));
+    assert_ne!(store.start_invocation_trace(&invocation, &worker, &[]).trace_id(),
+        trace.trace_id(), "{terminal_action} via predecessor leaked the original trace");
+    store.finish_invocation_trace(&invocation, false);
     let retried = store
         .adopt_mission_revision(
             &run.id,

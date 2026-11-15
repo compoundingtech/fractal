@@ -156,6 +156,7 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_alert_answer` | `write.assistant.answers` | Write | Execute one typed person-ask answer using the alert's current episode and fence. |
 | `fractal_missions_list` | `read.assistant.missions` | Read | List mission metadata. |
 | `fractal_agents_list` | `read.assistant.agents` | Read | List agent metadata, not priorities or conversation content. |
+| `fractal_availability_get` | `read.assistant.availability` | Read | Read the owning person's own effective status (available/away, override expiry), interruptions (all/urgent/none), deadline clock (run/hold-routine/hold-all), and current directive note; raw device presence is never shown. The note text is cut to fit `max_response_bytes` and `directive_note_truncated` is then true; read again with a larger budget, up to 16384, for the whole note. Park blocking asks while the person is away or interruptions is none. Grant the scope explicitly with `--scope read.assistant.availability`. |
 | `fractal_conversations_list` | `read.assistant.conversation` | Read | Discover source-bounded conversation metadata and read handles without conversation content. |
 | `fractal_conversation_detail` | `read.assistant.conversation` | Read | Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. |
 | `fractal_conversation_timeline` | `read.assistant.conversation` | Read | Page bounded chat excerpts and revision-pinned read handles. |

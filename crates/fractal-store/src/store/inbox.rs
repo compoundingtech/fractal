@@ -5,7 +5,9 @@ use crate::model::DoctorCheck;
 const FALLBACK_AGENT: &str = "inbox_fallback_agent";
 
 pub fn configured_agent_at(connection: &Connection) -> Result<Option<String>> {
-    Ok(connection.query_row("SELECT value FROM meta WHERE key=?1", [FALLBACK_AGENT], |row| row.get(0)).optional()?)
+    person_work::inbox_fallback_in_cut(connection, || {
+        Ok(connection.query_row("SELECT value FROM meta WHERE key=?1", [FALLBACK_AGENT], |row| row.get(0)).optional()?)
+    })
 }
 
 /// Choose responsibility without conflating discussion admission and approval visibility.

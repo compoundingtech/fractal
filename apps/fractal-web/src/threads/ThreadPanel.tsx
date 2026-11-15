@@ -159,11 +159,12 @@ export function ThreadPanel({
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocus={() => setFocused(true)}
     onBlur={event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocused(false) }}
     {...stylex.props(styles.panel, inList && styles.inList, !embedded && styles.dedicated)}>
-    {markRead === null ? <>{heading}{subline}</> : <div data-thread-read-heading="" {...stylex.props(styles.readHeader)}>
-      <div {...stylex.props(styles.readHeadingRow)}>{heading}{markRead}</div>
+    {/* Keep the disclosure's DOM ancestry stable when its read action appears or disappears. */}
+    <div data-thread-read-heading={markRead === null ? undefined : ''} {...stylex.props(markRead !== null && styles.readHeader)}>
+      <div {...stylex.props(markRead !== null && styles.readHeadingRow)}>{heading}{markRead}</div>
       {subline}
-      {feedback}
-    </div>}
+      {markRead === null ? null : feedback}
+    </div>
     {open ? <div id={contentId} {...stylex.props(styles.body)}>
       {children}
       <div ref={actions} {...stylex.props(styles.actions)}>

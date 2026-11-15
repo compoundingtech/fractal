@@ -105,6 +105,8 @@ pub enum Hit {
     PaletteChoice(usize),
     /// A document page's or the documents list's own button: back, try again, more.
     Document(super::documents::Tap),
+    /// An Availability pane button: pressing its key.
+    Availability(char),
     Thread(String, super::thread::Tap),
     /// Rendered body text, tracked for an explicit thread read action.
     ThreadBody { host: String, thread: String, message: String },

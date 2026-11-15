@@ -1312,7 +1312,9 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(claim) = claim_by_id_tx(connection, &failure.request)? else {
+        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || {
+            Ok(claim_by_id_tx(connection, &failure.request)?)
+        })? else {
             return Ok(None);
         };
         smallclaims::touched::note_read(|| claim.subject.clone());
@@ -1844,6 +1846,8 @@ pub fn person_attention_item(
     };
     // An ask resolves by itself at its deadline, with its default answer if it names one. Only
     // while this member counts deadlines (`[asks] deadlines` on): off, nothing resolves by one.
+    // The deadline is the effective one, past the time the person held their deadline clock;
+    // none while it is held.
     let (counting_since, default_ms) = person_work::ask_deadline_policy(connection)?;
     let (deadline_unix_ms, default_answer) = match &ask {
         Some(ask) if counting_since != 0 && !person_work::is_update(ask) => {
@@ -1857,7 +1861,7 @@ pub fn person_attention_item(
                     .map(|answer| json!({"id": id, "label": answer["label"]}))
             });
             (
-                person_work::ask_deadline(ask, counting_since, default_ms),
+                person_work::effective_ask_deadline(connection, ask, counting_since, default_ms)?,
                 default_answer,
             )
         }
@@ -1867,7 +1871,12 @@ pub fn person_attention_item(
         deadline_unix_ms,
         default_answer,
         episode,
-        priority: "normal".into(),
+        // The priority the asker gave the ask; `normal` without one.
+        priority: ask
+            .as_ref()
+            .and_then(|ask| ask.body["fields"]["priority"].as_str())
+            .unwrap_or("normal")
+            .into(),
         kind: "person-step".into(),
         review_mode: None,
         subject: subject.to_owned(),

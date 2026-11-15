@@ -13,7 +13,7 @@ const manifest = compileChangelog({
 })
 const privateEntries = manifest.entries.filter(({ visibility }) => visibility === 'private')
 const publicManifest = { ...manifest, entries: manifest.entries.filter(({ visibility }) => visibility === 'public') }
-const clean = { manifest: publicManifest, privateEntries, privateDirectory, modules: ['/checkout/apps/fractal-web/src/web/main.tsx'], texts: [JSON.stringify(publicManifest)] }
+const clean = { manifest: publicManifest, privateEntries, privateDirectories: [privateDirectory], modules: ['/checkout/apps/fractal-web/src/web/main.tsx'], texts: [JSON.stringify(publicManifest)] }
 
 describe('public changelog boundary', () => {
   it('accepts a public bundle that carries only public entries', () => {
@@ -36,9 +36,9 @@ describe('public changelog boundary', () => {
       .toThrow('Public build leaked private changelog modules')
   })
   it('rejects configured and real private paths, including query-bearing module IDs', () => {
-    const privateDirectoryRealpath = '/real-checkout/private/.changelog'
-    for (const directory of [privateDirectory, privateDirectoryRealpath])
-      expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectoryRealpath, modules: [`${directory}/mod.ts?raw`] }))
+    const privateDirectories = [privateDirectory, '/real-checkout/private/.changelog', '/registry-target/private']
+    for (const directory of privateDirectories)
+      expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectories, modules: [`${directory}/mod.ts?raw`] }))
         .toThrow('Public build leaked private changelog modules')
   })
 
@@ -49,9 +49,9 @@ describe('public changelog boundary', () => {
   })
 
   it('does not classify a similarly named neighbouring directory as private', () => {
-    const privateDirectoryRealpath = '/real-checkout/private/.changelog'
-    expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectoryRealpath,
-      modules: [`${privateDirectory}-public/mod.ts`, `${privateDirectoryRealpath}-public/mod.ts`],
+    const privateDirectories = [privateDirectory, '/real-checkout/private/.changelog', '/registry-target/private']
+    expect(() => assertPublicChangelogBoundary({ ...clean, privateDirectories,
+      modules: privateDirectories.map((directory) => `${directory}-public/mod.ts`),
     })).not.toThrow()
   })
 

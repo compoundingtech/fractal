@@ -33,6 +33,8 @@ pub enum Pane {
     Document(String),
     /// The documents under a prefix (all of them without one).
     Documents(Option<String>),
+    /// The person's own availability and directive note.
+    Availability,
 }
 
 impl Pane {
@@ -55,6 +57,7 @@ impl Pane {
             Pane::Resource(id) => format!("resource:{id}"),
             Pane::Document(reference) => format!("document:{reference}"),
             Pane::Documents(prefix) => with("documents", prefix),
+            Pane::Availability => "availability:".into(),
         }
     }
 
@@ -81,6 +84,7 @@ impl Pane {
             "resource" => Pane::Resource(subject?),
             "document" => Pane::Document(subject?),
             "documents" => Pane::Documents(subject),
+            "availability" => Pane::Availability,
             _ => return None,
         })
     }
@@ -111,6 +115,7 @@ mod tests {
             Pane::Document("doc/garden/plan".into()),
             Pane::Documents(None),
             Pane::Documents(some("doc/garden/")),
+            Pane::Availability,
         ] {
             assert_eq!(
                 Pane::parse(&pane.key()),

@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v4.cancelled-ask-context;custom-source.v1;u128-time.v1;public-row.v5.discussion-availability",
+            fingerprint: "projected-source.v1;canonical-person-fences.v4.cancelled-ask-context;custom-source.v1;u128-time.v1;public-row.v7.urgent-and-discussion-availability",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -399,7 +399,8 @@ pub fn resource(item: &AttentionItemView) -> Result<Value> {
       "title":item.title,"detail":item.detail,"priority":item.priority,"state":"open",
       "requested_at":crate::client_values::client_timestamp(item.requested_at_unix_ms),"targets":item.targets,
       "actions":crate::client_values::client_attention_actions(&item.kind,item.review_mode.as_deref()),
-      "operational":{"layer":"current","actionable":true,"reasons":[]},"alert":item.is_alert()});
+      "operational":{"layer":"current","actionable":true,"reasons":[]},"alert":item.is_alert(),
+      "urgent":item.is_urgent()});
     if item.conversation.is_some() {
         row["conversation_ids"] = json!(item.conversations());
     }
@@ -692,8 +693,11 @@ pub fn window(
             row.get::<_, String>(1).map(Some)
         }
     })?;
-    rows.filter_map(|row| row.transpose()).take(limit)
-        .map(|text| Ok(serde_json::from_str(&text?)?)).collect()
+    let mut rows = rows.filter_map(|row| row.transpose()).take(limit)
+        .map(|text| Ok(serde_json::from_str(&text?)?)).collect::<Result<Vec<Value>>>()?;
+    // The person's own controls are an overlay read in the same snapshot, not view state.
+    super::attention_controls::overlay(connection, &mut rows)?;
+    Ok(rows)
 }
 
 pub fn row(
@@ -726,8 +730,11 @@ pub fn row(
             },
         )
         .optional()?.flatten();
-    text.map(|text| serde_json::from_str(&text).map_err(Into::into))
-        .transpose()
+    let Some(text) = text else { return Ok(None) };
+    let mut rows = [serde_json::from_str::<Value>(&text)?];
+    super::attention_controls::overlay(connection, &mut rows)?;
+    let [row] = rows;
+    Ok(Some(row))
 }
 
 #[cfg(test)]

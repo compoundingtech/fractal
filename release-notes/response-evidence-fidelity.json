@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Response usage preserves actual model/provider/API, response identity, reasoning and cache-TTL subsets, timestamps, duration and TTFT. OMP object-shaped USD costs retain their total and components through the existing accounting path; premium requests remain separately typed provider quota, never tokens or money.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or historical backfill. Previously captured observations keep their original fields and omissions. Repeated terminal channel snapshots use provider response IDs when available."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "TimelineUsageBody gains optional provider, account, response_id, api, stop_reason, started_at_unix_ms, completed_at_unix_ms, duration_ms, ttft_ms, cache_write_1h_tokens, reasoning_tokens, cost_components and provider_quota. Response total_tokens is optional when unobserved; session cumulative totals remain required. Usage rows, pricing provenance, daily estimates, credits and execution usage gain unpriced_responses, an additive response counter independent of token totals. Rust and Swift model templates expose the same fields; TypeScript models and codecs derive from the schema."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No claim, retention, invocation-attribution or accounting authority change. Reported scalar total, including observed zero, still wins over shared price-table estimates. Metadata-only responses create no spend receipt; incomplete token buckets or unknown nonzero-write TTL remain unpriced rather than zero-filled for estimates. Unpriced responses accumulate in existing durable provenance and replicate in existing rollups even without total_tokens; either unpriced counter makes spend a lower bound. Cost components and token subsets are not additive spend."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Older observations decode with unknown optional evidence. Numeric scalar channel cost remains supported alongside OMP object-shaped cost. Missing unsupported counters and actual model observations are no longer manufactured as zeros or copied from launch requests. Older accounting records retain their original token-based coverage without inventing historical response counts. Older strict schema validators must update to accept the additional optional response and accounting fields."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Ordinary rolling deployment; no database conversion or additional startup work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No new recovery path, ledger or rate card. Unsupported or absent evidence remains unknown rather than being reconstructed."
+  }
+}

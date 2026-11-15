@@ -256,12 +256,15 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
+  // Topic threads share the transcript's scrolling reading lane; the ordinary composer stays docked.
+  const embeddedThreads = !readOnly && visible && agentRef.startsWith('agent/')
+    ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null
   // Recorded semantic evidence stands in for the kit summary line; the kit keeps raw input/output and Open beside it.
   const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call)), [onOpenTool])
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
-    <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-    {state._tag === 'Unavailable' ? <ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable} /> : <ConversationTranscript
+    <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: state._tag === 'Unavailable' ? 'auto' : 'hidden' }}>
+    {state._tag === 'Unavailable' ? <ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable}>{embeddedThreads}</ThreadUnavailable> : <ConversationTranscript
       agentRef={agentRef}
       feed={feed}
       active={visible}
@@ -270,6 +273,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       scrollToBottomKey={feed._tag === 'Observed' ? feed.value.lastSendId : undefined}
       tailRef={tailRef}
       title={agentName}
+      afterTranscript={embeddedThreads}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
       renderToolDetail={renderSemanticDetail}
@@ -291,9 +295,6 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       : stale ? <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />
         : restStatus === undefined || restLabel === undefined ? null : <SeatAtRest status={restStatus} label={restLabel} />}
     {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
-    {/* Only an agent has threads; a pane for any other ref would ask the daemon for a list it refuses.
-        The strip places itself in the alerts' reading lane. */}
-    {!readOnly && visible && agentRef.startsWith('agent/') ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return

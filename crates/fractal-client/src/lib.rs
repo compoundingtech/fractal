@@ -1376,6 +1376,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::ValidationFailed
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
+        | ErrorCode::AttentionDismissUnsupported
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -2380,6 +2381,21 @@ impl Client {
     }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
+    }
+    pub async fn availability_list(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Envelope<PersonAvailabilities>, ClientError> {
+        match person {
+            Some(person) => {
+                self.get(&format!(
+                    "/v1/client/availability?person={}",
+                    percent_encode(person)
+                ))
+                .await
+            }
+            None => self.get("/v1/client/availability").await,
+        }
     }
     pub async fn custom_subjects_list(
         &self,
@@ -3403,6 +3419,17 @@ impl Client {
                 .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn attention_dismiss(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionDismissParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_dismiss(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -3411,6 +3438,28 @@ impl Client {
         parameters: AttentionResolveParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::attention_resolve(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_seen(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSeenParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_seen(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn attention_snooze(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AttentionSnoozeParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::attention_snooze(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -4067,6 +4116,40 @@ impl Client {
         report: &ObservationReport,
     ) -> Result<ObservationResponse, ClientError> {
         self.post("/v1/client/observations", report).await
+    }
+
+    /// Set or clear the session person's own availability. Requires `write.availability`;
+    /// agent sessions are refused.
+    pub async fn availability_set(
+        &self,
+        request: &AvailabilitySet,
+    ) -> Result<Envelope<PersonAvailability>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/availability", Some(body))
+            .await
+    }
+
+    /// Report one device's raw state for the session person, on every state change and again at
+    /// the result's `report_again_at`; the daemon derives presence and assigns the source.
+    /// Requires `write.presence`; agent sessions are refused.
+    pub async fn presence_report(
+        &self,
+        report: &PresenceReport,
+    ) -> Result<Envelope<PresenceReportResult>, ClientError> {
+        self.post("/v1/client/presence", report).await
+    }
+
+    /// Set or clear the session person's own directive note. Requires `write.notes`;
+    /// agent sessions are refused.
+    pub async fn notes_set(
+        &self,
+        request: &DirectiveNoteSet,
+    ) -> Result<Envelope<DirectiveNoteSetResult>, ClientError> {
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request(Method::PUT, "/v1/client/notes", Some(body))
+            .await
     }
 
     /// Replace this paired device's local-only push registration. No graph receipt.
@@ -6159,6 +6242,7 @@ mod tests {
         for code in [
             ErrorCode::InvalidAnswer,
             ErrorCode::NotAnswerable,
+            ErrorCode::AttentionDismissUnsupported,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {

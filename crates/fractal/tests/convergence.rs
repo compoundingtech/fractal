@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v25.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v32.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -155,6 +155,23 @@ fn the_corpus_generates_valid_read_position_inputs() {
     }).unwrap();
     assert_eq!(actual, expected);
     assert_eq!(actual.len(), 1);
+}
+
+#[test]
+fn the_corpus_generates_valid_attention_control_inputs() {
+    let mut world = World::new(1, Sabotage::None);
+    for kind in fractal_schema::attention_controls::KINDS {
+        let input = world.claim_of(&corpus()[kind], 0).unwrap();
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
+        world.nodes[0].store.append_claim(&input).unwrap();
+    }
+    world.tap(0);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    let rows = (0..4).map(|row| format!("attention/{row:032x}")).collect::<Vec<_>>();
+    let keys = rows.iter().map(|row| (PERSON, row.as_str())).collect::<Vec<_>>();
+    let expected = world.nodes[0].store.attention_controls(&keys).unwrap();
+    assert!(!expected.is_empty());
+    assert_eq!(world.oracle.attention_controls(&keys).unwrap(), expected);
 }
 
 /// Deployment records need valid nested identities and time bounds, not generic empty objects.
@@ -1034,6 +1051,39 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if matches!(spec.kind.as_str(), fractal_schema::effects::KIND_INTENDED
+            | fractal_schema::effects::KIND_IN_FLIGHT | fractal_schema::effects::KIND_CONFIRMED
+            | fractal_schema::effects::KIND_UNRESOLVED)
+        {
+            let operation_id = self.fresh("effect-operation");
+            let subject = format!("effect/{operation_id}");
+            let mut fields = BTreeMap::from([
+                ("effect_id".into(), json!(subject)),
+                ("operation_id".into(), json!(operation_id)),
+                ("provider".into(), json!("native.message")),
+                ("target".into(), json!("agent/example/receiver")),
+                ("payload_digest".into(), json!("example-payload-digest")),
+                ("class".into(), json!("native-coordinated")),
+                ("bound_step_run".into(), json!("step-run/gen-0/send")),
+                ("bound_attempt".into(), json!(0)),
+                ("lease_owner".into(), json!("agent/example/sender")),
+                ("lease_incarnation".into(), json!("example-incarnation")),
+                ("evidence".into(), json!([])),
+            ]);
+            if spec.kind == fractal_schema::effects::KIND_CONFIRMED {
+                fields.insert("provider_ref".into(), json!("message/example"));
+                fields.insert("evidence".into(), json!(["message/example"]));
+            }
+            return Some(ClaimInput {
+                subject,
+                kind: spec.kind.clone(),
+                actor: None,
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("effect")),
+            });
+        }
         if spec.kind == fractal_schema::usage_limits::KIND {
             return Some(ClaimInput {
                 subject: "agent/sample/usage-producer".into(),
@@ -1074,6 +1124,27 @@ impl World {
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: Some(self.fresh("read")),
+            });
+        }
+        if fractal_schema::attention_controls::KINDS.contains(&spec.kind.as_str()) {
+            // The person's own control over one of a few rows, as the action records it.
+            let row = format!("attention/{:032x}", self.rng.below(4));
+            let mut fields = BTreeMap::from([
+                ("attention_id".into(), json!(row)),
+                ("source".into(), json!(format!("host/{}", self.nodes[index].name))),
+            ]);
+            if spec.kind == fractal_schema::attention_controls::SNOOZED_KIND {
+                let until = (!self.rng.chance(25)).then(|| self.now() + DAY_MS);
+                fields.insert("until_unix_ms".into(), json!(until));
+            }
+            return Some(ClaimInput {
+                subject: PERSON.into(),
+                kind: spec.kind.clone(),
+                actor: Some(PERSON.into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("attention-control")),
             });
         }
         if spec.kind == fractal_schema::source_map::KIND {
@@ -1185,6 +1256,7 @@ impl World {
             "daemon" => format!("daemon/{}", self.nodes[index].name),
             "doc" => format!("doc/convergence/{small}"),
             "exec" => format!("exec/run-0/job-{small}"),
+            "effect" => format!("effect/{}", self.fresh("effect-operation")),
             "file" => format!("file/{}:/srv/example-{small}", self.nodes[index].name),
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
@@ -2200,15 +2272,10 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v25 adds `github.workflow-run` to kind selection, and in seeds 2 and 233 the old build
-/// draws it: that one replicated claim makes the old build a writer every later checkpoint waits
-/// for, and an old build never seals. Seed 233 never excuses it (quiesce's even draw says no);
-/// seed 2 does, but its schedule ends with checkpoint/2100-01-24 sealed under two participant
-/// sets and no later cut. Skipping only that write, after drawing it, trims both (hosted burst
-/// runs in fixtures/convergence/README.md). So both converge without trimming, and both trim once
-/// the old build is excused and the next cut falls due, which each run then checks.
-/// The never-trim set is characterized by hosted CI; a lightly loaded runner can diverge (#6210).
-const NEVER_TRIMS: &[u64] = &[2, 233];
+/// Corpus v32 adds durable native effect receipts to v31's explicit person overrides.
+/// Non-trimming seeds must still trim on every modern node after excusing the old build
+/// and advancing to the next cut.
+const NEVER_TRIMS: &[u64] = &[179];
 // Growth beyond three non-trimming seeds needs review.
 const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
@@ -2216,9 +2283,9 @@ const _: () = assert!(NEVER_TRIMS.len() <= 3);
 /// such a seed trims on every modern node once its old build is excused and the next cut is due.
 fn seed_converges(seed: u64) {
     let never = NEVER_TRIMS.contains(&seed);
-    let outcome = run_with(seed, Sabotage::None, never);
+    let outcome = run_with(seed, Sabotage::None, true);
     eprintln!(
-        "convergence corpus v25 seed {seed}: trimmed={} after excuse and cut={:?}",
+        "convergence corpus v32 seed {seed}: trimmed={} after excuse and cut={:?}",
         outcome.trimmed, outcome.trims_after_excuse_and_cut
     );
     if let Some(failure) = &outcome.failure {
@@ -2227,7 +2294,7 @@ fn seed_converges(seed: u64) {
     assert_eq!(
         outcome.trimmed,
         !never,
-        "corpus v25 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
+        "corpus v32 seed {seed} {} a checkpoint, but this seed is {} the seeds that never trim ({NEVER_TRIMS:?})",
         if outcome.trimmed { "trimmed" } else { "did not trim" },
         if never { "one of" } else { "not one of" }
     );
@@ -2235,7 +2302,7 @@ fn seed_converges(seed: u64) {
         assert_eq!(
             outcome.trims_after_excuse_and_cut,
             Some(true),
-            "corpus v25 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
+            "corpus v32 seed {seed} still did not trim on every modern node after its old build was excused and the next cut fell due"
         );
     }
 }
@@ -2448,7 +2515,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v25.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v32.json"
         }))
         .unwrap(),
     )
