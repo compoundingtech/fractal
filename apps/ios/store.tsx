@@ -4,8 +4,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
+import { overrideRefusal, overrideRequest, overrideRetryable } from './autoResolved';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
-import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type AvailabilitySet, type Capabilities, type ConversationSearch, type DirectiveNote, type Glass, type Launch, type LaunchVariant, type Mission, type PersonAvailability, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type AutoResolvedAsk, type AvailabilitySet, type Capabilities, type ConversationSearch, type DirectiveNote, type Glass, type Launch, type LaunchVariant, type Mission, type PersonAvailability, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
 import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
@@ -77,6 +78,7 @@ const PUSH_KEY = 'st3.push.enabled';
 const OBSERVATIONS_KEY = 'st3.observations';
 const CARRIER_KEY = 'st3.carrier', FABRIC_TARGET_KEY = 'st3.fabric.target', FABRIC_MEMBERS_KEY = 'st3.fabric.members', FABRIC_FALLBACK_KEY = 'st3.fabric.fallback';
 const NO_AVAILABILITY = { person: null, note: null, issue: '' };
+const NO_AUTO_RESOLVED: { items: AutoResolvedAsk[]; complete: boolean; issue: string } = { items: [], complete: true, issue: '' };
 
 /** An error as a person reads it: Fractal's errors in plain words (the SDK's plainError). */
 export function errorText(error: unknown): string {
@@ -150,6 +152,7 @@ function useAppStore(proof?: FabricProfile) {
   const capsRef = useRef(caps);
   capsRef.current = caps;
   const [availability, setAvailability] = useState<{ person: PersonAvailability | null; note: DirectiveNote | null; issue: string }>(NO_AVAILABILITY);
+  const [autoResolved, setAutoResolved] = useState(NO_AUTO_RESOLVED);
   // The person's last input, for presence: a touch anywhere in the app (the root view's capture only
   // records its time) or the app coming forward. `presence` is the live connection's reporter.
   const lastInput = useRef<number | null>(foreground.current.active ? Date.now() : null);
@@ -562,6 +565,33 @@ function useAppStore(proof?: FabricProfile) {
     } catch (e) { if (availabilityRead.current === read && capsRef.current === caps) setAvailability(previous => ({ ...previous, issue: `Could not read your availability: ${errorText(e)}` })); }
   }, [client, status, caps]);
   useEffect(() => { void readAvailability(); }, [readAvailability]);
+  // The person's asks Fractal resolved by their deadline are a read, not a collection: read when a
+  // connection goes live, when the app comes forward, when Now comes into view, when the attention list
+  // changes (an ask that auto-resolves leaves it) and after an override is accepted. Never on a timer.
+  // Only a person session reads its own; a member that does not serve the read has none to show.
+  const autoResolvedRead = useRef(0);
+  const readAutoResolved = useCallback(async () => {
+    const read = ++autoResolvedRead.current;
+    if (proof || !client || status !== 'online' || !caps?.session_actor.startsWith('person/')) { setAutoResolved(NO_AUTO_RESOLVED); return; }
+    try {
+      const { items, complete } = (await client.autoResolvedList()).value;
+      if (autoResolvedRead.current === read && capsRef.current === caps) setAutoResolved({ items, complete, issue: '' });
+    } catch (e) {
+      if (autoResolvedRead.current !== read || capsRef.current !== caps) return;
+      if (e instanceof ClientError && e.status === 404) setAutoResolved(NO_AUTO_RESOLVED);
+      else setAutoResolved(previous => ({ ...previous, issue: `Could not read auto-resolved asks: ${errorText(e)}` }));
+    }
+  }, [proof, client, status, caps]);
+  useEffect(() => { void readAutoResolved(); }, [readAutoResolved]);
+  useEffect(() => foreground.current.subscribe(active => { if (active) void readAutoResolved(); }), [readAutoResolved]);
+  // Which items wait and which were closed: the membership, not every revision of an item.
+  const attentionShape = useMemo(() => data.attention.map(item => item.closedElsewhere ? `${item.id}!` : item.id).join('\n'), [data.attention]);
+  const attentionShapeSeen = useRef(attentionShape);
+  useEffect(() => {
+    if (attentionShapeSeen.current === attentionShape) return;
+    attentionShapeSeen.current = attentionShape;
+    void readAutoResolved();
+  }, [attentionShape, readAutoResolved]);
   // While a connection is live and its pairing may report presence, this phone reports its raw state
   // (see presence.ts); each answer's availability replaces what Now shows, fenced against edits.
   useEffect(() => {
@@ -1150,6 +1180,17 @@ function useAppStore(proof?: FabricProfile) {
       acted.current.add(id);
       setData(previous => ({ ...previous, attention: previous.attention.filter(item => item.id !== id) }));
     },
+    /**
+     * Replace the default an ask was resolved with by one of its other named answers. The episode is the
+     * fence, so the snapshot fence carries no revisions; the action ID and key are the same on every try.
+     * Accepted or refused, the auto-resolved list is read again: the row leaves once Fractal says so.
+     */
+    async override(ask: AutoResolvedAsk, answerId: string) {
+      if (!client) return false;
+      const done = await runAction(async () => client.workOverride(overrideRequest(ask, answerId, await fence())), [], overrideRetryable, overrideRefusal);
+      await readAutoResolved();
+      return done;
+    },
     /** Mark a message read from Home: it leaves the person's attention. */
     async markRead(item: Attention) {
       if (!client) return false;
@@ -1372,7 +1413,7 @@ function useAppStore(proof?: FabricProfile) {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, noteInput,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, noteInput,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,

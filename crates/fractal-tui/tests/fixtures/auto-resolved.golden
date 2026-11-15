@@ -1,0 +1,148 @@
+== auto-resolved, overridable
+ sidebar · ● live · ◆ 4 alerts · ⠋ 2 working · fleet ●2 ○1 · $ usage                                                               ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆4 Inbox                                                                                                                                +
+   somebody is stopped on you ──────── 1  │ ╭─ RESOLVED · 3H AGO ───────────────────────────────────────────────────────────────────────╮
+   ◆ feedback Feedback on the new pric…   │ │                                                                                           │
+     Docs Writer on harbor · waited 12m   │ │ Ship the release on Friday?                                                               │
+                                          │ │ ↻ resolved by itself · Example Builder asked · 3h ago                                     │
+   something broke ─────────────────── 1  │ │                                                                                           │
+   ✕ fault    Release Captain keeps re…   │ │ applied   “Hold”, the default                                                             │
+     waited 8m                            │ │                                                                                           │
+                                          │ │  o  Use my answer instead                                                                 │
+   today ───────────────────────────── 2  │ │                                                                                           │
+   ◆ launch   Launch harbor/nightly-au…   │ ╰───────────────────────────────────────────────────────────────────────────────────────────╯
+     Planner on lark · waited 1h          │
+   ◆ revision Add an audit step to the…   │
+     Rekey Worker on harbor · waited 19m  │
+                                          │
+   when there is time ──────────────── 1  │
+   ✉ message  Weekly usage is up 18%      │
+     waited 2h                            │
+                                          │
+   Recently closed: x clears each ──── 1  │
+   ◆ review   Approve the atlas store …   │
+     o use my answer instead · closed, x… │
+                                          │
+   Auto-resolved ───────────────────── 3  │
+ ▌ ↻ resolved Ship the release on Frid…   │
+ ▌   Example Builder asked · “Hold” appl… │
+   ↻ resolved Keep the old banner?        │
+     Example Builder asked · “Keep” appl… │
+   ↻ resolved Approve the atlas store …   │
+     Example Builder asked · “Hold” appl… │
+                                          │
+ ─────────────────────────────────────────│
+  ◆ decide    ✕ fault     ✉ message       │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+== auto-resolved, choosing
+ sidebar · ● live · ◆ 4 alerts · ⠋ 2 working · fleet ●2 ○1 · $ usage                                                               ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆4 Inbox                                                                                                                                +
+   somebody is stopped on you ──────── 1  │ ╭─ RESOLVED · 3H AGO ───────────────────────────────────────────────────────────────────────╮
+   ◆ feedback Feedback on the new pric…   │ │                                                                                           │
+     Docs Writer on harbor · waited 12m   │ │ Ship the release on Friday?                                                               │
+                                          │ │ ↻ resolved by itself · Example Builder asked · 3h ago                                     │
+   something broke ─────────────────── 1  │ │                                                                                           │
+   ✕ fault    Release Captain keeps re…   │ │ applied   “Hold”, the default                                                             │
+     waited 8m                            │ │                                                                                           │
+                                          │ │ your answer ───────────────────────────────────────────────────────────────────────────── │
+   today ───────────────────────────── 2  │ │ ❯ 1. Ship it                                                                              │
+   ◆ launch   Launch harbor/nightly-au…   │ │   2. Ship half                                                                            │
+     Planner on lark · waited 1h          │ │                                                                                           │
+   ◆ revision Add an audit step to the…   │ │ Your answer replaces the default. Work already done on the default is not undone; Example │
+     Rekey Worker on harbor · waited 19m  │ │ Builder is told.                                                                          │
+                                          │ │                                                                                           │
+   when there is time ──────────────── 1  │ │  enter  Send    esc  Cancel                                                               │
+   ✉ message  Weekly usage is up 18%      │ │                                                                                           │
+     waited 2h                            │ ╰───────────────────────────────────────────────────────────────────────────────────────────╯
+                                          │
+   Recently closed: x clears each ──── 1  │
+   ◆ review   Approve the atlas store …   │
+     o use my answer instead · closed, x… │
+                                          │
+   Auto-resolved ───────────────────── 3  │
+ ▌ ↻ resolved Ship the release on Frid…   │
+ ▌   Example Builder asked · “Hold” appl… │
+   ↻ resolved Keep the old banner?        │
+     Example Builder asked · “Keep” appl… │
+   ↻ resolved Approve the atlas store …   │
+     Example Builder asked · “Hold” appl… │
+                                          │
+ ─────────────────────────────────────────│
+  ◆ decide    ✕ fault     ✉ message       │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+== auto-resolved, seven days over
+ sidebar · ● live · ◆ 4 alerts · ⠋ 2 working · fleet ●2 ○1 · $ usage                                                               ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆4 Inbox                                                                                                                                +
+   somebody is stopped on you ──────── 1  │ ╭─ RESOLVED · 8D AGO ───────────────────────────────────────────────────────────────────────╮
+   ◆ feedback Feedback on the new pric…   │ │                                                                                           │
+     Docs Writer on harbor · waited 12m   │ │ Keep the old banner?                                                                      │
+                                          │ │ ↻ resolved by itself · Example Builder asked · 8d ago                                     │
+   something broke ─────────────────── 1  │ │                                                                                           │
+   ✕ fault    Release Captain keeps re…   │ │ applied   “Keep”, the default                                                             │
+     waited 8m                            │ │                                                                                           │
+                                          │ │ The seven days to give your own answer are over.                                          │
+   today ───────────────────────────── 2  │ │                                                                                           │
+   ◆ launch   Launch harbor/nightly-au…   │ ╰───────────────────────────────────────────────────────────────────────────────────────────╯
+     Planner on lark · waited 1h          │
+   ◆ revision Add an audit step to the…   │
+     Rekey Worker on harbor · waited 19m  │
+                                          │
+   when there is time ──────────────── 1  │
+   ✉ message  Weekly usage is up 18%      │
+     waited 2h                            │
+                                          │
+   Recently closed: x clears each ──── 1  │
+   ◆ review   Approve the atlas store …   │
+     o use my answer instead · closed, x… │
+                                          │
+   Auto-resolved ───────────────────── 3  │
+   ↻ resolved Ship the release on Frid…   │
+     Example Builder asked · “Hold” appl… │
+ ▌ ↻ resolved Keep the old banner?        │
+ ▌   Example Builder asked · “Keep” appl… │
+   ↻ resolved Approve the atlas store …   │
+     Example Builder asked · “Hold” appl… │
+                                          │
+ ─────────────────────────────────────────│
+  ◆ decide    ✕ fault     ✉ message       │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+== recently closed, resolved by itself
+ sidebar · ● live · ◆ 4 alerts · ⠋ 2 working · fleet ●2 ○1 · $ usage                                                               ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆4 Inbox                                                                                                                                +
+   somebody is stopped on you ──────── 1  │ ┏━ REVIEW · WAITING 33M ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+   ◆ feedback Feedback on the new pric…   │ ┃                                                                                           ┃
+     Docs Writer on harbor · waited 12m   │ ┃ Approve the atlas store cut-over                                                          ┃
+                                          │ ┃ ◆ review · closed, x clears it · Atlas Builder on harbor is waiting · 33m ago             ┃
+   something broke ─────────────────── 1  │ ┃ mission  Move the atlas store                                                             ┃
+   ✕ fault    Release Captain keeps re…   │ ┃ agent    Atlas Builder                                                                    ┃
+     waited 8m                            │ ┃                                                                                           ┃
+                                          │ ┃ The row counts agree and the contract check passed. Cut over to the new store?            ┃
+   today ───────────────────────────── 2  │ ┃                                                                                           ┃
+   ◆ launch   Launch harbor/nightly-au…   │ ┃ because   cut-over cannot start until you answer; the old store stays read-only meanwhile ┃
+     Planner on lark · waited 1h          │ ┃ report    1,204,881 rows on both sides, 0 mismatches                                      ┃
+   ◆ revision Add an audit step to the…   │ ┃ contract  42 of 42 public queries return identical results                                ┃
+     Rekey Worker on harbor · waited 19m  │ ┃ rollback  the old store is frozen and kept for 7 days                                     ┃
+                                          │ ┃ step      cut-over                                                                        ┃
+   when there is time ──────────────── 1  │ ┃                                                                                           ┃
+   ✉ message  Weekly usage is up 18%      │ ┃ ╭─ YOUR NOTES · THE AGENT READS THESE ──────────────────────────────────────────────────╮ ┃
+     waited 2h                            │ ┃ │ c or click to write what you think, what should change, anything it should know       │ ┃
+                                          │ ┃ ╰───────────────────────────────────────────────────────────────────────────────────────╯ ┃
+   Recently closed: x clears each ──── 1  │ ┃  a  Approve    c  Write notes or request changes                                          ┃
+ ▌ ◆ review   Approve the atlas store …   │ ┃                                                                                           ┃
+ ▌   o use my answer instead · closed, x… │ ┃ resolved by itself ────────────────────────────────────────────────────────────────────── ┃
+                                          │ ┃ applied   “Hold”, the default, 3h ago                                                     ┃
+   Auto-resolved ───────────────────── 3  │ ┃  o  Use my answer instead                                                                 ┃
+   ↻ resolved Ship the release on Frid…   │ ┃                                                                                           ┃
+     Example Builder asked · “Hold” appl… │ ┃ related ───────────────────────────────────────────────────────────────────────────────── ┃
+   ↻ resolved Keep the old banner?        │ ┃                                                                                           ┃
+     Example Builder asked · “Keep” appl… │ ┃  t  Chat about this    g  Go to the mission    l  Remind me in 3h                         ┃
+   ↻ resolved Approve the atlas store …   │ ┃                                                                                           ┃
+     Example Builder asked · “Hold” appl… │ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                                          │
+ ─────────────────────────────────────────│
+  ◆ decide    ✕ fault     ✉ message       │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help

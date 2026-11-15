@@ -420,6 +420,10 @@ enum Fetched {
     Slo { generation: u64, outcome: Result<(Vec<fractal_client::SloRow>, Option<String>), String> },
     /// What was left of one objective or budget across the chart period.
     SloHistory { generation: u64, id: String, outcome: Result<fractal_client::SloHistory, String> },
+    /// The person's asks that resolved by themselves, or why st could not say.
+    AutoResolved { generation: u64, outcome: Result<fractal_client::AutoResolvedAsks, String> },
+    /// st accepted the person's own answer to an auto-resolved ask: the list is read again.
+    Overridden,
     /// st's conversation search for the palette's query, or why st could not say.
     Said(String, Result<fractal_client::ConversationSearch, String>),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
@@ -662,6 +666,12 @@ pub fn run(context: Context) -> Result<()> {
     let mut slo_stale = false;
     let mut slo_reading = false;
     let mut slo_history_asked = BTreeSet::<(String, u64)>::new();
+    // The person's auto-resolved asks are a read, not a window: read when Now opens, when the
+    // attention window changes (an ask that resolves by itself leaves it) and after an override
+    // is accepted, while Now shows; never on a timer.
+    let mut auto_shown = false;
+    let mut auto_stale = true;
+    let mut auto_reading = false;
     let mut legacy_requested = BTreeSet::new();
     // When each polled inventory first failed on this run of failures: a read that fails for a
     // moment (a daemon catching up) is not said; one that keeps failing is.
@@ -750,6 +760,7 @@ pub fn run(context: Context) -> Result<()> {
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
                     // Another member's objectives are not this one's: drop them until it answers.
                     extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None; extras.slo_otel_url = None;
+                    auto_stale = true; auto_reading = false; extras.auto_resolved = Load::Loading;
                     extras.reset_connection();
                     ui.availability.connected();
                     attached = None;
@@ -859,6 +870,7 @@ pub fn run(context: Context) -> Result<()> {
                         Window::Attention => {
                             model.now = collection;
                             extras.attention_live = true;
+                            auto_stale = true;
                         }
                         Window::Missions => {
                             model.missions = collection;
@@ -1277,6 +1289,19 @@ pub fn run(context: Context) -> Result<()> {
                         Err(why) => { extras.slo_history.insert(id, Load::Failed(why)); }
                     }
                 }
+                Fetched::AutoResolved { generation, outcome } => {
+                    auto_reading = false;
+                    if generation != resources_generation { continue; }
+                    match outcome {
+                        Ok(asks) => extras.auto_resolved = Load::Ready(asks),
+                        // The rows read last stay: a failed refresh is not an empty list.
+                        Err(why) if matches!(extras.auto_resolved, Load::Ready(_)) => {
+                            ui.flash(format!("Could not read your auto-resolved asks again: {why}"));
+                        }
+                        Err(why) => extras.auto_resolved = Load::Failed(why),
+                    }
+                }
+                Fetched::Overridden => auto_stale = true,
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::ReadPositions { generation, outcome } => {
                     if generation == resources_generation {
@@ -1424,6 +1449,25 @@ pub fn run(context: Context) -> Result<()> {
             runtime.spawn(async move {
                 let outcome = reader.slo_list().await.map(|reply| (reply.value.rows, reply.value.otel_ui_url)).map_err(|error| super::objectives::error(&error));
                 let _ = tx.send(Fetched::Slo { generation, outcome });
+            });
+        }
+        let now_shown = ui.tab() == 0;
+        if now_shown && !auto_shown { auto_stale = true; }
+        auto_shown = now_shown;
+        if now_shown && extras.live && auto_stale && !auto_reading {
+            auto_stale = false; auto_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = match reader.auto_resolved_list().await {
+                    Ok(reply) => Ok(reply.value),
+                    // Only a person's own asks are listed: an agent's session, or a Fractal that
+                    // does not serve the read yet, has none to show.
+                    Err(ClientError::Api(fractal_client::ErrorCode::Forbidden | fractal_client::ErrorCode::NotFound, ..)) => {
+                        Ok(fractal_client::AutoResolvedAsks { items: Vec::new(), complete: true })
+                    }
+                    Err(error) => Err(error.human()),
+                };
+                let _ = tx.send(Fetched::AutoResolved { generation, outcome });
             });
         }
         // The chart of the objective or budget selected, or open in the focused pane.
@@ -1940,6 +1984,7 @@ pub fn run(context: Context) -> Result<()> {
             };
             let optimistic_answer = alert.as_ref().is_some_and(|id| ui.pending_answers.contains_key(id));
             let shell = matches!(effect, Effect::CreateTerminal { .. });
+            let overrides = matches!(effect, Effect::Override { .. });
             let client = client.clone();
             let tx = fetched_tx.clone();
             let person = person.clone();
@@ -1973,6 +2018,9 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 if shell && let Ok((_, Some(terminal))) = &outcome {
                     let _ = tx.send(Fetched::TerminalStarted(terminal.clone()));
+                }
+                if overrides && outcome.is_ok() {
+                    let _ = tx.send(Fetched::Overridden);
                 }
                 match outcome {
                     Ok((notice, _)) => {
@@ -3013,6 +3061,11 @@ async fn perform(
                 .attention_dismiss(action, idem, fence, fractal_client::AttentionDismissParameters { attention_id: id, text })
                 .await?;
             Ok(("Dismissed".into(), None))
+        }
+        Effect::Override { target_id, episode, answer, label } => {
+            crate::override_ask(client, &target_id, &episode, &answer, &label)
+                .await
+                .map(|notice| (notice, None))
         }
         Effect::LaunchRevise { id, feedback } => {
             let current = client.attention_get(&id).await?;

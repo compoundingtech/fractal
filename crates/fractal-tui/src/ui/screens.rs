@@ -258,6 +258,11 @@ pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> L
         }
         let (glyph, color) = attention_style(&item.kind);
         let mut second = vec![span("   ", theme::dim())];
+        // A closed ask that resolved by itself takes the person's own answer from here too; the
+        // hint leads, so a narrow list cuts the rest of the line, not the key.
+        if is_closed && auto_resolved_for(world, closed, &item.id).is_some_and(AutoResolved::overridable) {
+            second.push(span(format!("o {OVERRIDE_LABEL} · "), theme::fg(theme::ACCENT)));
+        }
         if let Some(waiting) = &item.waiting {
             second.push(span(format!("{waiting} · "), theme::dim()));
         }
@@ -287,24 +292,183 @@ pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> L
             theme::dim(),
         ))));
     }
+    let mut state = state_of(
+        &world.attention,
+        "Checking for alerts…",
+        if alerts_out_of_date(world).is_some() {
+            "No alerts known — out of date."
+        } else {
+            "No alerts."
+        },
+    );
+    // What resolved by itself is listed below what is open, once the alerts have loaded: the
+    // person may still give their own answer for seven days.
+    let auto = world.auto_resolved.ready().filter(|list| !list.items.is_empty());
+    if let (Some(list), ListState::Ready | ListState::Empty(_)) = (auto, &state) {
+        if let ListState::Empty(none) = state {
+            items.push(Item::Note(Line::from(span(format!(" ✓ {none}"), theme::fg(theme::GREEN)))));
+            state = ListState::Ready;
+        }
+        items.push(Item::Header {
+            title: "Auto-resolved".into(),
+            count: list.items.len(),
+            color: theme::OVERLAY1,
+        });
+        for ask in &list.items {
+            let mut second = vec![span("   ", theme::dim()), span(format!("{} asked · ", ask.asker), theme::dim())];
+            second.push(match &ask.default {
+                Some(label) => span(format!("“{label}” applied"), theme::soft()),
+                None => span("timed out", theme::soft()),
+            });
+            second.push(span(format!(" · {} ago", ask.resolved), theme::dim()));
+            items.push(Item::Row {
+                index: ids.len(),
+                first: vec![
+                    span(" ↻ ", theme::fg(theme::SAPPHIRE)),
+                    span(format!("{:<9}", "resolved"), theme::fg(theme::SAPPHIRE)),
+                    span(ask.title.clone(), theme::bold()),
+                ],
+                right: vec![],
+                second,
+                children: Vec::new(),
+            });
+            ids.push(ask.id.clone());
+        }
+        if !list.complete {
+            items.push(Item::Note(Line::from(span(
+                " Only the newest are listed: Fractal stopped reading at its limit",
+                theme::dim(),
+            ))));
+        }
+    }
     Listing {
         items,
         ids,
-        state: state_of(
-            &world.attention,
-            "Checking for alerts…",
-            if alerts_out_of_date(world).is_some() {
-                "No alerts known — out of date."
-            } else {
-                "No alerts."
-            },
-        ),
+        state,
         legend: legend(&[
             ("◆", theme::PERSON, "decide"),
             ("✕", theme::FAULT, "fault"),
             ("✉", theme::SAPPHIRE, "message"),
         ]),
     }
+}
+
+/// What Now's override key is called, on its button and in its hints.
+pub const OVERRIDE_LABEL: &str = "use my answer instead";
+/// The prefix of an auto-resolved ask's row id on Now.
+pub const AUTO_RESOLVED: &str = "auto-resolved/";
+
+/// What an override does, in the same words on every client; `asker` is who asked.
+pub fn override_copy(asker: &str) -> String {
+    format!("Your answer replaces the default. Work already done on the default is not undone; {asker} is told.")
+}
+
+/// The auto-resolved ask behind a row on Now: its own row in the Auto-resolved group, or a
+/// closed row under Recently closed whose ask is the same episode.
+pub fn auto_resolved_for<'w>(
+    world: &'w World,
+    closed: &std::collections::HashSet<String>,
+    id: &str,
+) -> Option<&'w AutoResolved> {
+    let asks = &world.auto_resolved.ready()?.items;
+    if id.starts_with(AUTO_RESOLVED) {
+        return asks.iter().find(|ask| ask.id == id);
+    }
+    if !closed.contains(id) {
+        return None;
+    }
+    let episode = world.attention.items().iter().find(|item| item.id == id)?.episode.as_deref()?;
+    asks.iter().find(|ask| ask.episode == episode)
+}
+
+/// An auto-resolved ask, and the alternative marked while its chooser is open.
+#[derive(Clone, Copy)]
+pub struct Overriding<'a> {
+    pub ask: &'a AutoResolved,
+    pub chooser: Option<usize>,
+}
+
+/// What an auto-resolved ask leaves the person: `o` to give their own answer, its chooser (the
+/// answers other than the default, numbered, with what an override does), or why it takes none.
+fn override_section(card: &mut Doc, overriding: Overriding<'_>, inner: usize) {
+    let ask = overriding.ask;
+    if !ask.open {
+        card.wrap(
+            &[run(
+                if ask.default.is_none() {
+                    "It timed out without a default, so there is no answer to replace."
+                } else {
+                    "The seven days to give your own answer are over."
+                },
+                theme::dim(),
+            )],
+            inner,
+        );
+        return;
+    }
+    if ask.alternatives.is_empty() {
+        card.wrap(&[run("It names no other answer to give instead.", theme::dim())], inner);
+        return;
+    }
+    let Some(marked) = overriding.chooser else {
+        card.buttons(&[("o", "Use my answer instead", Hit::Key('o'), theme::ACCENT)]);
+        return;
+    };
+    card.section("your answer", None, inner);
+    for (index, (_, label)) in ask.alternatives.iter().enumerate() {
+        let start = card.lines.len();
+        card.lines(super::alerts::option_lines(index == marked, true, index + 1, label, theme::text(), inner));
+        if let Some(key) = char::from_digit(index as u32 + 1, 10) {
+            for line in start..card.lines.len() {
+                card.targets.push(super::doc::Target { line, column: 0, width: inner as u16, hit: Hit::Key(key) });
+            }
+        }
+    }
+    card.blank();
+    card.wrap(&[run(override_copy(&ask.asker), theme::soft())], inner);
+    card.blank();
+    card.buttons(&[
+        ("enter", "Send", Hit::Enter, theme::ACCENT),
+        ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
+    ]);
+}
+
+/// An auto-resolved ask's card on Now: what was asked, who asked, the default that applied and
+/// when, and the person's own answer.
+fn auto_resolved_detail(world: &World, id: &str, width: usize, drafts: &Drafts<'_>) -> Doc {
+    let mut doc = Doc::new();
+    let Some(ask) = drafts
+        .overriding
+        .map(|overriding| overriding.ask)
+        .filter(|ask| ask.id == id)
+        .or_else(|| world.auto_resolved.ready()?.items.iter().find(|ask| ask.id == id))
+    else {
+        doc.blank();
+        doc.wrap(
+            &[run("This ask is no longer listed: it was answered, or its seven days are over.", theme::dim())],
+            width,
+        );
+        return doc;
+    };
+    let inner = width.saturating_sub(4);
+    let mut card = Doc::new();
+    card.blank();
+    card.wrap(&text::inline(&ask.title, theme::bold()), inner);
+    card.line(Line::from(vec![
+        span("↻ resolved by itself ", theme::fg(theme::SAPPHIRE)),
+        span(format!("· {} asked · {} ago", ask.asker, ask.resolved), theme::dim()),
+    ]));
+    card.blank();
+    match &ask.default {
+        Some(label) => card.field("applied", &format!("“{label}”, the default"), inner, theme::soft()),
+        None => card.field("applied", "nothing: it timed out without a default", inner, theme::soft()),
+    }
+    card.blank();
+    let chooser = drafts.overriding.filter(|overriding| overriding.ask.id == ask.id).and_then(|overriding| overriding.chooser);
+    override_section(&mut card, Overriding { ask, chooser }, inner);
+    card.blank();
+    doc.card(&format!("resolved · {} ago", ask.resolved), theme::SAPPHIRE, false, card, width);
+    doc
 }
 
 pub struct Drafts<'a> {
@@ -327,6 +491,9 @@ pub struct Drafts<'a> {
     pub chat: Option<Chat<'a>>,
     /// A prompt's form: its mark, whether it has the keys, and a question's choices.
     pub form: super::alerts::FormState<'a>,
+    /// The auto-resolved ask behind the row (its own, or a closed row of the same episode), and
+    /// the answer marked while "use my answer instead" is being chosen.
+    pub overriding: Option<Overriding<'a>>,
 }
 
 pub struct Chat<'a> {
@@ -995,6 +1162,9 @@ fn confirm_row(doc: &mut Doc, drafts: &Drafts<'_>, label: &str) -> bool {
 }
 
 pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Drafts<'_>) -> Doc {
+    if let Some(id) = id.filter(|id| id.starts_with(AUTO_RESOLVED)) {
+        return auto_resolved_detail(world, id, width, drafts);
+    }
     let mut doc = Doc::new();
     let Some(item) = id.and_then(|id| world.attention.items().iter().find(|item| item.id == id))
     else {
@@ -1641,6 +1811,18 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         }
     }
     card.blank();
+    // A closed ask that resolved by itself: the default that applied, and the person's own answer.
+    if let Some(overriding) = drafts.overriding {
+        let ask = overriding.ask;
+        card.section("resolved by itself", None, inner);
+        let applied = match &ask.default {
+            Some(label) => format!("“{label}”, the default, {} ago", ask.resolved),
+            None => format!("nothing: it timed out {} ago", ask.resolved),
+        };
+        card.field("applied", &applied, inner, theme::soft());
+        override_section(&mut card, overriding, inner);
+        card.blank();
+    }
     // What the item is about, as links wherever st names a graph subject.
     card.section("related", None, inner);
     if let Some(who) = &item.raised_by {
@@ -1702,6 +1884,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             confirm: None,
             chat: None,
             form: Default::default(),
+            overriding: None,
         };
         let first_target = card.targets.len();
         text_box(
@@ -3687,7 +3870,7 @@ mod tree_tests {
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
             answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
-            chat: None, form: Default::default(),
+            chat: None, form: Default::default(), overriding: None,
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -3716,7 +3899,7 @@ mod tree_tests {
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
             answering: None, note_answer: None, noted_answers: Vec::new(), answer_error: None,
-            chat: None, form: Default::default(),
+            chat: None, form: Default::default(), overriding: None,
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -4303,6 +4486,7 @@ mod request_notes {
             answer_error: case.error,
             chat: None,
             form: Default::default(),
+            overriding: None,
         };
         let mut card = Doc::new();
         structured_request(&mut card, "planner", &case.request, &[], &drafts, width);

@@ -46,7 +46,8 @@ export const replayAnswerPorts = (search: string): { readonly alertActions: Aler
     setTimeout(() => resolve(id.endsWith('-refused') ? { _tag: 'Refused', detail: 'Fractal did not take this answer.' } : { _tag: 'Sent', settled: true }), REPLY_MS)
   })
   return {
-    alertActions: { act: ({ alert }) => reply(alert.id) },
+    // The replay's example data holds no deadline-resolved asks.
+    alertActions: { act: ({ alert }) => reply(alert.id), autoResolved: async () => ({ _tag: 'Observed', asks: [], complete: true }), override: ({ ask }) => reply(ask.resolution_id) },
     prompts: { respond: ({ alert }) => reply(alert.id) },
   }
 }
