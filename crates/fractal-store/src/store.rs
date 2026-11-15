@@ -39,6 +39,7 @@ pub mod custom;
 pub mod model_drift;
 mod notice_authority;
 pub mod ask_digest;
+pub mod auto_resolved;
 mod ask_digest_cache;
 mod ask_digest_payload;
 mod transaction_work;
