@@ -5622,7 +5622,9 @@ impl Store {
                 || !cache.card_statuses.is_empty() || !cache.serving_card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
-                    "SELECT subject, actor, kind IN ('work.claimed','work.progress')
+                    "SELECT subject, actor, kind IN ('work.claimed','work.progress'),
+                            kind='owned-set.revised' OR json_extract(body,'$.owned_set') IS NOT NULL
+                                OR json_extract(body,'$._operation.id') IS NOT NULL
                      FROM claims WHERE store_index>?1 AND store_index<=?2",
                 )?;
                 let mut changed = HashSet::new();
@@ -5631,10 +5633,13 @@ impl Store {
                 // authored claims. Keep those input generations distinct.
                 let mut changed_subjects = HashSet::new();
                 let mut runtime_work_actors = HashSet::new();
+                let mut indirect_runtime_inputs = false;
                 for row in statement.query_map(params![cache.through, store_index], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                        row.get::<_, bool>(2)?, row.get::<_, bool>(3)?))
                 })? {
-                    let (subject, actor, work_activity) = row?;
+                    let (subject, actor, work_activity, indirect) = row?;
+                    indirect_runtime_inputs |= indirect;
                     if work_activity && let Some(actor) = &actor {
                         runtime_work_actors.insert(actor.clone());
                     }
@@ -5643,6 +5648,13 @@ impl Store {
                     changed.extend(actor);
                 }
                 drop(statement);
+                if indirect_runtime_inputs {
+                    // Receipt-selected declarations and operation authority can change
+                    // earlier runtime subjects without a claim naming those subjects.
+                    let runtimes = self.runtime_list_changes(cache.through, store_index)?;
+                    changed.extend(runtimes.iter().cloned());
+                    changed_subjects.extend(runtimes);
+                }
                 let stale = |subject: &String, owners: &[String]| {
                     changed.contains(subject) || owners.iter().any(|owner| changed.contains(owner))
                 };
