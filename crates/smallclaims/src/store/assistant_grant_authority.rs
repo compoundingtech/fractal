@@ -18,9 +18,16 @@ pub const MEMBERSHIP_KEYS_PER_REFRESH: usize = 16;
 const SCOPES: &[&str] = &[
     "read.assistant.summary", "read.assistant.attention", "read.assistant.missions",
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
+    "read.assistant.slo",
     "write.assistant.messages", "write.assistant.custom-reply", "write.assistant.answers",
+    "read.assistant.availability",
 ];
 const SERVICE_SCOPES: &[&str] = &["read.claims", "read.work", "read.documents"];
+
+// Core depends on smallclaims, so a core test enforces exact public-scope parity
+// without introducing an inverted runtime dependency.
+#[cfg(any(test, feature = "test-support"))]
+pub fn assistant_scopes_for_test() -> &'static [&'static str] { SCOPES }
 
 fn service_principal(value: &str) -> bool {
     let mut parts = value.split('/');

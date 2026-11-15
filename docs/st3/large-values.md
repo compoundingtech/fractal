@@ -110,6 +110,10 @@ The opt-in, test-support-only statement-work scope groups completed traced SQL
 by its prepared text across request and receipt threads. Summary fixtures report
 the top three statements' VM work at 1,000 and 10,000 retained subject claims;
 these measurements impose no history-scaling assertion.
+The authority's private assistant-scope allowlist is checked for exact equality
+with the public API list by a core unit test, preserving the core-to-smallclaims
+dependency direction while making new public scopes fail visibly until admitted
+by the authority validator.
 
 ### GitHub event observation fold inventory
 

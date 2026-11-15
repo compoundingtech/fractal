@@ -112,6 +112,24 @@ fn service_fields() -> Value {
 }
 
 #[test]
+fn assistant_grant_and_policy_accept_main_slo_and_availability_scopes() {
+    for scope in ["read.assistant.slo", "read.assistant.availability"] {
+        let store = node("issuer", None);
+        let mut source = fields();
+        source["scopes"] = json!([scope]);
+        let grant = append(&store, SUBJECT, GRANTED, source.clone());
+        assert!(authority::contains(&store.readers.get(), &grant.id).unwrap());
+        source["scopes"] = json!(["read.assistant.summary", scope]);
+        source["policy_revision"] = json!(2);
+        let policy = append(&store, SUBJECT, POLICY, source);
+        let projected = authority::latest(&store.readers.get(), SUBJECT, POLICY).unwrap().unwrap();
+        assert_eq!(projected.id, policy.id);
+        assert_eq!(projected.body["fields"]["policy_revision"], 2);
+        assert!(authority::contains(&store.readers.get(), &grant.id).unwrap());
+    }
+}
+
+#[test]
 fn service_local_grant_authenticates_projection_immediately_without_assistant_consent() {
     let store = node("issuer", None);
     let grant = append(&store, SUBJECT, GRANTED, service_fields());

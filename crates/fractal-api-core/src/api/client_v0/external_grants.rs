@@ -534,6 +534,12 @@ mod conflict_tests;
 mod tests {
     use super::*;
 
+    #[test]
+    fn assistant_authority_scope_allowlist_matches_public_scopes() {
+        assert_eq!(authority::assistant_scopes_for_test(), SCOPES,
+            "the authority validator must recognize exactly the public assistant scopes");
+    }
+
     // Only the current fixture thread can exercise the reserved profile through
     // the real mutation/session boundary. Production issuable() stays closed.
     thread_local! {
