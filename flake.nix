@@ -141,7 +141,7 @@
                 (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
                   "st3/config.toml".force = true;
                 });
-              config.services.smalltalk = {
+              config.services.fractal = {
                 enable = true;
                 person = "person/ada";
                 socket = "/tmp/fractal-test.sock";
@@ -972,7 +972,7 @@
         checks.hm-module-eval =
           let
             rendered = hmModuleEval.config;
-            stableBinDir = "${rendered.services.smalltalk.stateDir}/bin";
+            stableBinDir = "${rendered.services.fractal.stateDir}/bin";
             stableExecutable = "${stableBinDir}/fractal";
             package = toString (builtins.head rendered.home.packages);
             activation = rendered.home.activation.smalltalkBinary;
@@ -1063,12 +1063,12 @@
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
-          assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
+          assert rendered.services.fractal.webListen == "127.0.0.1:7410";
           assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
           assert pkgs.lib.hasInfix "--web-dist" args;
           # The PTY wrapper is a symlinkJoin: individual assets resolve outside its web root.
-          assert toString rendered.services.smalltalk.package != package;
-          assert builtins.elem "${rendered.services.smalltalk.package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
+          assert toString rendered.services.fractal.package != package;
+          assert builtins.elem "${rendered.services.fractal.package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
           assert !(builtins.elem "${package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args)));
           assert (
             let
@@ -1085,7 +1085,7 @@
             pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/fractal-client.sock"'' args
             && !(pkgs.lib.hasInfix "%%t/fractal-client.sock" args)
           else
-            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/fractal-client.sock" args);
+            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.fractal.stateDir}/run/fractal-client.sock" args);
           assert (if pkgs.stdenv.hostPlatform.isLinux then
             pkgs.lib.hasPrefix ''"${stableExecutable}" '' args
           else
@@ -1709,6 +1709,11 @@
           assert legacyPreflight.before == [ "writeBoundary" ];
           assert legacyPreflight.after == [ ];
           assert pkgs.stdenv.hostPlatform.isDarwin || legacyPreflight.data == preflight.data;
+          # Public options are Fractal-only; legacy service names below remain
+          # until the host migrator has moved state and published its receipts.
+          assert hmModuleEval.options.services ? fractal;
+          assert !(hmModuleEval.options.services ? smalltalk);
+          assert completed.services.fractal.fractalMigration.phase == "completed";
           assert !completed.xdg.configFile."st3/config.toml".enable;
           assert !(completed.xdg.configFile ? "fractal/config.toml");
           assert completed.home.activation.fractalConfig.after == [ "writeBoundary" ];
