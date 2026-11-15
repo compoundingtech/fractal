@@ -7,10 +7,13 @@ import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
+import type { AutoResolvedRead } from '../conversation/alerts/alert-action-port.ts'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
+import { useAutoResolved, type Override } from '../conversation/alerts/useAutoResolved.ts'
 import { useAttentionDecode, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
+import { AutoResolvedSection } from './AutoResolvedAsks.tsx'
 import { DecodeNotice } from './LiveRoster.tsx'
 
 // The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
@@ -19,20 +22,25 @@ import { DecodeNotice } from './LiveRoster.tsx'
 
 const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a question', '◆': 'needs you', '!': 'fault' }
 
-/** The Alerts tab over the active source: its attention feed, without answers on their way, and its clock. */
+/** The Alerts tab over the active source: its attention feed, without answers on their way, its clock and its auto-resolved asks. */
 export const AlertsTab = ({ onOpen, selected, onSelect }: {
   readonly onOpen: (ref: string) => void
   readonly selected?: string
   readonly onSelect?: (id: string) => void
-}): React.ReactNode => (
-  <AlertsList feed={useVisibleAttention()} decode={useAttentionDecode()} now={useNow()} onOpen={onOpen} {...(selected === undefined ? {} : { selected })} {...(onSelect === undefined ? {} : { onSelect })} />
-)
+}): React.ReactNode => {
+  const { read, onOverride } = useAutoResolved()
+  return <AlertsList
+    feed={useVisibleAttention()} decode={useAttentionDecode()} now={useNow()} onOpen={onOpen}
+    {...(selected === undefined ? {} : { selected })} {...(onSelect === undefined ? {} : { onSelect })}
+    {...(read === undefined ? {} : { autoResolved: read })} {...(onOverride === undefined ? {} : { onOverride })}
+  />
+}
 
 /**
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row stays reachable.
  */
-export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, autoResolved, onOverride }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly decode?: RosterDecode
   readonly now: number
@@ -42,6 +50,10 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
   readonly selected?: string
   /** Opens an alert's details in the main area. */
   readonly onSelect?: (id: string) => void
+  /** Asks a default answered at their deadline, below the open alerts; absent until read. */
+  readonly autoResolved?: AutoResolvedRead
+  /** Replaces a default with the person's own answer; absent without control access. */
+  readonly onOverride?: Override
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const shownIds = React.useMemo(() => new Set(feed._tag === 'Observed' ? feed.value.map((row) => row.id) : []), [feed])
@@ -119,6 +131,7 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
                 ))}
               </ul>
             )}
+            <AutoResolvedSection read={autoResolved} now={now} {...(onOverride === undefined ? {} : { onOverride })} />
           </>
         )}
     </div>
