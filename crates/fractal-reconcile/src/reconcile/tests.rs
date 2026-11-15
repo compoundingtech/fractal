@@ -31063,6 +31063,27 @@ mission "fresh" state="ready" {
         let _clock = ClockReset;
         smallclaims::store::set_thread_clock(Some(1_800_000_000_000));
         let seat = SeatQueueFixture::new();
+        if case == "dependency-completion" {
+            apply_source(&seat.store, r#"
+version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "queued" state="ready" {
+  goal "Do not complete around an unresolved effect."
+  completion { depends-on { step "finished" completed } }
+  step "work" { assigned-to "agent/node.worker" }
+  step "finished" {
+    agentless
+    gate "wait for the test" { field "state" "resource/never" is "ready" }
+  }
+  finally {
+    step "cleanup" {
+      agentless
+      gate "wait for the test" { field "state" "resource/never" is "ready" }
+    }
+  }
+}
+"#, "effect-mission-completion");
+        }
         // Unlike the queue-order helper, this fixture needs no sleep or distinct join times.
         let run = seat.store.create_mission_run(&crate::model::MissionRunRequest {
             mission: "queued".into(), revision: None, workspace: "/tmp".into(),
@@ -31120,6 +31141,13 @@ mission "fresh" state="ready" {
                 }).unwrap();
             }
             "submitted" => {}
+            "dependency-completion" => {
+                for path in ["finished", "cleanup"] {
+                    let subject = SeatQueueFixture::step(&run, path);
+                    seat.store.set_step_state(&subject, "completed", None).unwrap();
+                    assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().status, "completed");
+                }
+            }
             _ => unreachable!(),
         }
         for _ in 0..3 {
@@ -31136,6 +31164,21 @@ mission "fresh" state="ready" {
         assert!(seat.store.claims_for(&step, Some("step-run.state")).unwrap().iter()
             .all(|claim| claim.body["fields"]["status"] != "completed"));
         assert_ne!(seat.store.mission_run(&run.id).unwrap().unwrap().status, "completed");
+        if case == "dependency-completion" {
+            let blocked = seat.store.mission_run(&run.id).unwrap().unwrap();
+            assert_eq!(blocked.status, "blocked");
+            assert_eq!(blocked.phase, "normal", "dependency completion must not select final");
+            for phase in ["final", "cleanup-completed"] {
+                seat.store.set_mission_run_state(&run.id, "running", phase, None).unwrap();
+                for _ in 0..3 {
+                    seat.reconciler.evaluate_mission_runs().unwrap();
+                    let blocked = seat.store.mission_run(&run.id).unwrap().unwrap();
+                    assert_eq!(blocked.status, "blocked", "{phase}");
+                    assert_eq!(blocked.phase, phase);
+                }
+            }
+            assert_eq!(seat.store.messages(None, true).unwrap().len(), messages);
+        }
     }
 
     #[test]
@@ -31156,6 +31199,11 @@ mission "fresh" state="ready" {
     #[test]
     fn late_work_and_step_state_projections_preserve_unresolved_effect_fence() {
         unresolved_effect_fence_case("late-projection");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_dependency_completion_and_final_success() {
+        unresolved_effect_fence_case("dependency-completion");
     }
 
     #[test]

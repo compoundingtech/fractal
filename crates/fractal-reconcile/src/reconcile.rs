@@ -11668,6 +11668,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         if run.phase == "supersession-waiting" {
             return self.evaluate_active_mission_run(run, None);
         }
+        // A durable unresolved effect blocks the run before mission-level dependency
+        // completion, final-phase selection, and cleanup can bypass the per-step fence.
+        for step in &run.steps {
+            if self.store.step_has_unresolved_effect(&step.subject)? {
+                let changed = self.store.set_step_state(
+                    &step.subject, "blocked", Some("effect-unresolved"),
+                )?;
+                return Ok(self.store.set_mission_run_state(
+                    &run.id, "blocked", &run.phase, Some("effect-unresolved"),
+                )? || changed);
+            }
+        }
         if run.phase.starts_with("cleanup-") {
             return self.reconcile_mission_run_cleanup(run);
         }
