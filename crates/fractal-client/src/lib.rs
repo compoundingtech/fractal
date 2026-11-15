@@ -6605,6 +6605,33 @@ mod tests {
     }
 
     #[test]
+    fn auto_resolved_models_decode_and_override_omits_absent_summary() {
+        let wire: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/auto-resolved.json"
+        ))
+        .unwrap();
+        let rows: Envelope<AutoResolvedAsks> = serde_json::from_value(wire.clone()).unwrap();
+        assert!(rows.value.complete);
+        assert_eq!(
+            rows.value.items[0].default_answer.as_ref().unwrap().id,
+            "hold"
+        );
+        assert_eq!(serde_json::to_value(rows).unwrap(), wire);
+        let parameters = PersonOverrideParameters {
+            target_id: "step-run/example".into(),
+            episode: "claim/example".into(),
+            answer: PersonOverrideAnswer {
+                id: "ship".into(),
+                text: None,
+            },
+            summary: None,
+        };
+        let wire = serde_json::to_value(parameters).unwrap();
+        assert!(wire.get("summary").is_none());
+        assert!(wire["answer"].get("text").is_none());
+    }
+
+    #[test]
     fn schedule_models_preserve_unknown_fields_and_state_strings() {
         let wire: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/fixtures/schedules-page.json"

@@ -157,6 +157,7 @@ pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
 }
 mod availability;
 mod directive_notes;
+mod auto_resolved;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
@@ -665,6 +666,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
                 .layer(DefaultBodyLimit::max(client_diagnostics::MAX_REQUEST_BYTES)),
         )
         .route("/v1/client/notes", get(directive_notes::read).put(directive_notes::set))
+        .route("/v1/client/auto-resolved", get(auto_resolved::read))
         .route("/v1/client/availability", get(availability::list).put(availability::set))
         .route("/v1/client/presence", post(availability::report))
         .route("/v1/client/sets", get(owned_sets::list))
