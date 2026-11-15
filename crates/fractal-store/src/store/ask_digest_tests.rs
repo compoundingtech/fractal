@@ -207,19 +207,19 @@ fn a_future_person_does_not_block_another_persons_due_digest() {
     owner.graph.set_write_clock_at(ms("2027-11-15T08:00:00Z")).unwrap();
     seed_person(&owner, "already-reported", "person/avery");
     assert!(drain(&owner, ms("2027-11-15T09:00:00Z")));
-    // Avery's late earlier resolution cannot join its frozen digest today. Zane's
+    // Avery's late earlier resolution cannot join its frozen digest today. Robin's
     // later resolution is nevertheless due today, not at Avery's next boundary.
     other.graph.set_write_clock_at(ms("2027-11-15T07:59:00Z")).unwrap();
     let (_, late) = seed_person(&other, "late-avery", "person/avery");
     owner.graph.set_write_clock_at(ms("2027-11-15T08:30:00Z")).unwrap();
-    let (_, due) = seed_person(&owner, "due-zane", "person/zane");
+    let (_, due) = seed_person(&owner, "due-robin", "person/robin");
     sync(&other, &owner);
     let now = ms("2027-11-15T09:01:00Z");
     assert!(drain(&owner, now));
     assert_eq!(counts(&owner), (2, 2));
     let all = digests(&owner);
-    let zane = all.iter().find(|source| source["recipient"] == "person/zane").unwrap();
-    assert_eq!(rows(&owner, zane)[0]["resolution_id"], due.id);
+    let robin = all.iter().find(|source| source["recipient"] == "person/robin").unwrap();
+    assert_eq!(rows(&owner, robin)[0]["resolution_id"], due.id);
     assert!(!all.iter().flat_map(|source| rows(&owner, source)).any(|row| row["resolution_id"] == late.id));
     assert_eq!(owner.reconcile_ask_digests_at(now).unwrap().next_deadline, Some(now));
     assert_eq!(owner.reconcile_ask_digests_at(now).unwrap().next_deadline, Some(ms("2027-11-16T09:00:00Z")));

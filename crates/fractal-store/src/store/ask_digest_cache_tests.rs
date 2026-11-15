@@ -112,7 +112,7 @@ fn declaration_arrival_retries_only_one_bounded_dependency_page_per_pass() {
     let (owner, other, declaration) = setup();
     owner.connection.batched(|tx| -> Result<()> {
         for index in 0..PAGE + 3 {
-            source(tx, &owner.origin, &declaration.id, &format!("person/arrival-{index:03}"), &format!("resolution-{index}"));
+            source(tx, &owner.origin, &declaration.id, "person/example", &format!("resolution-{index}"));
         }
         Ok(())
     }).unwrap().unwrap();
@@ -121,11 +121,11 @@ fn declaration_arrival_retries_only_one_bounded_dependency_page_per_pass() {
     assert_eq!(count(&owner, "local_ask_digest_retry"), 0);
     sync(&other, &owner);
     owner.connection.batched(|tx| -> Result<()> { assert!(ingest(tx)?); Ok(()) }).unwrap().unwrap();
-    assert_eq!(count(&owner, "local_ask_digest_sources"), PAGE as u64);
+    assert_eq!(count(&owner, "local_ask_digest_source_history"), PAGE as u64);
     assert_eq!(count(&owner, "local_ask_digest_deferred"), 3);
     assert_eq!(count(&owner, "local_ask_digest_retry"), 1);
     settle_cache(&owner);
-    assert_eq!(count(&owner, "local_ask_digest_sources"), (PAGE + 3) as u64);
+    assert_eq!(count(&owner, "local_ask_digest_source_history"), (PAGE + 3) as u64);
     assert_eq!(count(&owner, "local_ask_digest_deferred"), 0);
     assert_eq!(count(&owner, "local_ask_digest_retry"), 0);
 }
@@ -144,7 +144,7 @@ fn known_nonowner_source_neither_fences_nor_queues_retries() {
     assert_eq!(count(&other, "local_ask_digest_source_history"), 0);
     assert_eq!(other.reconcile_ask_digests_at(0).unwrap(), AskDigestPass::default());
     assert_eq!(Store::open_memory("unbound").unwrap().reconcile_ask_digests_at(0).unwrap(), AskDigestPass::default());
-    // The actual owner still admits its legitimate source for the identical person/date.
+    // The actual owner still admits its legitimate source for the identical person and date.
     owner.connection.batched(|tx| -> Result<()> {
         let selected = current_desired_row_tx(tx, crate::notice_owner::SUBJECT)?.unwrap();
         source(tx, &owner.origin, &selected.claim_id, "person/example", "legitimate-resolution");

@@ -65,7 +65,7 @@ before that handover remain authenticated. The replicated envelope has no cross-
 knowledge frontier, so it cannot establish whether a writer had imported another
 writer's handover when emitting. Digests are informational derived graph records, not
 an exactly-once execution authority. Concurrent authenticated sources converge to one
-source per person/date, preferring the reader's current bound owner and then the lowest
+source per person and date, preferring the reader's current bound owner and then the lowest
 claim ID, never receiver arrival order. This bounds partitioned former-owner emissions
 to one selected notice rather than a duplicate or source conflict. Snapshots still
 require current-owner authority. These records do not register a notice client surface.
