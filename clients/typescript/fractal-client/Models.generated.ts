@@ -1242,6 +1242,30 @@ export type AvailabilityDeadlineClockChange = {
   value: "run" | "hold-routine" | "hold-all";
 };
 
+export type AvailabilityDeadlineClockDurations = {
+  "hold-all": number;
+  "hold-routine": number;
+  run: number;
+};
+
+export type AvailabilityHistory = {
+  bucket_seconds: number;
+  buckets: Array<AvailabilityHistoryBucket>;
+  from: Timestamp;
+  person: string;
+  to: Timestamp;
+};
+
+export type AvailabilityHistoryBucket = {
+  covered_ms: number;
+  deadline_clock: AvailabilityDeadlineClockDurations;
+  interruptions: AvailabilityInterruptionsDurations;
+  presence: (AvailabilityPresenceDurations | null);
+  start: Timestamp;
+  status: AvailabilityStatusDurations;
+  status_source: AvailabilityStatusSourceDurations;
+};
+
 export type AvailabilityInterruptions = ("all" | "urgent" | "none" | string);
 
 export type AvailabilityInterruptionsChange = {
@@ -1249,7 +1273,20 @@ export type AvailabilityInterruptionsChange = {
   value: "all" | "urgent" | "none";
 };
 
+export type AvailabilityInterruptionsDurations = {
+  all: number;
+  none: number;
+  urgent: number;
+};
+
 export type AvailabilityPresence = ("present" | "idle" | "locked" | "unreported" | string);
+
+export type AvailabilityPresenceDurations = {
+  idle: number;
+  locked: number;
+  present: number;
+  unreported: number;
+};
 
 export type AvailabilitySet = {
   deadline_clock?: AvailabilityDeadlineClockChange;
@@ -1264,7 +1301,18 @@ export type AvailabilityStatusChange = {
   value: ("available" | "away" | null);
 };
 
+export type AvailabilityStatusDurations = {
+  available: number;
+  away: number;
+};
+
 export type AvailabilityStatusSource = ("override" | "presence" | "unreported" | string);
+
+export type AvailabilityStatusSourceDurations = {
+  override: number;
+  presence: number;
+  unreported: number;
+};
 
 export type BlobChunk = {
   data: string;
@@ -1924,7 +1972,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
+  value: (DirectiveNotes | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | AvailabilityHistory | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (

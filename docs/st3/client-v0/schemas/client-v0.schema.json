@@ -518,6 +518,56 @@
         "report_again_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}], "description": "While the device is present: the instant it turns idle unless it has newer input, so it reports then with its current `last_input_at`. Null: report on the next state change, or on the next input after an idle stretch. Reporting more often is harmless; the daemon records only transitions."}
       }
     },
+    "AvailabilityStatusDurations": {
+      "description": "Milliseconds spent in each status during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["available", "away"],
+      "properties": {"available": {"type": "integer", "minimum": 0}, "away": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityStatusSourceDurations": {
+      "description": "Milliseconds the status came from each source during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["override", "presence", "unreported"],
+      "properties": {"override": {"type": "integer", "minimum": 0}, "presence": {"type": "integer", "minimum": 0}, "unreported": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityPresenceDurations": {
+      "description": "Milliseconds of each derived presence during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["present", "idle", "locked", "unreported"],
+      "properties": {"present": {"type": "integer", "minimum": 0}, "idle": {"type": "integer", "minimum": 0}, "locked": {"type": "integer", "minimum": 0}, "unreported": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityInterruptionsDurations": {
+      "description": "Milliseconds of each interruptions setting during a history bucket.",
+      "type": "object", "additionalProperties": false, "required": ["all", "urgent", "none"],
+      "properties": {"all": {"type": "integer", "minimum": 0}, "urgent": {"type": "integer", "minimum": 0}, "none": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityDeadlineClockDurations": {
+      "description": "Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words.",
+      "type": "object", "additionalProperties": false, "required": ["run", "hold-routine", "hold-all"],
+      "properties": {"run": {"type": "integer", "minimum": 0}, "hold-routine": {"type": "integer", "minimum": 0}, "hold-all": {"type": "integer", "minimum": 0}}
+    },
+    "AvailabilityHistoryBucket": {
+      "description": "One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range.",
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "covered_ms", "status", "status_source", "presence", "interruptions", "deadline_clock"],
+      "properties": {
+        "start": {"$ref": "#/$defs/Timestamp"},
+        "covered_ms": {"type": "integer", "minimum": 1},
+        "status": {"$ref": "#/$defs/AvailabilityStatusDurations"},
+        "status_source": {"$ref": "#/$defs/AvailabilityStatusSourceDurations"},
+        "presence": {"oneOf": [{"$ref": "#/$defs/AvailabilityPresenceDurations"}, {"type": "null"}], "description": "Null for anyone but the person."},
+        "interruptions": {"$ref": "#/$defs/AvailabilityInterruptionsDurations"},
+        "deadline_clock": {"$ref": "#/$defs/AvailabilityDeadlineClockDurations"}
+      }
+    },
+    "AvailabilityHistory": {
+      "description": "A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available).",
+      "type": "object", "additionalProperties": false, "required": ["person", "from", "to", "bucket_seconds", "buckets"],
+      "properties": {
+        "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "from": {"$ref": "#/$defs/Timestamp"},
+        "to": {"$ref": "#/$defs/Timestamp"},
+        "bucket_seconds": {"type": "integer", "minimum": 1},
+        "buckets": {"type": "array", "maxItems": 2016, "items": {"$ref": "#/$defs/AvailabilityHistoryBucket"}}
+      }
+    },
     "ObservationLatency": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "count", "over_target", "max_ms", "buckets"], "properties": {"target": {"enum": ["ios-open-to-live", "ios-connect", "ios-message-ack", "ios-conversation-open", "ios-terminal-open", "ios-recover"]}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "latency"}, "count": {"type": "integer", "minimum": 1, "maximum": 1000000}, "over_target": {"type": "integer", "minimum": 0, "maximum": 1000000}, "max_ms": {"type": "integer", "minimum": 0, "maximum": 3600000}, "buckets": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0, "maximum": 3670015}, {"type": "integer", "minimum": 1, "maximum": 1000000}], "minItems": 2, "maxItems": 2}}}},
     "ObservationLiveShare": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "foreground_ms", "live_ms"], "properties": {"target": {"const": "ios-live-share"}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "live-share"}, "foreground_ms": {"type": "integer", "minimum": 1, "maximum": 60000}, "live_ms": {"type": "integer", "minimum": 0, "maximum": 60000}}},
     "ObservationSample": {"oneOf": [{"$ref": "#/$defs/ObservationLatency"}, {"$ref": "#/$defs/ObservationLiveShare"}]},
@@ -1090,6 +1140,7 @@
             { "$ref": "#/$defs/DirectiveNoteSetResult" },
             { "$ref": "#/$defs/PersonAvailability" },
             { "$ref": "#/$defs/PresenceReportResult" },
+            { "$ref": "#/$defs/AvailabilityHistory" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/PrivateNotesSubject" },
             { "$ref": "#/$defs/DocumentContent" },

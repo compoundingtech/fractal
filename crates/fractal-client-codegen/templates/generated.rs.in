@@ -161,6 +161,72 @@ pub struct PresenceReportResult {
     pub report_again_at: Option<String>,
 }
 
+/// Milliseconds spent in each status during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityStatusDurations {
+    pub available: u64,
+    pub away: u64,
+}
+
+/// Milliseconds the status came from each source during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityStatusSourceDurations {
+    pub r#override: u64,
+    pub presence: u64,
+    pub unreported: u64,
+}
+
+/// Milliseconds of each derived presence during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityPresenceDurations {
+    pub present: u64,
+    pub idle: u64,
+    pub locked: u64,
+    pub unreported: u64,
+}
+
+/// Milliseconds of each interruptions setting during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityInterruptionsDurations {
+    pub all: u64,
+    pub urgent: u64,
+    pub none: u64,
+}
+
+/// Milliseconds of each deadline-clock mode during a history bucket.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityDeadlineClockDurations {
+    pub run: u64,
+    #[serde(rename = "hold-routine")]
+    pub hold_routine: u64,
+    #[serde(rename = "hold-all")]
+    pub hold_all: u64,
+}
+
+/// One history bucket; each axis's durations sum to `covered_ms`. `presence` is `None` for
+/// anyone but the person.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityHistoryBucket {
+    pub start: String,
+    pub covered_ms: u64,
+    pub status: AvailabilityStatusDurations,
+    pub status_source: AvailabilityStatusSourceDurations,
+    pub presence: Option<AvailabilityPresenceDurations>,
+    pub interruptions: AvailabilityInterruptionsDurations,
+    pub deadline_clock: AvailabilityDeadlineClockDurations,
+}
+
+/// A person's availability over `[from, to)` in buckets of `bucket_seconds` from `from`; `to`
+/// is the requested end clamped to when the daemon answered.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AvailabilityHistory {
+    pub person: String,
+    pub from: String,
+    pub to: String,
+    pub bucket_seconds: u64,
+    pub buckets: Vec<AvailabilityHistoryBucket>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope<T> {
     pub api_version: String,
