@@ -7,12 +7,13 @@
    Atlas Builder                        │ ▌   waited 1m                 │ │ Worker typecheck fails after the rename │
    Atlas Docs                           │                               │ │ ? unplaced · 1m ago                     │
    Atlas Migrator                       │                               │ │ mission  example/atlas · Rename fetchUser
-   Atlas Reviewer                       │                               │ │                                         │
- ▾ Missions 1                           │                               │ │ syncAvatars calls loadUser without the  │
-   example/atlas · Rename fetchUser to l│                               │ │ session. Thread the session through, or │
- ▾ Machines 2                           │                               │ │ keep a one-argument overload?           │
-   foundry                              │                               │ │                                         │
-   meadow                               │                               │ │ Fractal does not say what this is: this │
+   Atlas Reviewer                       │                               │ │ agent    Atlas Builder                  │
+ ▾ Missions 1                           │                               │ │                                         │
+   example/atlas · Rename fetchUser to l│                               │ │ syncAvatars calls loadUser without the  │
+ ▾ Machines 2                           │                               │ │ session. Thread the session through, or │
+   foundry                              │                               │ │ keep a one-argument overload?           │
+   meadow                               │                               │ │                                         │
+                                        │                               │ │ Fractal does not say what this is: this │
                                         │                               │ │ host's Fractal is older, or has not     │
                                         │                               │ │ presented it yet. Answer it with        │
                                         │                               │ │ fractal alerts.                         │
@@ -25,7 +26,6 @@
                                         │                               │ │  g  Go to the mission                   │
                                         │                               │ │                                         │
                                         │                               │ ╰─────────────────────────────────────────╯
-                                        │                               │
                                         │                               │
                                         │                               │
                                         │ ──────────────────────────────│
@@ -205,23 +205,22 @@
 === Conversation ===
  sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  ~ Atlas Builder                                                            +
+ / Filter:                          +New│  ◆ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ? Atlas Builder  running · older Fractal                    codex · meadow
  ▾ Agents 4                             │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-renam
    Atlas Builder                        │    mission example/atlas · Rename fetchUser to loadUser › step-3
    Atlas Docs                           │ ──────────────────────────────────────────────────────────── ctrl+d details ─
-   Atlas Migrator                       │
-   Atlas Reviewer                       │  Can you check why the worker typecheck fails after the rename?
+   Atlas Migrator                       │  Can you check why the worker typecheck fails after the rename?
+   Atlas Reviewer                       │
  ▾ Missions 1                           │
-   example/atlas · Rename fetchUser to l│
- ▾ Machines 2                           │  The typecheck still fails in packages/worker: syncAvatars calls loadUser
-   foundry                              │  with one argument. I asked Robin whether to thread the session through.
-   meadow                               │
-                                        │  starting · transcript unavailable until the harness writes its first line
+   example/atlas · Rename fetchUser to l│  The typecheck still fails in packages/worker: syncAvatars calls loadUser
+ ▾ Machines 2                           │  with one argument. I asked Robin whether to thread the session through.
+   foundry                              │
+   meadow                               │  starting · transcript unavailable until the harness writes its first line
                                         │
                                         │ ────── status: running · running
                                         │
-                                        │ ────── delivery paused · channel not verified yet                           ┃
+                                        │ ────── delivery paused · channel not verified yet
                                         │                                                                             ┃
                                         │  starting · transcript unavailable until the harness writes its first line  ┃
                                         │                                                                             ┃
@@ -231,6 +230,7 @@
                                         │                                                                             ┃
                                         │  starting · transcript unavailable until the harness writes its first line  ┃
                                         │                                                                             ┃
+                                        │  ◆ 1 alert · ? Worker typecheck fails after the rename ▸ show · Ctrl+N
                                         │ ─────────────────────────────────────────────────────────────────────────────
                                         │ › Message Atlas Builder · type or click
                                         │
@@ -239,32 +239,32 @@
 === Agent details ===
  sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                                                       ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                              +New│  ~ Atlas Builder                                                                                                +
+ / Filter:                              +New│  ◆ Atlas Builder                                                                                                +
  ▾ Everything else 7                        │  ? Atlas Builder  running · older Fractal                 codex · meadow   │ details                    × close
  ▾ Agents 4                                 │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-re  │ now ──────────────────────────────
    Atlas Builder                            │    mission example/atlas · Rename fetchUser to loadUser › step-3           │ example/atlas · Rename fetchUser to
    Atlas Docs                               │ ────────────────────────────────────────────────── ctrl+d hide details ▸ ─ │ held since 38m ago
-   Atlas Migrator                           │  Can you check why the worker typecheck fails after the rename?            │
+   Atlas Migrator                           │                                                                            │
    Atlas Reviewer                           │                                                                            │ next 0 ───────────────────────────
- ▾ Missions 1                               │                                                                            │ Nothing queued.
-   example/atlas · Rename fetchUser to loadU│  The typecheck still fails in packages/worker: syncAvatars calls           │
- ▾ Machines 2                               │  loadUser with one argument. I asked Robin whether to thread the session   │ runs as ──────────────────────────
-   foundry                                  │  through.                                                                  │ ? running · older Fractal
-   meadow                                   │                                                                            │ harness  codex
-                                            │  starting · transcript unavailable until the harness writes its first l…   │ model    Fractal has not said
-                                            │                                                                            │ state    blocked
-                                            │ ────── status: running · running                                           │ runtime  Fractal has not said
-                                            │                                                                            │ host     meadow
-                                            │ ────── delivery paused · channel not verified yet                        ┃ │ worktree worktree · branch builder/
-                                            │                                                                          ┃ │
-                                            │  starting · transcript unavailable until the harness writes its first l… ┃ │ agent/example/atlas/builder
-                                            │                                                                          ┃ │
+ ▾ Missions 1                               │  The typecheck still fails in packages/worker: syncAvatars calls           │ Nothing queued.
+   example/atlas · Rename fetchUser to loadU│  loadUser with one argument. I asked Robin whether to thread the session   │
+ ▾ Machines 2                               │  through.                                                                  │ runs as ──────────────────────────
+   foundry                                  │                                                                            │ ? running · older Fractal
+   meadow                                   │  starting · transcript unavailable until the harness writes its first l…   │ harness  codex
+                                            │                                                                            │ model    Fractal has not said
+                                            │ ────── status: running · running                                           │ state    blocked
+                                            │                                                                            │ runtime  Fractal has not said
+                                            │ ────── delivery paused · channel not verified yet                          │ host     meadow
+                                            │                                                                          ┃ │ worktree worktree · branch builder/
+                                            │  starting · transcript unavailable until the harness writes its first l… ┃ │
+                                            │                                                                          ┃ │ agent/example/atlas/builder
                                             │                                                                          ┃ │
                                             │  Can you check why the worker typecheck fails after the rename?          ┃ │
                                             │                                                                          ┃ │
                                             │                                                                          ┃ │
                                             │  starting · transcript unavailable until the harness writes its first l… ┃ │
                                             │                                                                          ┃ │
+                                            │  ◆ 1 alert · ? Worker typecheck fails after the rename ▸ show · Ctrl+N     │
                                             │ ────────────────────────────────────────────────────────────────────────── │
                                             │ › Message Atlas Builder · type or click                                    │
                                             │                                                                            │
@@ -273,19 +273,19 @@
 === Terminal ===
  sidebar · ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                               ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  ~ Atlas Builder                                                            +
+ / Filter:                          +New│  ◆ Atlas Builder                                                            +
  ▾ Everything else 7                    │  ← Return · Ctrl+\   Atlas Builder · demo terminal
  ▾ Agents 4                             │  Ctrl-C and Ctrl-D need a second press to reach the agent
-   Atlas Builder                        │ scenario harness ready
-   Atlas Docs                           │ $ pnpm -r typecheck
-   Atlas Migrator                       │ packages/api typecheck: Done
-   Atlas Reviewer                       │ packages/web typecheck: Done
- ▾ Missions 1                           │ packages/worker typecheck: src/jobs/syncAvatars.ts(41,18): error TS2554: Expe
-   example/atlas · Rename fetchUser to l│ d 2 arguments, but got 1.
- ▾ Machines 2                           │ packages/worker typecheck: Failed
-   foundry                              │
-   meadow                               │ scenario turn 3 output complete
-                                        │
+   Atlas Builder                        │  ◆ 1 alert · ? Worker typecheck fails after the rename ▸ show
+   Atlas Docs                           │ scenario harness ready
+   Atlas Migrator                       │ $ pnpm -r typecheck
+   Atlas Reviewer                       │ packages/api typecheck: Done
+ ▾ Missions 1                           │ packages/web typecheck: Done
+   example/atlas · Rename fetchUser to l│ packages/worker typecheck: src/jobs/syncAvatars.ts(41,18): error TS2554: Expe
+ ▾ Machines 2                           │ d 2 arguments, but got 1.
+   foundry                              │ packages/worker typecheck: Failed
+   meadow                               │
+                                        │ scenario turn 3 output complete
                                         │
                                         │
                                         │

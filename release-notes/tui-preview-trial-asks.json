@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Seed agent-authored Inbox asks for the isolated thread preview trial",
+  "replay": { "status": "none", "detail": "The ignored setup test changes only the explicitly selected stopped scratch store." },
+  "schema": { "status": "none", "detail": "Uses the existing production PersonAskRequest admission path." },
+  "rules": { "status": "none", "detail": "No person pairing or person CLI writes are added. Existing stand-in Botanist and Surveyor agents author the two asks to scratch person/avery." },
+  "compatibility": { "status": "none", "detail": "Normal tests and production operation do not run the ignored scratch setup." },
+  "downtime": { "status": "changed", "detail": "Stop only the isolated preview scratch daemon before running seed_scratch_trial_asks; the test refuses a reachable scratch socket." },
+  "manual": { "status": "changed", "detail": "After seed_scratch_threads, run seed_scratch_trial_asks to add Preview trial: humidity calibration decision and Preview trial: frost cover decision. Idempotency keys are preview-trial-ask-calibration-v1 and preview-trial-ask-frost-v1; reseeding checks that the same source IDs are returned." },
+  "recovery": { "status": "none", "detail": "Reset the scratch world from the person's offline baseline, then reseed; no live fleet state is involved." }
+}

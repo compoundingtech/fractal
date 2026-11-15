@@ -9,7 +9,7 @@ use fractal_client::{
     ThreadRenameParameters, ThreadReplyParameters, ThreadStartParameters, ThreadState,
     ThreadSummary, ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
 };
-use fractal_feed::{ThreadAccess, ThreadInterest, model::Model};
+use fractal_feed::{THREAD_UPDATES_PAUSED, ThreadAccess, ThreadInterest, model::Model};
 use ratatui::text::{Line, Span};
 
 use super::{
@@ -23,6 +23,9 @@ use super::{
 const DRAFT_COLLISION: &str = "This item has different saved drafts. Both drafts are kept. Combine saved drafts to edit both together; nothing will be sent.";
 const DRAFT_LOCKED_COLLISION: &str = "Both saved drafts are kept. Settle the original thread delivery before combining them; its request cannot be rewritten.";
 const DRAFT_COMBINED: &str = "Both saved drafts were combined for editing. Nothing has been sent.";
+const NOTHING_TO_SEND: &str = "Write something first; nothing was sent";
+/// One line under a paused thread's own heading; the view explains the pause once.
+const PAUSED_NOTICE: &str = "Paused · collapse a thread to resume live updates";
 
 fn start_draft_text<'a>(
     texts: &'a HashMap<String, String>,
@@ -384,9 +387,68 @@ pub(super) struct Threads {
     writes: Vec<Write>,
     pending_actions: BTreeMap<String, Delivery>,
     hover: Option<String>,
+    /// Why the last Enter or Send queued nothing, until the shell says it (`take_refusal`).
+    refusal: Option<String>,
+    completion_notice: Option<String>,
 }
 
 impl Threads {
+    /// Hydrate the ordinary native windows from the shared demo world, without a transport.
+    /// Access stays read-only: demo mode has no thread mutation receipt driver.
+    pub(super) fn demo_windows(
+        &mut self,
+        model: &Model,
+        snapshot: &Snapshot,
+        rows: Vec<super::demo::TopicThread>,
+    ) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.enable(true);
+        self.set_access(ThreadAccess::default());
+        self.model(model);
+        let mut contexts: BTreeMap<ThreadInterest, Vec<ThreadSummary>> = BTreeMap::new();
+        for row in rows {
+            let origin = self.origins.get(&row.origin_attention_id).ok_or_else(|| {
+                anyhow::anyhow!("Demo thread {} has no readable Inbox origin {}", row.summary.id, row.origin_attention_id)
+            })?;
+            anyhow::ensure!(
+                origin.agent == row.summary.agent_id,
+                "Demo thread {} and its Inbox origin have different conversations",
+                row.summary.id
+            );
+            for context in [
+                origin.context.clone(),
+                ThreadInterest::Agent(row.summary.agent_id.clone()),
+            ] {
+                contexts.entry(context).or_default().push(row.summary.clone());
+            }
+            let order = row.events.iter().map(|event| event.id.clone()).collect();
+            self.window(
+                ThreadInterest::Timeline(row.summary.id.clone()),
+                snapshot.clone(),
+                true,
+                ThreadCollectionRows::Timeline(row.events),
+                vec![],
+                order,
+                false,
+            );
+        }
+        for (context, summaries) in contexts {
+            let order = summaries.iter().map(|summary| summary.id.clone()).collect();
+            self.window(
+                context,
+                snapshot.clone(),
+                true,
+                ThreadCollectionRows::Summaries(summaries),
+                vec![],
+                order,
+                false,
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn enable(&mut self, available: bool) {
         self.available = available;
         if !available {
@@ -645,15 +707,18 @@ impl Threads {
         })
     }
 
+    /// The thread action a key names for the thread this pane acts on. Where a bare letter
+    /// types into a message box (an agent's conversation, a thread tab) the action takes Alt
+    /// and the bare letter stays text; elsewhere, as in an Inbox item, the bare letter acts.
     pub(super) fn shortcut(&self, pane: &Pane, key: KeyEvent) -> Option<thread::Tap> {
+        let host = pane.key();
         if !self.available
-            || key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            || key.modifiers.contains(KeyModifiers::CONTROL)
+            || key.modifiers.contains(KeyModifiers::ALT) != Self::alt_chords(&host)
             || self
                 .focused
                 .as_ref()
-                .is_some_and(|(host, _)| host == &pane.key())
+                .is_some_and(|(place, _)| place == &host)
         {
             return None;
         }
@@ -667,10 +732,16 @@ impl Threads {
             }
             _ => {
                 let id = self.selected.get(&pane.key())?;
-                if !self
-                    .open
-                    .get(&pane.key())
-                    .is_some_and(|expanded| expanded.contains(id))
+                // Expanded, or a collapsed heading Ctrl+↑/↓ focused while it is still listed.
+                let listed = self
+                    .context(pane)
+                    .and_then(|context| self.lists.get(&context))
+                    .is_some_and(|ids| ids.contains(id));
+                if !listed
+                    && !self
+                        .open
+                        .get(&pane.key())
+                        .is_some_and(|expanded| expanded.contains(id))
                 {
                     return None;
                 }
@@ -1036,6 +1107,7 @@ impl Threads {
         let host = pane.key();
         if let Pane::Thread(id) = pane {
             self.panel(&mut doc, &host, id, true, true, width, cursor, world, texts);
+            self.explain_pause(&mut doc, self.paused(id), width);
             return doc;
         }
         if let Pane::Home(Some(id)) = pane
@@ -1044,35 +1116,17 @@ impl Threads {
             self.panel(
                 &mut doc, &host, id, true, false, width, cursor, world, texts,
             );
+            self.explain_pause(&mut doc, self.paused(id), width);
             return doc;
         }
         if let Some(context) = self.context(pane) {
             let ids = self.lists.get(&context);
-            let start = match pane {
-                Pane::Home(Some(item)) if ids.is_some() => self.start_input(item),
-                _ => self.retained_origins.iter().find_map(|(item, origin)| {
-                    if context != ThreadInterest::Agent(origin.agent.clone()) {
-                        return None;
-                    }
-                    let input = self.start_input(item)?;
-                    self.drafts
-                        .get(&input.key())
-                        .and_then(|draft| draft.delivery.as_ref())
-                        .filter(|delivery| delivery.unknown || delivery.pending)
-                        .map(|_| input)
-                }),
-            };
+            let start = self.start_for(pane, &context);
             let drafting = start
                 .as_ref()
                 .filter(|input| texts.contains_key(&input.key()));
-            // Keep the new thread at the draft's position. The authoritative collection
-            // still orders the other threads and may arrive after the start receipt.
-            let pinned = self
-                .start_slot
-                .as_ref()
-                .filter(|(interest, _)| ids.is_some() && interest == &context && drafting.is_none())
-                .map(|(_, id)| id);
-            if ids.is_some_and(|ids| !ids.is_empty()) || drafting.is_some() || pinned.is_some() {
+            let rows: Vec<_> = self.row_order(&context, drafting).collect();
+            if ids.is_some_and(|ids| !ids.is_empty()) || drafting.is_some() || !rows.is_empty() {
                 doc.blank();
                 doc.section("Threads", None, width);
             }
@@ -1084,6 +1138,7 @@ impl Threads {
                         &origin.title,
                         &format!(" · Draft · to {}", origin.agent),
                         true,
+                        false,
                         width,
                     ));
                 }
@@ -1097,29 +1152,18 @@ impl Threads {
                     texts,
                 );
             }
-            let submitted = drafting
-                .and_then(|input| self.drafts.get(&input.key()))
-                .and_then(|draft| draft.delivery.as_ref())
-                .map(|delivery| &delivery.write.id);
-            let siblings = ids
-                .into_iter()
-                .flatten()
-                .filter(|id| Some(*id) != pinned && Some(*id) != submitted);
-            for id in pinned.into_iter().chain(siblings) {
+            let mut paused = false;
+            for id in rows {
+                let open = self
+                    .open
+                    .get(&host)
+                    .is_some_and(|expanded| expanded.contains(id));
+                paused |= open && self.paused(id);
                 self.panel(
-                    &mut doc,
-                    &host,
-                    id,
-                    self.open
-                        .get(&host)
-                        .is_some_and(|expanded| expanded.contains(id)),
-                    false,
-                    width,
-                    cursor,
-                    world,
-                    texts,
+                    &mut doc, &host, id, open, false, width, cursor, world, texts,
                 );
             }
+            self.explain_pause(&mut doc, paused, width);
             if let Some(message) = self.failures.get(&context) {
                 doc.wrap(&[text::run(message, theme::dim())], width);
                 if message == DRAFT_COLLISION
@@ -1138,7 +1182,7 @@ impl Threads {
                 && drafting.is_none()
             {
                 doc.buttons(&[(
-                    "T",
+                    "t",
                     "Start thread",
                     Hit::Thread(host, thread::Tap::Start(item.clone())),
                     theme::SAPPHIRE,
@@ -1146,6 +1190,116 @@ impl Threads {
             }
         }
         doc
+    }
+
+    /// The start a view offers or still delivers: its Inbox item's own, or a start for this
+    /// agent whose first message is pending or unknown.
+    fn start_for(&self, pane: &Pane, context: &ThreadInterest) -> Option<Input> {
+        match pane {
+            Pane::Home(Some(item)) if self.lists.contains_key(context) => self.start_input(item),
+            _ => self.retained_origins.iter().find_map(|(item, origin)| {
+                if *context != ThreadInterest::Agent(origin.agent.clone()) {
+                    return None;
+                }
+                let input = self.start_input(item)?;
+                self.drafts
+                    .get(&input.key())
+                    .and_then(|draft| draft.delivery.as_ref())
+                    .filter(|delivery| delivery.unknown || delivery.pending)
+                    .map(|_| input)
+            }),
+        }
+    }
+
+    /// The thread headings `mount` lists for `context`, top to bottom. A new thread keeps its
+    /// draft's position; the authoritative collection still orders the other threads and may
+    /// arrive after the start receipt.
+    fn row_order<'a>(
+        &'a self,
+        context: &ThreadInterest,
+        drafting: Option<&Input>,
+    ) -> impl Iterator<Item = &'a String> {
+        let ids = self.lists.get(context);
+        let pinned = self
+            .start_slot
+            .as_ref()
+            .filter(|(interest, _)| ids.is_some() && interest == context && drafting.is_none())
+            .map(|(_, id)| id);
+        let submitted = drafting
+            .and_then(|input| self.drafts.get(&input.key()))
+            .and_then(|draft| draft.delivery.as_ref())
+            .map(|delivery| &delivery.write.id);
+        let siblings = ids
+            .into_iter()
+            .flatten()
+            .filter(move |id| Some(*id) != pinned && Some(*id) != submitted);
+        pinned.into_iter().chain(siblings)
+    }
+
+    /// The thread headings `mount` draws in a list host, top to bottom: what Ctrl+↑/↓ walk
+    /// after an agent conversation's tools.
+    pub(super) fn rows(&self, pane: &Pane, texts: &HashMap<String, String>) -> Vec<String> {
+        if !self.available
+            || matches!(pane, Pane::Thread(_))
+            || matches!(pane, Pane::Home(Some(id)) if id.starts_with("thread/"))
+        {
+            return Vec::new();
+        }
+        let Some(context) = self.context(pane) else {
+            return Vec::new();
+        };
+        let start = self.start_for(pane, &context);
+        let drafting = start
+            .as_ref()
+            .filter(|input| texts.contains_key(&input.key()));
+        self.row_order(&context, drafting)
+            .filter(|id| self.summaries.contains_key(*id))
+            .cloned()
+            .collect()
+    }
+
+    /// The listed heading that has the keyboard in `pane`: it draws the `▌` gutter and the
+    /// thread keys act on it, expanded or not.
+    pub(super) fn focused_row(&self, pane: &Pane, texts: &HashMap<String, String>) -> Option<String> {
+        let id = self.selected.get(&pane.key())?;
+        self.rows(pane, texts).contains(id).then(|| id.clone())
+    }
+
+    /// Give the keyboard to heading `id` in `pane`, or to none of them (a tool took it).
+    pub(super) fn select_row(&mut self, pane: &Pane, id: Option<&str>) {
+        match id {
+            Some(id) => self.selected.insert(pane.key(), id.to_owned()),
+            None => self.selected.remove(&pane.key()),
+        };
+    }
+
+    /// A thread box in `pane` lets go of the keys, as Esc does; its draft stays.
+    pub(super) fn leave_input(&mut self, pane: &Pane) {
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|(host, _)| *host == pane.key())
+        {
+            self.focused = None;
+        }
+    }
+
+    /// Ctrl+Enter on the focused heading expands or collapses it in place. Unlike a click,
+    /// expanding never hands the reply box the keys, so the heading keeps them: Ctrl+Enter
+    /// again collapses it and the thread keys still act on it.
+    pub(super) fn toggle_row(&mut self, pane: &Pane, id: &str) {
+        let host = pane.key();
+        let expanded = self.open.entry(host.clone()).or_default();
+        let collapsed = expanded.remove(id);
+        if !collapsed {
+            expanded.insert(id.to_owned());
+        } else if expanded.is_empty() {
+            self.open.remove(&host);
+        }
+        if collapsed {
+            self.blur_thread(&host, id);
+        }
+        self.selected.insert(host, id.to_owned());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1161,27 +1315,27 @@ impl Threads {
         world: &super::view::World,
         texts: &HashMap<String, String>,
     ) {
-        let timeline = ThreadInterest::Timeline(id.into());
         let summary = self.summary(id);
-        let panel_open = open && self.histories.contains_key(id);
+        let loaded = self.histories.contains_key(id);
+        let panel_open = open && loaded;
         let reply_editor_visible = panel_open && self.access.reply;
         let rename_editor_visible =
             self.focused.as_ref() == Some(&(host.into(), Input::Rename(id.into())));
-        if open {
-            let missing = summary.is_none() || !self.histories.contains_key(id);
-            if let Some(reason) = self.failures.get(&timeline) {
-                // A paused live window keeps its cached body/draft, but must not pretend
-                // those rows are current or remain an unexplained loading placeholder.
-                doc.wrap(&[text::run(reason, theme::dim())], width);
-            } else if missing {
-                doc.wrap(&[text::run("Loading thread…", theme::dim())], width);
-            }
-            if missing && (standalone || summary.is_none()) {
-                self.panel_feedback(doc, host, id, false, false, width);
-                return;
-            }
-        }
+        // A paused live window keeps its cached body/draft, but must not pretend those rows
+        // are current or remain an unexplained loading placeholder. The status sits under
+        // this thread's own heading; the view explains a pause once, below its threads.
+        let notice = open
+            .then(|| match self.failures.get(&ThreadInterest::Timeline(id.into())) {
+                Some(_) if self.paused(id) => Some(PAUSED_NOTICE),
+                Some(reason) => Some(reason.as_str()),
+                None => (!loaded || summary.is_none()).then_some("Loading thread…"),
+            })
+            .flatten();
         let Some(summary) = summary else {
+            if let Some(notice) = notice {
+                doc.wrap(&[text::run(notice, theme::dim())], width);
+                self.panel_feedback(doc, host, id, false, false, width);
+            }
             return;
         };
         let source = self.histories.get(id);
@@ -1209,11 +1363,18 @@ impl Threads {
                 })
             })
             .or(quote);
+        let hotkeys = self.hotkeys_for(host, id);
         let rendered = thread::client_panel(
             summary,
             &history,
             &thread::State {
-                open: panel_open,
+                open,
+                awaiting_history: !loaded,
+                notice,
+                // Keep the selected destination visible while its composer owns the keys, and
+                // on a collapsed heading Ctrl+↑/↓ focused.
+                selected: !standalone
+                    && self.selected.get(host).is_some_and(|selected| selected == id),
                 standalone,
                 draft: draft_text,
                 cursor: focus.then(|| cursor.at(&key, draft_text)),
@@ -1226,7 +1387,8 @@ impl Threads {
                 pending_reply: draft
                     .and_then(|draft| draft.delivery.as_ref())
                     .is_some_and(|delivery| delivery.pending),
-                hotkeys: self.hotkeys_for(host, id),
+                hotkeys,
+                alt_keys: Self::alt_chords(host),
                 can_rename: self.access.rename,
                 can_close: self.access.close,
                 can_reopen: self.access.reopen,
@@ -1275,6 +1437,19 @@ impl Threads {
                 width,
                 texts,
             );
+        }
+    }
+
+    fn paused(&self, id: &str) -> bool {
+        self.failures
+            .get(&ThreadInterest::Timeline(id.into()))
+            .is_some_and(|reason| reason == THREAD_UPDATES_PAUSED)
+    }
+
+    /// Each paused thread carries a one-line notice; the full reason appears once per view.
+    fn explain_pause(&self, doc: &mut Doc, paused: bool, width: usize) {
+        if paused {
+            doc.wrap(&[text::run(THREAD_UPDATES_PAUSED, theme::dim())], width);
         }
     }
 
@@ -1517,6 +1692,12 @@ impl Threads {
         }
     }
 
+    /// Hosts where a bare letter types into a message box: an agent's conversation starts a
+    /// message to the agent, and a thread tab starts a reply. Thread actions there take Alt.
+    fn alt_chords(host: &str) -> bool {
+        matches!(Pane::parse(host), Some(Pane::Agent(_) | Pane::Thread(_)))
+    }
+
     fn hotkeys_for(&self, host: &str, id: &str) -> bool {
         !self
             .focused
@@ -1570,10 +1751,10 @@ impl Threads {
                 width,
             );
             doc.buttons(&[(
-                if self.hotkeys_for(host, &delivery.write.id) {
-                    "R"
-                } else {
-                    ""
+                match (self.hotkeys_for(host, &delivery.write.id), Self::alt_chords(host)) {
+                    (false, _) => "",
+                    (true, false) => "r",
+                    (true, true) => "alt+r",
                 },
                 &format!("Retry {}", delivery.write.label()),
                 Hit::Thread(host.into(), thread::Tap::Retry(delivery.write.key.clone())),
@@ -1638,8 +1819,12 @@ impl Threads {
             self.focused = None;
         }
         if self.focused.is_none() {
-            if key.code == KeyCode::Char('t')
-                && key.modifiers.is_empty()
+            // The keycap reads `t`; Shift+T starts the thread too, as the other thread keys
+            // accept either case.
+            if matches!(key.code, KeyCode::Char('t' | 'T'))
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 && let Pane::Home(Some(item)) = pane
                 && self.start_input(item).is_some()
             {
@@ -1750,8 +1935,11 @@ impl Threads {
         text: &str,
         draft: &Draft,
     ) -> Result<Write, String> {
-        if !self.available || !self.allowed(input) || text.trim().is_empty() {
+        if !self.available || !self.allowed(input) {
             return Err("The thread is not ready to send".into());
+        }
+        if text.trim().is_empty() {
+            return Err(NOTHING_TO_SEND.into());
         }
         if draft
             .delivery
@@ -1884,11 +2072,23 @@ impl Threads {
 
     fn submit(&mut self, host: &str, input: Input, texts: &HashMap<String, String>) {
         let key = input.key();
-        if let (Some(draft), Some(text)) = (self.drafts.get(&key), texts.get(&key))
-            && let Ok(write) = self.prepare_write(host, &input, text, draft)
-        {
-            self.retain_and_queue(&input, write);
-        }
+        let refusal = match (self.drafts.get(&key), texts.get(&key)) {
+            (Some(draft), Some(text)) => match self.prepare_write(host, &input, text, draft) {
+                Ok(write) => {
+                    self.retain_and_queue(&input, write);
+                    return;
+                }
+                Err(refusal) => refusal,
+            },
+            _ => NOTHING_TO_SEND.into(),
+        };
+        // Nothing was queued and the draft stays: the person hears why instead of a silent Enter.
+        self.refusal = Some(refusal);
+    }
+
+    /// Why the last Enter or Send queued nothing, said once.
+    pub(super) fn take_refusal(&mut self) -> Option<String> {
+        self.refusal.take()
     }
 
     fn has_edit(&self, id: &str) -> bool {
@@ -2035,6 +2235,7 @@ impl Threads {
         receipt: Receipt,
         texts: &mut HashMap<String, String>,
     ) -> Option<String> {
+        self.completion_notice = None;
         let Receipt {
             write,
             confirmation,
@@ -2106,6 +2307,15 @@ impl Threads {
         if let Some(summary) = summary {
             self.put_summary(summary);
         }
+        self.completion_notice = match &write.mutation {
+            Mutation::Close => self.summary(&write.id).map(|thread| format!(
+                "Closed “{}” · {} reopens", thread.title,
+                if Self::alt_chords(&write.host) { "alt+z" } else { "z" })),
+            Mutation::Reopen => self.summary(&write.id)
+                .map(|thread| format!("Reopened “{}”", thread.title)),
+            Mutation::Rename(parameters) => Some(format!("Renamed to “{}”", parameters.title)),
+            _ => None,
+        };
         if let Some(key) = &write.input {
             self.drafts.remove(key);
             texts.remove(key);
@@ -2143,6 +2353,10 @@ impl Threads {
             _ => {}
         }
         None
+    }
+
+    pub(super) fn take_completion_notice(&mut self) -> Option<String> {
+        self.completion_notice.take()
     }
 }
 
@@ -2192,3 +2406,5 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod render_tests;

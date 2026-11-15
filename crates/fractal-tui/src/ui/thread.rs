@@ -2,7 +2,10 @@
 //! authoritative thread and records after checking the negotiated capability.
 
 use fractal_conversation_ui::doc::Target;
-use ratatui::text::{Line, Span};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 
 use super::{composer, doc::DocExt, text, theme};
 
@@ -27,9 +30,14 @@ pub enum Tap {
 
 pub type Doc = fractal_conversation_ui::doc::Doc<Tap>;
 
+/// Shown in a thread tab instead of a composer when this connection may not change threads.
+pub const READ_ONLY: &str = "Read-only on this device: replies and changes need write access.";
+
 pub struct Summary<'a> {
     pub id: &'a str,
     pub title: &'a str,
+    /// The agent the thread talks to, as the person knows it (its display name).
+    pub agent: &'a str,
     pub closed: bool,
     pub message_count: usize,
     pub unread: bool,
@@ -62,7 +70,15 @@ pub enum Record<'a> {
 
 #[derive(Default)]
 pub struct State<'a> {
+    /// The requested disclosure. An open thread draws `▾` even while its history is paused
+    /// or loading, so the chevron never claims a collapse the user did not ask for.
     pub open: bool,
+    /// The open thread has no history to draw yet; only the heading and notice render.
+    pub awaiting_history: bool,
+    /// One status line drawn directly under this thread's own heading.
+    pub notice: Option<&'a str>,
+    /// The thread the keyboard acts on in a list of threads; its heading gets the gutter.
+    pub selected: bool,
     pub standalone: bool,
     pub draft: &'a str,
     pub cursor: Option<usize>,
@@ -74,6 +90,9 @@ pub struct State<'a> {
     pub can_reply: bool,
     pub pending_reply: bool,
     pub hotkeys: bool,
+    /// The host types any bare letter into a message box (an agent's conversation, a thread
+    /// tab), so its thread actions take Alt and their keycaps read `alt+z`, not `z`.
+    pub alt_keys: bool,
     pub can_rename: bool,
     pub can_close: bool,
     pub can_reopen: bool,
@@ -92,9 +111,11 @@ pub fn client_panel(
 ) -> Option<Doc> {
     use fractal_client::{ThreadState, ThreadTimelineChange};
 
+    let agent = actor_name(&summary.agent_id).unwrap_or_else(|| summary.agent_id.clone());
     let summary = Summary {
         id: &summary.id,
         title: &summary.title,
+        agent: &agent,
         closed: summary.state == ThreadState::Closed,
         message_count: summary.message_count?.try_into().ok()?,
         unread: summary.unread?,
@@ -159,8 +180,17 @@ pub fn client_panel(
     Some(panel(&summary, &records, state, width))
 }
 
-pub(super) fn heading(title: &str, metadata: &str, open: bool, width: usize) -> Line<'static> {
+/// `selected` marks the thread the keyboard acts on the way the Inbox marks its selected
+/// row: a `▌` gutter (visible without color) on a full-width selected-row background.
+pub(super) fn heading(
+    title: &str,
+    metadata: &str,
+    open: bool,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
     let title = inline(title);
+    let gutter = if selected && width > 2 { "▌" } else { "" };
     let marker = if width == 1 {
         if open { "▾" } else { "▸" }
     } else if open {
@@ -168,7 +198,7 @@ pub(super) fn heading(title: &str, metadata: &str, open: bool, width: usize) -> 
     } else {
         "▸ "
     };
-    let room = width.saturating_sub(text::width(marker));
+    let room = width.saturating_sub(text::width(gutter) + text::width(marker));
     let title_min = text::width(&title).min(12);
     let metadata = if text::width(metadata) <= room.saturating_sub(title_min) {
         metadata.to_owned()
@@ -176,11 +206,33 @@ pub(super) fn heading(title: &str, metadata: &str, open: bool, width: usize) -> 
         String::new()
     };
     let title = text::truncate(&title, room.saturating_sub(text::width(&metadata)));
-    Line::from(vec![
-        Span::styled(marker, theme::strong(theme::SAPPHIRE)),
-        Span::styled(title, theme::strong(theme::SAPPHIRE)),
-        Span::styled(metadata, theme::dim()),
-    ])
+    let row = |style: Style| {
+        if gutter.is_empty() {
+            style
+        } else {
+            style.bg(theme::ROW_SELECTED)
+        }
+    };
+    let mut spans = Vec::with_capacity(5);
+    if !gutter.is_empty() {
+        spans.push(Span::styled(gutter, row(theme::fg(theme::ACCENT))));
+    }
+    let used = text::width(gutter)
+        + text::width(marker)
+        + text::width(&title)
+        + text::width(&metadata);
+    spans.extend([
+        Span::styled(marker, row(theme::strong(theme::SAPPHIRE))),
+        Span::styled(title, row(theme::strong(theme::SAPPHIRE))),
+        Span::styled(metadata, row(theme::dim())),
+    ]);
+    if !gutter.is_empty() {
+        spans.push(Span::styled(
+            " ".repeat(width.saturating_sub(used)),
+            row(Style::default()),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// A collapsed embed takes exactly one line. The header remains the toggle when open.
@@ -203,11 +255,44 @@ pub fn panel(
             if summary.closed { " · closed" } else { "" },
             if summary.unread { " · unread" } else { "" },
         );
-        doc.line(heading(summary.title, &metadata, state.open, width));
+        doc.line(heading(
+            summary.title,
+            &metadata,
+            state.open,
+            state.selected,
+            width,
+        ));
         target(&mut doc, 0, 0, width, Tap::Toggle(summary.id.to_owned()));
         if !state.open {
             return doc;
         }
+    } else {
+        // A tab has no disclosure heading, so it names the thread, its agent and its state.
+        let title = inline(summary.title);
+        let metadata = format!(
+            " · to {} · {}",
+            inline(summary.agent),
+            if summary.closed { "closed" } else { "open" },
+        );
+        let metadata = if text::width(&metadata) + text::width(&title).min(12) <= width {
+            metadata
+        } else {
+            String::new()
+        };
+        doc.line(Line::from(vec![
+            Span::styled(
+                text::truncate(&title, width.saturating_sub(text::width(&metadata))),
+                theme::strong(theme::SAPPHIRE),
+            ),
+            Span::styled(metadata, theme::dim()),
+        ]));
+        doc.blank();
+    }
+    if let Some(notice) = state.notice {
+        doc.wrap(&[text::run(notice, theme::dim())], width);
+    }
+    if state.awaiting_history {
+        return doc;
     }
 
     if state.loading_earlier {
@@ -305,6 +390,13 @@ pub fn panel(
             }
         }
     }
+    let has_messages = records
+        .iter()
+        .any(|record| matches!(record, Record::Message { .. }));
+    if !has_messages && !state.has_earlier && !state.loading_earlier {
+        doc.line(Line::from(Span::styled("No messages yet.", theme::dim())));
+        doc.blank();
+    }
     if state.can_reply {
         let focused = state.cursor.is_some();
         doc.line(if state.pending_reply && !focused {
@@ -359,6 +451,9 @@ pub fn panel(
             );
         }
         doc.blank();
+    } else if state.standalone && !(state.can_rename || state.can_close || state.can_reopen) {
+        doc.wrap(&[text::run(READ_ONLY, theme::dim())], width);
+        doc.blank();
     }
 
     let (label, lifecycle) = if summary.closed {
@@ -366,10 +461,15 @@ pub fn panel(
     } else {
         ("Close thread", Tap::Close(summary.id.to_owned()))
     };
+    let keycap = |bare: &'static str, chord: &'static str| match (state.hotkeys, state.alt_keys) {
+        (false, _) => "",
+        (true, false) => bare,
+        (true, true) => chord,
+    };
     let mut actions = Vec::new();
     if summary.closed && state.can_reopen || !summary.closed && state.can_close {
         actions.push((
-            if state.hotkeys { "Z" } else { "" },
+            keycap("z", "alt+z"),
             label,
             lifecycle,
             theme::OVERLAY1,
@@ -377,7 +477,7 @@ pub fn panel(
     }
     if state.can_rename {
         actions.push((
-            if state.hotkeys { "N" } else { "" },
+            keycap("n", "alt+n"),
             "Rename",
             Tap::Rename(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -385,7 +485,7 @@ pub fn panel(
     }
     if !state.standalone {
         actions.push((
-            if state.hotkeys { "P" } else { "" },
+            keycap("p", "alt+p"),
             "Open in tab",
             Tap::OpenTab(summary.id.to_owned()),
             theme::SAPPHIRE,
@@ -393,7 +493,7 @@ pub fn panel(
     }
     if summary.unread && state.can_mark_read {
         actions.push((
-            if state.hotkeys { "V" } else { "" },
+            keycap("v", "alt+v"),
             "Mark visible replies read",
             Tap::MarkVisibleRead(summary.id.to_owned()),
             theme::OVERLAY1,
@@ -486,6 +586,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: true,
             message_count: 3,
             unread: true,
@@ -507,6 +608,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: false,
             message_count: 1,
             unread: false,
@@ -541,6 +643,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: false,
             message_count: 0,
             unread: false,
@@ -555,7 +658,8 @@ mod tests {
             },
             80,
         );
-        assert_eq!(doc.lines[1].spans[0].style, theme::fg(theme::ACCENT));
+        assert_eq!(doc.lines[1].to_string(), "No messages yet.");
+        assert_eq!(doc.lines[3].spans[0].style, theme::fg(theme::ACCENT));
         let lines: Vec<_> = doc.lines.iter().map(Line::to_string).collect();
         let controls = lines
             .iter()
@@ -573,6 +677,7 @@ mod tests {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
+            agent: "Atlas Builder",
             closed: true,
             message_count: 1,
             unread: false,
@@ -618,5 +723,176 @@ mod tests {
                 .iter()
                 .any(|target| matches!(target.hit, Tap::Reply { .. }))
         );
+    }
+
+    #[test]
+    fn requested_open_thread_without_history_keeps_open_chevron_and_notice_under_heading() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Sensor follow-up",
+            agent: "Atlas Builder",
+            closed: false,
+            message_count: 0,
+            unread: false,
+        };
+        let doc = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                awaiting_history: true,
+                notice: Some("Paused · collapse a thread to resume live updates"),
+                ..editable()
+            },
+            80,
+        );
+        let lines: Vec<_> = doc.lines.iter().map(Line::to_string).collect();
+        assert_eq!(
+            lines,
+            [
+                "▾ Sensor follow-up · 0 messages",
+                "Paused · collapse a thread to resume live updates",
+            ],
+            "the chevron follows the requested open state and the notice follows its own heading"
+        );
+        assert_eq!(doc.targets[0].hit, Tap::Toggle(summary.id.to_owned()));
+    }
+
+    #[test]
+    fn selected_heading_has_a_glyph_gutter_and_full_row_background() {
+        let line = heading("Worker test", " · 1 message", true, true, 40);
+        let shown = line.to_string();
+        assert!(
+            shown.starts_with("▌▾ Worker test · 1 message"),
+            "the gutter is a glyph, so it survives NO_COLOR: {shown:?}"
+        );
+        assert_eq!(text::width(&shown), 40, "the selected background spans the row");
+        assert!(line.spans.iter().all(|span| span.style.bg == Some(theme::ROW_SELECTED)));
+        assert_eq!(line.spans[0].style.fg, Some(theme::ACCENT));
+        let plain = heading("Worker test", " · 1 message", true, false, 40);
+        assert_eq!(plain.to_string(), "▾ Worker test · 1 message");
+        assert!(plain.spans.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    #[test]
+    fn empty_standalone_thread_names_itself_and_says_why_it_cannot_be_answered() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Sensor follow-up",
+            agent: "Atlas Builder",
+            closed: false,
+            message_count: 0,
+            unread: false,
+        };
+        let read_only = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                standalone: true,
+                ..State::default()
+            },
+            80,
+        );
+        let lines: Vec<_> = read_only.lines.iter().map(Line::to_string).collect();
+        assert_eq!(
+            lines[..5],
+            [
+                "Sensor follow-up · to Atlas Builder · open",
+                "",
+                "No messages yet.",
+                "",
+                READ_ONLY,
+            ]
+        );
+        let writable = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                standalone: true,
+                ..editable()
+            },
+            80,
+        );
+        let lines: Vec<_> = writable.lines.iter().map(Line::to_string).collect();
+        assert!(!lines.iter().any(|line| line == READ_ONLY));
+        assert!(lines.iter().any(|line| line == "No messages yet."));
+        let closed = panel(
+            &Summary {
+                closed: true,
+                ..summary
+            },
+            &[],
+            &State {
+                open: true,
+                standalone: true,
+                ..State::default()
+            },
+            80,
+        );
+        assert_eq!(
+            closed.lines[0].to_string(),
+            "Sensor follow-up · to Atlas Builder · closed"
+        );
+    }
+
+    #[test]
+    fn thread_action_keycaps_are_lowercase_like_the_footer_and_help() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Worker test",
+            agent: "Atlas Builder",
+            closed: false,
+            message_count: 0,
+            unread: true,
+        };
+        let doc = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                can_mark_read: true,
+                ..editable()
+            },
+            120,
+        );
+        let actions = doc.lines.last().unwrap().to_string();
+        for keycap in [" z ", " n ", " p ", " v "] {
+            assert!(actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
+        for keycap in [" Z ", " N ", " P ", " V "] {
+            assert!(!actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
+    }
+
+    #[test]
+    fn thread_action_keycaps_take_alt_where_letters_type() {
+        let summary = Summary {
+            id: "thread/1",
+            title: "Worker test",
+            agent: "Atlas Builder",
+            closed: false,
+            message_count: 0,
+            unread: true,
+        };
+        let doc = panel(
+            &summary,
+            &[],
+            &State {
+                open: true,
+                can_mark_read: true,
+                alt_keys: true,
+                ..editable()
+            },
+            120,
+        );
+        let actions = doc.lines.last().unwrap().to_string();
+        for keycap in [" alt+z ", " alt+n ", " alt+p ", " alt+v "] {
+            assert!(actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
+        for keycap in [" z ", " n ", " p ", " v "] {
+            assert!(!actions.contains(keycap), "{keycap:?} in {actions:?}");
+        }
     }
 }

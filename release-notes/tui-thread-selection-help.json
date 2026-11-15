@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Mark the expanded thread that thread keys act on, and list thread keys in help",
+  "replay": { "status": "none", "detail": "Rendering only; no durable data is replayed." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "Thread key bindings, selection and access rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Clients and daemons interoperate as before." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "changed", "detail": "Expand two threads in an agent pane: the selected thread draws a ▌ gutter on the selected-row background, like the Inbox list, and the gutter stays visible with NO_COLOR and while its composer is focused. Press ? to see the new threads section: click ▸ ▾, t, p, z, n, v, r, esc and ctrl+r." },
+  "recovery": { "status": "none", "detail": "No state changes." }
+}

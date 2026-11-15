@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep paused threads visibly open, with their pause notice under their own heading and one plain explanation per view",
+  "replay": { "status": "none", "detail": "Rendering only; no durable data is replayed." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes. The paused status keeps its existing update shape with plainer text." },
+  "rules": { "status": "none", "detail": "The four-thread live-window budget and its pause/resume policy are unchanged." },
+  "compatibility": { "status": "none", "detail": "Clients and daemons interoperate as before." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "changed", "detail": "Expand more threads than the live budget admits. Each paused thread shows ▾ with 'Paused · collapse a thread to resume live updates' directly under its heading, and the view explains the pause once below its threads. Clicking ▾ collapses it to ▸." },
+  "recovery": { "status": "none", "detail": "No state changes; collapse a thread or close another view to resume live updates." }
+}
