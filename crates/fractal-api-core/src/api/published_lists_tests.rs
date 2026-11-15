@@ -2418,6 +2418,17 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
     use crate::api::client_v0::published_runtimes::fold as runtimes;
     use crate::store::published_list::Publication;
     use crate::store::runtime_list::RuntimeRows;
+    fn raw(store: &Store, subject: &str, kind: &str, body: Value) -> String {
+        let claim = store.connection.batched(|tx| -> anyhow::Result<_> {
+            let claim = smallclaims::store::append_claim_record_tx(
+                tx, store.origin(), subject, kind, None, &body, &[], None)?;
+            smallclaims::store::register_operation_tx(tx, &claim)?;
+            if kind == "owned-set.revised" { crate::store::owned_sets::project_tx(tx)?; }
+            Ok(claim)
+        }).unwrap().unwrap();
+        store.committed_index.fetch_max(claim.store_index, std::sync::atomic::Ordering::Release);
+        claim.id
+    }
     fn check(store: &Store, base: &mut Publication<RuntimeRows>) -> bool {
         let (next, changed) = runtimes(store, Some(base)).unwrap().unwrap();
         let (oracle, _) = runtimes(store, None).unwrap().unwrap();
@@ -2456,7 +2467,7 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
                     BTreeSet::from([(*subject).to_owned()]));
                 check(&store, &mut base);
                 let items = Arc::clone(&base.rows.items);
-                crate::test_support::note_local_claim(&store, "message/unrelated-runtime");
+                crate::test_support::note_local_claim(&store, &format!("message/unrelated-runtime-{}", base.cut));
                 assert!(store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap().is_empty());
                 assert!(!check(&store, &mut base));
                 assert!(Arc::ptr_eq(&items, &base.rows.items), "unrelated commits do not fold or copy rows");
@@ -2477,4 +2488,45 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
         check(&store, &mut base);
         assert!(!base.rows.items.iter().any(|row| row["owner_id"] == "agent/cedar.a"));
     }
+    let store = Store::open_memory("cedar").unwrap();
+    raw(&store, "agent/cedar.conflict", "runtime.observed", json!({
+        "fields":{"runtime_id":"conflict","status":"running","terminal":true},
+        "_operation":{"id":"runtime-operation","request_digest":"first"}
+    }));
+    let mut base = runtimes(&store, None).unwrap().unwrap().0;
+    raw(&store, "daemon/unrelated", "daemon.started", json!({
+        "fields":{"status":"running"},
+        "_operation":{"id":"runtime-operation","request_digest":"different"}
+    }));
+    assert!(check(&store, &mut base));
+    assert_eq!(base.rows.items[0]["state"], "unreachable");
+    assert_eq!(base.rows.items[0]["terminal_access"]["read"], "unavailable");
+    assert!(base.rows.items[0]["operational"]["reasons"][0].as_str().unwrap().contains("idempotency-conflict"));
+
+    let store = Store::open_memory("amber").unwrap();
+    let intent = crate::store::owned_sets_tests_shared::bundle("true", true);
+    let mut options = crate::store::owned_sets::Options {
+        set: "garden".into(),
+        source: crate::store::owned_sets::Source { repository: "example/garden".into(),
+            r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
+        expected_set: "absent".into(), rollout: None, adopt: Default::default(),
+        allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
+    };
+    options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
+    store.apply_owned_set(&intent, &options, "runtime-owned", "person/operator").unwrap();
+    raw(&store, "agent/garden/meadow", "runtime.observed",
+        json!({"fields":{"runtime_id":"meadow","status":"running"}}));
+    let mut base = runtimes(&store, None).unwrap().unwrap().0;
+    let prior = crate::store::owned_sets::selected(&store.readers.get(), None).unwrap().remove(0);
+    let mut receipt = prior.receipt;
+    receipt.previous = Some(prior.revision);
+    receipt.source.sequence += 1;
+    receipt.members.remove("agent/garden/meadow");
+    let revision = smallclaims::hash::canonical_hash(&receipt).unwrap();
+    // A winning receipt omits a previously known member: no declaration is appended
+    // for it, but its implicit stop's desired token becomes the receipt claim.
+    let receipt_claim = raw(&store, "owned-set/garden", "owned-set.revised",
+        json!({"fields":{"revision":revision,"body":receipt}}));
+    assert!(check(&store, &mut base));
+    assert_eq!(base.rows.items[0]["desired_revision"], json!(receipt_claim));
 }

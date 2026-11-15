@@ -19,9 +19,35 @@ impl Store {
     /// the subjects that have runtime observations.
     pub fn runtime_list_changes(&self, after: u64, through: u64) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
-        let changed = connection.prepare_cached(published_list::CLAIMS_SINCE)?
+        let mut changed = connection.prepare_cached(published_list::CLAIMS_SINCE)?
             .query_map(params![after, through, Option::<&str>::None], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        // A conflicting operation changes the authority of its earlier subjects too,
+        // even when the new claim names an unrelated subject.
+        for row in connection.prepare_cached(
+            "SELECT prior.subject FROM claims incoming CROSS JOIN claims prior
+             INDEXED BY claims_operation_index
+             ON json_extract(prior.body,'$._operation.id')=json_extract(incoming.body,'$._operation.id')
+             WHERE incoming.store_index>?1 AND incoming.store_index<=?2
+               AND json_extract(incoming.body,'$._operation.id') IS NOT NULL
+               AND prior.store_index<=?2",
+        )?.query_map(params![after, through], |row| row.get::<_, String>(0))? {
+            changed.insert(row?);
+        }
+        let mut sets = BTreeSet::new();
+        for row in connection.prepare_cached(
+            "SELECT CASE WHEN kind='owned-set.revised' THEN subject
+                    ELSE json_extract(body,'$.owned_set') END FROM claims
+             WHERE store_index>?1 AND store_index<=?2
+               AND (kind='owned-set.revised' OR json_extract(body,'$.owned_set') IS NOT NULL)",
+        )?.query_map(params![after, through], |row| row.get::<_, String>(0))? {
+            sets.insert(row?);
+        }
+        for set in sets {
+            // Include losing-branch members omitted by the winning receipt: they
+            // receive implicit stop declarations without a new claim of their own.
+            changed.extend(owned_sets::known_members(&connection, &set, Some(through))?.into_keys());
+        }
         let mut candidates = BTreeSet::new();
         for subject in &changed {
             let query = if subject.starts_with("mission-run/") {
