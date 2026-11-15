@@ -19,6 +19,7 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
   /// Each row's steps, oldest first; a row without any reads as never measured.
   private let histories: [String: [Double?]]
   private let availability: AvailabilitySnapshot
+  private let availabilityHistory: HistoryFixture
   private let submits: [String: Submit]
   /// Snooze and dismiss outcomes by attention ID; seen always commits.
   private let controls: [String: Submit]
@@ -30,13 +31,15 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
 
   init(
     page: AttentionPage, slo: SloSnapshot, histories: [String: [Double?]], availability: AvailabilitySnapshot,
-    submits: [String: Submit] = [:], controls: [String: Submit] = [:], contexts: [String: AttentionContext] = [:],
+    availabilityHistory: HistoryFixture = .unsupported, submits: [String: Submit] = [:],
+    controls: [String: Submit] = [:], contexts: [String: AttentionContext] = [:],
     excerpts: [String: ConversationExcerpt] = [:], attachments: [String: Data] = [:]
   ) {
     self.page = page
     self.slo = slo
     self.histories = histories
     self.availability = availability
+    self.availabilityHistory = availabilityHistory
     self.submits = submits
     self.controls = controls
     self.contexts = contexts
@@ -103,6 +106,10 @@ actor FixtureFractal: AttentionAdapter, AvailabilityAdapter {
 
   func reportPresence(_ report: PresenceMachine.Report) async throws -> PresenceAnswer {
     PresenceAnswer(availability: try serve(availability.availability), reportAgainAt: nil)
+  }
+
+  func readAvailabilityHistory(_ request: AvailabilityHistoryRequest) async throws -> AvailabilityHistoryRead {
+    try serve(availabilityHistory.read(request, person: availability.availability.person))
   }
 }
 

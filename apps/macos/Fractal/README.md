@@ -90,6 +90,22 @@ collection, but `FractalClient` has no typed attention or availability stream.
   is written, given an expiry or cleared here. A change shows only once Fractal
   returns the folded result (`PUT v1/client/availability`, `PUT v1/client/notes`),
   or Fractal's refusal.
+- **Availability history** (`GET v1/client/availability/history`): the last four
+  weeks in hourly buckets from local midnight, read with the refresh at most
+  every ten minutes. The availability page draws it as one of three options
+  (design question H, its segmented picker remembered per Mac): H1 the last seven
+  days as 24-hour strips (available fills the strip, away its lower part, no
+  device reporting is an outline, nothing recorded the bare track), H2 each hour
+  of the day's available share over the four weeks with today as a line, H3 the
+  last 24 hours as minutes available above and away below the baseline with a
+  lane of limited interruptions, and the same 24 hours as a strip on the
+  availability tile. Hover names an hour; VoiceOver reads each day or hour in
+  words. A member without the read (an empty 404, which the client reports as
+  `unsupported-capability`) shows "History unavailable on this Fractal version"
+  instead of a failure, and is asked again hourly. A design-review build
+  (`ATTENTION_TRAY_HISTORY_PREVIEW=1`) draws a sample week there instead, badged
+  "Preview data" above the chart, in the header and on the tile, until the member
+  serves the person's own history.
 - **Presence** (`POST v1/client/presence`): this Mac reports its raw state
   (`active`; `inactive` while another login session is in front; `locked`;
   `sleeping`) with its last keyboard, mouse or trackpad input, and Fractal
@@ -219,6 +235,8 @@ owner-only Unix socket as that person (local person trust, as `fractal note set`
 does): no endpoint, bearer, pairing or gateway, and so no App Transport Security
 exception. The application loads no keychain, 1Password item or device profile.
 `ATTENTION_SPEECH_SOCKET` (optional, absolute) turns speech on.
+`ATTENTION_TRAY_HISTORY_PREVIEW=1` (review builds only) draws the labelled sample
+history where the member has no history read.
 `ATTENTION_TRAY_SNAPSHOT=<png>` refreshes once, renders the open panel to that
 file and exits.
 Snapshot mode starts no presence reporter, so its speech gate stays quiet.

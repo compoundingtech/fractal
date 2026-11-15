@@ -5,3 +5,6 @@ import FractalClient
 
 /// `GET v1/client/slo/history`'s value.
 typealias WireSloHistory = SloHistory
+
+/// `GET v1/client/availability/history`'s value.
+typealias WireAvailabilityHistory = AvailabilityHistory

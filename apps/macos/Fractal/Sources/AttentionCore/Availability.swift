@@ -246,6 +246,9 @@ public protocol AvailabilityAdapter: Sendable {
   func setNote(_ request: NoteRequest) async throws -> DirectiveNoteState?
   /// Returns Fractal's folding after this device's raw report and when to report again.
   func reportPresence(_ report: PresenceMachine.Report) async throws -> PresenceAnswer
+  /// The person's availability over the request's period; `.unsupported` from a member that
+  /// predates the history read.
+  func readAvailabilityHistory(_ request: AvailabilityHistoryRequest) async throws -> AvailabilityHistoryRead
 }
 
 // MARK: Panel words

@@ -45,13 +45,16 @@ public enum PanelMetrics {
 }
 
 /// The open design questions the gallery renders side by side: answer placement (D), panel
-/// width (W) and tile layout (T). The live panel uses `shipped`.
+/// width (W), tile layout (T) and the availability histogram (H). The live panel uses `shipped`,
+/// except H: it follows the availability page's picker, which the gallery pins.
 public struct PanelVariant: Sendable {
   public var placement: AnswerPlacement
   public var width: CGFloat
   public var tiles: TileLayout
+  public var histogram: AvailabilityHistogramStyle
 
-  public static let shipped = PanelVariant(placement: .inline, width: PanelMetrics.width, tiles: .capsules)
+  public static let shipped = PanelVariant(
+    placement: .inline, width: PanelMetrics.width, tiles: .capsules, histogram: .week)
 }
 
 private struct PanelWidthKey: EnvironmentKey {
@@ -72,6 +75,7 @@ extension View {
     environment(\.answerPlacement, variant.placement)
       .environment(\.panelWidth, variant.width)
       .environment(\.tileLayout, variant.tiles)
+      .environment(\.availabilityHistogram, variant.histogram)
   }
 }
 

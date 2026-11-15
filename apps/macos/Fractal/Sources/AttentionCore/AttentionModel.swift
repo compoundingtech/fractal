@@ -68,6 +68,10 @@ public enum AnswerState: Sendable, Equatable {
   private var sloHistoryCache = SloHistoryCache()
   /// The person's availability and directive note.
   public internal(set) var availability = LiveSection<AvailabilitySnapshot>()
+  /// The person's availability over the last four weeks, read with the refresh at most every
+  /// ten minutes (hourly while the member lacks the read).
+  public internal(set) var availabilityHistory = LiveSection<AvailabilityHistoryRead>()
+  @ObservationIgnored var availabilityHistoryReadAt: Date?
   /// The panel's latest availability or note change: sending, committed or Fractal's refusal.
   public internal(set) var availabilityWrite: AnswerState?
   public private(set) var answers: [String: AnswerState] = [:]
@@ -196,6 +200,7 @@ public enum AnswerState: Sendable, Equatable {
         group.addTask { await self.readSlo(from: adapter, now: now) }
         if let availabilityAdapter {
           group.addTask { await self.readAvailability(from: availabilityAdapter, now: now) }
+          group.addTask { await self.readAvailabilityHistory(from: availabilityAdapter, now: now) }
         }
       }
     } while refreshAgain

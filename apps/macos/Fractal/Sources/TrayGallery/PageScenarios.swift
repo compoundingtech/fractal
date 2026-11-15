@@ -128,17 +128,17 @@ extension Content {
   /// Every busy card with its page content.
   func fractal(
     _ records: [AttentionRecord], canAnswer: Bool = true, submits: [String: FixtureFractal.Submit] = [:],
-    availability: AvailabilitySnapshot? = nil
+    availability: AvailabilitySnapshot? = nil, availabilityHistory: HistoryFixture = .mixedWeek
   ) -> FixtureFractal {
     FixtureFractal(
       page: AttentionPage(records: records, canAnswer: canAnswer, canControl: canAnswer), slo: strainedSlo,
-      histories: strainedHistories, availability: availability ?? present, submits: submits, contexts: contexts,
-      excerpts: excerpts, attachments: [Self.chartSHA: chartPNG])
+      histories: strainedHistories, availability: availability ?? present, availabilityHistory: availabilityHistory,
+      submits: submits, contexts: contexts, excerpts: excerpts, attachments: [Self.chartSHA: chartPNG])
   }
 }
 
 /// Opens one page through the model's public API, then reads what it shows.
-@MainActor private func opened(_ model: AttentionModel, _ route: PanelRoute) async -> AttentionModel {
+@MainActor func opened(_ model: AttentionModel, _ route: PanelRoute) async -> AttentionModel {
   await model.refresh()
   model.open(route)
   await model.readOpenPage()
@@ -199,7 +199,7 @@ let pageScenarios: [Scenario] = [
   Scenario(
     id: "page-availability", title: "Availability page",
     description:
-      "The availability tile drilled into: the header switch (Available), status, interruptions and deadline clock with their until presets, and the note for agents."
+      "The availability tile drilled into: the header switch (Available), status, interruptions and deadline clock with their until presets, the last seven days’ history (H1) and the note for agents."
   ) { now in
     let content = Content(now: now)
     return await opened(model(content.fractal(content.asks)), .availability)

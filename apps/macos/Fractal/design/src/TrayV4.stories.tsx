@@ -289,15 +289,16 @@ const Question = ({
 )
 
 /**
- * The open questions: answer placement (D), panel width (W) and tile layout (T). Until Johannes
- * picks, the panel ships D1 · W3 · T1. Every option is the real panel at the live scroll limit.
+ * The open questions: answer placement (D), panel width (W), tile layout (T) and the
+ * availability history (H). Until Johannes picks, the panel ships D1 · W3 · T1 · H1. Every option
+ * is the real panel at the live scroll limit.
  */
 export const OpenVariants: Story = {
   render: () => (
     <div className="at-gallery">
       <p className="at-gallery-description">
-        Pick one per question. Open: nothing here is decided; the panel ships D1 · W3 · T1 until
-        the pick.
+        Pick one per question. Open: nothing here is decided; the panel ships D1 · W3 · T1 · H1
+        until the pick.
       </p>
       <Question
         title="D · Where an ask’s answers sit"
@@ -332,6 +333,19 @@ export const OpenVariants: Story = {
             { scenario: 'variant-w1-home', title: 'T1 at 320 pt: three capsules' },
             { scenario: 'variant-t2-w1' },
           ],
+        ]}
+      />
+      <Question
+        title="H · Availability history"
+        note="The availability page’s history, four weeks of hourly buckets from Fractal. H1: the last seven days as 24-hour strips (available fills, away the lower part, no device an outline). H2: each hour of the day’s available share over four weeks, today as a line. H3: the last 24 hours, available minutes up and away down, a lane of limited interruptions, and the same 24 hours as a strip on the availability tile. The page’s segmented picker switches between them live; each is shown for a mixed week and for one with gaps."
+        rows={[
+          [{ scenario: 'variant-h1' }, { scenario: 'variant-h2' }, { scenario: 'variant-h3' }],
+          [
+            { scenario: 'variant-h1-gaps' },
+            { scenario: 'variant-h2-gaps' },
+            { scenario: 'variant-h3-gaps' },
+          ],
+          [{ scenario: 'variant-h3-home' }],
         ]}
       />
     </div>
@@ -380,6 +394,9 @@ export const TilePages: Story = {
       <Scenarios
         ids={[
           'page-availability',
+          'history-empty',
+          'history-unsupported',
+          'history-preview',
           'speech-speaking',
           'speech-in-call',
           'speech-muted',

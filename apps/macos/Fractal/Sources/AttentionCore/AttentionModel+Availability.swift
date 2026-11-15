@@ -10,6 +10,23 @@ extension AttentionModel {
     Self.apply(result, to: &availability, now: now ?? .now)
   }
 
+  /// Reads the history when none was read yet, ten minutes after the last read, or an hour
+  /// after a member answered that it has no history read. A failure keeps the last history,
+  /// marked stale, and the next refresh retries it.
+  func readAvailabilityHistory(from adapter: any AvailabilityAdapter, now: Date?) async {
+    let started = now ?? .now
+    if let last = availabilityHistoryReadAt {
+      let wait =
+        availabilityHistory.value?.memberLacksHistory == true
+        ? AvailabilityHistoryRequest.unsupportedRecheck : AvailabilityHistoryRequest.rereadAfter
+      guard started.timeIntervalSince(last) >= wait else { return }
+    }
+    let request = AvailabilityHistoryRequest(now: started)
+    let result = await Self.capture { try await adapter.readAvailabilityHistory(request) }
+    if case .success = result { availabilityHistoryReadAt = started }
+    Self.apply(result, to: &availabilityHistory, now: now ?? .now)
+  }
+
   /// Sends one change; the panel shows it only once Fractal returns the folded availability.
   public func setAvailability(_ edit: AvailabilityEdit, label: String, now: Date = .now) async {
     guard let availabilityAdapter, !isWritingAvailability else { return }
