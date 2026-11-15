@@ -574,6 +574,12 @@ const withoutFeedback = (gates: readonly (typeof GateSchema.Type)[]): boolean =>
 export const RetrySchema = Schema.Struct({
   attempts: Schema.Int.pipe(Schema.refine((n): n is number => n >= 1 && n <= 100)),
   backoff: Schema.optionalKey(NonNegativeDuration),
+  /** Per-retry delays override backoff; the final delay repeats. */
+  delays: Schema.optionalKey(Schema.Array(Duration)),
+  /** Whole-policy window from the first attempt's start. */
+  within: Schema.optionalKey(Duration),
+  /** Empty or absent matches every failure; otherwise match typed error tags. */
+  on: Schema.optionalKey(Schema.Array(Text)),
 }).annotate({ identifier: 'Fractal.Retry' })
 
 /** An agentless command a step runs. */
@@ -1749,6 +1755,13 @@ const lowerStep = (input: typeof StepSchema.Encoded): Node => {
         children: [
           child({ name: 'attempts', value: s.retry.attempts }),
           ...optionalChild({ name: 'backoff', value: nativeDuration(s.retry.backoff) }),
+          ...(s.retry.delays === undefined || s.retry.delays.length === 0
+            ? []
+            : [node({ name: 'delays', args: s.retry.delays.map(lowerDuration) })]),
+          ...optionalChild({ name: 'within', value: nativeDuration(s.retry.within) }),
+          ...(s.retry.on === undefined || s.retry.on.length === 0
+            ? []
+            : [node({ name: 'on', args: s.retry.on })]),
         ],
       }),
     )
