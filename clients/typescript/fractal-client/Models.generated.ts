@@ -1651,6 +1651,7 @@ export type ConversationHeader = {
   cost?: ConversationHeaderField;
   jobs?: ConversationHeaderField;
   model?: ConversationHeaderField;
+  projection_revision?: number;
   subagents?: ConversationHeaderField;
   todos?: ConversationHeaderField;
   working?: ConversationHeaderField;
@@ -4483,6 +4484,7 @@ export type TimelineBlock = {
 
 };
   payload: unknown;
+  semantic?: TimelineSemantic;
   source_type: string;
   view?: unknown;
   visibility?: string;
@@ -4586,6 +4588,31 @@ export type TimelineResponseCostComponents = {
   cache_write?: number;
   input?: number;
   output?: number;
+};
+
+export type TimelineSemantic = {
+  category: string;
+  disposition: string;
+  revision: number;
+  source_part_id: string;
+  source_record_id: string;
+  text?: string;
+  usage?: TimelineSemanticUsage;
+};
+
+export type TimelineSemanticUsage = {
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  cost?: number;
+  counter_id?: string;
+  currency?: string;
+  input_tokens?: number;
+  model?: string;
+  output_tokens?: number;
+  provider?: string;
+  response_id?: string;
+  semantics: string;
+  total_tokens?: number;
 };
 
 export type TimelineStatus = ("queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | string);
