@@ -2519,7 +2519,7 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
     let mut base = runtimes(&store, None).unwrap().unwrap().0;
     let prior = crate::store::owned_sets::selected(&store.readers.get(), None).unwrap().remove(0);
     let mut receipt = prior.receipt;
-    receipt.previous = Some(prior.revision);
+    receipt.previous = Some(format!("{}@{}", prior.id, prior.revision));
     receipt.source.sequence += 1;
     receipt.members.remove("agent/garden/meadow");
     let revision = smallclaims::hash::canonical_hash(&receipt).unwrap();
@@ -2527,6 +2527,7 @@ fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_fl
     // for it, but its implicit stop's desired token becomes the receipt claim.
     let receipt_claim = raw(&store, "owned-set/garden", "owned-set.revised",
         json!({"fields":{"revision":revision,"body":receipt}}));
+    assert!(crate::store::owned_sets::selected(&store.readers.get(), None).unwrap()[0].blockers.is_empty());
     assert!(check(&store, &mut base));
     assert_eq!(base.rows.items[0]["desired_revision"], json!(receipt_claim));
 }
