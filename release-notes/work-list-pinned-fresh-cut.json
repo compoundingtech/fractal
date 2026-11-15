@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fresh work-list retries pin their first requested publication cut so ongoing writes cannot keep moving the command's freshness target",
+  "replay": {"status": "none", "detail": "Read-only change; no replay change."},
+  "schema": {"status": "none", "detail": "No stored schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "Current work first pages accept min_cut, bounded by the current host-local store index. Fresh clients retain the first not-fresh wanted_cut across retries; clients without min_cut retain per-request freshness. Older daemons without wanted_cut remain supported. Debug work-publication fold logs report cut lag and fold duration."},
+  "downtime": {"status": "none", "detail": "No coordinated downtime required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Record the launching host's absolute home directory as the cwd of newly created default API terminals.",
+  "replay": {"status": "none", "detail": "No graph replay or historical declaration rewrite."},
+  "schema": {"status": "none", "detail": "No database, claim schema or stored-data migration."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination rule change."},
+  "compatibility": {"status": "changed", "detail": "New default API terminals carry st3.cwd=home intent. Updated launching runtimes resolve that intent to the host user's absolute home before passing cwd to PTY. Explicit directories and untagged relative workspaces are unchanged. Older runtimes accept the tag and retain the shell-side cd to HOME. When the host home cannot be resolved, the runtime warns and retains the previous relative cwd and shell-side home behavior."},
+  "downtime": {"status": "none", "detail": "No service interruption required; updated runtimes apply the behavior to new launches."},
+  "manual": {"status": "none", "detail": "No manual migration; existing PTY records and declarations remain unchanged."},
+  "recovery": {"status": "none", "detail": "No data migration to undo. Older runtimes continue to accept declarations and use their shell-side cd."}
+}

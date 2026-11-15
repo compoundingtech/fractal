@@ -150,6 +150,19 @@ pub fn note_slow(what: &str, context: &str, build: &str) {
     }
 }
 
+/// Retain non-successful attach outcomes even when no tracing subscriber is installed.
+#[cfg(not(test))]
+pub(crate) fn note_attach_outcome(attempt_id: uuid::Uuid, agent: &str, phase_reached: &str, outcome: &str, elapsed_ms: u128) {
+    if let Some(file) = directory().and_then(|runs| runs.parent().map(|dir| dir.join("attach.log"))) {
+        let event = serde_json::json!({
+            "service": "fractal-tui", "level": "INFO", "at_unix_ms": now_unix() * 1000,
+            "attempt_id": attempt_id.to_string(), "agent": agent,
+            "phase_reached": phase_reached, "outcome": outcome, "elapsed_ms": elapsed_ms,
+        });
+        write_line(&file, &event.to_string());
+    }
+}
+
 /// Append one line to a log in the cache that is cleared once it passes 100 KB.
 fn write_line(file: &Path, line: &str) {
     use std::io::Write as _;

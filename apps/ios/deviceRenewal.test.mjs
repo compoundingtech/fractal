@@ -2,8 +2,22 @@ import assert from 'node:assert/strict';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { approveRenewal, pendingRenewals, pendingRenewalText, renewalApprovalText, renewalOfferText, watchRenewalForeground } from './deviceRenewal.ts';
+import { approveRenewal, pendingRenewals, pendingRenewalText, renewalApprovalText, renewalOfferText, renewalResponseValue, watchRenewalForeground } from './deviceRenewal.ts';
 import { ForegroundGate } from './foreground.ts';
+
+test('pending and completed renewal envelopes accept both namespaces, not unrelated versions', () => {
+  for (const value of [{ kind: 'device-renewals', renewals: [] }, { kind: 'paired-session', credential: 'replacement' }]) {
+    for (const api_version of ['st3.client.v0', 'fractal.client.v0']) {
+      assert.equal(renewalResponseValue({ api_version, value }), value);
+    }
+    for (const api_version of ['unrelated.client.v0', 'st3.client.v1', undefined]) {
+      assert.throws(() => renewalResponseValue({ api_version, value }), /Invalid renewal response/);
+    }
+  }
+  for (const envelope of [null, {}, { api_version: 'fractal.client.v0' }]) {
+    assert.throws(() => renewalResponseValue(envelope), /Invalid renewal response/);
+  }
+});
 
 test('the store polling subscription runs on active startup and each foreground, never background', () => {
   const gate = new ForegroundGate('active');

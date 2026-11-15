@@ -2,7 +2,7 @@
 //! answered with a fixed body or queued pages. Other crates' tests drive the real repository
 //! provider against it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::{ObservationRequest, ProviderObservation, pull_request_checks};
 use crate::github_http::GithubAuth;
+use crate::resource::WorkflowRunLedger;
 
 /// One poll by the real repository provider against the GitHub at `base`.
 pub async fn observe(request: ObservationRequest, base: &str) -> anyhow::Result<ProviderObservation> {
@@ -199,6 +200,25 @@ impl FakeGithub {
             .into_iter()
             .map(|request| request.lines().next().unwrap_or_default().to_owned())
             .collect()
+    }
+}
+
+/// A workflow run ledger in memory: each subject written and its fields. A second write of one
+/// subject fails, as the poller must never make one.
+#[derive(Default)]
+pub struct MemoryLedger {
+    pub runs: Mutex<BTreeMap<String, BTreeMap<String, Value>>>,
+}
+
+impl WorkflowRunLedger for MemoryLedger {
+    fn written(&self, subject: &str) -> anyhow::Result<bool> {
+        Ok(self.runs.lock().contains_key(subject))
+    }
+
+    fn write(&self, subject: &str, fields: &BTreeMap<String, Value>) -> anyhow::Result<()> {
+        let previous = self.runs.lock().insert(subject.to_owned(), fields.clone());
+        anyhow::ensure!(previous.is_none(), "{subject} was written twice");
+        Ok(())
     }
 }
 

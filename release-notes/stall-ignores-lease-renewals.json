@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Report a stalled run when a worker holds a step and only renews its lease; lease renewals no longer count as a sign of life",
+  "replay": { "status": "none", "detail": "No replay or projection changes. The stall deadline is recomputed at each run evaluation from existing step timing and progress claims." },
+  "schema": { "status": "none", "detail": "No persisted schema, claim vocabulary or migration changes." },
+  "rules": { "status": "none", "detail": "Checkpoint and retention rules are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Behaviour change for runs that name a reporter (report-to): a step a live seat holds now stalls after stalled-after (30 minutes unless set) without a work progress record, a new claim or resume, or a declared work wait. Before, the minute-by-minute lease renewal postponed the stall for as long as the seat lived. A worker on a long step should record progress with fractal work progress, or the reporter gets one stalled message per silence. Runs without report-to are unaffected. Members on different builds each evaluate only their own runs, so a mixed fleet reports by the build of the member that owns the run. Not tested against an older build." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout. The stall check adds one indexed step read per held step, only for runs that name a reporter and only when the run is evaluated." },
+  "manual": { "status": "none", "detail": "Nothing to configure. To silence stall reports for a run, use report-stalls=#false or fractal missions report-to RUN --report-stalls false. The rule is in docs/st3/mission-graph-runtime.md under Run reports." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback restores the previous stall clock. Stalled messages already sent stay in the reporter's mailbox." }
+}

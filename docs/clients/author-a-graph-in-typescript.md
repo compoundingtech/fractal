@@ -2,6 +2,8 @@
 
 Use [`@fractal/declarations`](../../clients/typescript/fractal-declarations/README.md) when declarations share references or defaults. Keep the typed source in Git, render ordinary KDL, and review both before publication. This package encodes declarations; it is not the daemon HTTP client and does not compute mission revisions or publish anything.
 
+To keep each agent, mission and schedule in its own module (`<id>/agent.ts`, `<id>/mission.ts`, `<id>/schedule.ts`) with IDs derived from the file path, use the in-repo [`fractal` authoring package](../../packages/fractal/README.md) instead. It renders the same native KDL; the TS samples in the [user guide](../site/concepts/missions.md) use it.
+
 ## Keep intent separate from execution
 
 ```text
@@ -63,6 +65,6 @@ The daily schedule uses `host: 'local'`, meaning the daemon receiving publicatio
 
 Review the typed source, pinned dependencies and generated KDL diff. Pay particular attention to supervision, launch commands, assignees, report recipients, schedule frequency and authority changes. Repair the source rather than hand-editing generated output. TypeScript generation executes code: run it in trusted or sandboxed CI without publication credentials. Never put secrets in declarations or rendered output.
 
-Publication is a separate authorized action after review. Retain the exact source revision and artifact; do not regenerate from an unreviewed tree just before applying it. Follow [Configuration and KDL](../site/reference/configuration.md) for preview and publication. An online apply preview is not the offline validation above. Actual publication can reconcile agent desired state, and an active schedule can later create work; publishing a mission definition alone does not start a run.
+Publication is a separate authorized action after review. Retain the exact source revision and artifact; do not regenerate from an unreviewed tree just before applying it. Follow [Configuration and KDL](../site/reference/configuration.md) for preview and publication. An online apply preview is not the offline validation above. Actual publication can reconcile agent desired state, and an active schedule can later create work. Initial mission publication does not start a run; publishing a new revision automatically preflights and supersedes already-active stale runs, as described in [Missions and runs](../site/concepts/missions.md#revising-a-running-mission).
 
 Plain apply is an upsert: removing an object from TypeScript does not retire its existing declaration. Use explicit retirement or an [owned set](../st3/owned-sets.md) for omission-driven retirement, and review its membership and source fences separately.

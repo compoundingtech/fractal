@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Emit fractal client-API, error and visualization versions from the server",
+  "replay": { "status": "none", "detail": "No replay, backfill or rewriting stored or signed history." },
+  "schema": { "status": "none", "detail": "No schema or generated client changes. Existing schema enums accept both version families." },
+  "rules": { "status": "none", "detail": "No admission, digest, signature or idempotency-domain changes. Issued lpv0 preview tokens retain the frozen st3.client.v0 hash input; launch page cache/cursor digests retain st3.visualization.v0 bytes independently of the emitted visualization version." },
+  "compatibility": { "status": "changed", "detail": "Server responses emit fractal.client.v0, fractal.client.error.v0 and fractal.visualization.v0. Anonymous capability-advertisement tests track the exported server API version, independently of generated client request defaults. Server WebSocket constants use fractal.client.*; negotiation still selects the spelling offered by each client, including st3.client.*. Legacy request versions remain readable permanently. Requires the deployed Stage 0 accepting readers through 5d27423414f0570449e6237f97f087386de06b5c." },
+  "downtime": { "status": "none", "detail": "Normal restart; writer rollout needs deploy approval." },
+  "manual": { "status": "none", "detail": "No configuration changes." },
+  "recovery": { "status": "none", "detail": "An accepting-reader release can be restored without rewriting data." }
+}

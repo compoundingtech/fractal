@@ -324,6 +324,46 @@ mod tests {
                 "decision":"approved","verdict":"pass","evidence":{"report":"ok"}},"evidence":[record.id]})).unwrap()
     }
     #[test]
+    fn agent_review_writer_rejects_empty_non_agentless_snapshot_without_writes() {
+        use crate::store::agent_review_transaction as writer;
+        use crate::store::*;
+        use smallclaims::store::append_claim_record_tx;
+        let store = Store::open_memory("node").unwrap();
+        let intent = crate::parse_intent(
+            "version 2\nagent \"example/reviewer\" { command \"true\"; workspace \"/tmp\"; }",
+            "example",
+        )
+        .unwrap();
+        let subjects = &intent.subjects;
+        let expected = subjects.keys().map(|s| (s.clone(), vec![])).collect();
+        store.apply(&intent, &expected, "declare").unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        let f = fixture();
+        let origin = store.origin();
+        let record =
+            append_claim_record_tx(&tx, origin, &f.subject, &f.kind, None, &f.body, &[], None)
+                .unwrap();
+        let mut input = answer(&record);
+        input.idempotency_key = Some("empty-owner-guard".into());
+        let before = smallclaims::store::current_index_tx(&tx).unwrap();
+        let error = writer::append_agent_review_answer_tx(&tx, origin, &input, |_, _, reviewer| {
+            Ok(writer::ReviewOwnerSnapshot {
+                responsible_agents: Default::default(),
+                reviewer: reviewer.into(),
+                agentless: false,
+            })
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "reviewer-owner-unresolved");
+        tx.commit().unwrap();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(smallclaims::store::current_index_tx(&tx).unwrap(), before);
+        let operation = identities::claim_operation(&input).unwrap();
+        let outcome = claim_operation_outcome_tx(&tx, operation.as_ref()).unwrap();
+        assert!(outcome.is_none());
+    }
+    #[test]
     fn agent_decode_answer_reuses_the_stored_request_predicate() {
         use super::super::agent_review_answer::{Rejection, ReviewPolicy, validate};
         let record = fixture();

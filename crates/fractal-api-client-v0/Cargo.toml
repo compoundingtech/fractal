@@ -25,8 +25,8 @@ kdl = "6"
 libc = "0.2"
 notify = "8"
 opentelemetry = "0.30"
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "d0e816ac4129c97f39473855bb4fe527701ea07c" }
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"

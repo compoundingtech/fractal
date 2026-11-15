@@ -314,6 +314,82 @@ fn foreground_only_fifo_and_batched_durable_answers_are_unchanged() {
 }
 
 #[test]
+fn foreground_batched_write_gets_a_bounded_turn_during_a_long_verdict_loop() {
+    let store = Arc::new(crate::store::Store::open_memory(
+        "studio",
+        Arc::new(crate::store::runtime::Plain),
+    ).unwrap());
+    let total = 1_024_u64;
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for i in 0..total {
+            tx.execute(
+                /* sqlite-large-value: allow-for-now lv-h4a820d51c105 owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */
+                "INSERT INTO claim_verdict_queue(claim_id) VALUES (?1)",
+                [format!("removed-claim/{i:05}")],
+            ).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let writer = &store.connection;
+    let held = writer.write();
+    // Intercept admission, not execution timing: the real verdict loop must opt into
+    // background scheduling before any contender can run.
+    let (proxy, incoming) = mpsc::channel();
+    let original = writer.jobs.lock().unwrap().replace(proxy).unwrap();
+    let judging = store.clone();
+    let thread = std::thread::spawn(move || judging.judge_claims(false).unwrap());
+    let pending = incoming.recv_timeout(Duration::from_secs(10)).unwrap();
+    *writer.jobs.lock().unwrap() = Some(original.clone());
+    assert!(
+        matches!(pending, WriterJob::BackgroundReady(_)),
+        "replication verdict chunks must be classified as background loans",
+    );
+    original.send(pending).unwrap();
+    let front = selected_loans(writer, FOREGROUND_TURNS);
+    let (recorded, remaining) = mpsc::sync_channel(1);
+    let (done, answer) = mpsc::sync_channel(1);
+    writer.send(WriterJob::Batched {
+        run: Box::new(move |tx| {
+            let queued: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM claim_verdict_queue", [], |row| row.get(0),
+            ).unwrap();
+            recorded.send(queued).unwrap();
+            tx.execute(
+                /* sqlite-large-value: allow-for-now lv-hece6d82a830b owner=smallclaims::sqlite::writer_queue::tests TODO=bound-or-reference-values-and-reclamation */
+                "INSERT INTO meta(key,value) VALUES ('verdict-fairness-foreground','committed')",
+                [],
+            ).unwrap();
+            true
+        }),
+        profile: None,
+        wait: None,
+        holder: crate::windows::holds::Holder::current(),
+        done,
+        enqueued: Instant::now(),
+    });
+    drop(held);
+    for next in &front {
+        next.release(next.acquire());
+    }
+    answer.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    // Eight queued foreground turns permit one background chunk (32 claims), not a
+    // complete backlog drain, before the batched foreground write receives its turn.
+    assert_eq!(remaining.recv_timeout(Duration::from_secs(10)).unwrap(), total - 32);
+    thread.join().unwrap();
+    assert!(!store.verdicts_pending().unwrap());
+    assert_eq!(
+        writer.write().query_row(
+            "SELECT value FROM meta WHERE key='verdict-fairness-foreground'",
+            [],
+            |row| row.get::<_, String>(0),
+        ).unwrap(),
+        "committed",
+    );
+}
+
+#[test]
 fn actual_worker_failure_disconnects_queued_background_and_foreground_borrowers() {
     let writer = writer();
     let active = foreground(&writer);

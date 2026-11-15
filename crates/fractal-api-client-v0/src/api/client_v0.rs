@@ -7,6 +7,7 @@ use crate::ConversationReadsStore;
 use crate::CustomStore;
 use crate::GlassesStore;
 use crate::ArrangementsStore;
+use crate::ReadPositionsStore;
 use crate::DeclarationsStore;
 use crate::LanesStore;
 use crate::MissionListStore;
@@ -46,13 +47,18 @@ pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
+mod github_plugin_reads;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
 pub mod mission_declaration;
+pub mod source_maps;
 pub mod raw_terminal;
 pub mod private_notes;
 pub mod quota;
+mod usage_hub;
+pub mod read_positions;
+pub mod attention_controls;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -75,6 +81,8 @@ mod conversation_follow_tests;
 mod launch_detail_tests;
 #[cfg(test)]
 mod mission_history_tests;
+#[cfg(test)]
+mod run_reach_tests;
 #[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
@@ -107,6 +115,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/arrangements/{person_name}/{uuid}/memberships",
             get(arrangements::memberships),
         )
+        .route("/v1/client/read-positions", get(read_positions::list))
         .route("/v1/client/glasses", get(glasses_list))
         .route(
             "/v1/client/glasses/{id}",
@@ -121,6 +130,14 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/usage", get(usage_period))
         .route("/v1/client/attention-budget", get(attention_budget::get))
         .route("/v1/client/quota", get(quota::read))
+        .route("/v1/client/usage/quota", get(usage_hub::read))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}", get(github_plugin_reads::pull))
+        .route("/v1/client/plugins/github/{owner}/{repo}/issues/{number}", get(github_plugin_reads::issue))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/conversation", get(github_plugin_reads::conversation))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/checks", get(github_plugin_reads::checks))
+        .route("/v1/client/plugins/github/{owner}/{repo}/pulls/{number}/files", get(github_plugin_reads::files))
+        .route("/v1/client/plugins/github/{owner}/{repo}/comments/{comment_id}", get(github_plugin_reads::comment))
+        .route("/v1/client/plugins/github/{owner}/{repo}/runs/{run_id}", get(github_plugin_reads::run))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -130,6 +147,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         )
         .route("/v1/client/publication-definition", get(publication_definition))
         .route("/v1/client/mission-declaration", get(mission_declaration::get))
+        .route("/v1/client/source-maps", get(source_maps::get))
+        .route("/v1/client/source-blobs/{hash}", get(source_maps::blob))
         .route("/v1/client/now", get(now))
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
@@ -171,6 +190,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
+        .route("/v1/client/mission-runs", get(mission_runs_by_prefix))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
         .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
@@ -217,6 +237,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/grants/assistant-grant/{id}/read-trust", post(assistant::pin_read_trust))
         .route("/v1/client/assistant/grants/assistant-grant/{id}/policy", post(assistant::update_policy))
         .route("/v1/client/assistant/summary", get(assistant::read_projection))
+        .route("/v1/client/assistant/availability", get(assistant::read_projection))
         .route("/v1/client/assistant/attention", get(assistant::read_projection))
         .route("/v1/client/assistant/missions", get(assistant::read_projection))
         .route("/v1/client/assistant/agents", get(assistant::read_projection))
@@ -226,6 +247,8 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo", get(assistant::read_projection))
+        .route("/v1/client/assistant/slo-history", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
         .route(
             "/v1/client/pairings/{id}/complete",
@@ -352,11 +375,11 @@ fn record_subscription_page(value: &Value, bytes: usize) {
     span.record("span.label", format!("{collection} {rows}"));
 }
 
-const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
+const TERMINAL_SUBPROTOCOL: &str = "fractal.client.terminal.v0";
 
-const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
+const CONVERSATION_SUBPROTOCOL: &str = "fractal.client.conversation.v0";
 
-const COLLECTION_SUBPROTOCOL: &str = "st3.client.collections.v0";
+const COLLECTION_SUBPROTOCOL: &str = "fractal.client.collections.v0";
 
 pub async fn request_latency(
     Extension(session): Extension<ClientSession>,
@@ -548,8 +571,8 @@ async fn collection_items_with_windows(
 ) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
     if !matches!(
         request.collection.as_str(),
-        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
-            | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
+        "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships"
+            | "read-positions" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
     }
@@ -578,13 +601,13 @@ async fn collection_items_with_windows(
     if request.collection == "glasses" && (request.person.is_some() || request.actor.is_some()) {
         return Err(validation("glasses select the session person"));
     }
-    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships") && request.actor.is_some() {
-        return Err(validation("arrangements select an explicit person, not an actor"));
+    if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions") && request.actor.is_some() {
+        return Err(validation("arrangements and read positions select an explicit person, not an actor"));
     }
     let mut gates = CollectionReadAdmission::new(read_permit);
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
-    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
+    let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "read-positions")
         || (windows.is_some() && session.transport != "unix")
     {
         Some(if state.store.readers.has_request_reader() {
@@ -624,6 +647,8 @@ async fn collection_items_with_windows(
             }
         }
         Some(person)
+    } else if request.collection == "read-positions" {
+        Some(read_positions::person(current, request.person.as_deref(), false)?)
     } else if matches!(request.collection.as_str(), "attention" | "summary" | "devices") {
         person_filter(session, request.person.as_deref())?
     } else {
@@ -641,7 +666,7 @@ async fn collection_items_with_windows(
     let subject = request.subject.clone();
     let status = request.status.clone();
     let collection = request.collection.clone();
-    let custom_forms = session.custom_forms;
+    let attention_compatibility = session.attention_compatibility();
     let arrangement_window = matches!(collection.as_str(), "arrangements" | "ordered-memberships");
     let mut admitted = collection != "agents";
     // Attribute the first frame, and any later cold root; never create a per-frame span.
@@ -700,6 +725,7 @@ async fn collection_items_with_windows(
                             request.person.as_deref(),
                             false,
                         )?),
+                        "read-positions" => Some(read_positions::person(&current, request.person.as_deref(), false)?),
                         "attention" | "summary" | "devices" => person_filter(&current, request.person.as_deref())?,
                         _ => person.clone(),
                     };
@@ -878,6 +904,10 @@ async fn collection_items_with_windows(
                 let owner_revision = if collection == "arrangements" && subject.is_none() {
                     Some(CollectionRevision::Owner(store.arrangement_inventory_revision(
                         person.as_deref().expect("explicit arrangement owner"))?))
+                } else if collection == "read-positions" {
+                    // Any change to the person's positions, inside the window's rows or not.
+                    Some(CollectionRevision::Owner(store.read_position_revision(
+                        person.as_deref().expect("explicit read-position owner"))?))
                 } else {
                     None
                 };
@@ -933,6 +963,10 @@ async fn collection_items_with_windows(
                             None,
                             limit.saturating_add(1),
                         )?,
+                        "read-positions" => store.read_positions(
+                            person.as_deref().expect("explicit read-position owner"),
+                            index,
+                        )?,
                         "attention" => match &published_rows {
                             Some(rows) => rows.clone(),
                             None => {
@@ -980,7 +1014,7 @@ async fn collection_items_with_windows(
                         )?,
                         _ => unreachable!(),
                     };
-                    client_attention_compatibility(&mut items, custom_forms);
+                    client_attention_compatibility(&mut items, attention_compatibility);
                     // Agent status/availability depends on live local delivery presence; overlay and
                     // filter it on every read, after reusing the immutable graph-derived rows.
                     if collection == "agents" {
@@ -1107,6 +1141,7 @@ fn collection_window_label(collection: &str) -> &'static str {
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
         "ordered-memberships" => "stream collection/ordered-memberships",
+        "read-positions" => "stream collection/read-positions",
         "summary" => "stream collection/summary",
         "clients" => "stream collection/clients",
         "usage" => "stream collection/usage",
@@ -2477,10 +2512,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
                     let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
+                    let read_positions_changed = subscriptions.values().any(|s| s.request.collection == "read-positions") && state.store.read_positions_changed(weighed, index).unwrap_or(true);
                     affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
                         || (memberships_changed && s.request.collection == "ordered-memberships")
+                        || (read_positions_changed && s.request.collection == "read-positions")
                         || match &claims {
                             Err(_) => true,
                             Ok(claims) => claims.len() >= 10_000
@@ -3004,6 +3041,9 @@ pub async fn publication_definition(
 const LIMITED_PAIRING_SCOPES: &[&str] = &[
     "read.projections",
     "write.client-diagnostics",
+    "write.availability",
+    "write.presence",
+    "write.notes",
     "read.glasses",
     "control.glasses",
     "read.arrangements",
@@ -3059,7 +3099,7 @@ fn mission_visualization(
         decisions.extend(super::client_launch_decision_resources(store, &session)?);
     }
     Ok(Some(json!({
-        "version":"st3.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
+        "version":"fractal.visualization.v0", "views":["graph","timeline","swimlane","revision","risk","live-progress"],
         "mission":mission_id, "nodes":nodes, "edges":edges, "groups":[],
         "timeline":{"entries":timeline}, "swimlanes":[], "goals":mission.goals,
         "constraints":mission.constraints, "gates":mission.gates, "resources":mission.products,
@@ -3301,7 +3341,9 @@ fn mission_resources_filtered(
                     } else if selected_id.is_some() {
                         store.with_step_states(header.clone(), true)?
                     } else {
-                        header.clone()
+                        let mut run = header.clone();
+                        store.enrich_mission_run_lineage(&mut run)?;
+                        run
                     };
                     let done = run
                         .steps
@@ -3321,8 +3363,8 @@ fn mission_resources_filtered(
                             json!({
                                 "id": step.subject,
                                 "title": step.title,
-                                "assignee": step.assigned_to,
-                                "claimant": step.claimant,
+                                "assignee": step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                                "claimant": step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                                 "state": client_work_state(&step.status),
                                 "since": client_timestamp(step.updated_at_unix_ms),
                                 "progress_at": step.progress_at_unix_ms.map(client_timestamp),
@@ -3377,7 +3419,9 @@ fn mission_resources_filtered(
                         });
                     let blocker = run.scheduler_fault.as_ref().map(|reason| json!({
                         "step": run.steps.first().map(|step| &step.subject), "reason": reason, "scope": crate::reconcile::FIRST_READINESS_FAULT_SCOPE,
-                    })).or_else(||
+                    })).or_else(|| run.programs.iter().find_map(|program| program.fault.as_ref().map(|fault| json!({
+                        "step": program.step_run, "reason": fault.reason, "scope": fault.scope,
+                    })))).or_else(||
                         run.steps.iter().find(|step| step.status == "blocked").map(
                             |step| json!({"step": step.subject, "reason": step.blocked_reason}),
                         ));
@@ -3392,6 +3436,13 @@ fn mission_resources_filtered(
                     } else {
                         BTreeMap::new()
                     };
+                    let executions = if selected_id.is_some() {
+                        run.steps.iter().map(|step| {
+                            Ok((step.subject.as_str(), store.step_executions(&step.subject)?))
+                        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?
+                    } else {
+                        BTreeMap::new()
+                    };
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()
@@ -3399,12 +3450,13 @@ fn mission_resources_filtered(
                                 let loop_run = run.loops.iter().find(|loop_run| {
                                     loop_run.step_run == step.subject
                                 });
+                                let program = run.programs.iter().find(|program| program.step_run == step.subject);
                                 let wake = step.wake.as_ref().filter(|_| {
                                     !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                                         && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped")
                                 }).map(|wake| {
                                     json!({
-                                        "assignee": wake.assignee,
+                                        "assignee": fractal_schema::canonical_agent_actor(&wake.assignee),
                                         "assignee_state": wake.assignee_state,
                                         "incarnation_id": wake.incarnation_id,
                                         "attempts": wake.attempts,
@@ -3419,8 +3471,8 @@ fn mission_resources_filtered(
                                     "title": step.title,
                                     "state": client_work_state(&step.status),
                                     "attempt": step.attempt,
-                                    "assignee": step.assigned_to,
-                                    "claimant": step.claimant,
+                                    "assignee": step.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
+                                    "claimant": step.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                                     "agentless": step.agentless,
                                     "keep_open": crate::mission::step_keeps_open(definition.map(|(definition, _)| definition), &step.step),
                                     "since": client_timestamp(step.updated_at_unix_ms),
@@ -3448,6 +3500,30 @@ fn mission_resources_filtered(
                                     value["transitions"] = json!(history.transitions);
                                     value["history_complete"] = json!(history.complete);
                                 }
+                                if let Some(executions) = executions.get(step.subject.as_str()) {
+                                    value["executions"] = json!(executions);
+                                }
+                                // Detail reads that enrich the run (`Store::mission_run`) carry
+                                // its program steps' journals.
+                                if let Some(program) = program {
+                                    let journal = &program.journal;
+                                    value["program"] = json!({
+                                        "open_key": journal.open.first(),
+                                        "entries": journal.entries.iter().map(|entry| json!({
+                                            "key": entry.key,
+                                            "status": entry.status,
+                                            "started_at": entry.started_at_unix_ms.map(client_timestamp),
+                                            "ended_at": entry.ended_at_unix_ms.map(client_timestamp),
+                                            "ms": entry.ms,
+                                            "error": entry.error,
+                                            "child": entry.child,
+                                        })).collect::<Vec<_>>(),
+                                        "truncated": journal.truncated,
+                                        "last_entry_at": journal.last_entry_at_unix_ms.map(client_timestamp),
+                                        "stalled_after_ms": program.stalled_after_ms,
+                                        "fault": program.fault.as_ref().map(|fault| json!({"scope": fault.scope, "reason": fault.reason})),
+                                    });
+                                }
                                 if let Some((low, high, samples)) = step_etas.get(&step.step)
                                     .filter(|_| !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
                                 {
@@ -3457,10 +3533,12 @@ fn mission_resources_filtered(
                             })
                             .collect::<Vec<_>>()
                     });
-                    Ok::<Value, anyhow::Error>(json!({
+                    let mut value = json!({
                         "id": run.subject,
                         "generation_id": run.generation,
+                        "revision": run.revision,
                         "requester": run.requester,
+                        "retried_by": run.retried_by,
                         "status": run.status,
                         "phase": run.phase,
                         "progress": {"done": done, "total": run.steps.len()},
@@ -3480,7 +3558,20 @@ fn mission_resources_filtered(
                         "after": run.after,
                         "deadline": run.deadline_at_unix_ms.map(client_timestamp),
                         "steps": steps,
-                    }))
+                    });
+                    if let Some(source) = &run.retry_of {
+                        value["retry_of"] = json!(source);
+                    }
+                    for (field, value_field) in [
+                        ("supersedes", &run.supersedes),
+                        ("superseded_by", &run.superseded_by),
+                        ("supersession_fault", &run.supersession_fault),
+                    ] {
+                        if let Some(text) = value_field {
+                            value[field] = json!(text);
+                        }
+                    }
+                    Ok::<Value, anyhow::Error>(value)
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let state = if run_details.iter().any(|run| run["blocker"]["scope"] == crate::reconcile::FIRST_READINESS_FAULT_SCOPE) { "blocked" } else { state };
@@ -4171,6 +4262,43 @@ pub async fn missions(
     Ok((Extension(snapshot), Json(page)))
 }
 
+#[derive(Deserialize)]
+pub struct MissionRunsQuery {
+    mission_prefix: String,
+    #[serde(default)]
+    active: bool,
+    limit: Option<usize>,
+}
+
+/// Prefix-indexed automation read, deliberately independent of the fleet tree.
+/// Response middleware frames the page under `value` with its pinned read snapshot.
+pub async fn mission_runs_by_prefix(
+    State(state): State<AppState>,
+    Extension(_snapshot): Extension<ClientSnapshot>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<MissionRunsQuery>,
+) -> Result<(Extension<ClientSnapshot>, Json<crate::store::mission_run_query::MissionRunsPage>), ApiError> {
+    require_scope(&session, "read.projections")?;
+    if !(1..=500).contains(&query.limit.unwrap_or(100)) {
+        return Err(ApiError::bad(FractalError::new(
+            "validation-failed", "run limit must be 1 through 500",
+        )));
+    }
+    let store = state.store.clone();
+    let (snapshot, page) = super::blocking_store(move || {
+        store.read_snapshot(|index| {
+            let snapshot = client_snapshot_at(&state, index);
+            let page = store.mission_runs_by_prefix(
+                &query.mission_prefix,
+                query.active,
+                query.limit.unwrap_or(100),
+            )?;
+            Ok((snapshot, page))
+        })
+    }).await?;
+    Ok((Extension(snapshot), Json(page)))
+}
+
 /// A single read of the projections used by mission show, agent tree, and seat queues.
 pub async fn missions_tree(
     State(state): State<AppState>,
@@ -4822,6 +4950,7 @@ fn native_replay_extent(
     let (tail, suppressed) = canonical_native_slice(
         state, snapshot, source, session, session_id, &messages,
         crate::external_sessions::TimelineOrder::Sequence, None, limit, managed, false,
+        &mut conversation_blocks::NativeReadAdmission::default(),
     )?;
     if source.driver != crate::external_sessions::ExternalDriver::OpenCode
         && tail.generation != generation
@@ -4879,6 +5008,7 @@ fn conversation_first_page_at_generation(
                     let (head, suppressed) = canonical_native_slice(
                         state, snapshot, source, session, session_id, &messages,
                         crate::external_sessions::TimelineOrder::Sequence, None, 1, managed, false,
+                        &mut conversation_blocks::NativeReadAdmission::default(),
                     )?;
                     Some(head.items.iter().filter_map(native_entry_sequence).max().unwrap_or(0)
                         .max(suppressed))
@@ -7217,7 +7347,7 @@ fn terminal_stream_envelope(state: &AppState, value: Value) -> Value {
 fn terminal_stream_error(error: &ApiError) -> Value {
     json!({
         "api_version": CLIENT_API_VERSION,
-        "error_version": "st3.client.error.v0",
+        "error_version": "fractal.client.error.v0",
         "request_id": format!("request/{}", new_request_id()),
         "code": client_error_code(Some(&error.code)),
         "message": error.message,
@@ -7684,7 +7814,7 @@ fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<
     let target = client_detail_id("step-run", target);
     let work = state
         .store
-        .step_run(&target)
+        .step_run_fenced(&target)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("work `{target}` does not exist")))?;
     if fence.mission_generation.as_deref() != Some(work.generation.as_str())
@@ -7770,6 +7900,8 @@ async fn apply_runtime_control_intent(
             expected_subjects: preview.subject_tokens,
             idempotency_key: format!("{}:runtime-intent", request.idempotency_key),
             actor: Some(actor.to_owned()),
+            program_bundles: Default::default(),
+            force_reason: None,
         }),
     )
     .await?
@@ -8291,6 +8423,7 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    priority: None,
                     deadline_ms: p
                         .get("deadline_ms")
                         .map(|deadline| {
@@ -8387,35 +8520,36 @@ async fn dispatch_action(
             let result = accept_message_receipt_with_upload_owner(
                 state,
                 MessageSendRequest {
-                    idempotency_key: request.idempotency_key.clone(),
-                    // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if let Some(authorization) = session.assistant_write.as_ref() {
-                        authorization.principal().into()
-                    } else {
-                        authority_actor.clone()
-                    },
-                    to,
-                    // An attachment may travel alone; text is then optional.
-                    content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
-                        p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
-                    } else {
-                        parameter_string(p, "content")?
-                    },
-                    title: p.get("title").and_then(Value::as_str).map(str::to_owned),
-                    in_reply_to: p
-                        .get("in_reply_to")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    tags: message_send_tags(p)?,
-                    attachments: p
-                        .get("attachments")
-                        .cloned()
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|_| {
-                            validation("attachments are `{blob, media_type, name?}` records")
-                        })?
-                        .unwrap_or_default(),
+                owner: None,
+                idempotency_key: request.idempotency_key.clone(),
+                // Owner authority permits the operation, but is never the assistant's sender.
+                from: if let Some(authorization) = session.assistant_write.as_ref() {
+                    authorization.principal().into()
+                } else {
+                    authority_actor.clone()
+                },
+                to,
+                // An attachment may travel alone; text is then optional.
+                content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
+                    p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
+                } else {
+                    parameter_string(p, "content")?
+                },
+                title: p.get("title").and_then(Value::as_str).map(str::to_owned),
+                in_reply_to: p
+                    .get("in_reply_to")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                tags: message_send_tags(p)?,
+                attachments: p
+                    .get("attachments")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| {
+                        validation("attachments are `{blob, media_type, name?}` records")
+                    })?
+                    .unwrap_or_default(),
                 },
                 session_id,
                 p.get("signature")
@@ -8722,16 +8856,20 @@ async fn dispatch_action(
                 .ok_or_else(|| {
                     ApiError::not_found(format!("mission run `{target}` does not exist"))
                 })?;
-            if request.fence.mission_generation.as_deref() != Some(current.generation.as_str()) {
-                return Err(stale("the mission generation fence is stale"));
-            }
+            let expected_generation = request.fence.mission_generation.as_deref()
+                .ok_or_else(|| stale("the mission generation fence is stale"))?;
             let reason = p
                 .get("reason")
                 .and_then(Value::as_str)
                 .unwrap_or("the mission was cancelled by its requester");
             state
                 .store
-                .request_mission_run_cancellation(&current.subject, reason)
+                .request_mission_run_cancellation_at_generation(
+                    &current.subject,
+                    reason,
+                    Some(expected_generation),
+                    Some(authority_actor.as_str()),
+                )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![current.subject])
@@ -9019,6 +9157,7 @@ async fn dispatch_action(
                 idempotency_key: request.idempotency_key.clone(),
                 reason,
                 host: if action == "agent.resume" { p.get("host").and_then(Value::as_str).map(str::to_owned) } else { None },
+                force: false,
             };
             let fence = super::SuspensionFence {
                 incarnation,
@@ -9773,6 +9912,16 @@ async fn action_inner(
         "arrangement.membership.edit" => Some(arrangements::edit_memberships(&state, &session, &request).await?),
         _ => None,
     };
+    let read_position = if request.action_type == "read-position.advance" {
+        Some(read_positions::advance(&state, &session, &request).await?)
+    } else {
+        None
+    };
+    let attention_control = if matches!(request.action_type.as_str(), "attention.seen" | "attention.snooze" | "attention.dismiss") {
+        Some(attention_controls::control(&state, &session, &request).await?)
+    } else {
+        None
+    };
     if request.action_type == "private-notes.write" {
         return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
     }
@@ -9785,6 +9934,10 @@ async fn action_inner(
         ]
     } else if let Some(claim) = &arrangement_claim {
         vec![claim.subject.clone()]
+    } else if let Some(advanced) = &read_position {
+        vec![advanced.id.clone()]
+    } else if let Some(controlled) = &attention_control {
+        controlled.affected.clone()
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
@@ -9795,6 +9948,14 @@ async fn action_inner(
     }
     if let Some(claim) = arrangement_claim {
         result[if request.action_type == "arrangement.membership.edit" { "membership_revision" } else { "arrangement_revision" }] = json!(claim.id);
+    }
+    if let Some(advanced) = &read_position {
+        // The stored position after the merge, whether or not this advance appended a claim.
+        result["read_position_at"] = json!(advanced.at);
+    }
+    if let Some(controls) = attention_control.and_then(|controlled| controlled.state) {
+        // The row's controls after the action, whether or not it appended a claim.
+        result["attention_control"] = controls;
     }
     if request.action_type == "agent.create"
         && let Some(subject) = affected.first()
@@ -10195,6 +10356,83 @@ mod tests {
     use std::os::unix::fs::MetadataExt as _;
     use std::sync::Barrier;
 
+    #[tokio::test]
+    async fn mission_runs_prefix_read_requires_scope_and_bounds_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = || ClientSession::for_tests_scoped("person/operator", "person/operator", &["read.projections"]);
+        let query = |limit| MissionRunsQuery { mission_prefix: "roll/".into(), active: true, limit };
+        let (Extension(snapshot), Json(response)) = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session()), Query(query(None)),
+        ).await.unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap(), json!({"runs": [], "truncated": false}));
+        assert_eq!(snapshot.store_index, state.store.index().unwrap());
+        for limit in [0, 501] {
+            let error = mission_runs_by_prefix(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session()), Query(query(Some(limit))),
+            ).await.unwrap_err();
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        let error = mission_runs_by_prefix(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(ClientSession::for_tests_scoped("person/operator", "person/operator", &[])),
+            Query(query(None)),
+        ).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mission_runs_http_envelope_uses_the_pinned_snapshot() {
+        use axum::middleware::{self, Next};
+        use tower::ServiceExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let admitted = new_client_snapshot(&state);
+        state.store.append_claim(&ClaimInput {
+            subject: "custom/test/mission-runs-envelope".into(),
+            kind: "custom.test.marker".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let pinned_index = state.store.index().unwrap();
+        assert!(pinned_index > admitted.store_index);
+        let context = super::super::response_body::Context {
+            state: state.clone(), client_request: true, local_only_response: false,
+            request_id: "request/mission-runs-envelope".into(),
+            client_snapshot: Some(admitted.clone()), server: None, roster: false,
+        };
+        let app = Router::new()
+            .route("/v1/client/mission-runs", get(mission_runs_by_prefix))
+            .layer(Extension(ClientSession::for_tests_scoped(
+                "person/operator", "person/operator", &["read.projections"],
+            )))
+            .layer(Extension(admitted))
+            .layer(middleware::from_fn(move |request: Request<Body>, next: Next| {
+                let context = context.clone();
+                async move { context.wrap(next.run(request).await).await }
+            }))
+            .with_state(state.clone());
+        let response = app.oneshot(Request::builder()
+            .uri("/v1/client/mission-runs?mission_prefix=roll%2F&active=true")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["value"], json!({"runs": [], "truncated": false}));
+        assert_eq!(response["snapshot"]["store_index"], pinned_index);
+        assert_eq!(response["snapshot"]["host_id"], client_host_id(&state.node));
+        assert_eq!(response["request_id"], "request/mission-runs-envelope");
+        assert!(response["snapshot"]["created_at"].is_string());
+        assert!(response["value"].get("snapshot").is_none());
+        assert!(response["value"].get("value").is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn published_runtimes_refresher_publishes_after_commits() {
         let root = tempfile::tempdir().unwrap();
@@ -10215,6 +10453,39 @@ mod tests {
         assert_eq!(publication.rows.items.len(), 2);
         assert!(published_runtimes::fold(&state.store, Some(&publication)).unwrap().is_none(),
             "an unchanged store index does not rebuild the list");
+    }
+
+    #[test]
+    fn server_subprotocols_use_fractal_and_negotiate_legacy_offers() {
+        for (canonical, expected, legacy) in [
+            (TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0", "st3.client.terminal.v0"),
+            (CONVERSATION_SUBPROTOCOL, "fractal.client.conversation.v0", "st3.client.conversation.v0"),
+            (COLLECTION_SUBPROTOCOL, "fractal.client.collections.v0", "st3.client.collections.v0"),
+        ] {
+            assert_eq!(canonical, expected);
+            assert_eq!(super::super::wire_names::selected_protocol(&[legacy], canonical), Some(legacy));
+            assert_eq!(super::super::wire_names::selected_protocol(&[canonical], canonical), Some(canonical));
+        }
+    }
+
+    #[tokio::test]
+    async fn server_pairing_accepts_legacy_requests_and_emits_fractal() {
+        for version in ["st3.client.v0", "fractal.client.v0"] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let response = super::super::router(state).oneshot(Request::builder()
+                .method("POST").uri("/v1/client/pairings")
+                .header(LOCAL_PERSON_HEADER, "person/ada")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({
+                    "api_version": version, "device_name": "Old client", "person_id": "person/ada"
+                }).to_string())).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["api_version"], "fractal.client.v0");
+            assert_eq!(response["value"]["kind"], "pairing-challenge");
+        }
     }
 
     #[tokio::test]
@@ -10240,7 +10511,7 @@ mod tests {
             let envelope: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(envelope["code"], if ended { "runtime-list-ended" } else { "runtime-list-not-ready" });
             assert_eq!(envelope["retryable"], !ended);
-            assert_eq!(envelope["error_version"], "st3.client.error.v0");
+            assert_eq!(envelope["error_version"], "fractal.client.error.v0");
             assert_eq!(envelope["details"], json!({}));
         }
     }
@@ -12284,8 +12555,15 @@ mission "differential" state="ready" {
             "runtime_id":"fresh-roster", "incarnation_id":"one"}));
         let mut published = state.store.subscribe_agent_roster();
         crate::api::start_agent_roster(&state);
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(|revision| *revision > 0))
-            .await.unwrap().unwrap();
+        let complete = {
+            let store = state.store.clone();
+            move |_: &u64| store.published_agent_roster(store.index().unwrap(), false).is_some()
+        };
+        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete))
+            .await.expect("the refresher publishes a complete initial roster").unwrap();
+        // Freeze the refresher before advancing the graph so the unchanged-through read
+        // must use the old publication, not an identical one published at a newer cut.
+        let _admission = state.store.admit_agent_resources("other").await;
         let revision = *published.borrow_and_update();
         let (_, Json(before)) = client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default())).await.unwrap();
@@ -12313,7 +12591,6 @@ mission "differential" state="ready" {
 
         // A claim about the agent changes its card. Start a healthy attempt and hold it:
         // the fresh read must wait for this attempt's publication, not answer early.
-        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
@@ -13439,7 +13716,7 @@ mission "differential" state="ready" {
     }
 
     #[tokio::test]
-    async fn diagnostics_scope_is_in_default_device_and_full_control_pairing() {
+    async fn device_write_scopes_are_in_default_device_and_full_control_pairing() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let app = super::super::router(state.clone());
@@ -13460,8 +13737,10 @@ mission "differential" state="ready" {
             ).unwrap();
             let begun = begun.claims.iter().find(|claim|
                 claim.body["fields"]["pairing_id"] == pairing_id).unwrap();
-            assert!(begun.body["fields"]["scopes"].as_array().unwrap()
-                .contains(&json!("write.client-diagnostics")));
+            let scopes = begun.body["fields"]["scopes"].as_array().unwrap();
+            for scope in ["write.client-diagnostics", "write.availability", "write.presence", "write.notes"] {
+                assert!(scopes.contains(&json!(scope)), "{scope}");
+            }
         }
     }
 
@@ -13661,18 +13940,19 @@ mission "differential" state="ready" {
         let sent = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-attachment".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "see image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: vec![crate::model::AttachmentInput {
-                    blob: format!("blob/{hash}"),
-                    media_type: "image/png".into(),
-                    name: Some("paste.png".into()),
-                }],
+            owner: None,
+            idempotency_key: "timeline-attachment".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "see image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: vec![crate::model::AttachmentInput {
+                blob: format!("blob/{hash}"),
+                media_type: "image/png".into(),
+                name: Some("paste.png".into()),
+            }],
             },
             None,
             None,
@@ -13698,14 +13978,15 @@ mission "differential" state="ready" {
         let plain = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-plain".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "no image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "timeline-plain".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "no image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,
@@ -13943,6 +14224,7 @@ mission "differential" state="ready" {
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: node.into(),
+            api_socket: root.join("api.sock"),
             state_dir: root.to_path_buf(),
             pty_root: root.join("pty"),
             pty_binary: root.join("unused-pty"),
@@ -16391,6 +16673,28 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn model_drift_attention_is_its_own_feature_not_implied_by_custom_forms() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for (features, expected) in [
+            (None, false),
+            // What clients before the kind send: custom forms alone never imply it.
+            (Some("custom-subjects.v1, conversation-blocks.v1"), false),
+            (Some("model-drift-attention.v2"), false),
+            (Some("custom-subjects.v1, model-drift-attention.v1 , conversation-blocks.v1"), true),
+        ] {
+            let mut request = Request::builder().uri("/v1/client/attention");
+            if let Some(features) = features {
+                request = request.header("x-st3-features", features);
+            }
+            let request = request.body(Body::empty()).unwrap();
+            let session = authenticate(&state, &request, "unix").unwrap();
+            assert_eq!(session.model_drift_attention, expected, "{features:?}");
+            assert_eq!(session.attention_compatibility().model_drift, expected, "{features:?}");
+        }
+    }
+
+    #[test]
     fn messages_paging_requires_the_exact_request_feature_token() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16834,7 +17138,7 @@ mission "example/looped" state="ready" {
             .unwrap();
         state
             .store
-            .retire_mission("example/looped", "person/operator", "retire-looped")
+            .retire_mission("example/looped", "person/operator", "retire-looped", None)
             .unwrap();
         let current =
             mission_resources(&state.store, state.store.index().unwrap(), false, None).unwrap();
@@ -16850,6 +17154,126 @@ mission "example/looped" state="ready" {
             .find(|value| value["id"] == "mission/example/looped")
             .unwrap();
         assert_eq!(retired["state"], "retired");
+    }
+
+    #[test]
+    fn mission_list_and_detail_preserve_retry_links_without_null_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "retry-node");
+        let mission = "mission/example/retry-links";
+        let source = r#"version 2
+mission "example/retry-links" state="ready" {
+  goal "Keep retry lineage visible."
+  step "work" { agentless }
+}"#;
+        let intent = crate::graph::parse_intent(source, "retry-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "publish-retry-links", Some("person/operator")).unwrap();
+        let start = |key: &str| state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let original = start("retry-links-original");
+        state.store.set_mission_run_state(&original.id, "failed", "terminal", Some("a gate failed")).unwrap();
+        let retried = state.store.retry_mission_run(&original.subject, &crate::model::MissionRunRetryRequest {
+            actor: "person/operator".into(), same_revision: false, reason: None,
+            idempotency_key: "retry-links-new".into(),
+        }).unwrap();
+        state.store.set_mission_run_state(&retried.id, "failed", "terminal", Some("another gate failed")).unwrap();
+        let ordinary = start("retry-links-ordinary");
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+        for items in [&cards, &detail, &history] {
+            let card = items.iter().find(|item| item["id"] == mission).unwrap();
+            let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+            let runs = card["run_details"].as_array().unwrap();
+            let original_view = runs.iter().find(|run| run["id"] == original.subject).unwrap();
+            assert!(original_view.get("retry_of").is_none(), "{original_view}");
+            assert_eq!(original_view["retried_by"], json!([retried.subject]));
+            let retry_view = runs.iter().find(|run| run["id"] == retried.subject).unwrap();
+            assert_eq!(retry_view["retry_of"], original.subject);
+            let ordinary_view = runs.iter().find(|run| run["id"] == ordinary.subject).unwrap();
+            assert!(ordinary_view.get("retry_of").is_none(), "{ordinary_view}");
+            assert_eq!(ordinary_view["retried_by"], json!([]));
+            for run in runs {
+                for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                    assert!(run.get(field).is_none(), "{run}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mission_public_readers_decode_supersession_links_and_input_refusal() {
+        for compatible in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "supersession-node");
+            let mission = "mission/example/supersession";
+            let source = r#"version 2
+mission "example/supersession" state="ready" {
+  input "value" kind="text"
+  goal "Keep publication lineage visible."
+  step "work" { agentless }
+}"#;
+            let publish = |source: &str, key: &str| {
+                let intent = crate::graph::parse_intent(source, "supersession-node").unwrap();
+                let preview = state.store.mission(&intent, crate::model::IntentInput {
+                    kdl: source.into(), source_name: None,
+                }).unwrap();
+                state.store.apply_as(&intent, &preview.subject_tokens, key, Some("person/operator")).unwrap();
+            };
+            publish(source, "supersession-original");
+            let original = state.store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: mission.into(), revision: None, workspace: root.path().display().to_string(),
+                requester: Some("person/operator".into()), mode: None,
+                inputs: BTreeMap::from([("value".into(), "retained".into())]),
+                idempotency_key: "supersession-source".into(),
+            }).unwrap();
+            let changed = if compatible {
+                source.replace("Keep publication lineage visible.", "Keep replacement lineage visible.")
+            } else {
+                source.replace("input \"value\"", "input \"replacement\"")
+            };
+            publish(&changed, "supersession-next");
+            let latest = state.store.mission_spec(mission, None).unwrap().unwrap();
+            let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+            let history = mission_resources(&state.store, state.store.index().unwrap(), true, None).unwrap();
+            for items in [&cards, &detail, &history] {
+                let card = items.iter().find(|item| item["id"] == mission).unwrap();
+                let _: fractal_client::Resource = serde_json::from_value(card.clone()).unwrap();
+                let runs: Vec<fractal_client::MissionRunSummary> =
+                    serde_json::from_value(card["run_details"].clone()).unwrap();
+                let old = runs.iter().find(|run| run.id == original.subject).unwrap();
+                assert!(old.retry_of.is_none());
+                assert!(old.retried_by.is_empty());
+                assert!(old.supersedes.is_none());
+                if compatible {
+                    let successor = old.superseded_by.as_ref().unwrap();
+                    let replacement = runs.iter().find(|run| &run.id == successor).unwrap();
+                    assert_eq!(replacement.supersedes.as_deref(), Some(original.subject.as_str()));
+                    assert!(replacement.superseded_by.is_none());
+                    assert!(replacement.supersession_fault.is_none());
+                    assert!(old.supersession_fault.is_none());
+                } else {
+                    assert_eq!(old.status, "running");
+                    assert!(old.superseded_by.is_none());
+                    let fault = old.supersession_fault.as_deref().unwrap();
+                    assert!(fault.contains(&original.revision), "{fault}");
+                    assert!(fault.contains(&latest.revision), "{fault}");
+                    assert!(fault.contains("replacement") && fault.contains("value"), "{fault}");
+                }
+                for run in card["run_details"].as_array().unwrap() {
+                    for field in ["supersedes", "superseded_by", "supersession_fault"] {
+                        assert!(run.get(field).is_none_or(Value::is_string), "{run}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -17101,7 +17525,7 @@ mission "example/looped" state="ready" {
             let root = tempfile::tempdir().unwrap();
             let state = test_state_named(root.path(), "live-run-node");
             let steps = (0..24).map(|i| format!(
-                "  step \"step-{i:02}\" {{ assigned-to \"agent/worker-{i:02}\" }}\n"
+                "  step \"step-{i:02}\" {{ assigned-to \"agent/live-run-node.worker-{i:02}\" }}\n"
             )).collect::<String>();
             let source = format!(
                 "version 2\nmission \"example/live\" state=\"ready\" {{\n  goal \"Keep live metadata.\"\n  concurrent-runs max=10\n{steps}}}"
@@ -17532,6 +17956,7 @@ mission "example/zero-run" state="ready" {
         )
         .unwrap();
         assert_eq!(details.len(), 1);
+        assert_eq!(details[0]["visualization"]["version"], "fractal.visualization.v0");
         assert_eq!(
             details[0]["visualization"]["mission"],
             "mission/example/zero-run"
@@ -19291,11 +19716,11 @@ mission "example/zero-run" state="ready" {
         .unwrap();
         assert_eq!(page["items"].as_array().unwrap().len(), 20);
         assert_eq!(page["page"]["has_more"], true);
-        // A relayed owner read negotiates conversation blocks, so it also reads the newest 200
-        // entries its header summarizes; the frame itself is still the 20 asked for.
+        // The owner folds the newest 200 entries for its header, but only prepares
+        // display bodies for the page and its has-more probe.
         assert_eq!(
             conversation_blocks::prepared_bodies(),
-            CLIENT_MAX_PAGE_ITEMS,
+            21,
             "the owner prepared {} bodies for a 20-entry relayed frame",
             conversation_blocks::prepared_bodies()
         );
@@ -20154,14 +20579,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-older".into(),
-                from: client_session.authority_actor.clone(),
-                to: subject.into(),
-                content: "older session message".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-older".into(),
+            from: client_session.authority_actor.clone(),
+            to: subject.into(),
+            content: "older session message".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             Some("session/older-incarnation".into()),
             None,
@@ -20212,14 +20638,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-outgoing".into(),
-                from: subject.into(),
-                to: "agent/session-message-peer".into(),
-                content: "outgoing Fractal message".into(),
-                title: Some("A question".into()),
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-outgoing".into(),
+            from: subject.into(),
+            to: "agent/session-message-peer".into(),
+            content: "outgoing Fractal message".into(),
+            title: Some("A question".into()),
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,
@@ -24548,6 +24975,7 @@ mission "example/zero-run" state="ready" {
             local_peer: false,
             peer_process: None,
             custom_forms: false,
+            model_drift_attention: false,
             conversation_blocks: false,
             conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,

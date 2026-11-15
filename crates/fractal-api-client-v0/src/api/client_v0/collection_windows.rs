@@ -1055,7 +1055,7 @@ mod tests {
                 } else {
                     client_attention_resources_at(&state.store, Some("person/ada"), false, now)?
                 };
-                client_attention_compatibility(&mut items, session.custom_forms);
+                client_attention_compatibility(&mut items, session.attention_compatibility());
                 Ok((items, false))
             };
             let oracle = state.store.read_snapshot(|_| projection()).unwrap();
@@ -1082,7 +1082,7 @@ mod tests {
                         } else {
                             client_attention_resources_fenced_at(&state.store, Some("person/ada"), now)?
                         };
-                        client_attention_compatibility(&mut items, session.custom_forms);
+                        client_attention_compatibility(&mut items, session.attention_compatibility());
                         Ok((items, false, until, None))
                     })).map(|(items, more, _)| (items, more)).unwrap()
             };
@@ -1100,6 +1100,7 @@ mod tests {
             for kind in fractal_schema::registry().claims.keys() {
                 let telemetry = matches!(kind.as_str(),
                     "daemon.diagnostic" | "transport.observed" | "workspace.observed")
+                    || kind == fractal_schema::read_positions::KIND
                     || (collection == "missions" && matches!(kind.as_str(),
                         "harness.observed" | "harness.diagnostic" | "harness.timeline" | "harness.usage"
                             | "harness.todo.observed" | "harness.session-file"))

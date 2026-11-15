@@ -87,6 +87,7 @@ fn terminal_tab_probe_worker() -> Result<()> {
             "one".into(),
             24,
             80,
+            None,
         )),
     });
     let mut last = String::new();

@@ -1,4 +1,5 @@
 import { live, telemetry } from './liveRuntime.ts'
+import { buildIdentity } from 'virtual:build-identity'
 import * as React from 'react'
 import { DataSourceProvider } from '../data/react.tsx'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
@@ -11,6 +12,12 @@ import { DiagnosticsBoundary } from './DiagnosticsBoundary.tsx'
 const Diagnostics = import.meta.env.DEV || import.meta.env.PERF
   ? React.lazy(() => import('../telemetry/DevBar.tsx').then(({ DevBar }) => ({ default: DevBar })))
   : undefined
+
+const build = {
+  version: buildIdentity.baseVersion,
+  dirty: buildIdentity.dirty,
+  ...(buildIdentity.rev === undefined || buildIdentity.rev === null ? {} : { revision: buildIdentity.rev }),
+}
 
 export const App = () => {
   const overlayHost = React.useRef<HTMLDivElement>(null)
@@ -28,7 +35,7 @@ export const App = () => {
         )}
         <DataSourceProvider source={live.source} registry={live.registry}>
           <React.Profiler id="workbench" onRender={telemetry.onCommit}>
-            <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} />
+            <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} build={build} />
           </React.Profiler>
         </DataSourceProvider>
         <div ref={overlayHost} data-app-overlay-host="" />

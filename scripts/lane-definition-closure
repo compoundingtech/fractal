@@ -135,7 +135,7 @@ EXTRA = {
 # kit-play-shards.mjs to test it). A package.json whose script a lane's pnpm call runs is in the closure (its `scripts` entry is the
 # command). Nothing outside SUBJECT is assumed to be the subject.
 SUBJECT = ('Cargo.toml', 'Cargo.lock', 'src', 'tests', 'crates', 'components', 'examples', 'wit', 'vendor',
-           'apps/fractal-web', 'apps/ios', 'clients/typescript', 'packages/fractal-sdk', 'packages/fractal-ui')
+           'apps/fractal-web', 'apps/ios', 'clients/typescript', 'packages/fractal', 'packages/fractal-sdk', 'packages/fractal-ui')
 HARNESS = ('apps/fractal-web/scripts/ci', 'packages/fractal-ui/scripts')
 HARNESS_LANES = {'fractal-web'}
 # Where the lanes' own code lives. A file elsewhere that the code names (a workflow, a doc, a fixture, a baseline) is read as data:

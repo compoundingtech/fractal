@@ -25,6 +25,15 @@ The CLI drives real public command paths. Reads are compared before and after re
 
 The live terminal UI test drives send/attachment upload, discussion, retry, agent/shell/launch creation, launch revision, device revocation and mission cancellation through its real adapter across disk-store restarts. The gate fixture drives the real attention adapter after a changed card and a restart. Terminal key encoding, native attachment/reconnection, visibility/read receipts, palette/layout and local draft/navigation controls retain their own focused tests.
 
+Read-position evidence separates presentation from transport:
+`presented_reads_queue_the_latest_advance_only_when_live_and_supported` exercises
+the presented-prose reducer and its effect queue, including capability/offline
+gates, latest-position coalescing and one advance in flight.
+`read_positions_advance_in_st_and_list_by_the_larger_from_any_device` drives the
+actual read-position adapter over a private Unix socket, checks monotonic advances
+from two clients and server-confirmation merging, and refuses another person's
+reads. It does not claim to drive the interactive terminal or a daemon restart.
+
 Suspension and new-seat readiness tests supply explicit fixture owner acknowledgements. They verify the public request, wait, native identity and durable protocol phases; native process continuation belongs to the runtime canaries and restart suite. GitHub gates use real CLI commands with a private HTTP fixture for pass/wait/broken behavior, obsolete commit refs and malformed-input refusal across daemon restarts; they make no live GitHub API calls. GitHub comment posting offers no public snapshot fence or retry token: tests prove refusal of a foreign seat actor before HTTP posting and durable ownership across restarts; they do not claim exactly-once external posting. Local-only UI operations have no graph fence. Glass base revisions intentionally report last-writer-wins replacement and are not execution fences.
 
 Three declared typed actions are unavailable: `attention.resolve` returns `attention-migrated`; `mission.revise` and `work.publish-mission` return `unsupported-capability`. Tests verify refusal without writes on either side of a restart. Supported source actions and the legacy CLI publication/revision paths have separate successful coverage. Dismiss/remind-me-later and forgetting an unconfirmed draft are local presentation changes, not attention resolution or message archival.

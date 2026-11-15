@@ -261,6 +261,9 @@ export const readOnlyBinaryCaches = Object.values(effectUtilsBinaryCaches)
 /** Dev/test builds without debug information or incremental state, as on the fleet runners. */
 export const buildEnv = { CARGO_PROFILE_DEV_DEBUG: '0', CARGO_PROFILE_TEST_DEBUG: '0', CARGO_INCREMENTAL: '0' }
 
+// This archive is dependency-only evidence, even on an exact key hit: its key
+// omits Rust sources. buildSnapshotPrepare discards local package fingerprints
+// and outputs after restoration; only exact-source snapshots retain them.
 export const cargoCacheStep = {
   name: 'Restore the Cargo target and registry',
   id: 'cargo-cache',

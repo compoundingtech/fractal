@@ -1874,9 +1874,29 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             assert!(double_attribute(cold, &key).is_some_and(|ms| ms >= 0.0), "{key}: {cold}");
         }
     }
-    assert!(spans.iter().all(|span| span["parentSpanId"].as_str()
-        .is_none_or(|parent| !spans.iter().any(|server| server["traceId"] == TRACE
-            && server["spanId"].as_str() == Some(parent)))), "request stage children leaked: {spans:?}");
+    let roster_gets: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "GET /v1/client/agents").collect();
+    assert!(!roster_gets.is_empty(), "roster GET server spans missing");
+    let roster_child = |span: &Value| span["traceId"] == TRACE
+        && span["parentSpanId"].as_str().is_some_and(|parent|
+            roster_gets.iter().any(|server| server["spanId"].as_str() == Some(parent)));
+    assert!(spans.iter().all(|span| !roster_child(span)),
+        "roster GET stage children leaked: {spans:?}");
+    assert!(spans.iter().all(|span| span["name"] != "st.db.writer" || !roster_child(span)),
+        "roster GET unexpectedly created a writer span: {spans:?}");
+    // The fixture's diagnostics POSTs share TRACE with the reads. Their writes
+    // intentionally have request-parented children, unlike published roster reads.
+    let diagnostic_posts: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "POST /v1/diagnostics/harness").collect();
+    assert!(!diagnostic_posts.is_empty(), "diagnostics POST server spans missing");
+    let writers: Vec<_> = spans.iter().filter(|span|
+        span["traceId"] == TRACE && span["name"] == "st.db.writer").collect();
+    assert!(!writers.is_empty(), "diagnostics writes must export writer spans");
+    for writer in writers {
+        assert!(writer["parentSpanId"].as_str().is_some_and(|parent|
+            diagnostic_posts.iter().any(|server| server["spanId"].as_str() == Some(parent))),
+            "writer span must be a child of its diagnostics POST: {writer}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2974,7 +2994,7 @@ fn population_gauges_export_exact_otlp_attribute_sets() {
         ("omp".into(), "subagent".into(), "unknown".into())]));
     assert_eq!(attention.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from(["person-step", "human-gate", "launch-approval", "unread-message",
-            "agent-request", "revision-approval", "harness-login", "harness-prompt", "fault", "unattributed"]));
+            "agent-request", "revision-approval", "harness-login", "harness-prompt", "fault", "model-drift", "effect-unresolved", "unattributed"]));
     assert!(attention.values().all(|count| *count == 0));
     assert!(freshness);
 }

@@ -29,6 +29,9 @@ fn step_line(wait: &StepWait, now: u128) -> String {
         (WaitKind::NoProgress | WaitKind::Working, Some(since)) => {
             let _ = write!(line, " · last progress {since} ago");
         }
+        (WaitKind::Program, Some(since)) => {
+            let _ = write!(line, " · last journal entry {since} ago");
+        }
         (WaitKind::Unclaimed | WaitKind::Ready, Some(since)) => {
             let _ = write!(line, " · ready {since}");
         }

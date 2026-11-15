@@ -77,7 +77,8 @@ const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => (
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
   steps: [
-    { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+    // Reuse setup's checkout before probing; a second checkout would clean downloaded compat archives.
+    ...setup.slice(0, 1),
     ...(nixOnly ? [genieNixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
       ...step,
       if: 'success()',
@@ -94,7 +95,7 @@ if ${nixOnly ? '[ \"$NIX_HIT\" != true ]' : '[ \"$CARGO_HIT\" != true ] || [ \"$
 fi`,
     },
     ...whenMissing([
-      ...(stage === 'genie' ? setup.filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup),
+      ...(stage === 'genie' ? setup.slice(1).filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup.slice(1)),
       ...(stage === 'genie' ? [megarepoApplyStep] : []),
       {
         ...nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),

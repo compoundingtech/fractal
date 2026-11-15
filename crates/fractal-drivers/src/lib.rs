@@ -61,6 +61,7 @@ pub mod hooks;
 pub mod host;
 pub mod host_lock;
 pub mod identity;
+pub mod managed_launch;
 pub mod materialize;
 pub mod message;
 pub mod metrics;

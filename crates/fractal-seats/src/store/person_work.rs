@@ -9,6 +9,8 @@ pub use fractal_missions::store::person_work::*;
 pub use fractal_missions::store::person_work::{AskImages, current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
 mod reconcile_candidates_tests;
+#[cfg(test)]
+mod deadline_clock_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
@@ -133,7 +135,9 @@ pub mod tests {
             answer: None,
         };
         assert_eq!(store.finish_person_step(&response, true).unwrap().status, "cancelled");
-        assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "ready");
+        let failed = store.step_run(&origin.subject).unwrap().unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.blocked_reason.as_deref(), Some(format!("ask cancelled by {}", response.actor).as_str()));
     }
 
     #[test]
@@ -314,6 +318,10 @@ pub mod tests {
     }
 
     fn fixture_with_store(store: Store) -> (Store, StepRunView, PersonAskRequest) {
+        fixture_with_revision(store, None)
+    }
+
+    fn fixture_with_revision(store: Store, prepare_changes: Option<bool>) -> (Store, StepRunView, PersonAskRequest) {
         let intent = crate::graph::parse_internal_intent(
             r#"version 2
 agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }
@@ -327,10 +335,15 @@ mission "person-work" state="ready" {
         )
         .unwrap();
         store.apply_internal(&intent, "person-fixture").unwrap();
+        if let Some(prepare_changes) = prepare_changes {
+            // Exercise direct generation adoption, not publication-driven supersession.
+            let next = crate::graph::parse_internal_intent(&revision_source(prepare_changes), "alder").unwrap();
+            store.apply_internal(&next, "person-revision").unwrap();
+        }
         let run = store
             .create_mission_run(&MissionRunRequest {
                 mission: "person-work".into(),
-                revision: None,
+                revision: prepare_changes.map(|_| intent.missions["person-work"].revision.clone()),
                 workspace: "/tmp".into(),
                 requester: Some("person/avery".into()),
                 mode: Some("run".into()),
@@ -352,6 +365,7 @@ mission "person-work" state="ready" {
             Ok(())
         }).unwrap().unwrap();
         let input = PersonAskRequest {
+            priority: None,
             deadline_ms: None,
             default_answer: None,
             legacy_request: None,
@@ -635,15 +649,13 @@ schedule "intake" {
         );
     }
 
-    /// Revise the fixture's run so `prepare` moves into a new generation: carried with its
-    /// claim when only `review` changes, or issued again and claimed anew when `prepare` changes.
-    fn revise_fixture(store: &Store, origin: &StepRunView, prepare_changes: bool) -> StepRunView {
+    fn revision_source(prepare_changes: bool) -> String {
         let (prepare, review) = if prepare_changes {
             ("Prepare the release notes too.", "Review the release.")
         } else {
             ("Prepare the release.", "Review the release notes.")
         };
-        let source = format!(
+        format!(
             r#"version 2
 mission "person-work" state="ready" {{
   goal "Review the release.";
@@ -651,9 +663,13 @@ mission "person-work" state="ready" {{
   step "review" {{ assigned-to "person/avery"; goal "{review}"; }}
 }}
 "#
-        );
+        )
+    }
+
+    /// Move `prepare` by explicit generation adoption, preserving its claim when unchanged.
+    fn revise_fixture(store: &Store, origin: &StepRunView, prepare_changes: bool) -> StepRunView {
+        let source = revision_source(prepare_changes);
         let intent = crate::graph::parse_internal_intent(&source, "alder").unwrap();
-        store.apply_internal(&intent, "person-revision").unwrap();
         let revised = store
             .adopt_mission_revision(
                 &origin.run,
@@ -696,7 +712,10 @@ mission "person-work" state="ready" {{
     #[test]
     fn a_worker_asks_from_the_step_a_revision_moved_by_its_old_name() {
         for prepare_changes in [false, true] {
-            let (store, origin, input) = fixture();
+            let (store, origin, input) = fixture_with_revision(
+                Store::open_memory("alder").unwrap(),
+                Some(prepare_changes),
+            );
             let eta = fractal_store::work_eta::summary(
                 Some("Release preparation checkpoint"),
                 "2h",
@@ -1230,6 +1249,17 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     /// applied. A person cannot answer it afterwards.
     #[test]
     fn a_structured_ask_resolves_with_its_default_answer_at_its_deadline() {
+        struct ResetClock;
+        impl Drop for ResetClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _reset = ResetClock;
+        let asked = 1_800_000_000_000u128;
+        // The fixture's claimant lease and every liveness read use the simulated clock:
+        // batched writes carry it, so an ask accepted at `asked` is in the future at wall time.
+        smallclaims::store::set_thread_clock(Some(asked));
         let (store, origin, mut input) = fixture();
         store.set_ask_deadlines(true);
         input.title = "Land the browser gateway?".into();
@@ -1244,10 +1274,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         too_soon.deadline_ms = Some(10_000);
         assert_eq!(store.ask_person(&too_soon).unwrap_err().code, "invalid-ask-deadline");
         input.default_answer = Some("keep-open".into());
-        let asked = 1_800_000_000_000u128;
-        smallclaims::store::set_thread_clock(Some(asked));
         let ask = store.ask_person(&input).unwrap();
-        smallclaims::store::set_thread_clock(None);
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
         let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
         assert_eq!(deadline, asked + 3_600_000);
@@ -1269,6 +1296,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
 
         let early = store.reconcile_person_asks_at(deadline - 1).unwrap();
         assert_eq!(early, PersonAskPass { changed: false, next_deadline: Some(deadline) });
+        smallclaims::store::set_thread_clock(Some(deadline - 1));
         let item = store
             .attention_items(Some("person/avery"))
             .unwrap()
@@ -1286,6 +1314,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         let row = fractal_store::store::attention_ivm::resource(&item).unwrap();
         assert!(row.get("deadline_at").is_none() && row.get("default_answer").is_none(), "{row}");
         assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
+        smallclaims::store::set_thread_clock(Some(deadline));
         assert!(
             store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),
             "the resolved ask leaves the person's home"
@@ -1328,14 +1357,15 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     /// with no answer.
     #[test]
     fn a_plain_ask_times_out_without_an_answer_at_the_fleet_default_deadline() {
+        let asked = 1_800_000_000_000u128;
+        // The fixture's claimant lease must be live at the simulated ask time.
+        smallclaims::store::set_thread_clock(Some(asked));
         let (store, origin, mut input) = fixture();
         store.set_ask_deadlines(true);
         input.default_answer = Some("friday".into());
         assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-default-answer");
         input.default_answer = None;
         store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
-        let asked = 1_800_000_000_000u128;
-        smallclaims::store::set_thread_clock(Some(asked));
         let ask = store.ask_person(&input).unwrap();
         smallclaims::store::set_thread_clock(None);
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
@@ -1427,11 +1457,12 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     #[test]
     fn an_answer_stored_at_the_deadline_is_refused_on_another_member() {
         const ASKED: u128 = 1_800_000_000_000;
+        // The fixture's claimant lease must be live at the simulated ask time.
+        smallclaims::store::set_thread_clock(Some(ASKED));
         let (owner, _, mut input) = fixture();
         owner.set_ask_deadlines(true);
         input.request = Some(gateway_decision());
         input.deadline_ms = Some(3_600_000);
-        smallclaims::store::set_thread_clock(Some(ASKED));
         let ask = owner.ask_person(&input).unwrap();
         let episode = request(&owner.readers.get(), &ask.subject).unwrap().unwrap().id;
         let other = Store::open_memory("birch").unwrap();
@@ -1902,6 +1933,174 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     }
 
     #[test]
+    fn historical_automatic_cancellation_uses_asking_predecessor_and_replays() {
+        for wrong_episode in [false, true] {
+            let (source, origin, input) = fixture();
+            let ask = source.ask_person(&input).unwrap();
+            let asking = request(&source.readers.get(), &ask.subject).unwrap().unwrap();
+            let target = Store::open_memory("birch").unwrap();
+            target.project_replication_backlog().unwrap();
+            receive(&source, &target);
+            source.connection.batched(|tx| -> Result<()> {
+                let mut body = json!({"fields": {
+                    "attempt": ask.attempt, "status": "cancelled",
+                    "summary": "the requester, origin or owning run ended",
+                    "key": format!("person-owner-ended:{}", asking.id)
+                }});
+                if wrong_episode {
+                    body["fields"]["episode"] = json!("a-different-asking-claim");
+                }
+                let cancelled = append_claim_tx(
+                    tx, "alder", &ask.subject, "work.person-cancelled", Some("daemon/runtime"),
+                    &body, std::slice::from_ref(&asking.id), None,
+                )?;
+                assert!(cancelled.predecessors.contains(&asking.id));
+                project(tx, &cancelled).unwrap();
+                Ok(())
+            }).unwrap().unwrap();
+            receive(&source, &target);
+            for store in [&source, &target] {
+                let check = || {
+                    assert_eq!(store.step_run(&ask.subject).unwrap().unwrap().status, "cancelled");
+                    let waiting = if wrong_episode {
+                        step(&store.readers.get(), &origin.subject).unwrap().unwrap()
+                    } else {
+                        store.step_run(&origin.subject).unwrap().unwrap()
+                    };
+                    assert_eq!(waiting.attempt, origin.attempt);
+                    assert_eq!(waiting.status, if wrong_episode { "waiting-person" } else { "failed" });
+                    assert_eq!(waiting.blocked_reason.as_deref(), Some(if wrong_episode {
+                        ask.subject.as_str()
+                    } else {
+                        "ask cancelled by daemon/runtime"
+                    }));
+                };
+                check();
+                store.replay_replication_graph().unwrap();
+                check();
+            }
+        }
+    }
+
+    #[test]
+    fn stale_replica_cancellation_preserves_new_attempt_and_live_lease() {
+        stale_replica_cancellation_preserves_origin("retry");
+    }
+
+    #[test]
+    fn stale_replica_cancellation_preserves_reclaimed_same_attempt() {
+        stale_replica_cancellation_preserves_origin("reclaimed");
+    }
+
+    #[test]
+    fn stale_replica_cancellation_preserves_different_ask_episode() {
+        stale_replica_cancellation_preserves_origin("another-ask");
+    }
+
+    fn stale_replica_cancellation_preserves_origin(advance: &str) {
+        for historical_effect in [false, true] {
+            let (owner, origin, mut input) = fixture();
+            let ask = owner.ask_person(&input).unwrap();
+            let episode = request(&owner.readers.get(), &ask.subject).unwrap().unwrap().id;
+            let stale = Store::open_memory("birch").unwrap();
+            stale.project_replication_backlog().unwrap();
+            receive(&owner, &stale);
+            owner.finish_person_step(&PersonStepResponse {
+                delegation: None,
+                subject: ask.subject.clone(),
+                actor: input.person.clone(),
+                summary: "Friday".into(),
+                evidence: vec![],
+                episode: Some(episode.clone()),
+                idempotency_key: "answered-before-stale-cancel".into(),
+                answer: None,
+            }, false).unwrap();
+            if advance == "retry" {
+                owner.set_step_state(&origin.subject, "failed", Some("try again")).unwrap();
+                owner.retry_step(&origin.subject, "try again", 0).unwrap();
+                owner.set_step_state(&origin.subject, "ready", None).unwrap();
+            }
+            let attempt = owner.step_run(&origin.subject).unwrap().unwrap().attempt;
+            let expires = now_ms() + 600_000;
+            owner.connection.batched(|tx| -> Result<()> {
+                let claim = append_claim_tx(tx, "alder", &origin.subject, "work.claimed", Some(&input.actor),
+                    &json!({"fields": {"attempt": attempt, "status": "claimed", "claimant": input.actor,
+                        "claim_incarnation": "asker-new", "claim_expires_at_unix_ms": expires as u64}}), &[], None)?;
+                project_mission_run_update(tx, &claim).unwrap();
+                Ok(())
+            }).unwrap().unwrap();
+            if advance == "another-ask" {
+                input.incarnation = Some("asker-new".into());
+                input.idempotency_key = "second-release-question".into();
+                owner.ask_person(&input).unwrap();
+            }
+            let before = owner.step_run(&origin.subject).unwrap().unwrap();
+            assert_eq!(before.attempt, if advance == "retry" { 2 } else { 1 });
+            if advance == "another-ask" {
+                assert_eq!(before.status, "waiting-person");
+                assert_ne!(before.blocked_reason.as_deref(), Some(ask.subject.as_str()));
+            } else {
+                assert_eq!(before.status, "claimed");
+                assert_eq!(before.claim_incarnation.as_deref(), Some("asker-new"));
+                assert_eq!(before.claimant.as_deref(), Some(input.actor.as_str()));
+                assert_eq!(before.claim_expires_at_unix_ms, Some(expires));
+                assert!(expires > now_ms());
+            }
+            // Sort cancellation after the owner's new work, so replay consumes it against
+            // the newer attempt/episode rather than merely repairing an earlier failure.
+            stale.set_write_clock_at(now_ms() + 10_000).unwrap();
+            stale.finish_person_step(&PersonStepResponse {
+                delegation: None,
+                subject: ask.subject.clone(),
+                actor: input.actor.clone(),
+                summary: "No longer needed".into(),
+                evidence: vec![],
+                episode: Some(episode),
+                idempotency_key: "stale-cancel".into(),
+                answer: None,
+            }, true).unwrap();
+            assert_eq!(stale.step_run(&origin.subject).unwrap().unwrap().status, "failed");
+            if historical_effect {
+                // Previous writers also emitted this redundant unfenced state effect.
+                stale.connection.batched(|tx| -> Result<()> {
+                    let response = tx.query_row(
+                        "SELECT id FROM claims WHERE subject=?1 AND kind='work.person-cancelled'",
+                        [&ask.subject], |row| row.get::<_, String>(0))?;
+                    let effect = append_claim_tx(tx, "birch", &origin.subject, "step-run.state", Some("daemon/runtime"),
+                        &json!({"fields": {"status": "failed", "attempt": 1,
+                            "reason": format!("ask cancelled by {}", input.actor)}}), &[response], None)?;
+                    project_mission_run_update(tx, &effect).unwrap();
+                    Ok(())
+                }).unwrap().unwrap();
+            }
+            let exchange = |source: &Store, target: &Store| {
+                let exchange = source.export_replication_exchange_answering(
+                    TEST_FLEET, &target.replication_inventory().unwrap(), &[]).unwrap();
+                target.receive_replication_exchange(&exchange.peer, TEST_FLEET, &exchange).unwrap();
+                target.validate_replication_backlog().unwrap();
+                target.project_replication_backlog().unwrap();
+            };
+            exchange(&stale, &owner);
+            exchange(&owner, &stale);
+            for store in [&owner, &stale] {
+                let check = || {
+                    let after = store.step_run(&origin.subject).unwrap().unwrap();
+                    assert_eq!(after.attempt, before.attempt);
+                    assert_eq!(after.status, before.status);
+                    assert_eq!(after.blocked_reason, before.blocked_reason);
+                    assert_eq!(after.claimant, before.claimant);
+                    assert_eq!(after.claim_incarnation, before.claim_incarnation);
+                    assert_eq!(after.claim_expires_at_unix_ms, before.claim_expires_at_unix_ms);
+                    assert_eq!(after.readiness_epoch, before.readiness_epoch);
+                };
+                check();
+                store.replay_replication_graph().unwrap();
+                check();
+            }
+        }
+    }
+
+    #[test]
     fn person_lifecycle_replication_rebuilds_only_its_tree() {
         for mode in ["step", "standalone", "owned"] {
             let standalone = mode != "step";
@@ -1968,7 +2167,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }
                 if !standalone {
                     assert_eq!(
                         target.step_run(&origin.subject).unwrap().unwrap().status,
-                        "ready"
+                        if cancel { "failed" } else { "ready" }
                     );
                 }
                 target

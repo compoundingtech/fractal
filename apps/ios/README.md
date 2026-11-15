@@ -47,6 +47,8 @@ Scanned pairings always require the independently copied fingerprint: the manual
 
 The app holds one WebSocket to the gateway, the collections socket (`docs/st3/client-v0/collections.md`). It subscribes to three windows (up to 200 each of the person's attention, missions, and agents, as Fractal terminal UI does), and Fractal pushes each change to them. Missions carry their runs' steps and agents carry their current and queued steps, so the app joins nothing and reads no work or runtime lists. The same socket carries the open conversation and the open terminal. A dropped socket reconnects after 1, 2, 5, 10, then 30 seconds, and the delay resets once a snapshot arrives. Leaving the foreground closes the socket; returning opens a fresh one and shows the new snapshots first. The server’s eight-second WebSocket protocol pings are answered natively and reset a twenty-four-second receive deadline without an HTTP capability probe. If frames and pings stop, the phone closes the socket and keeps the existing offline wording and reconnect delays. The autolinked `FractalCollections` module exposes pings through SocketRocket for both gateway and Fabric-loopback sockets; Expo Go uses its ordinary WebSocket and cannot observe protocol heartbeats. No inventory read is sent while nothing changes.
 
+The fifteen-second collections opening deadline includes the WebSocket handshake, not just creation of its carrier. The receive-heartbeat deadline starts after the handshake; only a base-window snapshot marks the feed live and resets retry backoff. Opening attempts close their pending carrier when timed out, superseded, or backgrounded. Native socket failures retain only the NSError domain and numeric code, never its localized message. Transient iOS `inactive` states such as the Share sheet preserve the previous foreground state: a live feed keeps receiving and retrying, while a backgrounded feed waits for `active` before resuming.
+
 Observation reporting holds one send slot during both batch preparation and transport. Closing a measured minute can synchronously notify the reporter; that notification cannot prepare a second batch while the first is being formed. A null or empty batch releases the slot without delaying the next measurement.
 
 ## Layout
@@ -68,6 +70,8 @@ The chrome uses native tabs and stacks. Now and alert detail use system typograp
 Each tab holds its own native stack, and every detail (a conversation, terminal, mission, attention item, launch, past sessions) can be pushed in any tab, so the back button returns where the person came from. A conversation and a terminal hide the tab bar while they are on top, as Messages does.
 
 - **Now** lists what Fractal terminal UI's Home lists: every unresolved request, review, approval, native harness prompt and provider sign-in for the paired person, plus the updates they asked for, grouped by tier (somebody is stopped on you, today, when there is time) with Fractal terminal UI's glyphs and a legend. The first thing it prints is the alert count: nothing at zero, `1 alert`, `N alerts` otherwise; the tab's badge shows the same number. An alert is whatever blocks or waits on the person (an update asks nothing and is not one). The app reads `alert` on each attention row, and a daemon that predates alerts is read as everything but an update or an unread message. The wire names (`attention`, `/attention`) are unchanged, so older and newer builds keep working. An item opens its detail, with resolve when Fractal offers it; a long press offers the agent's conversation and the mission.
+- **Availability** heads Now, above the alert count, as `fractal now` prints it: the person's status (available or away), whether they set it or it follows their devices' presence, and until when; the interruptions they accept (all, urgent only, none) and the deadline clock (running, routine asks held, every ask held), each with its start and end; and their directive note with its expiry. When no device has reported for a day, status reads Available with "No device reporting": agents ask as usual. Every word Fractal answers is open, so a word this build does not know (a later daemon's status, source, presence, interruptions or deadline clock) reads as itself rather than hiding the row. Availability is not on the collections socket, so the app reads it (`availabilityList` and `notesList`) each time a connection goes live (opening, returning to the foreground, reconnecting) and on pull to refresh. A member that predates availability shows no section. Tapping a row changes it while connected: an action sheet offers the values, where Follow my devices, All and Run clear their axis, then how long the change holds (30 minutes, 1 hour, 2 hours, until 09:00 tomorrow in local time, a typed time such as `17:30` or span such as `1h30m`, or until changed). The note row writes or clears the note with the same ends. Each write's answer replaces what is shown. Changing these needs the `write.availability` and `write.notes` scopes, which pairing grants; a phone paired without them says to re-pair it, before and instead of a refused write. `availability.ts` holds the rows, ends and refusals; `availability.test.mjs` covers them.
+- **Presence.** While a connection is live and the pairing grants `write.presence`, the phone reports its raw state to `presenceReport`: `active` when the app comes to the foreground, `inactive` when it leaves (iOS gives an app no lock signal, so the phone never reports `locked` or `sleeping`), each with the person's last input. The last input is the latest touch anywhere in the app (the root view's responder capture records its time and declines the touch) or the moment the app came forward. Fractal derives presence; the phone applies no idle threshold and sends no heartbeat. It reports on every change of state, and when an answer names a `report_again_at` (the moment the phone would turn idle) and nothing has changed by then, it reports again at that time with its newer last input. An answer without one leaves the next report to the next change of state, or to the first touch after it. A refused report (403) stops reporting for that connection; after any other failure, the next change of state or touch reports. Each report's answer replaces the availability shown. `presence.ts` holds the schedule; `presence.test.mjs` covers it.
 - **Resources** keeps the Agents and Missions lists one tap away, with their search, list/tree controls, conversation results and mission cards. It opens on the person's own folders, then Everything else grouped into Agents, Missions, Terminals and Machines. The filter stays on top. Agent and mission status glyphs and needs-you dots remain visible, including sessions found running. A row opens its conversation, mission or terminal; long-press offers Move to. New folder, folder rename and confirmed deletion use `arrangement.edit`; each folder's + finds a resource not already in it. Drag handles move resources or reorder rows and folders; tapping a handle changes nothing. The stream supplies the winning registers after edits. Collapse choices and unavailable resource names stay on this phone.
 - **Documents** (a row under Resources, beside Agents and Missions) lists documents under a prefix a page at a time, each with its name, short version and changed time; type `doc/NAME` and **Open** to read one by name. A document opens read-only, as its author wrote it: Markdown with tables, code and lists, its version (twelve characters), whether it is the latest, and when it changed. A `doc/…` reference in a message, a step's goal or a document opens that document in the same tab; a mission lists the documents it and its latest run name, with the step that pinned each. Inside a document, its links are listed once at the end (including those in tables and code), and following one already on the trail goes back to it, so a link cycle never grows the stack. A document that cannot be shown says why: not found, not synced to this host yet, the host did not answer, or not text. An older Fractal without the `documents` capability is named as such. Reads go through `document.get`, `documents.list` and `document-references.get` and the shared `@fractal/views` document view (`docs/clients/ui-contract.md#documents`); nothing edits or publishes.
 - **Fleet** shows machines, sessions found running on the gateway machine, this connection, paired devices, and the tab order.
@@ -129,10 +133,11 @@ CI and the web shell use the same preparation command.
 | --- | --- | --- | --- |
 | `dev` (default) | Fractal Dev, amber DEV-badged icon | `com.compoundingtech.fractal.starter` | Debug with Metro, simulator and device smoke tests |
 | `daily` | Fractal, ordinary icon | `com.compoundingtech.fractal` | Release build used every day on a phone |
+| `test` | Fractal Test, ordinary icon | `com.compoundingtech.fractal.test` | Isolated client-control Release app; never the everyday pairing |
 
-The two apps coexist on one phone and keep separate Keychain profiles, so each is paired on its own. Any other value fails the configuration. Changing variants requires a clean prebuild, and the same `APP_VARIANT` must stay exported for the Xcode build that embeds the bundle. The EAS simulator profile selects dev; preview selects daily.
+The apps coexist and keep separate Keychain profiles, so each is paired on its own. Any other value fails the configuration. Changing variants requires a clean prebuild, and the same `APP_VARIANT` must stay exported for the Xcode build that embeds the bundle. The EAS simulator profile selects dev; preview selects daily.
 
-The Expo name `fractal` and slug `fractal-starter` generate `ios/fractal.xcodeproj`, `ios/fractal.xcworkspace`, and the `fractal` target/scheme for both variants. Each variant's URL scheme matches its bundle identifier. Device signing keys use the Keychain service `com.compoundingtech.fractal.device-key`, isolated by the app's bundle identity.
+The Expo name `fractal` and slug `fractal-starter` generate `ios/fractal.xcodeproj`, `ios/fractal.xcworkspace`, and the `fractal` app target/scheme for every variant. Device signing keys use the Keychain service `com.compoundingtech.fractal.device-key`, isolated by the app's bundle identity. The test variant additionally declares its own explicit keychain access group and app group; neither is shared with daily or dev.
 
 When moving from the former app identity, install the new app, pair it once, delete the old app by hand, and revoke the old device's grant. The new bundle identifier cannot read the old app's Keychain; there is deliberately no fallback to the former service.
 
@@ -160,6 +165,20 @@ app (`com.compoundingtech.fractal`), without Metro, EAS, or OTA. The tracked
 ref must support `APP_VARIANT=daily`; a ref without that variant is refused
 rather than replacing the separate Debug app. First prepare a signed artifact
 without phone access:
+
+For the isolated test app, select `--variant test` (or `FRACTAL_IOS_VARIANT=test`)
+and supply `--test-app-profile` / `FRACTAL_IOS_TEST_APP_PROFILE`, the installed
+Apple Development profile name that Johannes prepared. `--test-runner-profile` /
+`FRACTAL_IOS_TEST_RUNNER_PROFILE` supplies the separate XCUITest runner profile
+when building the observation scheme. The lane uses manual signing for test,
+never requests provisioning updates, and appends `ios-test-variant` to the
+supplied state directory, isolating checkout, caches, version floor and artifacts.
+Normal remains the default and keeps its existing state path and automatic
+signing policy. Both variants run the same #6207 Fabric build and pre-install
+guard; a snapshot with another bundle identifier is refused before installation.
+The test app can bootstrap from an absent installed bundle; the normal lane
+still requires its existing app readback. No lane configuration grants pairing,
+enrollment, installation or process-launch consent.
 
 ```sh
 python3 apps/ios/scripts/release_delivery.py \
@@ -265,7 +284,8 @@ framework output fails closed before linking. The hash participates in the
 build and native-generation identities and is recorded as
 `fabric_framework_hash` in `success.json`. A changed framework invalidates reuse.
 The worker uses `pnpm exec expo config` and clean `pnpm exec expo prebuild`,
-then `pnpm run export:ios`, all with `APP_VARIANT=daily` and the daily Fabric
+then `pnpm run export:ios`, with the selected variant (`APP_VARIANT=daily` by
+default, `test` only when explicitly selected) and the daily Fabric
 settings pinned before invoking Xcode. Before publishing the signed snapshot,
 it requires defined Rust bridge symbols in the app executable: the real module
 and disabled stub share the same Swift class name, so that name alone is not proof.
@@ -292,8 +312,9 @@ from the last successful fetch, updated on every fetch, including reverts and
 app-irrelevant commits. Its content key hashes the Git trees of `apps/ios` and
 its local-package closure together with the inputs outside the revision: the
 Xcode directory, Node/pnpm/CocoaPods paths, inherited `EXPO_PUBLIC_*` values,
-the compiled Fabric framework hash, and the pinned native environment. Builds
-always run with `APP_VARIANT=daily`, `FRACTAL_FABRIC=1`,
+the compiled Fabric framework hash, and the pinned native environment. Test
+profile selections are also build inputs. Builds always run with the selected
+`APP_VARIANT` and `FRACTAL_FABRIC=1`,
 `FRACTAL_FABRIC_PROOF=0` (read by `FractalFabric.podspec`), and
 `FRACTAL_FABRIC_OFFLINE_DEBUG=0` (read by `metro.config.js`), with the legacy
 `ST3_` counterparts pinned to the same respective values. Inherited settings
@@ -529,3 +550,94 @@ graph subject. Session and PTY IDs only navigate; placements require stable grap
 
 Opening a resource detail also reads its exact subject with the existing prefix filter,
 including subjects beyond the catalog windows.
+
+## Isolated native test client and independent observer
+
+`APP_VARIANT=test` selects **Fractal Test**, bundle `com.compoundingtech.fractal.test`,
+app group `group.com.compoundingtech.fractal.test`, and sole keychain access group
+`$(AppIdentifierPrefix)com.compoundingtech.fractal.test`. It keeps the same Expo
+project/workspace and release application source as daily. The readable build-time
+flag is `Constants.expoConfig.extra.testClientMode` in JavaScript and
+`FractalTestClientMode` in the app's Info.plist; both are absent for dev/daily
+(absence means normal mode, preserving the normal configuration unchanged).
+This flag describes the binary, not enrollment or authorization. No command handlers
+or automatic enrollment are enabled by this preparation.
+
+State isolation relies on the separate application sandbox and sole test keychain
+access group, not on renaming existing state keys. `FractalDeviceKeyModule.swift`
+stores P-256 key material as a generic password under service
+`com.compoundingtech.fractal.device-key`; `FractalFabricModule.swift` similarly
+stores its independent transport secret under `com.compoundingtech.fractal.fabric-proof`.
+Neither specifies `kSecAttrAccessGroup`, so Keychain uses the application's default
+access group. SecureStore profile calls in `store.tsx` also omit access-group options.
+The local native modules do not use app-group containers or shared UserDefaults
+suites. Normal modules and normal dev/daily entitlements are unchanged. The test app
+must generate its own key and pair manually with a pinned fingerprint; never copy
+normal-app credentials. The app-group entitlement reserves the isolated namespace;
+the observer does not share that container or the application's keychain.
+
+`plugins/withTestClient.cjs` durably generates `FractalTestControl` (UI-testing
+target and shared Release scheme) and copies `plugins/ClientControlUITests.swift`
+into the disposable native project. The UI runner's base product bundle identifier
+is `com.compoundingtech.fractal.test`; Xcode appends `.xctrunner`, giving
+`com.compoundingtech.fractal.test.xctrunner`. Signing is manual, with app profile
+`$(FRACTAL_IOS_TEST_APP_PROFILE)` and runner profile
+`$(FRACTAL_IOS_TEST_RUNNER_PROFILE)`. Johannes performs provisioning/signing setup;
+these commands do not create profiles or allow provisioning updates.
+
+After unsigned test prebuild, run `node scripts/assert_test_project.mjs` from
+`apps/ios` to assert the generated product reference is exactly
+`FractalTestControl.xctest` (not a Spotlight `.mdimporter`) and uses the
+UI-testing product type and expected runner base identity. This checks project
+generation only; it is not a signed/compiled runner receipt.
+
+After the applicable consent/signing gates, the command interface from `apps/ios`
+is below. Use the daily delivery lane to enforce its guards and regenerate native
+source with `APP_VARIANT=test`; do not install using an unguarded alternate path.
+The commands illustrate the native build/observer interface, not permission to act
+on a device. Destination, profile names and signing identity are supplied locally.
+
+```sh
+APP_VARIANT=test pnpm exec expo prebuild --platform ios --no-install
+xcodebuild build-for-testing \
+  -workspace ios/fractal.xcworkspace -scheme FractalTestControl \
+  -configuration Release -destination "$TEST_DESTINATION" \
+  -derivedDataPath "$TEST_DERIVED_DATA" \
+  FRACTAL_IOS_TEST_APP_PROFILE="$FRACTAL_IOS_TEST_APP_PROFILE" \
+  FRACTAL_IOS_TEST_RUNNER_PROFILE="$FRACTAL_IOS_TEST_RUNNER_PROFILE"
+xcodebuild test-without-building -xctestrun "$TEST_XCTESTRUN" \
+  -destination "$TEST_DESTINATION" -resultBundlePath "$SMOKE_RESULT" \
+  -only-testing:FractalTestControl/ClientControlUITests/testLaunchAndReadAccessibility
+```
+
+The smoke launches only the test bundle in a separate process and reads the existing
+native **Now** tab. It never unlocks, dismisses system dialogs or launches the daily
+bundle. Run it separately from a content observation because launching may reset the
+route. Failed launches/locked devices are failures, not permission to unlock.
+
+For D-9, first have the authorized journey open the seeded item. In a copy of the
+generated `.xctestrun`, set the test target's **runner** `EnvironmentVariables`
+(inside `TestConfigurations[].TestTargets[]` for format 2; target dictionary for
+format 1) from the independent seed, not from `device.result`:
+
+- `FRACTAL_D9_TITLE`: exact rendered seed title.
+- `FRACTAL_D9_BODY`: exact plain-text seed body, rendered as one static-text
+  accessibility element.
+- `FRACTAL_D9_BODY_SHA256`: lowercase SHA-256 hex of the seed body's exact UTF-8
+  bytes, with no whitespace normalization.
+
+```sh
+xcodebuild test-without-building -xctestrun "$SEEDED_TEST_XCTESTRUN" \
+  -destination "$TEST_DESTINATION" -resultBundlePath "$D9_RESULT" \
+  -only-testing:FractalTestControl/ClientControlUITests/testSeededTitleAndBodyDigest
+```
+
+This test does not relaunch, activate, navigate, send commands or read a client
+report. It reads visible accessibility labels and hashes the observed body itself.
+Missing expectations, background state, missing/split/truncated text or an invisible
+element fail closed. Use a simple seed whose full body fits the visible viewport;
+rich-text segmentation is not reconstructed by this observer. The accessibility
+tree and screenshot are XCTest attachments; screenshots are not OCR proof.
+The observer alone does not prove enrollment, grants, receipts, no read-state
+mutation, or unchanged normal pairing: those remain separate journey evidence.
+

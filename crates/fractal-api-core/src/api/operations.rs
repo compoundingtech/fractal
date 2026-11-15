@@ -135,6 +135,7 @@ pub async fn doctor(
         client_now_ms(),
     ));
     report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
+    report.checks.extend(crate::github_webhook::doctor_line(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
@@ -233,7 +234,7 @@ pub async fn operational_repair_plan(
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     if bound.is_some() || request.actor.is_some() {
@@ -249,14 +250,14 @@ pub async fn apply_operational_repair(
 /// before mutation, even if it would silently ignore an unknown actor field.
 pub async fn apply_attributed_operational_repair(
     State(state): State<AppState>,
-    bound: Option<Extension<BoundAgent>>,
+    bound: Option<BoundActor>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     let bound = bound.ok_or_else(|| ApiError::bad(FractalError::new(
         "foreign-agent-actor",
         "attributed repair apply requires an authenticated harness binding",
     )))?;
-    apply_operational_repair_with_actor(state, request, Some(bound.0.0)).await
+    apply_operational_repair_with_actor(state, request, Some(bound.actor().to_owned())).await
 }
 
 async fn apply_operational_repair_with_actor(
@@ -510,20 +511,22 @@ pub async fn get_usage(
 
 pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
-    let dir = crate::slo_history::dir(&state.state_dir);
-    let rows = blocking_store(move || {
-        let mut rows = slo_rows(&store)?;
-        rows.extend(crate::readiness_slo::current(&store));
-        add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
-        add_tones(&mut rows);
-        Ok(rows)
-    })
-    .await?;
+    let state_dir = state.state_dir.clone();
+    let rows = blocking_store(move || current_slo_rows(&store, &state_dir)).await?;
     let mut body = json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows});
     if let Some(url) = crate::slo_history::ui_url() {
         body["otel_ui_url"] = Value::String(url);
     }
     Ok(Json(body))
+}
+
+/// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
+pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
+    let mut rows = slo_rows(store)?;
+    rows.extend(crate::readiness_slo::current(store));
+    add_budget_forecasts(&mut rows, &crate::slo_history::dir(state_dir), client_now_ms() as u64);
+    add_tones(&mut rows);
+    Ok(rows)
 }
 
 /// Say on each row how urgent it is, by the one rule the terminal UI colors with, so the phone
@@ -685,6 +688,27 @@ pub async fn get_desired(
         .next()
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("`{subject}` has no desired record")))
+}
+
+/// Bulk comparison read: no status reduction or cold actual-state folds.
+pub async fn desired_batch(
+    State(state): State<AppState>,
+    Query(parameters): Query<Vec<(String, String)>>,
+) -> Result<Json<crate::store::desired_batch::DesiredBatchPage>, ApiError> {
+    let mut request = crate::store::desired_batch::DesiredBatchRequest::default();
+    for (name, value) in parameters {
+        match name.as_str() {
+            "subject" => request.subjects.push(value),
+            "kind" => request.kind = Some(value),
+            "cursor" => request.cursor = Some(value),
+            "limit" => request.limit = Some(value.parse().map_err(|_| ApiError::bad(
+                FractalError::new("desired-page-limit", "limit must be an integer between 1 and 1000"),
+            ))?),
+            _ => {}
+        }
+    }
+    let store = state.store.clone();
+    blocking_store(move || store.desired_batch(&request)).await.map(Json)
 }
 
 pub async fn status(

@@ -215,18 +215,14 @@ fn legend(entries: &[(&str, Color, &str)]) -> Vec<Line<'static>> {
 
 // --------------------------------------------------------------------- home
 
-pub fn home_list(
-    world: &World,
-    snoozed: &std::collections::HashSet<String>,
-    closed: &std::collections::HashSet<String>,
-) -> Listing {
+pub fn home_list(world: &World, closed: &std::collections::HashSet<String>) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
     let mut attention = world
         .attention
         .items()
         .iter()
-        .filter(|item| !snoozed.contains(&item.id))
+        .filter(|item| !item.snoozed(world.at))
         .collect::<Vec<_>>();
     // What st closed while it was shown stays, in a section of its own below what needs you, so
     // the two are never mistaken for each other (Nathan, 2026-10-07: "2 need you", 4 listed).
@@ -241,7 +237,9 @@ pub fn home_list(
                 .items()
                 .iter()
                 .filter(|other| {
-                    closed.contains(&other.id) == is_closed && (is_closed || other.tier == item.tier)
+                    !other.snoozed(world.at)
+                        && closed.contains(&other.id) == is_closed
+                        && (is_closed || other.tier == item.tier)
                 })
                 .count();
             items.push(Item::Header {
@@ -281,11 +279,11 @@ pub fn home_list(
         .attention
         .items()
         .iter()
-        .filter(|item| snoozed.contains(&item.id))
+        .filter(|item| item.snoozed(world.at))
         .count();
     if later > 0 {
         items.push(Item::Note(Line::from(span(
-            format!(" {later} put off until later · demo, this machine only"),
+            format!(" {later} put off until later"),
             theme::dim(),
         ))));
     }
@@ -1638,12 +1636,6 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 card.buttons(&[
                     ("c", "Reply", Hit::Key('c'), theme::ACCENT),
                     ("x", "Dismiss: mark read", Hit::Key('x'), theme::GREEN),
-                    (
-                        "l",
-                        "Remind me later · demo",
-                        Hit::Key('l'),
-                        theme::OVERLAY1,
-                    ),
                 ]);
             }
         }
@@ -1745,6 +1737,12 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 theme::OVERLAY1,
             ));
         }
+        // Put off on every device of the person (`attention.snooze`), or brought back.
+        buttons.push(if item.snoozed(world.at) {
+            ("l", "Bring back now", Hit::Key('l'), theme::OVERLAY1)
+        } else {
+            ("l", super::SNOOZE_LABEL, Hit::Key('l'), theme::OVERLAY1)
+        });
         card.buttons(&buttons);
     }
     card.blank();
@@ -1851,6 +1849,19 @@ fn mark_standing(
     first.push(span(MARKER, theme::dim()));
 }
 
+/// The right of an agent's row: `•` first when it said something since the person last read its
+/// conversation here (st's `last_prose_at` against the read position), as the web and the phone
+/// mark it; then its harness and how long ago it was active.
+fn agent_row_right(world: &World, agent: &Agent) -> Vec<Span<'static>> {
+    let mut right = Vec::with_capacity(3);
+    if world.unread.contains(&agent.id) {
+        right.push(span("• ", theme::strong(theme::ACCENT)));
+    }
+    right.push(span(agent.harness.name(), theme::fg(harness_color(agent.harness))));
+    right.push(span(format!(" {:>4}", agent.activity), theme::dim()));
+    right
+}
+
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
@@ -1885,13 +1896,7 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             span(format!(" {glyph} "), theme::strong(color)),
             span(agent.name.clone(), theme::bold()),
         ];
-        let right = vec![
-            span(
-                agent.harness.name(),
-                theme::fg(harness_color(agent.harness)),
-            ),
-            span(format!(" {:>4}", agent.activity), theme::dim()),
-        ];
+        let right = agent_row_right(world, agent);
         mark_standing(agent, &mut first, &right, width);
         items.push(Item::Row {
             index: ids.len(),
@@ -1923,6 +1928,7 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             ("✕", theme::FAULT, "broken"),
             ("○", theme::QUIET, "stopped"),
             ("?", theme::QUIET, "unmanaged"),
+            ("•", theme::ACCENT, "new since you read"),
         ])
         .into_iter()
         .chain(world.agents.items().iter().any(|agent| agent.reported.is_some()).then(|| {
@@ -3457,13 +3463,7 @@ pub fn agents_tree(world: &World, spinner: &'static str, width: usize) -> Listin
                     span(format!("{glyph} "), theme::strong(color)),
                     span(agent.name.clone(), theme::bold()),
                 ],
-                vec![
-                    span(
-                        agent.harness.name(),
-                        theme::fg(harness_color(agent.harness)),
-                    ),
-                    span(format!(" {:>4}", agent.activity), theme::dim()),
-                ],
+                agent_row_right(world, agent),
             )
         })
         .collect();

@@ -53,19 +53,39 @@ pub async fn apply(
     if let Some(error) = publication_refusals(&state, &intent).await?.error() {
         return Err(ApiError::bad(error));
     }
+    store_program_bundles(&state, &intent, &request.program_bundles)?;
     let response = state
         .store
-        .apply_owned_set(
+        .apply_owned_set_mapped(
             &intent,
             &request.options,
             &request.idempotency_key,
             &request.actor,
+            request.source_map.as_ref(),
         )
         .map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(
         json!({"publication":response,"set":state.store.owned_sets().map_err(ApiError::bad)?.into_iter().find(|v|v.id==sets::subject(&request.options.set).unwrap())}),
     ))
+}
+
+#[derive(serde::Deserialize)]
+pub struct SourceStatusQuery {
+    #[serde(default)]
+    audit: bool,
+}
+
+/// `fractal source status`: each set's policy, open source debt, the debt each set's current
+/// revision closed and, with `?audit=true`, the newest audit records.
+pub async fn source_status(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<SourceStatusQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.source_status(query.audit).map_err(anyhow::Error::new))
+        .await
+        .map(Json)
 }
 
 pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
@@ -183,7 +203,7 @@ pub async fn get(
         state.store.read_snapshot(|index| {
             Ok((
                 client_snapshot_at(&state, index),
-                detail(&state, &id, query.sha),
+                state.store.with_owned_set_snapshot_reads(|| detail(&state, &id, query.sha)),
             ))
         })
     })

@@ -860,6 +860,7 @@ mod tests {
                 "one".into(),
                 24,
                 80,
+                None,
             )),
         });
         peer.write_all(&encode_packet(

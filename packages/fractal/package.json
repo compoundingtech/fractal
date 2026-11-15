@@ -1,0 +1,42 @@
+{
+  "name": "fractal",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./effect": "./src/effect.ts",
+    "./source-map": "./src/source-map.ts",
+    "./testing": "./src/testing.ts",
+    "./tree": "./src/tree.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@overeng/kdl": "link:../../repos/effect-utils/packages/@overeng/kdl",
+    "effect": "4.1.0"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.1.0",
+    "@effect/vitest": "4.1.0",
+    "@fractal/declarations": "workspace:^",
+    "@types/node": "24.10.0",
+    "oxc-parser": "0.127.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
+  },
+  "$genie": {
+    "source": "package.json.genie.ts",
+    "warning": "DO NOT EDIT - changes will be overwritten",
+    "workspaceClosureDirs": [
+      "clients/typescript/fractal-declarations",
+      "packages/fractal",
+      "repos/effect-utils/packages/@overeng/kdl",
+      "repos/effect-utils/packages/@overeng/utils-dev"
+    ]
+  }
+}

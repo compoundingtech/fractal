@@ -4,181 +4,32 @@ import { DateTime, Option } from 'effect'
 import * as React from 'react'
 
 import { cleanMessageText } from '../../../../../clients/typescript/fractal-views/conversationView.ts'
-import { ANSWERS, askDeadline, isRequest, personAnswer, report, spaced, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
+import { askDeadline, isRequest, report, spaced } from '../../../../../clients/typescript/fractal-views/requestView.ts'
 import { ago } from '../../../../../clients/typescript/fractal-views/time.ts'
+import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { DecisionCard, type DecisionDensity, type DecisionPosition } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import { DecisionMore, type DecisionSubject } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionMore.tsx'
+import type { IconName } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
-import { AlertButton } from './AlertButton.tsx'
-import { tokens } from '../../ui-compat/tokens.stylex.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
+import { useAlertAnswersStore } from './alertAnswers.ts'
+import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
+import { contextOf, firstLine, isPlainHeading, repeatsHeading, sameWords, useArmed } from './decisionText.ts'
 
-// Asks, review gates and launch approvals in an agent's conversation, answered in place with the
-// answers the Fractal terminal UI and the phone give: a structured request's named answers, Yes and No for a
-// yes-or-no question, the person's own words, Nothing to do; a gate's approve, send back or
-// reject; a launch's approve, send back to its planner, or cancel. Every answer is confirmed
-// before it is sent, so a stray click answers nothing.
-
-/** One answer an alert offers, and what it sends. */
-export type AlertChoice = {
-  readonly key: string
-  readonly label: string
-  /** What happens next, as the request says. */
-  readonly consequence?: string
-  readonly recommended?: boolean
-  /** Whether this answer takes the person's words: never, if they wrote some, or only with them. */
-  readonly words: 'none' | 'optional' | 'required'
-  readonly tone: 'primary' | 'secondary' | 'danger'
-  readonly action: (words: string) => AlertAction
-}
-
-const done = (summary: string, answer?: { readonly id?: string; readonly text?: string }): AlertAction => ({
-  type: 'work.done',
-  summary,
-  ...(answer === undefined ? {} : { answer }),
-})
-
-/** The person's answer to a structured request, as the Fractal terminal UI types it; the words become the summary. */
-const typed = (request: NonNullable<Native.Attention['request']>, chosen: string | undefined, words: string) => {
-  const answer = personAnswer(request as Parameters<typeof personAnswer>[0], chosen, words)
-  return typeof answer === 'object' ? answer : undefined
-}
-
-/**
- * The answers an alert offers here, or null when it is answered elsewhere. A request is answered
- * only while Fractal offers `work.done` on it; a gate offers only the `review.*` actions Fractal lists.
- */
-export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | null => {
-  const offered = alert.actions as readonly string[]
-  if (isRequest(alert.attention_kind) && offered.includes('work.done')) {
-    const request = alert.request
-    if (request !== undefined) {
-      const choices: AlertChoice[] = (request.answers ?? []).map((answer) => ({
-        key: answer.id,
-        label: answer.label,
-        consequence: answer.consequence,
-        recommended: request.recommendation?.answer === answer.id,
-        // Requesting changes carries the changes, in the person's words.
-        words: answer.outcome === 'request_changes' ? 'required' : 'none',
-        tone: answer.outcome === 'decline' ? 'danger' : request.recommendation?.answer === answer.id ? 'primary' : 'secondary',
-        action: (words) => done(answer.outcome === 'request_changes' ? words.trim() : answer.label, typed(request, answer.id, words)),
-      }))
-      if (request.type === 'feedback' || (request.type === 'choice' && request.custom === true)) {
-        choices.push({
-          key: 'words', label: 'Send', words: 'required', tone: choices.length === 0 ? 'primary' : 'secondary',
-          action: (words) => done(words.trim(), typed(request, undefined, words)),
-        })
-      }
-      // A request with named answers is set aside by name; Fractal tells its asker it was dismissed.
-      choices.push((request.answers ?? []).length > 0
-        ? { key: 'dismiss', label: 'Dismiss', words: 'none', tone: 'secondary', action: () => done('Dismissed without an answer.', { id: 'dismiss' }) }
-        : { key: 'nothing', label: 'Nothing to do', words: 'none', tone: 'secondary', action: () => done(ANSWERS.nothing, typed(request, undefined, ANSWERS.nothing)) })
-      return choices
-    }
-    return [
-      ...(yesNo(alert.title)
-        ? [
-            { key: 'yes', label: 'Yes', words: 'none', tone: 'primary', action: () => done(ANSWERS.yes) },
-            { key: 'no', label: 'No', words: 'none', tone: 'secondary', action: () => done(ANSWERS.no) },
-          ] satisfies AlertChoice[]
-        : []),
-      { key: 'words', label: 'Send', words: 'required', tone: yesNo(alert.title) ? 'secondary' : 'primary', action: (words) => done(words.trim()) },
-      { key: 'nothing', label: 'Nothing to do', words: 'none', tone: 'secondary', action: () => done(ANSWERS.nothing) },
-    ]
-  }
-  if (alert.attention_kind === 'human-gate') {
-    const choices: AlertChoice[] = []
-    // Notes written on a review go with an approval too.
-    if (offered.includes('review.approve'))
-      choices.push({ key: 'approve', label: 'Approve', words: 'optional', tone: 'primary', action: (words) => ({ type: 'review.approve', reason: words.trim() }) })
-    // A feedback gate offers request-changes where an approval gate offers reject.
-    if (offered.includes('review.request-changes'))
-      choices.push({ key: 'changes', label: 'Send back', words: 'required', tone: 'secondary', action: (words) => ({ type: 'review.request-changes', reason: words.trim() }) })
-    if (offered.includes('review.reject'))
-      choices.push({ key: 'reject', label: 'Reject', words: 'required', tone: 'danger', action: (words) => ({ type: 'review.reject', reason: words.trim() }) })
-    return choices.length > 0 ? choices : null
-  }
-  if (alert.attention_kind === 'launch-approval') {
-    const choices: AlertChoice[] = []
-    if (offered.includes('launch.approve')) {
-      // Approving launches the preview shown; a launch without one says why and cannot be approved.
-      if (Option.isSome(alert.preview))
-        choices.push({ key: 'approve', label: 'Approve launch', words: 'none', tone: 'primary', action: () => ({ type: 'launch.approve' }) })
-      choices.push({ key: 'revise', label: 'Send back', words: 'required', tone: 'secondary', action: (words) => ({ type: 'launch.revise', feedback: words.trim() }) })
-    }
-    if (offered.includes('launch.cancel'))
-      choices.push({ key: 'cancel', label: 'Cancel launch', words: 'none', tone: 'danger', action: () => ({ type: 'launch.cancel' }) })
-    return choices.length > 0 ? choices : null
-  }
-  return null
-}
-
-/**
- * A request's link, only when it is an absolute http(s) URL. The URL is the asking agent's, so
- * any other scheme (javascript:, data:, …) or a relative path shows as plain text, never a link.
- */
-export const webLink = (url: string | undefined): string | undefined => {
-  if (url === undefined) return undefined
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** Who an alert is from: the agent that asked, else the seat it is about. */
-export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id'>): string =>
-  (alert.requester_id ?? alert.source_id).replace(/^agent\//, '')
-
-const KIND_WORDS: Record<string, string> = {
-  'human-gate': 'Review',
-  'person-step': 'Request',
-  'agent-request': 'Request',
-  'launch-approval': 'Launch approval',
-  'revision-approval': 'Revision approval',
-  'harness-login': 'Sign-in',
-}
-
-const styles = stylex.create({
-  alert: { display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.8125rem' },
-  title: { fontWeight: 600, color: tokens['--ds-gray-1000'] },
-  meta: { color: tokens['--ds-gray-900'], fontSize: '0.75rem' },
-  body: { color: tokens['--ds-gray-1000'], overflowWrap: 'anywhere' },
-  report: { margin: 0, display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: '8px', fontSize: '0.75rem' },
-  key: { color: tokens['--ds-gray-900'] },
-  fault: { color: tokens['--ds-red-900'] },
-  soft: { color: tokens['--ds-gray-900'] },
-  value: { margin: 0 },
-  list: { margin: 0, paddingInlineStart: '1.25rem' },
-  answers: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' },
-  consequence: { color: tokens['--ds-gray-900'], fontSize: '0.75rem' },
-  words: {
-    width: '100%',
-    boxSizing: 'border-box',
-    minHeight: '3.5rem',
-    resize: 'vertical',
-    padding: '8px',
-    borderRadius: 4,
-    borderWidth: 1,
-    borderStyle: 'solid',
-    borderColor: tokens['--ds-gray-alpha-400'],
-    backgroundColor: 'transparent',
-    color: 'inherit',
-    font: 'inherit',
-  },
-  note: { color: tokens['--ds-gray-900'], fontSize: '0.75rem' },
-})
+// Asks, review gates and launch approvals, in the one decision card: choosing an answer sends nothing, Send is its own
+// deliberate act, so a stray click answers nothing.
 
 /** A request's question: a JSON report as its telling fields, anything else as Markdown. */
 const Question = ({ text }: { readonly text: string }): React.ReactNode => {
   const shown = report(text)
-  if (shown === null) return <div {...stylex.props(styles.body)}><Markdown text={spaced(text)} /></div>
+  if (shown === null) return <div {...stylex.props(styles.prose)}><Markdown text={spaced(text)} /></div>
   return (
-    <div {...stylex.props(styles.body)}>
+    <div {...stylex.props(styles.prose)}>
       {shown.before ? <Markdown text={shown.before} /> : null}
       <dl {...stylex.props(styles.report)}>
         {shown.rows.map((row) => (
           <React.Fragment key={row.key}>
-            <dt {...stylex.props(styles.key)}>{row.key}</dt>
+            <dt {...stylex.props(styles.soft)}>{row.key}</dt>
             <dd {...stylex.props(styles.value, row.tone === 'fault' ? styles.fault : row.tone === 'soft' ? styles.soft : null)}>{row.value}</dd>
           </React.Fragment>
         ))}
@@ -191,18 +42,12 @@ const Question = ({ text }: { readonly text: string }): React.ReactNode => {
 /** What a launch would start, as its planner previewed it: goal, steps, agents and gates. */
 const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode => {
   if (Option.isNone(alert.preview)) {
-    return (
-      <div {...stylex.props(styles.note)}>
-        There is no valid preview of this launch yet, so it cannot be approved.
-        {alert.detail ? ` ${cleanMessageText(alert.detail)}` : ''}
-      </div>
-    )
+    return <div {...stylex.props(styles.soft)}>There is no valid preview of this launch yet, so it cannot be approved.{alert.detail ? ` ${cleanMessageText(alert.detail)}` : ''}</div>
   }
   const preview = alert.preview.value
   return (
     <>
-      <div {...stylex.props(styles.body)}><strong>Goal:</strong> {preview.goal}</div>
-      {preview.request_excerpt ? <div {...stylex.props(styles.meta)}>Asked for: {preview.request_excerpt}</div> : null}
+      {preview.request_excerpt ? <div {...stylex.props(styles.soft)}>Asked for: {preview.request_excerpt}</div> : null}
       {preview.steps.length > 0 ? (
         <ol {...stylex.props(styles.list)} aria-label="Steps">
           {preview.steps.map((step) => (
@@ -215,11 +60,11 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
         </ol>
       ) : null}
       {preview.agents.length > 0 ? (
-        <div {...stylex.props(styles.meta)}>
+        <div {...stylex.props(styles.soft)}>
           Agents: {preview.agents.map((agent) => `${agent.id.replace(/^agent\//, '')}${Option.isSome(agent.host) ? ` on ${agent.host.value}` : ''}${Option.isSome(agent.worktree) ? ` in ${agent.worktree.value}` : ''}`).join('; ')}
         </div>
       ) : null}
-      <div {...stylex.props(styles.meta)}>
+      <div {...stylex.props(styles.soft)}>
         Gates: {preview.gates.human} for a person, {preview.gates.automated} automated
         {preview.diagnostics_count > 0 ? ` · ${preview.diagnostics_count} diagnostics` : ''}
       </div>
@@ -227,154 +72,178 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
   )
 }
 
-const Body = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode => {
-  if (alert.attention_kind === 'launch-approval') return <LaunchPreview alert={alert} />
-  const request = alert.request
-  if (request !== undefined) {
-    const label = (id: string) => request.answers?.find((answer) => answer.id === id)?.label ?? id
-    return (
-      <>
-        {request.recommendation ? (
-          <div {...stylex.props(styles.meta)}>Recommends <strong>{label(request.recommendation.answer)}</strong>: {request.recommendation.reason}</div>
-        ) : null}
-        <Question text={request.question} />
-        {request.summary ? <div {...stylex.props(styles.body)}><Markdown text={spaced(request.summary)} /></div> : null}
-        {request.reasons?.length ? <ul {...stylex.props(styles.list)}>{request.reasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul> : null}
-        {request.subjects?.length ? (
-          <ul {...stylex.props(styles.list)}>
-            {request.subjects.map((subject, index) => (
-              <li key={index}>
-                {webLink(subject.url) !== undefined ? <a href={webLink(subject.url)} target="_blank" rel="noopener noreferrer">{subject.label}</a> : subject.label}
-                {subject.ref && webLink(subject.url) === undefined ? <span {...stylex.props(styles.soft)}> {subject.ref}</span> : null}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        <div {...stylex.props(styles.note)}>Why you: {request.why_person}</div>
-      </>
-    )
+const SUBJECT_ICONS: Readonly<Record<string, IconName>> = { pull_request: 'pull-request', issue: 'alert', document: 'pencil', mission: 'checklist', run: 'gauge', step: 'checklist', agent: 'person', host: 'folder', commit: 'dot', link: 'globe' }
+const SUBJECT_KINDS: Readonly<Record<string, string>> = { pull_request: 'Pull request', issue: 'Issue', document: 'Document', mission: 'Mission', run: 'Run', step: 'Step', agent: 'Agent', host: 'Host', commit: 'Commit', link: 'Link' }
+
+/** A request's subjects as rows: a checked web link opens out, a ref the host can open opens in, and any other ref is shown to copy. */
+const subjectRows = (alert: Native.Attention, onOpenRef: ((ref: string) => void) | undefined, opensRef: (ref: string) => boolean): readonly DecisionSubject[] =>
+  (alert.request?.subjects ?? []).map((subject, index) => {
+    const href = webLink(subject.url)
+    const ref = subject.ref
+    const inner = href === undefined && ref && onOpenRef !== undefined && opensRef(ref)
+    const kind = SUBJECT_KINDS[subject.kind]
+    return {
+      key: `${index}`,
+      label: subject.label,
+      icon: SUBJECT_ICONS[subject.kind] ?? 'info',
+      ...(kind === undefined ? {} : { kind }),
+      ...(href === undefined ? {} : { href }),
+      ...(inner ? { onOpen: () => onOpenRef!(ref!) } : {}),
+      ...(href === undefined && !inner && ref ? { rawRef: ref } : {}),
+    }
+  })
+
+/** A heading's text with its `inline code` kept; the rest of a question's Markdown shows in its body when it has any. */
+const InlineCode = ({ text }: { readonly text: string }) => <>{text.split(/`([^`]+)`/).map((part, index) => index % 2 === 1 ? <code key={index} {...stylex.props(styles.command)}>{part}</code> : part.replace(/\*\*|__/g, ''))}</>
+
+const Command = ({ children }: { readonly children: React.ReactNode }) => <code {...stylex.props(styles.command)}>{children}</code>
+
+/** Why an alert cannot be answered here and where it can be, with the exact command when there is one. */
+const elsewhere = (alert: Native.Attention, step: string | undefined): React.ReactNode => {
+  switch (alert.attention_kind) {
+    case 'harness-login': return 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
+    case 'model-drift': return 'Nothing to answer: these agents keep working on another model. This clears by itself once each runs its declared model again.'
+    case 'revision-approval': return <>A revision isn't approved from the web yet. Run <Command>fractal work revision approve</Command> or <Command>cancel</Command>, as in the terminal app.</>
+    case 'fault': return step === undefined
+      ? <>This is a fault to act on, not a question. Run <Command>fractal alerts</Command> to see what it offers.</>
+      : <>This is a fault to act on, not a question. Retry it with <Command>fractal work retry {step}</Command>.</>
+    default: return <>The web can't answer this kind of alert yet. Answer it with <Command>fractal alerts</Command>.</>
   }
-  const text = cleanMessageText(alert.detail ?? '')
-  return (
-    <>
-      {text ? isRequest(alert.attention_kind) ? <Question text={text} /> : <div {...stylex.props(styles.body)}><Markdown text={spaced(text)} /></div> : null}
-      {alert.because ? <div {...stylex.props(styles.meta)}>because {alert.because}</div> : null}
-    </>
-  )
 }
+
+const READ_ONLY = <>This device is read-only, so it can't answer here. Answer it from a device with control access, or with <Command>fractal alerts</Command>.</>
 
 type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
 
-/**
- * An ask, a review gate, or another alert Fractal shows in this conversation. Answers show only when
- * this device can send them; otherwise the alert says where it is answered.
- */
+/** One ask, gate or launch in the decision card. Answers always show; only a device that can send them can choose. */
 export const AnswerAlert = ({
   alert,
   onAct,
   now = Date.now(),
+  density = 'docked',
+  pager,
+  onFold,
+  maxBlockSize,
+  onBegin,
+  focusRef,
+  onOpenRef,
+  opensRef = () => true,
 }: {
   readonly alert: Native.Attention
   readonly onAct?: Act
   readonly now?: number
+  readonly density?: DecisionDensity
+  readonly pager?: DecisionPosition
+  readonly onFold?: () => void
+  readonly maxBlockSize?: number
+  /** The answer left the card: called as it is sent, before any reply. */
+  readonly onBegin?: (alert: Native.Attention) => void
+  readonly focusRef?: React.Ref<HTMLElement>
+  /** Opens a subject's ref inside the app. */
+  readonly onOpenRef?: (ref: string) => void
+  /** Which refs that can open; any other stays a chip to copy. */
+  readonly opensRef?: (ref: string) => boolean
 }): React.ReactNode => {
+  const store = useAlertAnswersStore()
   const choices = alertChoices(alert)
+  const parts = choices === null ? { options: [] } : partitionChoices(choices)
+  const words = store.words(alert.id)
+  const chosen = store.selected(alert)
+  const selected = chosen ?? parts.options.filter((choice) => choice.recommended === true).map((choice) => choice.key)
+  const answer = choices === null ? undefined : effectiveChoice(choices, selected[0], words)
   const from = alertFrom(alert)
-  const [words, setWords] = React.useState('')
-  const [confirming, setConfirming] = React.useState<AlertChoice>()
-  const [sending, setSending] = React.useState(false)
-  const [status, setStatus] = React.useState<string>()
-  // A new revision may carry a new question under the same id: a pending confirmation or an
-  // earlier answer's status belongs to the revision the person read. Their words stay theirs.
-  const [read, setRead] = React.useState(alert.revision)
-  if (read !== alert.revision) {
-    setRead(alert.revision)
-    setConfirming(undefined)
-    if (!sending) setStatus(undefined)
-  }
-  const wordsId = React.useId()
-  const takesWords = choices?.some((choice) => choice.words !== 'none') === true
-  const send = (choice: AlertChoice) => {
+  const send = (choice: NonNullable<typeof answer>) => {
     if (onAct === undefined) return
-    setConfirming(undefined)
-    setSending(true)
-    setStatus(`Sending “${choice.label}”…`)
-    void onAct(alert, choice.action(words)).then((result) => {
-      setSending(false)
-      setStatus(result._tag === 'Sent' ? 'Answered. The alert clears once Fractal records it.' : result.detail)
-    })
+    store.send(alert, answeredLabel(choice, words), () => onAct(alert, choice.action(words)))
+    onBegin?.(alert)
   }
+  const [armed, arm] = useArmed(alert.id)
   const step = alert.blocked?.step ?? alert.step_run_id?.split('/').pop()
   const deadline = askDeadline(
-    {
-      deadline_at: alert.deadline_at === undefined ? undefined : DateTime.formatIso(alert.deadline_at),
-      default_answer: alert.default_answer,
-    },
+    { deadline_at: alert.deadline_at === undefined ? undefined : DateTime.formatIso(alert.deadline_at), default_answer: alert.default_answer },
     now,
   )
-  return (
-    <section {...stylex.props(styles.alert)} aria-label={alert.title} data-alert-kind={alert.attention_kind}>
-      <div {...stylex.props(styles.title)}>◆ {alert.title}</div>
-      <div {...stylex.props(styles.meta)}>
-        {KIND_WORDS[alert.attention_kind] ?? 'Alert'} · from {from}
-        {step ? ` · step ${step}` : ''} · waited {ago(DateTime.formatIso(alert.requested_at), now)}
-        {deadline ? ` · ${deadline}` : ''}
-      </div>
-      <Body alert={alert} />
-      {choices === null ? (
-        <div {...stylex.props(styles.note)}>
-          {alert.attention_kind === 'harness-login'
-            ? 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
-            : alert.attention_kind === 'revision-approval'
-              ? 'Approve or cancel a revision with fractal work revision approve or cancel, as in the terminal app.'
-              : 'Answer this one in Fractal for now.'}
-        </div>
-      ) : onAct === undefined ? (
-        <div {...stylex.props(styles.note)}>This device cannot answer alerts. Answer it in Fractal.</div>
-      ) : (
-        <>
-          {takesWords ? (
-            <textarea
-              id={wordsId}
-              aria-label={`Your answer to ${from}`}
-              placeholder={choices.some((choice) => choice.words === 'required') ? 'Your words, for an answer that needs them' : 'Notes (optional)'}
-              value={words}
-              disabled={sending}
-              onChange={(event) => setWords(event.target.value)}
-              {...stylex.props(styles.words)}
-            />
-          ) : null}
-          {confirming === undefined ? (
-            <div {...stylex.props(styles.answers)}>
-              {choices.map((choice) => (
-                <AlertButton
-                  key={choice.key}
-                  tone={choice.tone}
-                  isDisabled={sending || (choice.words === 'required' && words.trim() === '')}
-                  aria-describedby={choice.consequence ? `${wordsId}-${choice.key}` : undefined}
-                  onPress={() => setConfirming(choice)}
-                >
-                  {choice.recommended ? `${choice.label} (recommended)` : choice.label}
-                </AlertButton>
-              ))}
-            </div>
-          ) : (
-            <div {...stylex.props(styles.answers)} role="group" aria-label="Confirm your answer">
-              <span>Send “{confirming.label}” to {from}?</span>
-              <AlertButton tone="primary" onPress={() => send(confirming)}>Send</AlertButton>
-              <AlertButton tone="secondary" onPress={() => setConfirming(undefined)}>Cancel</AlertButton>
-            </div>
-          )}
-          {choices.some((choice) => choice.consequence) ? (
-            <ul {...stylex.props(styles.list, styles.consequence)}>
-              {choices.filter((choice) => choice.consequence).map((choice) => (
-                <li key={choice.key} id={`${wordsId}-${choice.key}`}><strong>{choice.label}</strong>: {choice.consequence}</li>
-              ))}
-            </ul>
-          ) : null}
-        </>
-      )}
-      {status ? <div role="status" {...stylex.props(styles.note)}>{status}</div> : null}
-    </section>
-  )
+  const request = alert.request
+  const question = request?.question
+  const plain = question !== undefined && isPlainHeading(question)
+  const headingText = plain ? question : alert.attention_kind === 'launch-approval' && Option.isSome(alert.preview) ? alert.preview.value.goal : alert.title
+  const detail = cleanMessageText(alert.detail ?? '')
+  const contextSource = request?.summary ?? (request === undefined && alert.attention_kind !== 'launch-approval' && !(isRequest(alert.attention_kind) && report(detail) !== null) ? detail : '')
+  const { line, overflows } = contextOf(contextSource)
+  const title = plain && !repeatsHeading(alert.title, question) ? alert.title : undefined
+  const whyText = request?.why_person.replace(/^why (you|now):\s*/i, '').replace(/^why (you|now):\s*/i, '')
+  const why = whyText === undefined || whyText === '' || sameWords(whyText, contextSource, true) || sameWords(whyText, question ?? '', true) ? undefined : whyText
+  const evidence = [...(alert.because ? [`Because ${alert.because}`] : []), ...(request?.reasons ?? [])]
+  const related = subjectRows(alert, onOpenRef, opensRef)
+  const full = density === 'full'
+  const contextFull = overflows ? <div {...stylex.props(styles.prose)}><Markdown text={spaced(contextSource)} /></div> : undefined
+  // A differing title is context the heading does not carry. Full density shows the long context beside More's parts already.
+  const shownContext = title === undefined && (full || contextFull === undefined) ? undefined : <>{title === undefined ? null : <p {...stylex.props(styles.titleLine)}>{title}</p>}{full ? null : contextFull}</>
+  const more = why !== undefined || evidence.length > 0 || related.length > 0 || shownContext !== undefined
+    ? <DecisionMore clamp={!full} evidence={evidence} related={related} {...(why === undefined ? {} : { why })} {...(shownContext === undefined ? {} : { context: shownContext })} />
+    : undefined
+  const body = alert.attention_kind === 'launch-approval' ? <LaunchPreview alert={alert} />
+    : question !== undefined && !plain ? <Question text={question} />
+      : request === undefined && isRequest(alert.attention_kind) && report(detail) !== null ? <Question text={detail} /> : undefined
+  const failure = store.failure(alert)
+  const options = parts.options
+  const shownSelected = answer !== undefined && options.some((choice) => choice.key === answer.key) ? [answer.key] : []
+  const movedToWords = words.trim() !== '' && selected.length > 0 && answer?.key !== selected[0]
+  const stuck = words.trim() !== '' && answer !== undefined && answer.words === 'none'
+  const status = failure !== undefined ? { tone: 'error' as const, text: failure }
+    : stuck ? { tone: 'progress' as const, text: 'This asks you to pick one of its answers, so your words can\'t be sent. Clear them to send.' }
+      : movedToWords ? { tone: 'progress' as const, text: answer?.key === 'words' ? 'Your words will be sent as the answer.' : `Your words go with “${answer?.label}”.` }
+        : undefined
+  // A new revision may ask something new: the card starts over, so a choice made on the old one never lets Enter answer this one.
+  return <DecisionCard
+    key={`${alert.id}\u0000${alert.revision}`}
+    density={density}
+    label={alert.title}
+    data={{ 'data-alert-kind': alert.attention_kind }}
+    meta={[from, KIND_WORDS[alert.attention_kind] ?? 'Alert', ...(step ? [`step ${step}`] : []), `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`, ...(deadline ? [deadline] : [])]}
+    heading={plain ? <InlineCode text={question} /> : headingText}
+    headingText={plain ? firstLine(question) : headingText}
+    {...(line === '' ? {} : { context: line })}
+    {...(contextFull === undefined ? {} : { contextFull })}
+    {...(more === undefined ? {} : { more })}
+    {...(body === undefined ? {} : { body })}
+    options={options.map((choice) => ({
+      id: choice.key,
+      label: choice.label,
+      ...(choice.consequence ? { rationale: choice.consequence } : {}),
+      ...(choice.recommended === true ? { recommended: request?.recommendation?.reason ? { reason: request.recommendation.reason } : {} } : {}),
+      ...(choice.tone === 'danger' ? { danger: true } : {}),
+    }))}
+    selected={shownSelected}
+    onSelect={(ids) => store.setSelected(alert, ids)}
+    {...(choices === null ? {} : {
+      words: {
+        value: words,
+        label: `Your answer to ${from}`,
+        placeholder: answer?.words === 'required' ? 'What should it do instead?' : parts.words !== undefined ? 'Or tell it something else…' : choices.some((choice) => choice.words === 'optional') ? 'Add a note (optional)…' : 'Or tell it something else…',
+        onChange: (value: string) => store.setWords(alert.id, value),
+      },
+      send: { label: 'Send', disabled: !canSend(answer, words), onPress: () => { if (answer !== undefined) send(answer) } },
+    })}
+    {...(parts.dismiss === undefined ? {} : {
+      dismiss: { label: armed ? `Confirm ${parts.dismiss.label.toLowerCase()}` : parts.dismiss.label, onPress: () => { if (armed) send(parts.dismiss!); else arm() } },
+    })}
+    {...(choices === null ? { unavailable: elsewhere(alert, step) } : onAct === undefined ? { unavailable: READ_ONLY } : {})}
+    {...(status === undefined ? {} : { status })}
+    {...(pager === undefined ? {} : { pager })}
+    {...(onFold === undefined ? {} : { onFold })}
+    {...(maxBlockSize === undefined ? {} : { maxBlockSize })}
+    {...(focusRef === undefined ? {} : { focusRef })}
+  />
 }
+
+const styles = stylex.create({
+  prose: { color: c.fg, fontSize: t.uiSize, lineHeight: t.uiLeading, overflowWrap: 'anywhere' },
+  report: { margin: 0, display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: s.md, fontSize: t.metaSize },
+  fault: { color: c.dangerFg },
+  soft: { color: c.fgSoft },
+  value: { margin: 0 },
+  list: { margin: 0, paddingInlineStart: s.xxl },
+  titleLine: { margin: 0 },
+  command: { fontFamily: t.fontMono, color: c.fg },
+})

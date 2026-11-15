@@ -7,11 +7,13 @@ import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
-    Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
+    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
+    Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
-    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     AttentionBudgetReport,
-    MissionDeclaration,
+    MissionDeclaration, SubjectSourceMap, SourceBlob,
+    GithubPullRequestRead, GithubIssueRead, GithubCommentRead, GithubConversationRead, GithubChecksRead, GithubFilesRead, GithubRunRead,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
@@ -145,7 +147,9 @@ export type CollectionStream = {
     subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
-    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships'>, limit?: number, filters?: CollectionFilters): void;
+    /** Follow the person's read positions; frames are invalidations, so re-list `readPositionsList`. */
+    subscribeReadPositions(id: string, person: string, limit?: number): void;
+    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'read-positions'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
     subscribeAgent(id: string, agent: string, status?: string | null): Promise<void>;
@@ -302,8 +306,8 @@ export class FractalClient {
     }
     private features(): string {
         return this.messagesPaging
-            ? 'custom-subjects.v1, conversation-blocks.v1, messages-paging.v2'
-            : 'custom-subjects.v1, conversation-blocks.v1';
+            ? 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1, messages-paging.v2'
+            : 'custom-subjects.v1, conversation-blocks.v1, model-drift-attention.v1';
     }
 
 
@@ -466,6 +470,21 @@ export class FractalClient {
     /** Local diagnostic acceptance, without a snapshot fence or durable action receipt. */
     async observationsReport(report: ObservationReport, requestOptions: RequestOptions = {}): Promise<ObservationResponse> {
         return this.request('POST', '/v1/client/observations', report, undefined, undefined, requestOptions);
+    }
+
+    /** Set or clear the session person's own availability. Requires write.availability; agent sessions are refused. */
+    async availabilitySet(request: AvailabilitySet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailability>> {
+        return this.request<PersonAvailability>('PUT', '/v1/client/availability', request, undefined, undefined, requestOptions);
+    }
+
+    /** Report one device's raw state for the session person, on every state change and again at report_again_at; the daemon derives presence and assigns the source. Requires write.presence. */
+    async presenceReport(report: PresenceReport, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PresenceReportResult>> {
+        return this.request<PresenceReportResult>('POST', '/v1/client/presence', report, undefined, undefined, requestOptions);
+    }
+
+    /** Set or clear the session person's own directive note. Requires write.notes; agent sessions are refused. */
+    async notesSet(request: DirectiveNoteSet, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNoteSetResult>> {
+        return this.request<DirectiveNoteSetResult>('PUT', '/v1/client/notes', request, undefined, undefined, requestOptions);
     }
 
     /** Replace this paired device's local-only registration, without a graph receipt. */
@@ -643,12 +662,21 @@ export class FractalClient {
             } catch (error) { end(error instanceof Error ? error : new Error(String(error))); socket.close(1000); }
         };
         socket.onclose = event => end(event.code === 1000 ? undefined : new Error(`The collections socket closed (${event.code}${event.reason ? ` ${event.reason}` : ''})`));
-        socket.onerror = () => end(new Error('The collections socket failed'));
+        socket.onerror = event => {
+            // Native carriers expose only NSError identity. Browser events remain generic;
+            // never copy message, localizedDescription, userInfo, or arbitrary event text.
+            const identity = typeof event === 'object' && event !== null
+                && 'domain' in event && typeof event.domain === 'string'
+                && 'code' in event && typeof event.code === 'number' && Number.isSafeInteger(event.code)
+                ? ` (${event.domain} ${event.code})` : '';
+            end(new Error(`The collections socket failed${identity}`));
+        };
         return {
             subscribeGlasses: id => send({kind: 'subscribe', id, collection: 'glasses', limit: 100}),
             subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
+            subscribeReadPositions: (id, person, limit = 100) => send({kind: 'subscribe', id, collection: 'read-positions', person, limit}),
             subscribe: (id, collection, limit, filters = {}) => {
                 // Only subscribeAgent may send an exact selector: it first checks the daemon.
                 if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
@@ -688,6 +716,7 @@ export class FractalClient {
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
+    async availabilityList(person?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailabilities>> { return this.get('/v1/client/availability' + query({ person }), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }
@@ -700,11 +729,21 @@ export class FractalClient {
     async documentReferencesGet(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentReferences>> { return this.get('/v1/client/document-references' + query({ subject }), undefined, requestOptions); }
     async publicationDefinition(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PublicationDefinition>> { return this.get('/v1/client/publication-definition' + query({ subject }), undefined, requestOptions); }
     async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MissionDeclaration>> { return this.get('/v1/client/mission-declaration' + query({ mission, revision }), undefined, requestOptions); }
+    async sourceMapGet(subject: string, revision?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectSourceMap>> { return this.get('/v1/client/source-maps' + query({ subject, revision }), undefined, requestOptions); }
+    async sourceBlobGet(hash: string, subject: string, revision: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SourceBlob>> { return this.get(`/v1/client/source-blobs/${encodeURIComponent(hash)}` + query({ subject, revision }), undefined, requestOptions); }
     async subjectDefinition(subject: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectDefinition>> { return this.get('/v1/client/subject-definition' + query({ subject, show_env_values: showEnvValues }), undefined, requestOptions); }
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
     async sloList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloList>> { return this.get('/v1/client/slo', undefined, requestOptions); }
     async sloHistory(id: string, options: { since_ms?: number; until_ms?: number; steps?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloHistory>> { return this.get('/v1/client/slo/history' + query({ id, ...options }), undefined, requestOptions); }
     async usagePeriod(options: { since_ms?: number; until_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsagePeriod>> { return this.get('/v1/client/usage' + query(options), undefined, requestOptions); }
+    async usageHubQuota(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsageHubQuota>> { return this.get('/v1/client/usage/quota', undefined, requestOptions) }
+    async githubPluginPullRequest(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubPullRequestRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`, undefined, requestOptions); }
+    async githubPluginIssue(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubIssueRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${number}`, undefined, requestOptions); }
+    async githubPluginConversation(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubConversationRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/conversation`, undefined, requestOptions); }
+    async githubPluginChecks(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubChecksRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/checks`, undefined, requestOptions); }
+    async githubPluginFiles(owner: string, repo: string, number: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubFilesRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/files`, undefined, requestOptions); }
+    async githubPluginComment(owner: string, repo: string, commentId: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubCommentRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/comments/${commentId}`, undefined, requestOptions); }
+    async githubPluginRun(owner: string, repo: string, runId: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<GithubRunRead>> { return this.get(`/v1/client/plugins/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/runs/${runId}`, undefined, requestOptions); }
     async clientsList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ClientConnections>> { return this.get('/v1/client/clients', undefined, requestOptions); }
     async nowList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/now' + query(options), undefined, requestOptions); }
     async machinesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/machines' + query(options), undefined, requestOptions); }
@@ -761,6 +800,7 @@ export class FractalClient {
     async arrangementsList(person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ArrangementPage>> { return this.get('/v1/client/arrangements' + query({ person, ...options }), undefined, requestOptions); }
     async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Arrangement>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}`, undefined, requestOptions); }
     async arrangementsMemberships(personName: string, uuid: string, person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<OrderedMembershipPage>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}/memberships` + query({ person, ...options }), undefined, requestOptions); }
+    async readPositionsList(person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ReadPositionPage>> { return this.get('/v1/client/read-positions' + query({ person, ...options }), undefined, requestOptions); }
     async glassesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/glasses' + query(options), undefined, requestOptions); }
     async glassesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async assistantSummary(params: AssistantSummaryRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantSummary>> { return this.assistantRead<AssistantSummary>('summary', params, proof, requestOptions); }
@@ -782,7 +822,10 @@ export class FractalClient {
     async agentSuspend(input: Omit<ActionOf<'agent.suspend'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'agent.suspend' } as ActionOf<'agent.suspend'>, requestOptions); }
     async arrangementEdit(input: Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.edit' } as ActionOf<'arrangement.edit'>, requestOptions); }
     async arrangementMembershipEdit(input: Omit<ActionOf<'arrangement.membership.edit'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.membership.edit' } as ActionOf<'arrangement.membership.edit'>, requestOptions); }
+    async attentionDismiss(input: Omit<ActionOf<'attention.dismiss'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.dismiss' } as ActionOf<'attention.dismiss'>, requestOptions); }
     async attentionResolve(input: Omit<ActionOf<'attention.resolve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.resolve' } as ActionOf<'attention.resolve'>, requestOptions); }
+    async attentionSeen(input: Omit<ActionOf<'attention.seen'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.seen' } as ActionOf<'attention.seen'>, requestOptions); }
+    async attentionSnooze(input: Omit<ActionOf<'attention.snooze'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.snooze' } as ActionOf<'attention.snooze'>, requestOptions); }
     async customReply(input: Omit<ActionOf<'custom.reply'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'custom.reply' } as ActionOf<'custom.reply'>, requestOptions); }
     async harnessAnswer(input: Omit<ActionOf<'harness.answer'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'harness.answer' } as ActionOf<'harness.answer'>, requestOptions); }
     async laneApprove(input: Omit<ActionOf<'lane.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.approve' } as ActionOf<'lane.approve'>, requestOptions); }
@@ -806,6 +849,7 @@ export class FractalClient {
     async pairingRevoke(input: Omit<ActionOf<'pairing.revoke'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'pairing.revoke' } as ActionOf<'pairing.revoke'>, requestOptions); }
     async privateNotesWrite(input: Omit<ActionOf<'private-notes.write'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'private-notes.write' } as ActionOf<'private-notes.write'>, requestOptions); }
     async promptRespond(input: Omit<ActionOf<'prompt.respond'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'prompt.respond' } as ActionOf<'prompt.respond'>, requestOptions); }
+    async readPositionAdvance(input: Omit<ActionOf<'read-position.advance'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'read-position.advance' } as ActionOf<'read-position.advance'>, requestOptions); }
     async reviewApprove(input: Omit<ActionOf<'review.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.approve' } as ActionOf<'review.approve'>, requestOptions); }
     async reviewReject(input: Omit<ActionOf<'review.reject'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.reject' } as ActionOf<'review.reject'>, requestOptions); }
     async reviewRequestChanges(input: Omit<ActionOf<'review.request-changes'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.request-changes' } as ActionOf<'review.request-changes'>, requestOptions); }

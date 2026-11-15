@@ -26,11 +26,38 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 | `fractal agents show ID` | Inspect one agent's current state and its charter. |
 | `fractal agents queue ID` | Inspect its ordered runs. |
 | `fractal missions ls` | List missions and current work. |
+| `fractal missions runs --mission-prefix PREFIX` | Read bounded run and step summaries for a mission ID prefix. |
 | `fractal missions show ID` | Inspect a definition or run. |
 | `fractal work ls` | Inspect ready and active steps. |
 | `fractal alerts ls` | List requests and approvals. |
 | `fractal conversations` | Read and send durable conversation. |
 | `fractal usage` | Inspect observed usage and estimated cost. |
+| `fractal availability` | Read or set your status, interruptions and deadline clock. |
+
+### Bounded mission run queries
+
+```sh
+fractal missions runs --mission-prefix mission/garden/ --active --json
+fractal missions runs --mission-prefix mission/garden/ --limit 500
+```
+
+`--mission-prefix` is required and matches a literal mission ID prefix, not a
+pattern. `--active` selects only active runs; without it, terminal runs are also
+eligible. `--limit` defaults to 100 runs and accepts 1 through 500.
+
+The command makes one read-only request to
+`GET /v1/client/mission-runs?mission_prefix=<encoded>&active=true|false&limit=N`.
+It does not fetch run cards or follow additional pages. JSON output passes through
+the daemon's complete `{snapshot,value}` envelope. `value` contains `runs` and
+`truncated`; each run includes `run_id`, `mission_id`, `revision`, `phase`,
+`status`, `started_at`, `updated_at`, `steps`, and `steps_truncated`, with optional
+data omitted when absent (including `host_id`). Steps contain `step_id` and
+`state`, with at most 500 steps per run.
+
+`truncated: true` means more runs match: narrow the prefix or increase the limit.
+`steps_truncated: true` means more steps exist for that run; use
+`fractal missions show RUN` to inspect it. Plain output shows the same summaries
+and makes both truncation conditions explicit.
 
 ## Publication and planning
 
@@ -46,6 +73,88 @@ harness. Launch changes retain their existing actions (such as
 still take precedence.
 
 For small independent authorized work, use `fractal work start`. Claim before executing assigned work, record progress, and complete with evidence. Use `fractal work revise` for an explicit new generation of an existing run.
+
+### Where declarations come from
+
+A set publication may carry a source map (`fractal apply --set … --source-map FILE`), which records, per new agent or mission revision, the files it was rendered from, the span of each KDL node in them, and the helper and value frames that fed it. These commands read it; each takes `--json`.
+
+- `fractal subject show SUBJECT --source [--revision REV] [--node NODE]` prints the revision's commit, its declaration span with a GitHub permalink pinned to that commit, every step and gate with the line that declares it, and the other files it uses. `--node` takes a KDL node path or a short form such as `step:review/goal` and prints that node's span and frames (declared → helper → value). A `step-run/…` subject resolves through the revision its run pinned.
+- `fractal source where PATH[:LINE]` (or a local file in a git checkout, or a GitHub blob URL with `#L…`) lists the live agents and missions that file, or that line of it, declares, feeds or is imported by. Spans recorded against an older version of the file are carried into the newest one by a line diff; `--repository OWNER/REPO` narrows a path present in several repositories.
+- `fractal source diff SUBJECT [A..B]` compares two mapped revisions (unique prefixes; either side may be empty; no range compares the two newest): a diff of every contributing file whose text changed, the canonical KDL diff, and a Why line that says whether the subject's own file, only a file it uses, or neither changed.
+
+`fractal work claim` prints a `SOURCE` row under the step's definition when its run's revision has a map, and the faults for a broken gate or a step out of time, and a failing gate's reason, name the line that declares it.
+
+### Bulk desired declarations
+
+```sh
+fractal subject desired --json --all
+fractal subject desired --json agent/garden/worker mission/garden
+fractal subject desired --json --all --kind agent
+```
+
+The existing noun is singular: `fractal subject desired --json [--all | SUBJECT...] [--kind K]`.
+No subjects (with or without `--all`) selects all declarations. Named subjects are exact IDs,
+not fuzzy matches; `--all` cannot be combined with names. `--kind` filters either selection
+by the literal desired kind: stopped and terminally retired agents are `stop`, not
+`agent`; unfiltered all includes their retained declarations.
+The server accepts at most 1,000 supplied names and returns the typed error
+`desired-batch-limit` above that limit.
+
+The CLI follows `GET /v1/desired?subject=ID&subject=ID&kind=K&limit=N&cursor=TOKEN`,
+with repeated URL-encoded `subject` parameters; omitting them selects all declarations.
+`kind` and `cursor` are optional. The default and maximum page limit are both 1,000;
+zero or a larger limit returns HTTP 422 `desired-page-limit`.
+Each API page is `{"items":[...],"next_cursor":null,"store_index":123}`, with a
+string `next_cursor` when another page follows and a `u64` store index. Each item
+flattens `DesiredSubject` (`subject`, `kind`, `desired`, `member`, and ownership fields)
+alongside `desired_token` (a selected declaration claim ID or `null`) and optional
+`actual` (an extensible JSON summary). This is not a client-v0 envelope.
+
+An opaque cursor binds the store origin, pinned claim read cut, shared graph projection
+progress, desired row-write generation, selection filters, page limit and last subject.
+Continuations must keep the same subjects, kind and limit. The claim cut, graph projection
+health/frontier and desired row-write generation must all remain unchanged; otherwise the
+API returns typed `desired-cursor-expired`. The frontier covers selected desired declarations
+and mission definitions, including backlog projection without claim appends. Transactional
+row-write triggers also fence repairs and corrections that leave both `store_index` and graph
+health unchanged. Validation reads these bounded witnesses in the page's pinned snapshot;
+it does not scan the declarations or use SQLite's connection-relative `data_version`.
+There is no historical snapshot or pagination cache, silent restart or automatic retry.
+The CLI uses limit 1,000 throughout, collects every page and prints one final JSON array
+only after all reads succeed. Cursor invalidation fails the command without partial stdout.
+
+Each page uses one store read snapshot. This GET uses the existing desired-read
+`read.projections` scope, deadline and read admission, and remains available during fleet
+drain. It does not reduce status or cold-fold cards.
+Published mission definitions are included as synthesized `DesiredSubject` entries:
+`desired` is the canonical published `MissionSpec`; optional `member` and ownership
+fields are absent, including for retained retired definitions.
+Their `desired_token` is `null`, matching mission cards: publication claim IDs are
+not selected desired-table tokens. Compare mission declarations using
+`actual.revision` and `actual.digest`, not a substituted publication claim ID.
+
+Agent `actual` currently includes only the maintained published declaration `revision`
+when available. Non-agents include the published `revision`, declaration `digest`,
+and maintained `state` when available (missions: `draft`, `ready`, `retired`), never
+the body. Runtime and card state fields are intentionally absent. For bulk roster
+status, use `fractal agents ls --all --json`, whose status is not card state. See
+[the operational query contract](../../st3/operational-queries.md#bulk-desired-declarations)
+for exact omissions and the SHA-256 digest's canonical input.
+
+If a retained member contains an unsupported enum variant anywhere in its schema,
+or an unknown field in a structure that rejects unknown fields, only that item's `actual` becomes
+`{"unavailable":{"code":"member-version-unproven"}}`; normal items and the page
+still succeed. This marker is not a revision or a negative runtime observation.
+Malformed JSON, wrong types, missing required fields, and other read failures still
+fail the page. The authority is the full `MemberSpec` serde schema, including nested
+discriminators; it has no numeric wire version. The CLI preserves extensible item JSON,
+including member payloads from newer daemons, rather than decoding each member locally.
+
+This automation read deliberately does not reduce status or fold cards. It is not a
+replacement for `fractal subject show SUBJECT` or `fractal agents show AGENT`: fetch
+the card for fields absent from the cheap summary. These raw `/v1/desired` routes are
+outside the generated client-v0 contract; no generated client or OpenAPI artifact
+is needed for this command.
 
 ## Operating a machine
 

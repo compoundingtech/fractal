@@ -76,7 +76,7 @@ function SystemStatesStory({ scheme, connection: initial, failure, ticking = fal
       <SystemNotice scope="rail" kind="stale" connection title="Last observed roster" detail="Live updates pending" />
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      {active === undefined ? null : <ThreadHeader folder={active.host} title={active.title} status={active.status} statusLabel={active.statusLabel} statusSince={active.statusSince} freshness="stale" now={observedAt} terminalAvailable panelOpen drawerOpen onTogglePanel={() => {}} onToggleDrawer={() => {}} />}
+      {active === undefined ? null : <ThreadHeader folder={active.host} title={active.title} status={active.status} statusLabel={active.statusLabel} statusSince={active.statusSince} freshness="stale" now={observedAt} terminalAvailable panelOpen terminalOpen onTogglePanel={() => {}} onToggleTerminal={() => {}} />}
       <ConnectionStatus state={connection} {...(text === undefined ? {} : { text })} {...(connection === 'offline' || connection === 'reconnecting' ? { onReconnect: reconnect } : {})} />
       <div {...stylex.props(styles.body)}>
         <section aria-label="Missions" {...stylex.props(styles.missions)}>
@@ -130,7 +130,7 @@ function ConnectionGeometryStory({ scheme }: { scheme: Scheme }) {
   const [connection, setConnection] = React.useState<ConnectionState>('live')
   return <main aria-label="Workspace" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-      {agent === undefined ? null : <ThreadHeader title={agent} freshness={connection === 'live' ? 'live' : 'stale'} panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />}
+      {agent === undefined ? null : <ThreadHeader title={agent} freshness={connection === 'live' ? 'live' : 'stale'} panelOpen={false} terminalOpen={false} onTogglePanel={() => {}} onToggleTerminal={() => {}} />}
       <ConnectionStatus state={connection} {...(connection === 'offline' ? { onReconnect: () => setConnection('live') } : {})} />
       <EmbraceScrollViewport items={turns} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(styles.turns)}>
         {turns.map(turn => <article key={turn.id} data-item-id={turn.id} {...stylex.props(styles.turn)}><strong {...stylex.props(styles.turnWho)}>{turn.who}</strong><p {...stylex.props(styles.turnText)}>{turn.text}</p></article>)}

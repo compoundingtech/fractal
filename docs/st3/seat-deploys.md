@@ -163,6 +163,34 @@ An agent can explicitly inspect that retained mail with `fractal conversations l
 and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
 continues to arrive normally, with the channel's usual handoff deduplication and receipt handling.
 
+The registry also accepts a durable graph `message.expired` outcome, written only by
+`daemon/runtime`, with reason `cutoff-never-offered`, `cutoff-uncertain-attempt`, or
+`no-live-recipient`. No automatic expiration is enabled. Non-superseded expiry removes mail
+from open inboxes, unread counts and recovery offers, and settles an outstanding batch member.
+It wakes stream re-evaluation without inventing a delivered/read receipt. Actual delivery or read
+evidence supersedes expiry and restores the normal receipt-based path; delivered-but-unread
+mail remains unread. The expiry claim stays in history. Harness receipts cannot
+write expiry, and the messages shard still replicates only `message.sent`. Outcome readers,
+projections and sender surfaces must be deployed to every pinned host before any expiry writer
+is enabled; older registries retain the new kind as unknown rather than interpreting its outcome.
+Writer activation also requires upgraded TypeScript clients, including fractal-web and generated
+consumers, whose message-state decoder accepts `expired`. This is a prerequisite for the
+expiry-writer rollout, not a negotiated response format.
+The writer must also enforce original-accepting-member authority before activation; replicated
+expiry admission here checks the daemon actor, not that future writer prerequisite.
+
+`GET /v1/messages/delivery/:id` reports active expiry as terminal `state: expired`,
+`phase: expired`, with the durable reason above, before human-hold or delivery-path
+diagnostics. An unavailable remote receipt host cannot replace that outcome with
+`unknown`. Actual delivered/read evidence supersedes expiry and reports normal receipt
+progress; this endpoint does not add expiry history. `fractal conversations status`
+prints the outcome and reason; `fractal conversations ls` shows the raw message status.
+Rust's generated string field can receive the raw `expired` status without regeneration.
+Older TypeScript `ReadSchema.Message.state` decoders use a closed literal union and reject
+`expired`, even in tolerant mode; upgrade those clients before enabling any expiry writer.
+Upgrading the generated union may require consumers to add an exhaustive `expired` arm.
+No harness receipt or automatic expiry writer is changed.
+
 Claude distinguishes native queue acceptance (`queue-operation/enqueue`, which records
 `delivered`) from consumption (a user transcript entry, including `isMeta`, or an explicit
 `queue-operation/remove` with `reason: absorbed_mid_turn`, which records `read`). Receipt matching

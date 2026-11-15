@@ -70,6 +70,7 @@ async fn descriptor_exhaustion_child() {
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "accept-node".into(),
+        api_socket: root.path().join("daemon").join("api.sock"),
         state_dir: root.path().join("daemon"),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),

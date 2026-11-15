@@ -22,10 +22,14 @@ export type ActionCommon = {
   "harness.answer"
   | "arrangement.edit"
   | "arrangement.membership.edit"
+  | "read-position.advance"
   | "custom.reply"
   | "private-notes.write"
   | "prompt.respond"
   | "attention.resolve"
+  | "attention.seen"
+  | "attention.snooze"
+  | "attention.dismiss"
   | "review.approve"
   | "review.reject"
   | "review.request-changes"
@@ -85,11 +89,13 @@ export type ActionResult = {
   action_id: Id;
   affected_ids: Array<Id>;
   arrangement_revision?: Revision;
+  attention_control?: AttentionControlState;
   harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   membership_revision?: Revision;
   operation_id: Id;
   private_notes?: PrivateNotesFence;
+  read_position_at?: Timestamp;
   snapshot_id: Id;
   status: "accepted" | "completed" | "rejected";
   terminal_attachment?: (TerminalAttachment | null);
@@ -121,10 +127,12 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  last_prose_at?: (Timestamp | null);
   launch_contract?: {
 
 } | null;
   lifecycle?: AgentLifecycle;
+  live_model?: string | null;
   mail_custody?: AgentMailCustody;
   name: string;
   next_work?: (WorkLabel | null);
@@ -242,6 +250,7 @@ export type AgentMessageDay = {
   low_percent?: number | null;
   messages: number;
   since_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   until_ms: number;
   usage_cost_microusd: number;
@@ -722,6 +731,7 @@ export type AssistantAttentionItem = {
   | "fault"
   | "harness-login"
   | "harness-prompt"
+  | "model-drift"
   | "custom"
   | "unknown"
 ;
@@ -931,9 +941,11 @@ export type AssistantScope =
   | "read.assistant.agents"
   | "read.assistant.conversation"
   | "read.assistant.terminal"
+  | "read.assistant.slo"
   | "write.assistant.messages"
   | "write.assistant.custom-reply"
   | "write.assistant.answers"
+  | "read.assistant.availability"
 ;
 
 export type AssistantSenderClass = "external-assistant";
@@ -1018,6 +1030,7 @@ export type Attention = ResourceHeader & {
   | "fault"
   | "harness-login"
   | "harness-prompt"
+  | "model-drift"
  | string);
   because?: string;
   blocked?: AttentionBlocked;
@@ -1047,6 +1060,8 @@ export type Attention = ResourceHeader & {
   requested_at: Timestamp;
   requester_id?: Id;
   review_mode?: "approve" | "feedback";
+  seen_at?: (Timestamp | null);
+  snoozed_until?: (Timestamp | null);
   source_id: Id;
   source_kind?: string;
   state: "open" | "resolved";
@@ -1055,6 +1070,7 @@ export type Attention = ResourceHeader & {
   targets?: Array<Id>;
   title: string;
   update?: PersonUpdate;
+  urgent?: boolean;
   variant_id?: Id;
   what?: string;
 };
@@ -1097,6 +1113,19 @@ export type AttentionBudgetReport = {
 export type AttentionBudgetRequestRef = {
   claim_id: string;
   subject: string;
+};
+
+export type AttentionControlId = string;
+
+export type AttentionControlState = {
+  attention_id: AttentionControlId;
+  seen_at: (Timestamp | null);
+  snoozed_until: (Timestamp | null);
+};
+
+export type AttentionDismissParameters = {
+  attention_id: AttentionControlId;
+  text?: string;
 };
 
 export type AttentionLaunchAgent = {
@@ -1186,6 +1215,15 @@ export type AttentionRevisionLine = {
   text: string;
 };
 
+export type AttentionSeenParameters = {
+  attention_id: AttentionControlId;
+};
+
+export type AttentionSnoozeParameters = {
+  attention_id: AttentionControlId;
+  until: (Timestamp | null);
+};
+
 export type AttentionTargetState = {
   id: Id;
   since?: Timestamp;
@@ -1196,6 +1234,37 @@ export type AttentionWaiting = {
   path: string;
   step: StepRunId;
 };
+
+export type AvailabilityDeadlineClock = ("run" | "hold-routine" | "hold-all" | string);
+
+export type AvailabilityDeadlineClockChange = {
+  until?: (Timestamp | null);
+  value: "run" | "hold-routine" | "hold-all";
+};
+
+export type AvailabilityInterruptions = ("all" | "urgent" | "none" | string);
+
+export type AvailabilityInterruptionsChange = {
+  until?: (Timestamp | null);
+  value: "all" | "urgent" | "none";
+};
+
+export type AvailabilityPresence = ("present" | "idle" | "locked" | "unreported" | string);
+
+export type AvailabilitySet = {
+  deadline_clock?: AvailabilityDeadlineClockChange;
+  interruptions?: AvailabilityInterruptionsChange;
+  status?: AvailabilityStatusChange;
+};
+
+export type AvailabilityStatus = ("available" | "away" | string);
+
+export type AvailabilityStatusChange = {
+  until?: (Timestamp | null);
+  value: ("available" | "away" | null);
+};
+
+export type AvailabilityStatusSource = ("override" | "presence" | "unreported" | string);
 
 export type BlobChunk = {
   data: string;
@@ -1421,6 +1490,13 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person: ArrangementPerson;
   subject: ArrangementId;
 } & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; trace?: never; until_ms?: never; }) | ({
+  collection: "read-positions";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person: ArrangementPerson;
+  trace?: SubscribeTraceContext;
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   capability: string;
   collection: "terminal";
   id: string;
@@ -1517,6 +1593,7 @@ export type CollectionName =
   | "glasses"
   | "arrangements"
   | "ordered-memberships"
+  | "read-positions"
   | "summary"
   | "clients"
   | "usage"
@@ -1785,6 +1862,15 @@ export type DirectiveNote = {
   time: Timestamp;
 };
 
+export type DirectiveNoteSet = {
+  expires_at?: (Timestamp | null);
+  text: (string | null);
+};
+
+export type DirectiveNoteSetResult = {
+  note: (DirectiveNote | null);
+};
+
 export type DirectiveNotes = {
   notes: Array<DirectiveNote>;
 };
@@ -1838,7 +1924,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | PersonAvailabilities | DirectiveNoteSetResult | PersonAvailability | PresenceReportResult | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | SubjectSourceMap | SourceBlob | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | UsageHubQuota | MailBacklog | SloList | SloHistory | GithubPluginRead);
 };
 
 export type ErrorCode = (
@@ -1855,6 +1941,7 @@ export type ErrorCode = (
   | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
+  | "set-managed-subject"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -1897,6 +1984,7 @@ export type ErrorCode = (
   | "agent-roster-not-ready"
   | "agent-roster-cut-not-ready"
   | "message-selectors-not-ready"
+  | "database-busy"
   | "rate-limited"
   | "runtime-not-local"
   | "runtime-authority-indeterminate"
@@ -1929,6 +2017,7 @@ export type ErrorCode = (
   | "private-notes-indeterminate"
   | "invalid-answer"
   | "not-answerable"
+  | "attention-dismiss-unsupported"
   | "internal"
  | string);
 
@@ -1985,6 +2074,327 @@ export type Fence = {
   terminal_sequence?: number;
 };
 
+export type GithubCheckRun = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  name: string;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  summary: (string | null);
+  url: string;
+  workflow: (string | null);
+};
+
+export type GithubChecks = {
+  head_sha: string;
+  runs: Array<GithubCheckRun>;
+  truncated: boolean;
+};
+
+export type GithubChecksRead = ({
+  fetched_at: string;
+  item: GithubChecks;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubComment = {
+  author: (GithubUser | null);
+  author_association: string;
+  body: string;
+  created_at: string;
+  id: number;
+  number: number;
+  owner: string;
+  reactions: Array<GithubReaction>;
+  repo: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubCommentRead = ({
+  fetched_at: string;
+  item: GithubComment;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubConversation = {
+  comments: Array<GithubComment>;
+  review_threads: Array<GithubReviewThread>;
+  reviews: Array<GithubReview>;
+  truncated: boolean;
+};
+
+export type GithubConversationRead = ({
+  fetched_at: string;
+  item: GithubConversation;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubFile = {
+  additions: number;
+  deletions: number;
+  patch: (string | null);
+  path: string;
+  previous_path: (string | null);
+  status: "added" | "removed" | "modified" | "renamed" | "copied" | "changed" | "unchanged";
+};
+
+export type GithubFiles = {
+  files: Array<GithubFile>;
+  total: number;
+  truncated: boolean;
+};
+
+export type GithubFilesRead = ({
+  fetched_at: string;
+  item: GithubFiles;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubIssue = {
+  assignees: Array<string>;
+  author: (GithubUser | null);
+  body: string;
+  closed_at: (string | null);
+  comments: number;
+  created_at: string;
+  is_pull_request: boolean;
+  labels: Array<GithubLabel>;
+  milestone: (string | null);
+  number: number;
+  owner: string;
+  repo: string;
+  state: "open" | "closed";
+  state_reason: ("completed" | "not_planned" | "reopened" | null);
+  title: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubIssueRead = ({
+  fetched_at: string;
+  item: GithubIssue;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubItemLink = {
+  number: number;
+  owner: string;
+  repo: string;
+  state: string;
+  title: string;
+};
+
+export type GithubJob = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  name: string;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  url: string;
+};
+
+export type GithubLabel = {
+  color: string;
+  name: string;
+};
+
+export type GithubMovedTo = {
+  number: (number | null);
+  owner: string;
+  repo: string;
+};
+
+export type GithubPluginRead = (GithubPullRequestRead | GithubIssueRead | GithubCommentRead | GithubConversationRead | GithubChecksRead | GithubFilesRead | GithubRunRead);
+
+export type GithubPullRequest = {
+  additions: number;
+  author: (GithubUser | null);
+  base_ref: string;
+  body: string;
+  changed_files: number;
+  closed_at: (string | null);
+  closing_issues: Array<GithubItemLink>;
+  comments: number;
+  commits: number;
+  created_at: string;
+  deletions: number;
+  draft: boolean;
+  head_ref: string;
+  head_sha: string;
+  labels: Array<GithubLabel>;
+  merge_state: (
+  "clean"
+  | "dirty"
+  | "blocked"
+  | "behind"
+  | "unstable"
+  | "has_hooks"
+  | "draft"
+  | "unknown"
+ | null);
+  merged_at: (string | null);
+  number: number;
+  owner: string;
+  repo: string;
+  requested_reviewers: Array<string>;
+  review_decision: ("approved" | "changes_requested" | "review_required" | null);
+  state: "open" | "closed" | "merged";
+  title: string;
+  updated_at: string;
+  url: string;
+};
+
+export type GithubPullRequestRead = ({
+  fetched_at: string;
+  item: GithubPullRequest;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubReaction = {
+  content: string;
+  count: number;
+};
+
+export type GithubReview = {
+  author: (GithubUser | null);
+  body: string;
+  id: string;
+  state: "approved" | "changes_requested" | "commented" | "dismissed" | "pending";
+  submitted_at: (string | null);
+  url: string;
+};
+
+export type GithubReviewThread = {
+  comments: Array<GithubThreadComment>;
+  id: string;
+  line: (number | null);
+  outdated: boolean;
+  path: string;
+  resolved: boolean;
+};
+
+export type GithubRun = {
+  completed_at: (string | null);
+  conclusion: (string | null);
+  event: string;
+  head_branch: (string | null);
+  head_sha: string;
+  id: number;
+  jobs: Array<GithubJob>;
+  name: string;
+  owner: string;
+  pull_requests: Array<number>;
+  repo: string;
+  run_attempt: number;
+  started_at: (string | null);
+  status: "queued" | "in_progress" | "completed" | "waiting" | "requested" | "pending";
+  url: string;
+};
+
+export type GithubRunRead = ({
+  fetched_at: string;
+  item: GithubRun;
+  stale: boolean;
+  status: "found";
+} | {
+  status: "moved";
+  to: GithubMovedTo;
+} | {
+  status: "gone";
+} | {
+  status: "not_found";
+} | {
+  reason: string;
+  retry_after_s: (number | null);
+  status: "unavailable";
+});
+
+export type GithubThreadComment = {
+  author: (GithubUser | null);
+  body: string;
+  created_at: string;
+  id: string;
+  url: string;
+};
+
+export type GithubUser = {
+  login: string;
+  url: string;
+};
+
 export type Glass = ResourceHeader & {
   base_revision: string | null;
   body: (GlassBody | null);
@@ -2021,6 +2431,8 @@ export type GlassTab = {
 };
 
 export type GoldenResourceSet = Array<Resource>;
+
+export type GoldenResponseEvidence = Array<TimelineUsageBody>;
 
 export type HarnessAnswerInput = {
   positions: Array<number>;
@@ -2360,7 +2772,7 @@ export type Message = ResourceHeader & {
   kind: "message";
   sent_at: Timestamp;
   session_id?: (Id | null);
-  state: "sent" | "delivered" | "read" | "closed";
+  state: "sent" | "delivered" | "read" | "closed" | "expired";
   status_from?: MessageStatusFrom;
   tags?: Array<string>;
   title?: string | null;
@@ -2539,10 +2951,16 @@ export type MissionRunSummary = {
   total: number;
 };
   requester: ActorRef;
+  retried_by?: Array<MissionRunId>;
+  retry_of?: MissionRunId;
+  revision?: Revision;
   started_at?: number | null;
   state_since: Timestamp;
   status: string;
   steps?: (Array<MissionStep> | null);
+  superseded_by?: MissionRunId;
+  supersedes?: MissionRunId;
+  supersession_fault?: string;
 };
 
 export type MissionState = (
@@ -2568,6 +2986,7 @@ export type MissionStep = {
   completed_at?: number | null;
   constraints?: Array<string>;
   eta?: MissionStepEta;
+  executions?: Array<StepExecution>;
   goals?: Array<string>;
   history_complete?: boolean;
   id: Id;
@@ -2579,6 +2998,7 @@ export type MissionStep = {
   next_wake_at?: (Timestamp | null);
   nudged_at?: (Timestamp | null);
   path: string;
+  program?: MissionStepProgram;
   progress_at?: (Timestamp | null);
   since: Timestamp;
   started_at?: number | null;
@@ -2624,6 +3044,28 @@ export type MissionStepPresentation = {
   | "failed"
   | "pending"
 ;
+};
+
+export type MissionStepProgram = {
+  entries: Array<MissionStepProgramEntry>;
+  fault?: ({
+  reason: string;
+  scope: string;
+} | null);
+  last_entry_at?: (Timestamp | null);
+  open_key?: string | null;
+  stalled_after_ms: number;
+  truncated: boolean;
+};
+
+export type MissionStepProgramEntry = {
+  child?: string | null;
+  ended_at?: (Timestamp | null);
+  error?: string | null;
+  key: string;
+  ms?: number | null;
+  started_at?: (Timestamp | null);
+  status: ("started" | "completed" | "failed" | string);
 };
 
 export type MissionStepTransition = {
@@ -2698,6 +3140,8 @@ export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | strin
 
 export type NoticeActor = string;
 
+export type NoticeAgent = string;
+
 export type NoticeClaimId = string;
 
 export type NoticeCreated = {
@@ -2736,6 +3180,31 @@ export type NoticeDelivery = ({
   state: "suppressed";
   surface: "tray" | "speech" | "push" | "log";
 });
+
+export type NoticeDigestActions = {
+  "work.override": NoticeDigestOverride;
+};
+
+export type NoticeDigestDefaultAnswer = {
+  id: string;
+  label: string;
+};
+
+export type NoticeDigestOverride = {
+  episode: string;
+  target_id: string;
+};
+
+export type NoticeDigestRow = {
+  action_parameters?: NoticeDigestActions;
+  default_answer?: NoticeDigestDefaultAnswer;
+  episode: string;
+  requester_id: string;
+  resolution_id: string;
+  resolved_at: NoticeTimestamp;
+  target_id: string;
+  title: string;
+};
 
 export type NoticeDismissParameters = {
   notice_id: NoticeId;
@@ -2777,8 +3246,6 @@ export type NoticePolicy = {
   revision: Revision;
 };
 
-export type NoticeRuntime = string;
-
 export type NoticeSeenParameters = {
   notice_id: NoticeId;
 };
@@ -2796,7 +3263,7 @@ export type NoticeSnapshot = {
   policy: NoticePolicy;
   producer: NoticeActor;
   revision: Revision;
-  runtime: NoticeRuntime;
+  runtime: string;
   schema_version: 1;
   seen_at: (NoticeTimestamp | null);
   snoozed_until: (NoticeTimestamp | null);
@@ -2811,9 +3278,14 @@ export type NoticeSnoozeParameters = {
 };
 
 export type NoticeSource = {
-  agent?: NoticeRuntime;
+  agent?: NoticeAgent;
+  covered_through?: NoticeTimestamp;
   cwd?: string;
+  digest?: Array<NoticeDigestRow>;
+  digest_count?: string;
+  digest_document?: string;
   host: string;
+  owner_claim?: string;
   pty?: string;
   repo?: string;
 };
@@ -3079,6 +3551,24 @@ export type PersonAskParameters = {
   title: string;
 };
 
+export type PersonAvailabilities = {
+  people: Array<PersonAvailability>;
+};
+
+export type PersonAvailability = {
+  deadline_clock: AvailabilityDeadlineClock;
+  deadline_clock_since: (Timestamp | null);
+  deadline_clock_until: (Timestamp | null);
+  interruptions: AvailabilityInterruptions;
+  interruptions_until: (Timestamp | null);
+  person: string;
+  presence: (AvailabilityPresence | null);
+  presence_observed_at: (Timestamp | null);
+  status: AvailabilityStatus;
+  status_source: AvailabilityStatusSource;
+  status_until: (Timestamp | null);
+};
+
 export type PersonId = string;
 
 export type PersonOptionNote = {
@@ -3110,7 +3600,18 @@ export type PersonPairingBegin = {
   fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
-  scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
+  scopes?: Array<
+  "read.projections"
+  | "write.client-diagnostics"
+  | "write.availability"
+  | "write.presence"
+  | "write.notes"
+  | "read.glasses"
+  | "control.glasses"
+  | "terminal.read"
+  | "control.attention"
+  | "control.launches"
+>;
 };
 
 export type PersonStepParameters = {
@@ -3123,6 +3624,7 @@ export type PersonStepParameters = {
 
 export type PersonUpdate = {
   about: Id;
+  speech?: string;
   subjects?: Array<RequestSubject>;
   summary?: string;
   type: "update";
@@ -3172,6 +3674,17 @@ export type PlannerConfig = {
   effort?: string;
   model?: string;
   provider: "codex" | "claude" | "pi" | "omp" | "opencode";
+};
+
+export type PresenceReport = {
+  last_input_at?: Timestamp;
+  observed_at: Timestamp;
+  state: "active" | "inactive" | "locked" | "sleeping";
+};
+
+export type PresenceReportResult = {
+  availability: PersonAvailability;
+  report_again_at: (Timestamp | null);
 };
 
 export type PresentationActor = {
@@ -3267,6 +3780,33 @@ export type PushRegistrationStatus = ({
   registered: true;
 });
 
+export type ReadPosition = ResourceHeader & {
+  at: Timestamp;
+  conversation: ReadPositionConversation;
+  kind: "read-position";
+  owner: ArrangementPerson;
+};
+
+export type ReadPositionAdvanceParameters = {
+  at: Timestamp;
+  conversation: ReadPositionConversation;
+  owner: ArrangementPerson;
+};
+
+export type ReadPositionConversation = string;
+
+export type ReadPositionPage = {
+  collection: "read-positions";
+  filters: {
+  [key: string]: string;
+};
+  items: Array<ReadPosition>;
+  kind: "page";
+  page: PageInfo;
+  replicated?: ReplicatedNotice;
+  sync?: SyncNotice;
+};
+
 export type RelatedRunWait = {
   detail?: string;
   kind: string;
@@ -3328,6 +3868,7 @@ export type ResourceCollectionName =
   | "work"
   | "glasses"
   | "arrangements"
+  | "read-positions"
   | "summary"
   | "clients"
   | "usage"
@@ -3568,7 +4109,7 @@ export type SloRow = {
   remaining_percent: number | null;
   resets_at_unix_ms?: number | null;
   runs_out_at_unix_ms?: number;
-  status: "met" | "missed" | "no-data" | "stale";
+  status: ("met" | "missed" | "no-data" | "stale" | string);
   target: string;
   tone?: string;
   window: string;
@@ -3585,6 +4126,68 @@ export type Snapshot = {
 
 export type SnapshotId = string;
 
+export type SourceBlob = {
+  hash: string;
+  text: string;
+};
+
+export type SourceMapClaim = {
+  declaration: number;
+  files: Array<SourceMapFile>;
+  inputs: Array<number>;
+  nodes: Array<SourceMapNode>;
+  ref: string;
+  repository: string;
+  revision: Revision;
+  sequence: number;
+  set_revision: string;
+  sha: string;
+  subject: string;
+};
+
+export type SourceMapFile = {
+  blob: string;
+  blob_hash: string;
+  path: string;
+  repository: string;
+};
+
+export type SourceMapFrame = {
+  end: SourceMapPosition;
+  file: number;
+  precision: ("exact" | "enclosing" | string);
+  role: ("declaration" | "helper" | "value" | "constructor" | "fragment" | string);
+  start: SourceMapPosition;
+};
+
+export type SourceMapNode = {
+  frames: Array<SourceMapFrame>;
+  kdl: string;
+  kdlLines: Array<number>;
+  span: SourceMapSpan;
+};
+
+export type SourceMapPosition = {
+  column: number;
+  line: number;
+};
+
+export type SourceMapRevision = {
+  recorded_at_unix_ms: number;
+  ref: string;
+  repository: string;
+  revision: Revision;
+  sequence: number;
+  set_revision: string;
+  sha: string;
+};
+
+export type SourceMapSpan = {
+  end: SourceMapPosition;
+  file: number;
+  start: SourceMapPosition;
+};
+
 export type StatusHistory = {
   complete: boolean;
   items: Array<StatusTransition>;
@@ -3599,6 +4202,38 @@ export type StatusTransition = {
   runtime_incarnation: string;
   seat: AgentId;
   state: string | null;
+};
+
+export type StepExecution = {
+  agent: string;
+  attempt: number;
+  declared_model: string | null;
+  duration_ms: number | null;
+  ended_at_unix_ms: number | null;
+  exit_evidence: string | null;
+  fallback: boolean | null;
+  id: string;
+  incarnation_id: string | null;
+  invocation_id?: string;
+  observed_models: Array<string>;
+  started_at_unix_ms: number;
+  status: string | null;
+  step_subject: string;
+  trace_id: string | null;
+  usage: (StepExecutionUsage | null);
+};
+
+export type StepExecutionUsage = {
+  cache_write_1h_tokens: number;
+  cache_write_tokens: number;
+  cached_tokens: number;
+  cost_microusd: number;
+  input_tokens: number;
+  output_tokens: number;
+  reported_cost_microusd: number;
+  total_tokens: number;
+  unpriced_responses?: number;
+  unpriced_tokens: number;
 };
 
 export type StepRunId = string;
@@ -3657,6 +4292,15 @@ export type SubjectDefinition = {
   desired_token: string;
   kdl: string;
   kind: "subject-definition";
+  subject: string;
+};
+
+export type SubjectSourceMap = {
+  current?: Revision;
+  kdl: string;
+  map: SourceMapClaim;
+  revision: Revision;
+  revisions: Array<SourceMapRevision>;
   subject: string;
 };
 
@@ -3951,6 +4595,13 @@ export type TimelinePage = {
   session_id: Id;
 };
 
+export type TimelineProviderQuota = {
+  quantity: number;
+  unit: TimelineProviderQuotaUnit;
+};
+
+export type TimelineProviderQuotaUnit = "premium_requests";
+
 export type TimelineRecipientRef = string;
 
 export type TimelineRedactionBody = {
@@ -3958,6 +4609,13 @@ export type TimelineRedactionBody = {
   reason: string;
   withheld_bytes: number;
   withheld_items?: number;
+};
+
+export type TimelineResponseCostComponents = {
+  cache_read?: number;
+  cache_write?: number;
+  input?: number;
+  output?: number;
 };
 
 export type TimelineStatus = ("queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | string);
@@ -3997,29 +4655,45 @@ export type TimelineTruncationBody = {
 };
 
 export type TimelineUsageBody = {
+  account?: string;
+  api?: string;
   attribution: {
   agent_id: Id;
+  attempt?: number;
+  execution_id?: string;
   generation_id?: string | null;
+  invocation_id?: string;
   mission_run_id?: string | null;
   step_id?: string | null;
 };
   blocks?: Array<TimelineBlock>;
+  cache_write_1h_tokens?: number;
   cache_write_tokens?: number;
   cached_tokens?: number;
   compactions?: number;
+  completed_at_unix_ms?: number;
   context_used_percent?: number;
   context_used_tokens?: number;
   context_window_tokens?: number;
   cost?: number;
+  cost_components?: TimelineResponseCostComponents;
   currency?: string;
   driver: string;
+  duration_ms?: number;
   input_tokens?: number;
   last_compaction_ms?: number;
   last_compaction_trigger?: "manual" | "auto" | "threshold" | "overflow" | "idle" | "unknown";
   model?: string;
   output_tokens?: number;
+  provider?: string;
+  provider_quota?: TimelineProviderQuota;
+  reasoning_tokens?: number;
+  response_id?: string;
   semantics: "context_occupancy" | "session_cumulative" | "response";
+  started_at_unix_ms?: number;
+  stop_reason?: string;
   total_tokens?: number;
+  ttft_ms?: number;
   turn_id?: string;
 };
 
@@ -4323,9 +4997,26 @@ export type UsageContext = {
 export type UsageCredits = {
   budget_microusd: number;
   period_start_ms: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
   used_microusd: number;
 };
+
+export type UsageHubQuota = ({
+  state: "disabled";
+} | {
+  reason: "transport" | "invalid_snapshot";
+  refresh_seconds: number;
+  state: "unavailable";
+} | {
+  refresh_seconds: number;
+  snapshot: {
+  accounts: Array<unknown>;
+  generatedAt: string;
+  schemaVersion: 3;
+};
+  state: "available";
+});
 
 export type UsageLimit = {
   account: string;
@@ -4365,6 +5056,7 @@ export type UsagePricing = {
   rates_usd_per_million_tokens?: UsagePricingRates;
   reported_cost_microusd: number;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -4380,12 +5072,15 @@ export type UsageRow = {
   account?: string;
   account_ref?: string;
   agent: Id;
+  attempt?: number;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;
   cached_tokens: number;
   cost_microusd: number;
+  execution_id?: string;
   host?: string;
   input_tokens: number;
+  invocation_id?: string;
   mission_run?: Id;
   model?: string;
   native_session_id?: string;
@@ -4395,6 +5090,7 @@ export type UsageRow = {
   reported_cost_microusd: number;
   step?: Id;
   total_tokens: number;
+  unpriced_responses?: number;
   unpriced_tokens: number;
 };
 
@@ -4508,6 +5204,7 @@ export type Work = ResourceHeader & {
   | "human"
   | "mixed"
   | "run"
+  | "program"
   | null
 ;
   generation_id: Id;
@@ -4519,6 +5216,7 @@ export type Work = ResourceHeader & {
   nudged_at_unix_ms?: number | null;
   path: string;
   person_answers?: Array<PersonAnswerRecord>;
+  program?: (WorkProgram | null);
   progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
@@ -4538,6 +5236,14 @@ export type WorkLabel = {
   since: Timestamp;
   state: WorkState;
   title?: string | null;
+};
+
+export type WorkProgram = {
+  child?: string | null;
+  last_entry_at_unix_ms?: number | null;
+  open_key?: string | null;
+  open_since_unix_ms?: number | null;
+  stalled_after_ms: number;
 };
 
 export type WorkState = 
@@ -4568,11 +5274,14 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'agent.suspend'; parameters: AgentSuspendParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'runtime_desired_revision'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.edit'; parameters: ArrangementEditParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'arrangement.membership.edit'; parameters: ArrangementMembershipEditParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.dismiss'; parameters: AttentionDismissParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.resolve'; parameters: {
   attention_id: Id;
   outcome: string;
   reason?: string;
 }; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.seen'; parameters: AttentionSeenParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'attention.snooze'; parameters: AttentionSnoozeParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'custom.reply'; parameters: CustomReplyParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'harness.answer'; parameters: HarnessAnswerParameters; fence: Fence & Required<Pick<Fence, 'runtime_incarnation'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'lane.approve'; parameters: {
@@ -4689,6 +5398,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'read-position.advance'; parameters: ReadPositionAdvanceParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.request-changes'; parameters: TargetParameters; fence: Fence }) |

@@ -12,6 +12,7 @@ import type { ConversationPage, DataSource } from '../data/source.ts'
 import type * as CapturedChangesModule from './capturedChanges.ts'
 import type * as InspectorModule from './ChangesInspector.tsx'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+import { inspectorViewPreference } from './conversationPreferences.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const { inspectorRequested, projectedChanges } = vi.hoisted(() => ({
@@ -88,6 +89,8 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/w/agent/changes-a')
   projectedChanges.mockClear()
   registry = AtomRegistry.make()
+  // The last-used panel tab is global; each test starts on Details.
+  registry.set(inspectorViewPreference, 'details')
   now = Atom.make(Date.parse('2026-10-19T12:00:02.000Z'))
   source = {
     ...fixtureSource({ world: {
@@ -201,7 +204,7 @@ describe('live captured Changes dock', () => {
     expect(separator()).toBeNull()
   })
 
-  it('names the dock separator after the visible inspector view and starts every inspector mount on Details', async () => {
+  it('names the dock separator after the visible inspector view and reopens on the last tab', async () => {
     await mount()
     expect(inspectorSeparators()).toEqual([])
     await act(async () => toggle().click())
@@ -214,23 +217,24 @@ describe('live captured Changes dock', () => {
     await act(async () => inspectorTab('Details').click())
     expect(inspectorSeparators()).toEqual(['Resize Details'])
     await act(async () => inspectorTab('Changes').click())
-    // Closing and reopening remounts the panel on Details; the separator follows it rather than the last selection.
+    // Closing and reopening remembers the last tab, and the separator follows it.
     await act(async () => close().click())
     expect(inspectorSeparators()).toEqual([])
     await act(async () => toggle().click())
     await act(async () => vi.dynamicImportSettled())
-    await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
-    expect(inspectorSeparators()).toEqual(['Resize Details'])
+    await vi.waitFor(() => expect(inspectorTab('Changes')?.getAttribute('aria-selected')).toBe('true'))
+    await vi.waitFor(() => expect(inspectorSeparators()).toEqual(['Resize Changes']))
+    await act(async () => inspectorTab('Details').click())
     // Another agent's inspector is another mount.
     await act(async () => inspectorTab('Changes').click())
     expect(inspectorSeparators()).toEqual(['Resize Changes'])
     await selectAgent('agent/example-changes-peer')
-    // Selecting a thread closes the inspector; the next explicit opening is a fresh mount.
+    // Selecting a thread closes the inspector; the next opening keeps the last tab, in any conversation.
     expect(inspectorSeparators()).toEqual([])
     await act(async () => toggle().click())
     await act(async () => vi.dynamicImportSettled())
-    await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
-    expect(inspectorSeparators()).toEqual(['Resize Details'])
+    await vi.waitFor(() => expect(inspectorTab('Changes')?.getAttribute('aria-selected')).toBe('true'))
+    await vi.waitFor(() => expect(inspectorSeparators()).toEqual(['Resize Changes']))
   })
 
   it('returns focus to Toggle right panel after an explicit dock close, but not after a passive one', async () => {

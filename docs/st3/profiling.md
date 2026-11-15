@@ -51,6 +51,68 @@ subtract writer wait or report only a hierarchy component. This is server comple
 network delivery time. Abandoned and still-running requests have no sample. Existing long-poll
 route durations include deliberate waiting.
 
+## Replication receive costs
+
+Each completed graph receive handler emits one `replication receive summary` INFO record,
+including errors. `correlation_id` is the canonical UUID from `x-fractal-exchange-id`, or a
+generated UUID when that header is missing or invalid. The receive's slow-request and
+independent writer-hold diagnostics use the same ID. IDs are log fields, never metric labels;
+request bodies and invalid header values are not logged.
+
+The summary has six named phase records, each with `elapsed`, `writer_wait` and `writer_hold`
+durations: `receipt_ingest` (initial state inspection, exchange receipt and transport observation),
+`admission_prelude` (local sealing and judging), `admission` (backlog validation, including its
+admission mutex), `repairs`, `projection`, and `response_postcommit` (response construction and
+notifications after projection). Unreached phases remain zero. `admit_ms` describes admission
+only, excluding the separately reported prelude and repairs. `project_ms` retains projection
+wall time. Handler `total_ms` also includes blocking admission/dispatch waits, but does not
+include response-envelope serialization or network delivery.
+
+Writer waits are measured at actual acquisition, not inferred from phase wall time. Independent
+loans measure borrower ownership through transaction finalization and postcommit observer
+cleanup, before connection return. Batched callbacks measure their queue wait and exclusive
+savepoint execution on the writer thread. Captured request and phase scopes restore the
+previous thread context after callback return or unwind. Phase wall time contains writer
+wait/hold and nested rebuild/final-drain work: these costs are **non-additive**.
+
+A group commit emits one `replication receive shared finalization` event if any receive
+participated. It reports a process-local `batch_id`, `prepare_ms`, `finalization_ms` (finalizers,
+COMMIT or rollback, and postcommit observers), and the participating `(correlation_id, phase)`
+pairs. It is explicitly `shared=true`, `additive=false`: no request owns that shared duration.
+Its participant set is bounded by the existing writer batch limit, including distinct phases
+of the same request. Shared hold diagnostics carry `shared_batch_id`, not one receive ID.
+Non-receive writer diagnostics retain their existing attribution.
+
+The summary's `shared_event_join` equals its `correlation_id`: join that ID against **all**
+shared events' participant pairs for the authoritative links. `shared_finalizations` counts
+distinct participating batches; optional `first_shared_batch` and `last_shared_batch` are
+only bounded index hints, **not an exhaustive list**. Summaries retain no growing batch-ID
+list. Shared event timing and links finish before batched acknowledgements, so a completed
+request cannot snapshot before its shared accounting arrives.
+
+## Conversation relay reads
+
+`st.conversation.relay_read.duration` is one histogram in seconds, recorded for successful
+and failed conversation relays (not dependent on trace sampling). Its only labels are
+`st.conversation.owner` (the provenance's `host/<configured-peer>`, `local`, or `unknown`)
+and `st.conversation.operation` (`timeline`, `session_detail`, `changes`, `first_snapshot`).
+`first_snapshot` means a changes request without an `after` cursor; long-poll durations
+include intentional waiting. Discovered, unconfigured owners collapse to `unknown`.
+No session or agent id becomes a metric label.
+
+Sampled owner timeline requests carry `st.conversation.*` attributes on the existing
+request span: `reader_admission_ms` (SQLite reader acquisition and snapshot establishment),
+`graph_sql_ms` (graph runtime/message query calls, including their reader admission),
+`fold_mutex_wait_ms`, `native_admission_ms` (bounded native-reader permit wait),
+`native_fold_ms`, `display_preparation_ms`, and `header_overlay_ms`. The graph timing
+includes row decoding but excludes session filtering and display conversion; it overlaps
+SQLite reader admission, so these attributes are not an additive partition.
+Repeated native refills and header/overlay work accumulate within the request.
+Counts are `requested_limit` (effective clamped page request), `native_read_limit`
+(sum of requested native slice sizes), `native_prepared_items` (before page truncation),
+and `graph_rows` (returned graph message rows before session filtering).
+Stages not reached are absent, not synthetic zero-duration work.
+
 ## Background task CPU
 
 The daemon exports `st.task.cpu_time`, a monotonic counter in seconds, and
@@ -152,7 +214,7 @@ move observers after acknowledgements.
 
 ## Targets and live windows
 
-[`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
+[`slo/objectives.kdl`](../../slo/objectives.kdl) holds the objectives Fractal ships ([objectives](objectives.md)): reads a person waits on,
 writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
 the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
 A target describes what we aim for and gates nothing by itself.
@@ -306,7 +368,7 @@ holds the history. Each point carries `target`, `series` (`owner` or `remote` fo
 the store), `window` (`1m`, `5m`, `1h`) and, on
 latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
 `st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
-figure from `slo/targets.toml`, so one query sets a host's number against its target),
+figure from `slo/objectives.kdl`, so one query sets a host's number against its target),
 `st_slo_cpu_cores` (the member's cores by `window`, sent only once known) and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
 phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
@@ -376,65 +438,12 @@ is `no-data`; stale readings are `stale`, never success. The same freshness poli
 readings applies. These rows describe only observed credits and are observational: they do not
 stop seats, enforce quotas or redeem credits.
 
-The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
-percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
-`NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
-over; a name may declare several percentiles. A `[[count]]` is at most `max_per_hour` events an
-hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci/NAME`, and one
-series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
-time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
-workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
-nextest passed only on a retry and merge groups ejected from the queue, none an hour). They are
-not in the request-latency read, its gauges or `fractal doctor`.
-
-Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
-`main_performance_failures` also reads, with the same token, conditional cache and five-minute
-cadence, two list-runs pages of that workflow: completed `pull_request` runs that succeeded and
-completed `merge_group` runs, each created since the start of the previous UTC day. The runs stay in
-the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
-the member that runs that observer has them; every other member, and that one until its first
-read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
-fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
-first observer that read them; another repository's observer does not read them and logs a warning.
-If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
-workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
-reading as an idle day. Only run-level timestamps and, for `flakes`, artifact names are read, no
-jobs and no logs:
-
-- `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
-  `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
-  a rerun restarts `run_started_at` and reruns only some jobs. A run whose jobs were all skipped, such as a draft's, counts as a fast sample.
-- `merge-latency/p50` and `/p95`: each successful merge group run (head branch
-  `gh-readonly-queue/...`), from its `created_at`, when the group entered the queue, to its
-  `updated_at`, when it went green. This is a proxy for entering the queue until merging: the wait
-  before GitHub creates the group's run and the merge after it are not counted, and a pull request
-  whose group is rebuilt after an ejection counts once per green group, not from its first entry.
-- `flakes`: merge group runs that concluded `failure`, an ejected group, plus the tests nextest
-  passed only on a retry, in the runs that finished in the last hour. Workspace CI's four test lanes
-  name their count in an artifact, `nextest-flaky-<lane>-<N>` (none for 0, see `docs/ci.md`). Each
-  run that finished in the last hour, pull request or merge group, has its artifacts listed once
-  (`GET .../actions/runs/ID/artifacts?per_page=100`, the same token and actions read), at most 20
-  runs a poll, newest first, so a restart cannot burst; the rest are listed on the next polls. The
-  counts stay in the daemon's memory with the runs, kept only while a run is in the hour; a failed
-  listing is tried again on a later poll. Pull request runs are listed only when they succeeded, so
-  a failed pull request run's flaky tests are not counted. A run not listed yet adds no flaky test.
-  About one listing per Workspace CI run, a few hundred a day.
-
-A duration's samples are the runs that finished in the last day; its value is the nearest-rank
-percentile, and `LEFT` is how much of the `100 - percentile` share allowed over its target the
-day has not spent. The count is over the last hour, and with `max_per_hour = 0` one ejected group
-or one flaky test spends it all. A window without a sample, or without a finished pull request or
-merge group run for the count, is `no-data`.
-
-A missed CI objective is a fault. Each minute, when the SLO history samples the rows, a CI
-objective whose row is `missed` and has no open fault opens one `operational.failure` (condition
-`slo-objective-missed`, severity `warning`, so normal priority) on the member's own `daemon/NODE`
-subject, in the episode `slo-objective/NODE/ID`. Its reviewer is the fleet fault agent, the live
-agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
-fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
-that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
-before the observer has read any runs, neither opens nor ends one. The other objectives open no
-fault.
+CI's objectives are not in this file. `fractal/merge-latency`, `fractal/ci-critical-path` and
+`fractal/flakes` are declared objectives in `slo/fractal-ci.kdl`, over the `github.workflow-run`
+claims the repository's poller writes, one per completed Workspace CI run, so every member reads
+the same rows ([objectives](objectives.md#fractals-own-ci), [plugins](plugins.md#workflow-runs)).
+A missed one is a fault for the owner its `on-breach` names. The objectives this file declares open
+no fault.
 
 ### Operator-selected API readiness
 

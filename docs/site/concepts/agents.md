@@ -6,30 +6,30 @@ order: 3
 
 # Agents
 
-KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+KDL is the runnable format. TS and Effect samples declare the same file with the in-repo [`fractal` package](https://github.com/compoundingtech/fractal/tree/main/packages/fractal), which renders exactly the KDL shown; it is not published to npm yet. Use KDL for the runnable commands in these guides.
 
 An **agent** is a durable identity backed by a coding harness, a model, and a workspace. No single mission owns an independently declared agent, so finishing a mission does not stop it.
 
 ```ts group=worker variant=effect
-import { Fractal } from 'fractal/effect'
+// example/worker/agent.ts
+import { Fractal } from 'fractal'
 
-export const worker = Fractal.agent({
-  id: 'example/worker',
-  lifecycle: 'standing',
-  host: 'local',
+export default Fractal.agent({
+  meta: import.meta,
   workspace: '/work/example',
+  restart: 'always',
   harness: { kind: 'claude', model: 'sonnet' },
 })
 ```
 
 ```ts group=worker variant=ts
+// example/worker/agent.ts
 import { Fractal } from 'fractal'
 
-export const worker = Fractal.agent({
-  id: 'example/worker',
-  lifecycle: 'standing',
-  host: 'local',
+export default Fractal.agent({
+  meta: import.meta,
   workspace: '/work/example',
+  restart: 'always',
   harness: { kind: 'claude', model: 'sonnet' },
 })
 ```

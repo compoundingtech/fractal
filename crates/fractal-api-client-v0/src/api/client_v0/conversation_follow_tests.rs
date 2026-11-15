@@ -378,6 +378,63 @@ fn has_stored_availability_notice(page: &Value) -> bool {
 }
 
 #[test]
+fn timeline_read_exports_owner_subphases_on_existing_request_span() {
+    let fixture = NativeBoundaryFixture::new("timeline-read-phases");
+    fixture.append(0, 3);
+    let mut session = ClientSession::local(Some("person/example")).unwrap();
+    session.conversation_blocks = true;
+    let spans = crate::otel::capture_test_spans(|| {
+        let span = tracing::info_span!("timeline-request-proof");
+        let _entered = span.enter();
+        let page = timeline_value(
+            &fixture.state, &new_client_snapshot(&fixture.state), &session,
+            &fixture.session_id, &ClientListQuery { limit: Some(2), ..Default::default() },
+        ).unwrap().0;
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    });
+    let span = spans.iter().find(|span| span.name == "timeline-request-proof").unwrap();
+    for key in [
+        "reader_admission_ms", "graph_sql_ms", "fold_mutex_wait_ms", "native_admission_ms",
+        "native_fold_ms", "display_preparation_ms", "header_overlay_ms",
+        "requested_limit", "native_read_limit", "native_prepared_items", "graph_rows",
+    ] {
+        let key = format!("st.conversation.{key}");
+        assert!(span.attributes.iter().any(|attribute| attribute.key.as_str() == key),
+            "missing {key}: {:?}", span.attributes);
+    }
+    let requested = span.attributes.iter().find(|attribute|
+        attribute.key.as_str() == "st.conversation.requested_limit").unwrap();
+    assert_eq!(requested.value, opentelemetry::Value::I64(2));
+}
+
+#[test]
+fn timeline_continuation_exports_the_inherited_nondefault_limit() {
+    let fixture = NativeBoundaryFixture::new("timeline-continuation-limit");
+    fixture.append(0, 4);
+    let session = ClientSession::local(Some("person/example")).unwrap();
+    let snapshot = new_client_snapshot(&fixture.state);
+    let first = timeline_value(
+        &fixture.state, &snapshot, &session, &fixture.session_id,
+        &ClientListQuery { limit: Some(2), ..Default::default() },
+    ).unwrap().0;
+    let cursor = first["page"]["next_cursor"].as_str().unwrap().to_owned();
+    let spans = crate::otel::capture_test_spans(|| {
+        let span = tracing::info_span!("timeline-continuation-proof");
+        let _entered = span.enter();
+        let page = timeline_value(
+            &fixture.state, &snapshot, &session, &fixture.session_id,
+            &ClientListQuery { cursor: Some(cursor), ..Default::default() },
+        ).unwrap().0;
+        assert_eq!(page["page"]["limit"], 2);
+        assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    });
+    let span = spans.iter().find(|span| span.name == "timeline-continuation-proof").unwrap();
+    let requested = span.attributes.iter().find(|attribute|
+        attribute.key.as_str() == "st.conversation.requested_limit").unwrap();
+    assert_eq!(requested.value, opentelemetry::Value::I64(2));
+}
+
+#[test]
 fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

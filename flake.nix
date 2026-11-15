@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/79d526d1be4f77bb3764dc1d880492806f8a07fc";
+    pty.url = "github:compoundingtech/pty/d0e816ac4129c97f39473855bb4fe527701ea07c";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Fabric v0.9.4 includes bounded peer expiry and recoverable identity rotation.
     fabric.url = "github:compoundingtech/fabric/19e7f8964ce8305aeb8c200fb717967aa03f738f";
@@ -16,6 +16,9 @@
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
       "github:overengineeringstudio/effect-utils/15ff7fa8968469c2c99a647888a999f9d62ffde5";
+    mergemaster.url = "github:compoundingtech/mergemaster/v0.6.0";
+    mergemaster.inputs.nixpkgs.follows = "nixpkgs";
+    mergemaster.inputs.effect-utils.follows = "effect-utils";
   };
 
   outputs =
@@ -27,6 +30,7 @@
       pty,
       fabric,
       effect-utils,
+      mergemaster,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -593,6 +597,8 @@
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             ptyPackage
             effect-utils.packages.${system}.otelite
             messagingCompat
@@ -2081,6 +2087,8 @@
             chmod -R u+w hooks
             cp ${self}/crates/fractal-daemon/hooks/pi-channel.ts hooks/st-pi-channel.ts
             cp ${self}/crates/fractal-daemon/hooks/omp-channel.ts hooks/st-omp-channel.ts
+            mkdir -p tests/fixtures/harness-timeline
+            cp ${self}/crates/fractal-drivers/tests/fixtures/harness-timeline/omp-response-evidence.json tests/fixtures/harness-timeline/
 
             modules=hooks/typecheck/node_modules
             mkdir -p "$modules/@earendil-works/pi-coding-agent" "$modules/@types/node"
@@ -2196,6 +2204,8 @@
             # st3's messaging fault matrix runs the omp channel hook (TypeScript) under the
             # provider stand-in with Node's built-in type stripping, which Node 24 enables.
             pkgs.nodejs
+            # Program steps run on a Bun host; the engine tests start a real one.
+            pkgs.bun
             # st3's completion tests drive the installed stub in each supported shell.
             pkgs.fish
             pkgs.zsh

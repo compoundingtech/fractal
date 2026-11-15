@@ -43,7 +43,8 @@ impl TryFrom<String> for NoticeActor {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
         static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-            regex::Regex::new("^(?:agent|person)/[^\\s]+$").expect("supported pattern")
+            regex::Regex::new("^(?:(?:agent|person)/[^\\s]+|daemon/runtime)$")
+                .expect("supported pattern")
         });
         if !(PATTERN.is_match(&value)) {
             return Err("pattern".into());
@@ -53,6 +54,24 @@ impl TryFrom<String> for NoticeActor {
 }
 impl NoticeModel for NoticeActor {
     const NAME: &'static str = "NoticeActor";
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeAgent(pub String);
+impl TryFrom<String> for NoticeAgent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^(?:agent)/[^\\s]+$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
+impl NoticeModel for NoticeAgent {
+    const NAME: &'static str = "NoticeAgent";
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
@@ -397,6 +416,173 @@ impl NoticeModel for NoticeDelivery {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct NoticeDigestActions {
+    #[serde(rename = "work.override")]
+    pub work_override: NoticeDigestActionsWorkOverride,
+}
+pub type NoticeDigestActionsWorkOverride = NoticeDigestOverride;
+impl NoticeModel for NoticeDigestActions {
+    const NAME: &'static str = "NoticeDigestActions";
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticeDigestDefaultAnswer {
+    pub id: NoticeDigestDefaultAnswerId,
+    pub label: NoticeDigestDefaultAnswerLabel,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestDefaultAnswerId(pub String);
+impl TryFrom<String> for NoticeDigestDefaultAnswerId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestDefaultAnswerLabel(pub String);
+impl TryFrom<String> for NoticeDigestDefaultAnswerLabel {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+impl NoticeModel for NoticeDigestDefaultAnswer {
+    const NAME: &'static str = "NoticeDigestDefaultAnswer";
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticeDigestOverride {
+    pub episode: NoticeDigestOverrideEpisode,
+    pub target_id: NoticeDigestOverrideTargetId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestOverrideEpisode(pub String);
+impl TryFrom<String> for NoticeDigestOverrideEpisode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestOverrideTargetId(pub String);
+impl TryFrom<String> for NoticeDigestOverrideTargetId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+impl NoticeModel for NoticeDigestOverride {
+    const NAME: &'static str = "NoticeDigestOverride";
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticeDigestRow {
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub action_parameters: Option<NoticeDigestRowActionParameters>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_answer: Option<NoticeDigestRowDefaultAnswer>,
+    pub episode: NoticeDigestRowEpisode,
+    pub requester_id: NoticeDigestRowRequesterId,
+    pub resolution_id: NoticeDigestRowResolutionId,
+    pub resolved_at: NoticeDigestRowResolvedAt,
+    pub target_id: NoticeDigestRowTargetId,
+    pub title: NoticeDigestRowTitle,
+}
+pub type NoticeDigestRowActionParameters = NoticeDigestActions;
+pub type NoticeDigestRowDefaultAnswer = NoticeDigestDefaultAnswer;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestRowEpisode(pub String);
+impl TryFrom<String> for NoticeDigestRowEpisode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestRowRequesterId(pub String);
+impl TryFrom<String> for NoticeDigestRowRequesterId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestRowResolutionId(pub String);
+impl TryFrom<String> for NoticeDigestRowResolutionId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^[0-9a-f]{64}$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
+pub type NoticeDigestRowResolvedAt = NoticeTimestamp;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestRowTargetId(pub String);
+impl TryFrom<String> for NoticeDigestRowTargetId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeDigestRowTitle(pub String);
+impl TryFrom<String> for NoticeDigestRowTitle {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        if value.is_empty() {
+            return Err("minLength".into());
+        }
+        Ok(Self(value))
+    }
+}
+impl NoticeModel for NoticeDigestRow {
+    const NAME: &'static str = "NoticeDigestRow";
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NoticeDismissParameters {
     pub notice_id: NoticeDismissParametersNoticeId,
 }
@@ -439,7 +625,7 @@ impl TryFrom<String> for NoticeId {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
         static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-            regex::Regex::new("^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").expect("supported pattern")
+            regex::Regex::new("^custom/attention/snapshot/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$").expect("supported pattern")
         });
         if !(PATTERN.is_match(&value)) {
             return Err("pattern".into());
@@ -660,24 +846,6 @@ impl NoticeModel for NoticePolicy {
     const NAME: &'static str = "NoticePolicy";
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct NoticeRuntime(pub String);
-impl TryFrom<String> for NoticeRuntime {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, String> {
-        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-            regex::Regex::new("^(?:agent)/[^\\s]+$").expect("supported pattern")
-        });
-        if !(PATTERN.is_match(&value)) {
-            return Err("pattern".into());
-        }
-        Ok(Self(value))
-    }
-}
-impl NoticeModel for NoticeRuntime {
-    const NAME: &'static str = "NoticeRuntime";
-}
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoticeSeenParameters {
     pub notice_id: NoticeSeenParametersNoticeId,
@@ -782,7 +950,21 @@ pub enum NoticeSnapshotKind {
 pub type NoticeSnapshotPolicy = NoticePolicy;
 pub type NoticeSnapshotProducer = NoticeActor;
 pub type NoticeSnapshotRevision = Revision;
-pub type NoticeSnapshotRuntime = NoticeRuntime;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSnapshotRuntime(pub String);
+impl TryFrom<String> for NoticeSnapshotRuntime {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^(?:host)/[^\\s]+$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u64")]
 pub struct NoticeSnapshotSchemaVersion(pub u64);
@@ -873,8 +1055,38 @@ pub struct NoticeSource {
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
+    pub covered_through: Option<NoticeSourceCoveredThrough>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cwd: Option<NoticeSourceCwd>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub digest: Option<NoticeSourceDigest>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub digest_count: Option<NoticeSourceDigestCount>,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub digest_document: Option<NoticeSourceDigestDocument>,
     pub host: NoticeSourceHost,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub owner_claim: Option<NoticeSourceOwnerClaim>,
     #[serde(
         default,
         deserialize_with = "present",
@@ -888,13 +1100,58 @@ pub struct NoticeSource {
     )]
     pub repo: Option<NoticeSourceRepo>,
 }
-pub type NoticeSourceAgent = NoticeRuntime;
+pub type NoticeSourceAgent = NoticeAgent;
+pub type NoticeSourceCoveredThrough = NoticeTimestamp;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct NoticeSourceCwd(pub String);
 impl TryFrom<String> for NoticeSourceCwd {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Vec<NoticeSourceDigestItem>")]
+pub struct NoticeSourceDigest(pub Vec<NoticeSourceDigestItem>);
+impl TryFrom<Vec<NoticeSourceDigestItem>> for NoticeSourceDigest {
+    type Error = String;
+    fn try_from(value: Vec<NoticeSourceDigestItem>) -> Result<Self, String> {
+        if !(value.len() <= 128) {
+            return Err("maxItems".into());
+        }
+        Ok(Self(value))
+    }
+}
+pub type NoticeSourceDigestItem = NoticeDigestRow;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSourceDigestCount(pub String);
+impl TryFrom<String> for NoticeSourceDigestCount {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^(?:0|[1-9][0-9]*)$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSourceDigestDocument(pub String);
+impl TryFrom<String> for NoticeSourceDigestDocument {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^doc/ask-digest/[0-9a-f]{64}@[0-9a-f]{64}$")
+                .expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
         Ok(Self(value))
     }
 }
@@ -906,6 +1163,21 @@ impl TryFrom<String> for NoticeSourceHost {
     fn try_from(value: String) -> Result<Self, String> {
         static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
             regex::Regex::new("^(?:host)/[^\\s]+$").expect("supported pattern")
+        });
+        if !(PATTERN.is_match(&value)) {
+            return Err("pattern".into());
+        }
+        Ok(Self(value))
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct NoticeSourceOwnerClaim(pub String);
+impl TryFrom<String> for NoticeSourceOwnerClaim {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, String> {
+        static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new("^[0-9a-f]{64}$").expect("supported pattern")
         });
         if !(PATTERN.is_match(&value)) {
             return Err("pattern".into());
@@ -947,7 +1219,7 @@ impl TryFrom<String> for NoticeSourceId {
     type Error = String;
     fn try_from(value: String) -> Result<Self, String> {
         static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-            regex::Regex::new("^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").expect("supported pattern")
+            regex::Regex::new("^custom/attention/source/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})$").expect("supported pattern")
         });
         if !(PATTERN.is_match(&value)) {
             return Err("pattern".into());
