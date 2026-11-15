@@ -79,6 +79,11 @@ export const createAppStoryFixture = (state: AppStoryState): AppStoryFixture => 
             agents: observed({ value: fixtureProjections.agents, freshness: 'stale' }),
           }
         : {}),
+      // The repair answer is still streaming, so its seat reports the turn as its harness does; a pane shows a run
+      // in progress only for a seat that reports one.
+      ...(state === 'scripted-repair'
+        ? { agents: observed({ value: fixtureProjections.agents.map((row) => row.id === agentRef ? { ...row, turn: 'active' as const } : row) }) }
+        : {}),
     },
   })
   // Production status surfaces consume decoded sync observations, not socket tags.
