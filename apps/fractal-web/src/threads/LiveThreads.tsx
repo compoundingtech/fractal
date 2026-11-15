@@ -10,6 +10,7 @@ import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAgent, useDataSource, useGatewaySync, useNow } from '../data/react.tsx'
+import { agentDisplayName, FRACTAL_NAME, isFractalMachinery } from '../data/agentName.ts'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
@@ -180,14 +181,10 @@ export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonl
     canStart={alert.state === 'open'} onOpenThread={onOpenThread} />
 }
 
-/** The last segment of an actor id ("atlas"): what the UI shows when no observed name exists. Ids stay out of the text. */
-const shortActorName = (id: string) => id.split('/').at(-1) || id
-
-/** The observed agent name, else its short name with the exact id as the title: never a guessed role. */
+/** The agent's display name, with the exact id only as the title: never a guessed role, never the id as text. */
 function AgentName({ id }: { readonly id: string }) {
   const agent = useAgent(id)
-  const name = agent._tag === 'Observed' ? agent.value?.name : undefined
-  return name === undefined ? <span title={id}>{shortActorName(id)}</span> : <>{name}</>
+  return <span title={id}>{agentDisplayName({ id, name: agent._tag === 'Observed' ? agent.value?.name : undefined })}</span>
 }
 
 function InboxThreadsContent({ source, agent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
@@ -558,7 +555,9 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
       : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
     <ol {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
-        const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You' : event.actor_id === agentId && agentName !== undefined ? agentName : shortActorName(event.actor_id)
+        const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You'
+          : isFractalMachinery(event.actor_id) ? FRACTAL_NAME
+            : agentDisplayName({ id: event.actor_id, name: event.actor_id === agentId ? agentName : undefined })
         const date = new Date(event.accepted_at_unix_ms)
         const iso = Number.isFinite(date.getTime()) ? date.toISOString() : undefined
         const time = iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>
@@ -573,7 +572,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
         )
         return <li key={event.id} data-thread-message={event.actor_id === agentId && feed.freshness === 'live' ? event.id : undefined} {...stylex.props(stylex.defaultMarker(), styles.event)}>
           <div {...stylex.props(styles.eventHeader)}>
-            <strong>{sender}</strong>
+            <strong title={sender === 'You' ? undefined : event.actor_id}>{sender}</strong>
             {time}
             {onQuote === undefined ? null : <Button aria-label={`Reply to ${sender}`} onPress={() => onQuote(event, sender)} {...stylex.props(styles.reply)}>Reply</Button>}
           </div>

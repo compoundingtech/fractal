@@ -75,6 +75,7 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
       ? prompt.call_id == null ? 'Fractal does not say which call this asks about: answer it in the seat\'s terminal.' : 'The prompt details are incomplete or unsupported: answer it in the agent\'s terminal.'
       : undefined
   const failure = store.failure(alert)
+  const from = alertFrom(alert)
   const { line, overflows } = contextOf(alert.detail ?? '')
   const heading = question === undefined ? alert.title : `${question.header ? `${question.header} · ` : ''}${question.question}${question.multiSelect ? ' (choose any)' : ''}`
   const body = question === undefined && shown.length > 0
@@ -86,7 +87,7 @@ export const PromptAlert = ({ alert, onAnswer, paused = false, now = Date.now(),
     density={density}
     label={context === undefined ? alert.title : `${context}: ${alert.title}`}
     data={{ 'data-alert-kind': alert.attention_kind }}
-    meta={[alertFrom(alert), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
+    meta={[...(from === undefined ? [] : [from]), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
     heading={heading}
     headingText={heading}
     {...(line === '' || line === alert.title ? {} : { context: line })}

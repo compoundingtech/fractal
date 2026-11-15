@@ -480,6 +480,29 @@ it('replaces the composer with a read-only note and keeps lifecycle changes to o
   } finally { await view.dispose() }
 })
 
+it('names thread senders without their ids: an unobserved agent by its short name, Fractal machinery as Fractal', async () => {
+  const reconciler = 'agent/st3/reconciler'
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.closed', id: 'event/closed', actor_id: reconciler, accepted_at_unix_ms: Date.parse('2026-11-01T11:04:30Z') },
+      { kind: 'message', id: 'message/daemon', actor_id: 'daemon/runtime', content: 'Delivery retried.', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z'), thread_quote_id: null },
+      { kind: 'message', id: 'message/reconciler', actor_id: reconciler, content: 'Reconciled the mission run.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:30Z'), thread_quote_id: null },
+      { kind: 'message', id: 'message/first', actor_id: 'agent/build-host-a/worker-tests', content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.textContent).toContain('Delivery retried.'))
+    const senders = [...view.host.querySelectorAll('ol > li > div > strong')].map(each => [each.textContent, each.getAttribute('title')])
+    expect(senders).toEqual([
+      ['worker-tests', 'agent/build-host-a/worker-tests'],
+      ['Fractal', reconciler],
+      ['Fractal', 'daemon/runtime'],
+    ])
+    expect(view.host.querySelector('[data-thread-event="thread.closed"]')?.textContent).toMatch(/^Fractal closed the thread/)
+    expect(view.host.textContent).not.toMatch(/build-host-a|reconciler|daemon\//)
+  } finally { await view.dispose() }
+})
+
 it.each([['lost', true], ['held elsewhere', false]] as const)('focuses a thread tab composer only when focus was %s', async (_, lost) => {
   const outside = document.createElement('button')
   document.body.append(outside)

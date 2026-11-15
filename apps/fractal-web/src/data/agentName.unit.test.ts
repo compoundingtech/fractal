@@ -1,0 +1,32 @@
+import { describe, expect, it } from 'vitest'
+
+import { agentDisplayName, isFractalMachinery, shortAgentName } from './agentName.ts'
+
+const id = 'agent/example/atlas'
+
+describe('agent display names', () => {
+  it('shows a real roster name as declared', () => {
+    expect(agentDisplayName({ id, name: 'Atlas' })).toBe('Atlas')
+    expect(agentDisplayName({ id, name: 'Atlas/Manager' })).toBe('Atlas/Manager')
+  })
+
+  it('never shows the id, or the id without agent/, as a name', () => {
+    for (const name of [undefined, '', '  ', id, 'example/atlas', ' example/atlas ']) {
+      const shown = agentDisplayName({ id, name })
+      expect(shown).toBe('atlas')
+      expect(shown).not.toContain('/')
+    }
+    expect(agentDisplayName({ id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests' })).toBe('worker-tests')
+  })
+
+  it('shortens to the last segment', () => {
+    expect(shortAgentName(id)).toBe('atlas')
+    expect(shortAgentName('agent/manager/')).toBe('manager')
+  })
+
+  // Mirrors is_fractal in crates/fractal-ui-model/src/attention.rs.
+  it('treats the daemon and the st3 reconciler as Fractal machinery, and nothing else', () => {
+    for (const machinery of ['daemon/runtime', 'daemon/site-a', 'agent/st3/reconciler']) expect(isFractalMachinery(machinery)).toBe(true)
+    for (const actor of [id, 'agent/st3/reconciler/session/1', 'agent/st3', 'agent/example/reconciler', 'person/avery', 'daemon']) expect(isFractalMachinery(actor)).toBe(false)
+  })
+})

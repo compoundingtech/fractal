@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The web no longer shows an agent's raw id or path as its name in the roster, thread senders, a thread's agent, request cards or Inbox rows, and names Fractal's own machinery Fractal",
+  "replay": {
+    "status": "none",
+    "detail": "Presentation only; no history is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage, wire or generated-schema change. The roster, threads and attention rows are read as before."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Grants and delivery policy are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Web only, against the same daemons. Display rule: (a) an agent with a real name shows that name as declared, for example 'Atlas'; (b) a name that is the agent's id, or the id without 'agent/' (the path Fractal serves for a seat that declares no name, for example 'example/atlas' or 'build-host-a/worker-tests'), shows as the id's last part, 'atlas' or 'worker-tests'; (c) Fractal's own machinery, the daemon (daemon/*) and the st3 reconciler (agent/st3/reconciler), the ids attention presentation serves as 'st', shows as 'Fractal', ahead of any roster name; (d) an agent the web has not observed shows as the id's last part, and a request whose only source is a step, mission or custom id names no one, since the card already shows the step. Thread senders and a thread's agent keep the full id as their hover title. The terminal app agrees on (a) and (c); it shows 'an agent' where the web shows the id's last part for an unobserved agent or one labelled by its full id, and it shows a served 'example/atlas' label as given."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Refreshing the web bundle does not interrupt the daemon."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step. A seat shows a chosen name once its declaration sets `name`."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling the web bundle back restores the previous labels."
+  }
+}
