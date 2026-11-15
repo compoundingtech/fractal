@@ -125,13 +125,17 @@ async fn collection_http_errors_and_legacy_wire_shape() {
 async fn collection_http_cursor_survives_more_than_five_minutes() {
     // Follow read_deadline's process-wide counter isolation: re-exec only this test.
     // This isolates the clock under both cargo test and nextest.
-    const NAME: &str = concat!(module_path!(), "::collection_http_cursor_survives_more_than_five_minutes");
+    const NAME: &str = "api::client_v0::arrangements::tests::collection_http_cursor_survives_more_than_five_minutes";
     const CHILD: &str = "ST_MEMBERSHIP_CURSOR_CLOCK_TEST";
     if std::env::var(CHILD).as_deref() != Ok("1") {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--nocapture"])
-            .env(CHILD, "1").status().unwrap();
-        assert!(status.success());
+            .env(CHILD, "1").output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains("running 1 test") && stdout.contains("1 passed"),
+            "isolated child must execute exactly one passing test: {stdout}\n{stderr}");
         return;
     }
     let root = tempfile::tempdir().unwrap();
