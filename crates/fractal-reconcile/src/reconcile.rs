@@ -4319,6 +4319,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.reconcile_provider_capacity_retries(&desired)
         });
         self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
+        self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
         });
@@ -16827,6 +16828,27 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(deadline) = pass.next_deadline {
             self.arm_deadline_at(
                 "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
+    }
+
+    /// Wake immediately when a hot reload changes the daily boundary, even if no claim changed.
+    pub fn set_ask_digest_policy(&self, config: &crate::config::AsksConfig) -> Result<()> {
+        if self.store.set_ask_digest_policy(config)? {
+            self.signal_changed();
+        }
+        Ok(())
+    }
+
+    /// Publish each person's daily auto-resolution digest and wake at its next local boundary.
+    fn reconcile_ask_digests(&self) -> Result<bool> {
+        let pass = self.store.reconcile_ask_digests_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "ask-digest",
                 deadline,
                 crate::reconcile_telemetry::WakeCause::Deadline,
             );
