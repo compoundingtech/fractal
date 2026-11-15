@@ -207,7 +207,7 @@ public actor FractalClient {
         }
     }
 
-    private func collectionsSocket() -> URLSessionWebSocketTask {
+    private func collectionsSocket() -> any ClientWebSocket {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         var request = URLRequest(url: components.url!)
