@@ -4933,6 +4933,15 @@ PY
         if action == "reset" {
             std::fs::write(config.state_dir.join("must-be-erased"), "old state").unwrap();
         }
+        if action == "uninstall" {
+            // The daemon disable invalidates its initial snapshot. The absent
+            // optional worker's failed disable must await fresh admission,
+            // rather than aborting before removing the installed daemon.
+            let worker = root.path().join("config/systemd/user/st3-replication.service");
+            if worker.exists() {
+                std::fs::remove_file(worker).unwrap();
+            }
+        }
         let output = run(args).await;
         assert!(
             output.status.success(),

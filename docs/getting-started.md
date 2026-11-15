@@ -245,8 +245,12 @@ Systemd commands share one in-flight owner and a three-second invocation
 deadline, then kill and reap on timeout. Failed observations back off from two
 seconds up to one minute. Unresponsive-manager diagnostics are recorded before
 cleanup, which may take longer than the invocation deadline; cleanup retains
-single-flight ownership. Explicit controls still execute once, never replaying
-a cached command result.
+single-flight ownership. `/v1/health` reports `status: degraded` with supervisor
+reason `systemd-unresponsive` and `since_unix_ms`, without probing the manager.
+Worker authority validates the process-generation witness pinned with its
+snapshot, so an exited worker's reused PID cannot inherit its authority.
+Explicit controls still execute once, never replaying a cached command result;
+administrative failure verification waits for fresh snapshot admission when needed.
 
 State lives in `~/.local/state/st3`. The local API uses a Unix socket. On Linux it
 normally lives in `XDG_RUNTIME_DIR`, with `STATE/run/fractal.sock` linking to it; on macOS

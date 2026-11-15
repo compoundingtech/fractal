@@ -8525,7 +8525,21 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
     {
         health["messages_store_index"] = json!(index);
     }
+    apply_systemd_health(&mut health, fractal_runtime::systemd::health());
     Ok(Json(health))
+}
+
+fn apply_systemd_health(health: &mut Value, supervisor: fractal_runtime::systemd::Health) {
+    if let Some(reason) = supervisor.unresponsive {
+        health["status"] = json!("degraded");
+        health["supervisor"] = json!({
+            "status": "unresponsive",
+            "reason": "systemd-unresponsive",
+            "since_unix_ms": reason.since.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis(),
+            "message": reason.message,
+        });
+    }
 }
 
 fn isolation_name(mode: fractal_runtime::Isolation) -> &'static str {

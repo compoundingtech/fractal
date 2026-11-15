@@ -1,4 +1,4 @@
-//! Process-local, loaded-only systemd observation.
+//! Process-local systemd state with loaded-only property queries.
 //!
 //! Absence is evidence only in a complete, admitted snapshot. Invalidating after a
 //! control operation does not bypass the two-second observation admission bound:
@@ -27,6 +27,7 @@ pub struct Unit {
     pub load: String,
     pub active: String,
     pub sub: String,
+    /// Zero when unavailable, including unloaded rows preserved from enumeration.
     pub main_pid: u32,
     /// Absolute cgroup filesystem path, not systemd's manager-relative path.
     pub control_group: Option<PathBuf>,
@@ -35,8 +36,25 @@ pub struct Unit {
 #[derive(Debug)]
 pub struct Snapshot {
     pub units: BTreeMap<String, Unit>,
+    /// Generation witnesses pinned when loaded service MainPIDs were observed.
+    /// Missing witnesses preserve status but cannot authorize a worker.
+    pub service_identities: BTreeMap<String, crate::PeerProcessIdentity>,
     /// Start of enumeration, conservative for creation/retirement evidence.
     pub captured_at: Instant,
+}
+
+impl Snapshot {
+    /// Validate the admission-time witness, never recapture a cached numeric PID.
+    pub fn worker_identity(&self, name: &str) -> Result<crate::PeerProcessIdentity> {
+        let unit = self.units.get(name).context("systemd worker service is absent")?;
+        ensure!(name.ends_with(".service") && unit.load != "not-found" && unit.main_pid != 0,
+            "systemd worker service has no loaded MainPID");
+        let identity = self.service_identities.get(name)
+            .context("systemd worker service has no admission-time generation witness")?;
+        ensure!(identity.pid() == unit.main_pid, "systemd worker witness differs from observed MainPID");
+        identity.validate()?;
+        Ok(identity.clone())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,11 +86,16 @@ impl Clock for RealClock {
 }
 trait Runner: Send + Sync {
     fn run(&self, command: &mut Command, failed: &dyn Fn(&str)) -> io::Result<Output>;
+    // Fake command runners must not inspect host processes named by fixtures.
+    fn capture_service_identity(&self, _pid: u32) -> Option<crate::PeerProcessIdentity> { None }
 }
 struct RealRunner;
 impl Runner for RealRunner {
     fn run(&self, command: &mut Command, failed: &dyn Fn(&str)) -> io::Result<Output> {
         bounded_output(command, failed)
+    }
+    fn capture_service_identity(&self, pid: u32) -> Option<crate::PeerProcessIdentity> {
+        crate::PeerProcessIdentity::capture_pid(pid).ok()
     }
 }
 
@@ -197,6 +220,46 @@ impl<C: Clock, R: Runner> Monitor<C, R> {
         result
     }
 
+    fn snapshot_after_admission(&self) -> Result<Arc<Snapshot>> {
+        self.snapshot_after_admission_with(|state, delay| {
+            self.changed.wait_timeout(state, delay)
+                .unwrap_or_else(std::sync::PoisonError::into_inner).0
+        })
+    }
+
+    fn snapshot_after_admission_with(
+        &self,
+        mut wait: impl for<'a> FnMut(
+            std::sync::MutexGuard<'a, State>, Duration,
+        ) -> std::sync::MutexGuard<'a, State>,
+    ) -> Result<Arc<Snapshot>> {
+        loop {
+            match self.snapshot() {
+                Ok(snapshot) => return Ok(snapshot),
+                Err(error) => {
+                    let state = self.lock_state();
+                    // Only a stale successful observation's admission boundary
+                    // is waitable here. Transport/backoff errors stay prompt.
+                    if self.admission_error(&state).is_some() { return Err(error); }
+                    if state.stale {
+                        if let Some(at) = state.next_refresh {
+                            let delay = at.saturating_duration_since(self.clock.now());
+                            if !delay.is_zero() {
+                                // Condvar releases the state lock during the wait;
+                                // no flight or subprocess is owned by this caller.
+                                drop(wait(state, delay));
+                            } else {
+                                drop(state);
+                            }
+                            continue;
+                        }
+                    }
+                    return Err(error);
+                },
+            }
+        }
+    }
+
     fn run(&self, command: &mut Command) -> io::Result<Output> {
         let mut state = self.lock_state();
         loop {
@@ -231,11 +294,14 @@ impl<C: Clock, R: Runner> Monitor<C, R> {
         let output = self.runner.run(&mut list, &|message| self.publish_failure(message))?;
         ensure!(output.status.success(), "list loaded systemd units: {}: {}", output.status,
             String::from_utf8_lossy(&output.stderr));
-        let mut names = loaded_names(&output.stdout)?;
+        let mut units = listed_units(&output.stdout)?;
         // Generation-terminal proof is stronger than a manager row pending GC.
-        // Never re-query those historical scopes, even if still enumerated loaded.
-        names.retain(|name| !crate::isolate::has_ended(name));
-        let mut units = BTreeMap::new();
+        // Never re-query or publish those historical scopes, loaded or not-found.
+        units.retain(|name, _| !crate::isolate::has_ended(name));
+        let names: Vec<String> = units.iter()
+            .filter(|(_, unit)| unit.load != "not-found")
+            .map(|(name, _)| name.clone()).collect();
+        let mut service_identities = BTreeMap::new();
         // Bound argument sizes while never asking show to resolve an unknown name.
         for batch in names.chunks(128) {
             let mut show = crate::isolate::systemctl();
@@ -244,9 +310,17 @@ impl<C: Clock, R: Runner> Monitor<C, R> {
             let output = self.runner.run(&mut show, &|message| self.publish_failure(message))?;
             ensure!(output.status.success(), "read loaded systemd properties: {}: {}",
                 output.status, String::from_utf8_lossy(&output.stderr));
-            units.extend(parse_properties(&output.stdout, batch)?);
+            let properties = parse_properties(&output.stdout, batch)?;
+            for (name, unit) in &properties {
+                if name.ends_with(".service") && unit.main_pid != 0 {
+                    if let Some(identity) = self.runner.capture_service_identity(unit.main_pid) {
+                        service_identities.insert(name.clone(), identity);
+                    }
+                }
+            }
+            units.extend(properties);
         }
-        Ok(Snapshot { units, captured_at })
+        Ok(Snapshot { units, service_identities, captured_at })
     }
 }
 
@@ -256,6 +330,9 @@ fn monitor() -> &'static Monitor<RealClock, RealRunner> {
     &MONITOR
 }
 pub fn snapshot() -> Result<Arc<Snapshot>> { monitor().snapshot() }
+/// For explicit control-failure verification, wait for stale-success admission
+/// without bypassing refresh bounds. Transport/backoff errors return promptly.
+pub fn snapshot_after_admission() -> Result<Arc<Snapshot>> { monitor().snapshot_after_admission() }
 /// Mark observation stale after actual creation/control changes, never per lookup.
 pub fn invalidate() { monitor().invalidate(); }
 pub fn health() -> Health { monitor().lock_state().health.clone() }
@@ -264,19 +341,23 @@ pub fn health() -> Health { monitor().lock_state().health.clone() }
 pub fn output(command: &mut Command) -> io::Result<Output> { monitor().run(command) }
 #[derive(Deserialize)]
 struct ListedUnit { unit: String, load: String, active: String, sub: String }
-fn loaded_names(bytes: &[u8]) -> Result<Vec<String>> {
+fn listed_units(bytes: &[u8]) -> Result<BTreeMap<String, Unit>> {
     let rows: Vec<ListedUnit> = serde_json::from_slice(bytes).context("parse systemd list-units JSON")?;
-    let mut names = BTreeSet::new();
+    let mut units = BTreeMap::new();
     for row in rows {
         ensure!(!row.unit.is_empty() && !row.unit.contains(['/', '\n', '\0']) &&
             !row.unit.starts_with('-'), "invalid listed systemd unit name");
         ensure!(valid_load(&row.load) && !row.active.is_empty() && !row.sub.is_empty(),
             "incomplete or unknown listed systemd state for {}", row.unit);
-        // --all includes not-found stubs already held by the manager, not loaded units.
-        if row.load == "not-found" { continue; }
-        ensure!(names.insert(row.unit), "duplicate systemd enumeration entry");
+        // A not-found unit can still be active after its file is removed. Keep
+        // list-units' state for conflict detection, but never show that name.
+        // Loaded rows must receive complete properties before publication.
+        ensure!(units.insert(row.unit, Unit {
+            load: row.load, active: row.active, sub: row.sub,
+            main_pid: 0, control_group: None,
+        }).is_none(), "duplicate systemd enumeration entry");
     }
-    Ok(names.into_iter().collect())
+    Ok(units)
 }
 
 fn valid_load(load: &str) -> bool {
@@ -665,7 +746,7 @@ mod tests {
             assert!(parse_properties(text.as_bytes(), &expected).is_err());
         }
         for text in ["", "diagnostic only", "{}", "[{}]"] {
-            assert!(loaded_names(text.as_bytes()).is_err());
+            assert!(listed_units(text.as_bytes()).is_err());
         }
         assert!(parse_properties(complete.as_bytes(), &["other.service".to_owned()]).is_err());
         assert!(parse_properties(complete.replace("/user.slice/", "/../").as_bytes(), &expected).is_err());
@@ -708,7 +789,7 @@ mod tests {
             outputs.push(Ok(success(&batch.iter().map(|name| properties(name)).collect::<Vec<_>>().join("\n"))));
         }
         let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(outputs));
-        assert_eq!(monitor.snapshot().unwrap().units.len(), 257);
+        assert_eq!(monitor.snapshot().unwrap().units.len(), 258);
         let calls = monitor.runner.calls.lock().unwrap();
         assert_eq!(calls.len(), 4);
         for batch in &calls[1..] {
@@ -836,5 +917,135 @@ mod tests {
         let calls = monitor.runner.calls.lock().unwrap();
         assert_eq!(calls.len(), 4);
         assert!(!calls.iter().flatten().any(|argument| argument == TERMINAL));
+    }
+
+    #[test]
+    fn unloaded_active_service_is_preserved_without_property_query() {
+        let rows = serde_json::json!([
+            { "unit": "fractal-unloaded.service", "load": "not-found", "active": "active", "sub": "running" },
+            { "unit": "fractal-stopped.service", "load": "not-found", "active": "inactive", "sub": "dead" },
+            { "unit": "st3-loaded.scope", "load": "loaded", "active": "active", "sub": "running" },
+        ]);
+        let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(vec![
+            Ok(success(&serde_json::to_string(&rows).unwrap())),
+            Ok(success(&properties("st3-loaded.scope"))),
+        ]));
+        let snapshot = monitor.snapshot().unwrap();
+        let unloaded = &snapshot.units["fractal-unloaded.service"];
+        assert_eq!(unloaded.load, "not-found");
+        assert_eq!(unloaded.active, "active");
+        assert_eq!(unloaded.sub, "running");
+        assert_eq!(unloaded.main_pid, 0);
+        assert!(unloaded.control_group.is_none());
+        assert_eq!(snapshot.units["fractal-stopped.service"].active, "inactive");
+        assert_eq!(snapshot.units["st3-loaded.scope"].main_pid, 123);
+        let calls = monitor.runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(&calls[1][4..], ["st3-loaded.scope"]);
+    }
+
+    #[test]
+    fn duplicate_enumeration_across_loaded_and_unloaded_rows_is_rejected() {
+        let rows = serde_json::json!([
+            { "unit": "fractal.service", "load": "loaded", "active": "active", "sub": "running" },
+            { "unit": "fractal.service", "load": "not-found", "active": "active", "sub": "running" },
+        ]);
+        let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(vec![
+            Ok(success(&serde_json::to_string(&rows).unwrap())),
+        ]));
+        assert!(monitor.snapshot().is_err());
+        assert_eq!(monitor.runner.count(), 1);
+    }
+
+    #[test]
+    fn explicit_verification_waits_for_admission_without_sleep_or_extra_refresh() {
+        let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(vec![
+            Ok(success("[]")), Ok(success("[]")),
+        ]));
+        monitor.snapshot().unwrap();
+        monitor.invalidate();
+        let waits = AtomicUsize::new(0);
+        let snapshot = monitor.snapshot_after_admission_with(|mut state, delay| {
+            waits.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(delay, REFRESH);
+            assert_eq!(monitor.runner.count(), 1);
+            monitor.clock.advance(delay.as_millis() as usize);
+            // Further invalidation during the wait cannot change admission.
+            state.generation = state.generation.wrapping_add(1);
+            state.stale = true;
+            state
+        }).unwrap();
+        assert!(snapshot.units.is_empty());
+        assert_eq!(waits.load(Ordering::SeqCst), 1);
+        assert_eq!(monitor.runner.count(), 2);
+    }
+
+    #[test]
+    fn explicit_verification_never_waits_through_transport_backoff() {
+        let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(vec![
+            Err(io::Error::new(io::ErrorKind::TimedOut, "wedged")),
+        ]));
+        assert!(monitor.snapshot_after_admission_with(|_, _| panic!("must not wait")).is_err());
+        assert!(monitor.snapshot_after_admission_with(|_, _| panic!("must not wait")).is_err());
+        assert_eq!(monitor.runner.count(), 1);
+    }
+
+    #[test]
+    fn missing_service_capture_preserves_status_but_denies_authority() {
+        let monitor = Monitor::new(FakeClock::new(), FakeRunner::new(vec![
+            Ok(success(LIST)), Ok(success(&properties("fractal.service"))),
+        ]));
+        let snapshot = monitor.snapshot().unwrap();
+        assert_eq!(snapshot.units["fractal.service"].main_pid, 123);
+        assert!(snapshot.service_identities.is_empty());
+        assert!(snapshot.worker_identity("fractal.service").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_identity_waiting_child() {
+        if std::env::var_os("FRACTAL_SYSTEMD_IDENTITY_WAITING_CHILD").is_some() {
+            use std::io::Read as _;
+            std::io::stdin().read_exact(&mut [0_u8]).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exited_admission_witness_is_rejected_before_first_authority_lookup() {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        struct CapturingRunner { commands: FakeRunner, captures: AtomicUsize }
+        impl Runner for CapturingRunner {
+            fn run(&self, command: &mut Command, failed: &dyn Fn(&str)) -> io::Result<Output> {
+                self.commands.run(command, failed)
+            }
+            fn capture_service_identity(&self, pid: u32) -> Option<crate::PeerProcessIdentity> {
+                self.captures.fetch_add(1, Ordering::SeqCst);
+                Some(crate::PeerProcessIdentity::capture_pid(pid).unwrap())
+            }
+        }
+        let mut owner = ReapOnDrop {
+            child: Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "systemd::tests::systemd_identity_waiting_child"])
+                .env("FRACTAL_SYSTEMD_IDENTITY_WAITING_CHILD", "1")
+                .stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap(),
+            reaped: false,
+        };
+        let service_properties = properties("fractal.service")
+            .replace("MainPID=123", &format!("MainPID={}", owner.child.id()));
+        let monitor = Monitor::new(FakeClock::new(), CapturingRunner {
+            commands: FakeRunner::new(vec![Ok(success(LIST)), Ok(success(&service_properties))]),
+            captures: AtomicUsize::new(0),
+        });
+        let snapshot = monitor.snapshot().unwrap();
+        assert!(snapshot.service_identities.contains_key("fractal.service"));
+        assert_eq!(monitor.runner.captures.load(Ordering::SeqCst), 1);
+        // End the admitted generation before the very first authority lookup.
+        owner.child.stdin.take().unwrap().write_all(b"x").unwrap();
+        owner.reap().unwrap();
+        assert!(snapshot.worker_identity("fractal.service").is_err());
+        assert!(monitor.snapshot().unwrap().worker_identity("fractal.service").is_err());
+        assert_eq!(monitor.runner.captures.load(Ordering::SeqCst), 1);
     }
 }

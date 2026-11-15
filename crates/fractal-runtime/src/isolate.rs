@@ -843,6 +843,7 @@ mod tests {
         let held = std::sync::Arc::new(crate::systemd::Snapshot {
             captured_at: Instant::now(),
             units: std::collections::BTreeMap::new(),
+            service_identities: std::collections::BTreeMap::new(),
         });
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let reader_barrier = barrier.clone();

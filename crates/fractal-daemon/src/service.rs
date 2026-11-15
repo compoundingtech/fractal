@@ -772,7 +772,7 @@ fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
     }
     // A unit file may be gone while its service remains loaded. Only the manager can
     // establish that a failed stop/disable addressed an absent, inactive unit.
-    let snapshot = fractal_runtime::systemd::snapshot()?;
+    let snapshot = fractal_runtime::systemd::snapshot_after_admission()?;
     anyhow::ensure!(
         snapshot.units.get(name).is_none_or(|unit| {
             unit.load == "not-found" && unit.active == "inactive"
@@ -1226,23 +1226,25 @@ WantedBy=default.target\n",
 }
 
 #[cfg(target_os = "linux")]
-struct WorkerResolution {
+struct WorkerResolution<I = fractal_runtime::PeerProcessIdentity> {
     snapshot: std::sync::Arc<fractal_runtime::systemd::Snapshot>,
-    pid: std::result::Result<u32, std::sync::Arc<str>>,
+    identity: std::result::Result<I, std::sync::Arc<str>>,
 }
 
 #[cfg(target_os = "linux")]
-fn cached_worker_pid(
-    cached: &mut Option<WorkerResolution>,
+fn cached_worker_pid<I>(
+    cached: &mut Option<WorkerResolution<I>>,
     snapshot: std::sync::Arc<fractal_runtime::systemd::Snapshot>,
-    resolve: impl FnOnce(&fractal_runtime::systemd::Snapshot) -> Result<u32>,
+    resolve: impl FnOnce(&fractal_runtime::systemd::Snapshot) -> Result<I>,
+    validate: impl FnOnce(&I) -> Result<u32>,
 ) -> Result<u32> {
-    if let Some(cached) = cached.as_ref().filter(|cached| std::sync::Arc::ptr_eq(&cached.snapshot, &snapshot)) {
-        return cached.pid.clone().map_err(anyhow::Error::msg);
+    if !cached.as_ref().is_some_and(|cached| std::sync::Arc::ptr_eq(&cached.snapshot, &snapshot)) {
+        let identity = resolve(&snapshot).map_err(|error| std::sync::Arc::<str>::from(format!("{error:#}")));
+        *cached = Some(WorkerResolution { snapshot, identity });
     }
-    let pid = resolve(&snapshot).map_err(|error| std::sync::Arc::<str>::from(format!("{error:#}")));
-    *cached = Some(WorkerResolution { snapshot, pid: pid.clone() });
-    pid.map_err(anyhow::Error::msg)
+    let identity = cached.as_ref().expect("worker resolution cached").identity.as_ref()
+        .map_err(|error| anyhow::Error::msg(error.to_string()))?;
+    validate(identity)
 }
 
 /// Observe the worker through its supervisor, never through caller-supplied argv.
@@ -1256,9 +1258,10 @@ pub(crate) fn replication_worker_pid() -> Result<u32> {
         let mut worker = WORKER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         cached_worker_pid(&mut worker, snapshot, |snapshot| {
             let service = lookup::systemd(snapshot)?.replication;
-            let pid = snapshot.units.get(&service.name).map_or(0, |unit| unit.main_pid);
-            anyhow::ensure!(pid != 0, "replication worker is not running");
-            Ok(pid)
+            snapshot.worker_identity(&service.name)
+        }, |identity| {
+            identity.validate()?;
+            Ok(identity.pid())
         })
     }
     #[cfg(target_os = "macos")]
@@ -1287,26 +1290,48 @@ mod worker_snapshot_tests {
         let calls = std::cell::Cell::new(0);
         let snapshot = Arc::new(fractal_runtime::systemd::Snapshot {
             units: std::collections::BTreeMap::new(),
+            service_identities: Default::default(),
             captured_at: std::time::Instant::now(),
         });
         for _ in 0..1000 {
             assert!(cached_worker_pid(&mut cached, Arc::clone(&snapshot), |_| {
                 calls.set(calls.get() + 1);
                 anyhow::bail!("worker is absent")
-            }).is_err());
+            }, |pid: &u32| Ok(*pid)).is_err());
         }
         assert_eq!(calls.get(), 1);
         let changed = Arc::new(fractal_runtime::systemd::Snapshot {
             units: std::collections::BTreeMap::new(),
+            service_identities: Default::default(),
             captured_at: std::time::Instant::now(),
         });
         for _ in 0..1000 {
             assert_eq!(cached_worker_pid(&mut cached, Arc::clone(&changed), |_| {
                 calls.set(calls.get() + 1);
                 Ok(42)
-            }).unwrap(), 42);
+            }, |pid: &u32| Ok(*pid)).unwrap(), 42);
         }
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn an_exited_cached_worker_cannot_transfer_authority_to_a_reused_pid() {
+        let mut cached = None;
+        let live = std::cell::Cell::new(true);
+        let snapshot = Arc::new(fractal_runtime::systemd::Snapshot {
+            units: std::collections::BTreeMap::new(),
+            service_identities: Default::default(),
+            captured_at: std::time::Instant::now(),
+        });
+        let validate = |pid: &u32| {
+            anyhow::ensure!(live.get(), "pinned generation has exited");
+            Ok(*pid)
+        };
+        assert_eq!(cached_worker_pid(&mut cached, Arc::clone(&snapshot), |_| Ok(42), validate).unwrap(), 42);
+        live.set(false);
+        assert!(cached_worker_pid(&mut cached, snapshot, |_| {
+            panic!("must not recapture a replacement process at the cached PID")
+        }, validate).is_err());
     }
 }
 

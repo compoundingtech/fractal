@@ -16,6 +16,33 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[tokio::test]
+async fn health_reports_read_only_systemd_failure_and_recovery() {
+    // No manager access: both production routers share the health handler, and
+    // isolation is initialized with an environment without a manager address.
+    fractal_runtime::initialize_isolation(&std::collections::BTreeMap::new());
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for app in [router(state.clone()), fabric_router(state.clone())] {
+        let (status, mut health) = get_request(app, "/v1/health").await;
+        assert_eq!(status, StatusCode::OK, "{health}");
+        assert_eq!(health["status"], "ready");
+        apply_systemd_health(&mut health, fractal_runtime::systemd::Health {
+            unresponsive: Some(fractal_runtime::systemd::SystemdUnresponsive {
+                since: std::time::UNIX_EPOCH + std::time::Duration::from_secs(17),
+                message: "invocation deadline".into(),
+            }),
+        });
+        assert_eq!(health["status"], "degraded");
+        assert_eq!(health["supervisor"]["reason"], "systemd-unresponsive");
+        assert_eq!(health["supervisor"]["since_unix_ms"], 17_000);
+        let (status, recovered) = get_request(router(state.clone()), "/v1/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(recovered["status"], "ready");
+        assert!(recovered.get("supervisor").is_none());
+    }
+}
+
 #[test]
 fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
     assert_eq!(CLIENT_API_VERSION, "fractal.client.v0");
