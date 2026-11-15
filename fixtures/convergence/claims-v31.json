@@ -1882,462 +1882,6 @@
       "doc"
     ]
   },
-  "effect.confirmed": {
-    "kind": "effect.confirmed",
-    "subjects": [
-      "effect"
-    ],
-    "fields": {
-      "bound_attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "bound_step_run": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "step-run"
-        ]
-      },
-      "class": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "native-coordinated",
-          "provider-idempotent",
-          "fail-closed"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "effect_id": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "effect"
-        ]
-      },
-      "error": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "evidence": {
-        "value_type": "array",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_incarnation": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_owner": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "operation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "payload_digest": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider_ref": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "recovering_actor": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "result_digest": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "target": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
-  "effect.in-flight": {
-    "kind": "effect.in-flight",
-    "subjects": [
-      "effect"
-    ],
-    "fields": {
-      "bound_attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "bound_step_run": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "step-run"
-        ]
-      },
-      "class": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "native-coordinated",
-          "provider-idempotent",
-          "fail-closed"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "effect_id": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "effect"
-        ]
-      },
-      "error": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "evidence": {
-        "value_type": "array",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_incarnation": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_owner": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "operation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "payload_digest": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider_ref": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "recovering_actor": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "result_digest": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "target": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
-  "effect.intended": {
-    "kind": "effect.intended",
-    "subjects": [
-      "effect"
-    ],
-    "fields": {
-      "bound_attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "bound_step_run": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "step-run"
-        ]
-      },
-      "class": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "native-coordinated",
-          "provider-idempotent",
-          "fail-closed"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "effect_id": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "effect"
-        ]
-      },
-      "error": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "evidence": {
-        "value_type": "array",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_incarnation": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_owner": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "operation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "payload_digest": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider_ref": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "recovering_actor": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "result_digest": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "target": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
-  "effect.unresolved": {
-    "kind": "effect.unresolved",
-    "subjects": [
-      "effect"
-    ],
-    "fields": {
-      "bound_attempt": {
-        "value_type": "integer",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "bound_step_run": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "step-run"
-        ]
-      },
-      "class": {
-        "value_type": "string",
-        "required": true,
-        "values": [
-          "native-coordinated",
-          "provider-idempotent",
-          "fail-closed"
-        ],
-        "immutable": false,
-        "reference": false
-      },
-      "effect_id": {
-        "value_type": "subject-reference",
-        "required": true,
-        "immutable": false,
-        "reference": true,
-        "reference_families": [
-          "effect"
-        ]
-      },
-      "error": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "evidence": {
-        "value_type": "array",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_incarnation": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "lease_owner": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "operation_id": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "payload_digest": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      },
-      "provider_ref": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "recovering_actor": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "result_digest": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "target": {
-        "value_type": "string",
-        "required": true,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
-  },
   "eval.verdict": {
     "kind": "eval.verdict",
     "subjects": [
@@ -12024,6 +11568,49 @@
         "reference": false
       },
       "status": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "summary": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "authorized-participant",
+    "cardinality": "append",
+    "projection": "work",
+    "wakes_reconciler": true
+  },
+  "work.person-override": {
+    "kind": "work.person-override",
+    "subjects": [
+      "step-run"
+    ],
+    "fields": {
+      "answer": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "episode": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "key": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "overrides": {
         "value_type": "string",
         "required": false,
         "immutable": false,

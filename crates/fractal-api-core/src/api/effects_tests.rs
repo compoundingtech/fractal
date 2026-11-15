@@ -254,6 +254,70 @@ fn different_worker_recovers_a_confirmed_effect_without_originating_another_mess
 }
 
 #[test]
+fn different_host_and_worker_recovers_a_long_message_with_its_original_body_origin() {
+    let mut original = Fixture::new();
+    original.request.content = "x".repeat(message_body::INLINE_MAX_BYTES + 1024);
+    let effect = original.admit();
+    original.state.store.effect_in_flight(&effect).unwrap();
+    let sent = original.seed_message();
+    assert_eq!(sent.message.body_origin.as_deref(), Some("host/origin"));
+    let committed = original.state.store.operation_claim(&sent.idempotency_key).unwrap().unwrap();
+    let peer_root = tempfile::tempdir().unwrap();
+    let peer = persistent_state(peer_root.path(), "peer");
+    peer.store.bind_fleet(FLEET).unwrap();
+    replicate(&original.state, &peer);
+    let mut recovering = Fixture {
+        root: peer_root, state: peer, request: original.request.clone(),
+    };
+    let caller = recovering.replace_attempt_as(RECOVERING_WORKER, "replacement-worker:peer");
+    assert_ne!(client_host_id(&recovering.state.node), "host/origin");
+    for _ in 0..2 {
+        let recovered = verified_send_as(&recovering.state, recovering.request.clone(), &caller).unwrap();
+        assert!(recovered.already_sent);
+        assert_eq!(recovered.message.subject, sent.message.subject);
+        assert_eq!(recovered.message.body_origin, sent.message.body_origin);
+        assert_eq!(recovered.message.body_ref, sent.message.body_ref);
+        assert_eq!(recovered.message.body_bytes, sent.message.body_bytes);
+    }
+    let confirmed = recovering.state.store.resolve_effect_by_key(recovering.owner()).unwrap().unwrap();
+    assert_eq!(confirmed.provider_ref.as_deref(), Some(sent.message.subject.as_str()));
+    assert_eq!(confirmed.recovering_actor.as_deref(), Some(caller.as_str()));
+    assert!(confirmed.error.is_none());
+    assert!(!recovering.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+    assert!(recovering.state.store.claims_for(&effect.effect_id, Some("effect.unresolved")).unwrap().is_empty());
+    assert_eq!(recovering.state.store.claims_for(&effect.effect_id, Some("effect.in-flight")).unwrap().len(), 1);
+    assert_ne!(recovering.state.store.step_run(&recovering.owner().step).unwrap().unwrap().status, "blocked");
+    let recovered_claim = recovering.state.store.operation_claim(&sent.idempotency_key).unwrap().unwrap();
+    assert_eq!(recovered_claim.id, committed.id);
+    assert_eq!(recovered_claim.body["fields"]["attachments"], committed.body["fields"]["attachments"]);
+    assert_message_count(&original.state, 1);
+    assert_message_count(&recovering.state, 1);
+}
+
+#[test]
+fn long_message_recovery_refuses_different_full_text_despite_an_identical_preview() {
+    for change_size in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.request.content = "x".repeat(message_body::INLINE_MAX_BYTES + 1024);
+        let effect = fixture.admit();
+        let mut conflicting = fixture.request.clone();
+        conflicting.owner = None;
+        conflicting.idempotency_key = native_message_key(fixture.owner()).unwrap();
+        if !change_size {
+            conflicting.content.pop();
+        }
+        conflicting.content.push('y');
+        assert_eq!(message_body::preview(&conflicting.content), message_body::preview(&fixture.request.content));
+        assert_eq!(conflicting.content.len() != fixture.request.content.len(), change_size);
+        accept_message_receipt(&fixture.state, conflicting, None, None).unwrap();
+        assert_eq!(fixture.accept().unwrap_err().code, "idempotency-mismatch");
+        fixture.assert_parked(&effect);
+        assert!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().is_empty());
+        assert_message_count(&fixture.state, 1);
+    }
+}
+
+#[test]
 fn different_worker_parks_an_undelivered_effect_instead_of_sending() {
     for in_flight in [false, true] {
         let mut fixture = Fixture::new();

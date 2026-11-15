@@ -55,6 +55,14 @@ fn latest_tx(tx: &Connection, id: &str) -> Result<Option<(String, EffectRecord)>
     }).transpose()
 }
 
+/// Unresolved is a monotonic phase, so no later work or effect observation can clear it.
+pub(super) fn step_has_unresolved_effect_tx(connection: &Connection, step: &str) -> rusqlite::Result<bool> {
+    connection.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='effect.unresolved'
+         AND json_extract(body,'$.fields.bound_step_run')=?1)",
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h51c18f03a1dc owner=fractal_store::store::effects TODO=trace-statement-and-value-representation */ [step], |row| row.get(0))
+}
+
 fn append_effect_tx(tx: &Transaction<'_>, origin: &str, kind: &str, record: &EffectRecord) -> Result<(), FractalError> {
     let predecessors = latest_claim_id_tx(tx, &record.effect_id).map_err(internal)?.into_iter().collect::<Vec<_>>();
     append_claim_tx(tx, origin, &record.effect_id, kind,
@@ -115,6 +123,10 @@ fn may_originate_tx(tx: &Connection, origin: &str, step: &str, caller: &str,
 }
 
 impl Store {
+    pub fn step_has_unresolved_effect(&self, step: &str) -> Result<bool, FractalError> {
+        step_has_unresolved_effect_tx(&self.readers.get(), step).map_err(internal)
+    }
+
     pub fn admit_message_effect(&self, owner: &EffectOwner, caller: &str, payload_sender: &str,
         payload_digest: &str, target: &str) -> Result<EffectAdmission, FractalError> {
         let key = effect_key(owner)?;

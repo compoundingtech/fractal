@@ -4429,6 +4429,8 @@ enum WorkCommand {
     Update(WorkUpdateArgs),
     /// Complete a person-assigned step with a response.
     Done(WorkDoneArgs),
+    /// Replace a deadline-applied default within seven days. Already taken effects are not undone.
+    Override(WorkOverrideArgs),
     /// Cancel your own ask and resume its live origin.
     CancelAsk(WorkDoneArgs),
     /// List current actionable work; use --as to filter one agent or --all for history.
@@ -4658,6 +4660,26 @@ struct WorkDoneArgs {
     episode: Option<String>,
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+struct WorkOverrideArgs {
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
+    subject: String,
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_name = "PERSON", value_parser = parse_person_subject)]
+    actor: String,
+    /// The ID of one of the ask's named answers.
+    #[arg(long, value_name = "ID")]
+    answer: String,
+    /// Text accompanying the selected answer.
+    #[arg(long)]
+    text: Option<String>,
+    #[arg(long)]
+    summary: Option<String>,
+    /// Fence the original ask; recovered from its latest ask claim when omitted.
+    #[arg(long)]
+    episode: Option<String>,
 }
 
 #[derive(Args)]
@@ -6686,6 +6708,7 @@ fn guard_mutating_cli_actor(
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
             WorkCommand::Done(args) | WorkCommand::CancelAsk(args) => Some(args.actor.as_str()),
+            WorkCommand::Override(args) => Some(args.actor.as_str()),
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),

@@ -18096,6 +18096,7 @@ fn try_project_simple_replication_inner_tx(
                     | "work.person-asked"
                     | "work.person-reassigned"
                     | "work.person-done"
+                    | "work.person-override"
                     | "work.person-cancelled"
                     | "doc.bound"
                     | "mission.published"
@@ -18142,7 +18143,7 @@ fn try_project_simple_replication_inner_tx(
         // before its ask, or a later local update, has the same result as canonical replay.
         if matches!(
             claim.kind.as_str(),
-            "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-cancelled"
+            "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-override" | "work.person-cancelled"
         ) && !local_ask_applied && let Some(aggregate) = aggregate_of_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
         {
@@ -19033,7 +19034,7 @@ pub fn project_replicated_mission_runs(transaction: &Transaction<'_>) -> Result<
             1 => "claims.kind IN ('mission-run.state','run-generation.created','run-generation.state','run-generation.superseded',
                   'revision-proposal.created','revision-proposal.approved','revision-proposal.cancelled','revision-proposal.applied',
                   'step-run.carried','step-run.state','step-run.retried',
-                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-cancelled')",
+                  'work.claimed','work.renewed','work.progress','work.submitted','work.failed','work.released','work.handoff-returned','work.extended','work.person-asked','work.person-reassigned','work.person-done','work.person-override','work.person-cancelled')",
             _ => "claims.kind='step-run.carried'",
         };
         let mut statement = transaction
@@ -19341,6 +19342,17 @@ pub fn project_mission_run_update(
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    // The durable effect subject, not the last work-state reason, owns this fence.
+    // Check before every step/work projection, including person waits and retries.
+    if claim.subject.starts_with("step-run/")
+        && effects::step_has_unresolved_effect_tx(transaction, &claim.subject).map_err(internal)?
+    {
+        transaction.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h4550e7b9ce6d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE step_runs SET status='blocked', blocked_reason='effect-unresolved' WHERE subject=?1",
+        ).map_err(internal)?.execute(/* sqlite-large-value: allow-for-now lv-h1f1e37b98c1e owner=fractal_store::store TODO=trace-statement-and-value-representation */ [&claim.subject]).map_err(internal)?;
+        return Ok(());
+    }
     if person_work::project(transaction, claim)? {
         return Ok(());
     }
@@ -22378,6 +22390,12 @@ pub fn apply_effective_step_state_with_owner(
         view.claimant = None;
         view.claim_incarnation = None;
         view.claim_expires_at_unix_ms = None;
+        return Ok(());
+    }
+    // Lease expiry is not authority to retry an unresolved external effect.
+    if effects::step_has_unresolved_effect_tx(connection, &view.subject)? {
+        view.status = "blocked".into();
+        view.blocked_reason = Some("effect-unresolved".into());
         return Ok(());
     }
     if step_claim_expired(view, snapshot_unix_ms) {

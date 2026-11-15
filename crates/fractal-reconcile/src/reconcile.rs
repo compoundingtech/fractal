@@ -11920,6 +11920,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             let step_changed = self
                 .isolate("step", &view.subject, || -> Result<bool> {
                     let mut changed = false;
+                    // An unresolved native effect forbids lease recovery, gate evaluation and
+                    // completion, even when a later work report replaced the visible reason.
+                    if self.store.step_has_unresolved_effect(&view.subject)? {
+                        return self.store.set_step_state(
+                            &view.subject,
+                            "blocked",
+                            Some("effect-unresolved"),
+                        );
+                    }
                     let eligible_phase = ((run.phase == "normal"
                         || run.phase == "revision-draining")
                         && !step.spec.finally)

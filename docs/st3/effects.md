@@ -27,6 +27,10 @@ The anchor is retained for the run's lifetime: `mission-run.created` is durable 
 
 A replacement attempt encountering intended or in-flight state reads the existing message by key. It confirms the observed committed message or remains blocked; it never sends again. In particular, interruption after intended but before a message commit may leave an unresolved effect. An empty local lookup, missing response cache, stopped worker or unavailable originating store is not proof of non-delivery. There is no timeout-based takeover or automatic retry of origination. Unresolved state requires explicit human or revision action, not elapsed time.
 
+The durable unresolved receipt fences reconciliation and late work-state projections, not just the current visible status. Lease expiry, stopped incarnations and submitted-step gates cannot ready or complete the bound step while that fence exists.
+
 A different verified worker may recover an effect only while holding the current live attempt of the **same bound step-run**, under the same effect key. It replays the byte-identical original payload, including the original worker in `from`; changing that sender is a payload mismatch, not a replacement send. This authority permits only keyed readback and confirmation (including returning an already confirmed result), never a provider send under the original worker's identity. Without delivery evidence it records unresolved and parks. Confirmation and unresolved receipts separately record `recovering_actor`, retaining the original sender and lease binding as immutable intent evidence.
+
+For a long message, recovery checks the supplied full text's hash and byte length before reusing the committed body attachment metadata, including its original host. Recovering on another host does not change immutable message identity.
 
 Confirmation proves the native message committed, not that a recipient read it. Delivery and read observations remain the message lifecycle's evidence. Unobserved optional result metadata remains absent, not fabricated. Provider adapters, effect products/gates and program/CLI authoring helpers are separate from this native-message contract.

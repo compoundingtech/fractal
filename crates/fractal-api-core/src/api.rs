@@ -1045,6 +1045,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
         .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
         .route("/v1/work/done", post(work::done_person_step))
+        .route("/v1/work/override", post(work::override_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
         .route("/v1/work", get(work::list_work))
         .route("/v1/work-items/{*subject}", get(work::get_work))
@@ -12079,13 +12080,27 @@ fn accept_message_receipt_authorized(
         message_body::bodies(&state.state_dir)
             .ensure_room(&from, &subject, request.content.len())
             .map_err(ApiError::bad)?;
-        let entry = crate::model::MessageAttachment {
+        let mut entry = crate::model::MessageAttachment {
             sha256: hex::encode(Sha256::digest(request.content.as_bytes())),
             media_type: message_body::MEDIA_TYPE.into(),
             name: None,
             size: request.content.len() as u64,
             origin: client_host_id(&state.node),
         };
+        if let Some(stored) = previous.as_ref()
+            .filter(|claim| claim.kind == "message.sent" && claim.subject == subject)
+            .and_then(|claim| claim.body["fields"]["attachments"].as_array())
+            .and_then(|entries| entries.iter().find(|entry| entry["media_type"] == message_body::MEDIA_TYPE))
+        {
+            let stored: crate::model::MessageAttachment =
+                serde_json::from_value(stored.clone()).map_err(ApiError::internal)?;
+            // The body belongs to the accepting host, not the host recovering the key.
+            // Reuse its metadata only for identical full text; otherwise keep the supplied
+            // hash and size so the immutable operation comparison below refuses the retry.
+            if stored.sha256 == entry.sha256 && stored.size == entry.size {
+                entry = stored;
+            }
+        }
         claim_attachments.push(entry.clone());
         body = Some(entry);
     }

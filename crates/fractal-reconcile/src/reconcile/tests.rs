@@ -31053,6 +31053,109 @@ mission "fresh" state="ready" {
         assert_eq!(after.status, "closed", "the local working report took up the wake");
     }
 
+    fn unresolved_effect_fence_case(case: &str) {
+        struct ClockReset;
+        impl Drop for ClockReset {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = ClockReset;
+        smallclaims::store::set_thread_clock(Some(1_800_000_000_000));
+        let seat = SeatQueueFixture::new();
+        // Unlike the queue-order helper, this fixture needs no sleep or distinct join times.
+        let run = seat.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "queued".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/requester".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: format!("unresolved-{case}"),
+        }).unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let step = SeatQueueFixture::step(&run, "work");
+        seat.work(&step, "claim", "effect-worker-claim").unwrap();
+        let claimed = seat.store.step_run(&step).unwrap().unwrap();
+        let owner = crate::model::EffectOwner {
+            mission: "mission/queued".into(), key: "announce".into(), step: step.clone(),
+            attempt: claimed.attempt, incarnation: "seat-one".into(),
+        };
+        let fractal_store::store::effects::EffectAdmission::Originate(effect) =
+            seat.store.admit_message_effect(&owner, SEAT, SEAT, "original-payload", SEAT).unwrap()
+        else { panic!("the creation host must admit the original effect"); };
+        if matches!(case, "submitted" | "late-projection") {
+            seat.work(&step, "complete", "effect-worker-submitted").unwrap();
+            assert!(seat.store.step_run(&step).unwrap().unwrap().worker_reported);
+        }
+        seat.store.unresolved_message_effect(&effect, "delivery is unknown", SEAT).unwrap();
+        let messages = seat.store.messages(None, true).unwrap().len();
+        match case {
+            "expired" => {
+                smallclaims::store::set_thread_clock(Some(claimed.claim_expires_at_unix_ms.unwrap() + 1));
+            }
+            "stopped" => {
+                let actual = seat.store.latest_claim(SEAT, Some("runtime.observed")).unwrap().unwrap();
+                let mut fields: BTreeMap<String, Value> =
+                    serde_json::from_value(actual.body["fields"].clone()).unwrap();
+                fields.insert("status".into(), json!("stopped"));
+                seat.store.append_claim(&ClaimInput {
+                    subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
+                    fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                assert!(seat.store.work_claim_is_orphaned(&claimed).unwrap());
+            }
+            "late-projection" => {
+                // Replay a valid worker submission after parking, then a late daemon readiness
+                // decision. Neither may replace the durable fence with its own status/reason.
+                let submitted = seat.store.claims_for(&step, Some("work.submitted")).unwrap().pop().unwrap();
+                seat.store.append_claim(&ClaimInput {
+                    subject: step.clone(), kind: submitted.kind, actor: submitted.actor,
+                    fields: serde_json::from_value(submitted.body["fields"].clone()).unwrap(),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                seat.store.append_claim(&ClaimInput {
+                    subject: step.clone(), kind: "step-run.state".into(),
+                    actor: Some("daemon/runtime".into()),
+                    fields: BTreeMap::from([("status".into(), json!("ready"))]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            "submitted" => {}
+            _ => unreachable!(),
+        }
+        for _ in 0..3 {
+            let view = seat.store.step_run(&step).unwrap().unwrap();
+            assert_eq!(view.status, "blocked", "{case}");
+            assert_eq!(view.blocked_reason.as_deref(), Some("effect-unresolved"), "{case}");
+            seat.reconciler.evaluate_mission_runs().unwrap();
+        }
+        let view = seat.store.step_run(&step).unwrap().unwrap();
+        assert_eq!(view.status, "blocked", "{case}");
+        assert_eq!(view.blocked_reason.as_deref(), Some("effect-unresolved"), "{case}");
+        assert_eq!(seat.store.messages(None, true).unwrap().len(), messages,
+            "an unresolved effect must not originate a replacement message or work wake");
+        assert!(seat.store.claims_for(&step, Some("step-run.state")).unwrap().iter()
+            .all(|claim| claim.body["fields"]["status"] != "completed"));
+        assert_ne!(seat.store.mission_run(&run.id).unwrap().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_expired_work_lease() {
+        unresolved_effect_fence_case("expired");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_stopped_worker_incarnation() {
+        unresolved_effect_fence_case("stopped");
+    }
+
+    #[test]
+    fn unresolved_effect_fences_submitted_step_completion() {
+        unresolved_effect_fence_case("submitted");
+    }
+
+    #[test]
+    fn late_work_and_step_state_projections_preserve_unresolved_effect_fence() {
+        unresolved_effect_fence_case("late-projection");
+    }
+
     #[test]
     fn expired_lease_rearms_consumed_wake_in_the_same_incarnation() {
         let seat = SeatQueueFixture::new();
