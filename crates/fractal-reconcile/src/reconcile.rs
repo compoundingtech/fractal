@@ -11652,6 +11652,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.evaluate_mission_run(run, &mission)
     }
 
+    // Both normal evaluation and the direct cleanup entrypoint must honor this fence.
+    fn unresolved_effect_run_fence(&self, run: &MissionRunView) -> Result<Option<bool>> {
+        if self.store.mission_run_has_unresolved_effect(&run.id)? {
+            return Ok(Some(self.store.set_mission_run_state(
+                &run.id, "blocked", &run.phase, Some("effect-unresolved"),
+            )?));
+        }
+        Ok(None)
+    }
+
     fn evaluate_mission_run(&self, run: &MissionRunView, mission: &MissionSpec) -> Result<bool> {
         let idle_cutover = self.store.supersede_idle_mission_run(run, mission)?;
         if idle_cutover == Some(true) {
@@ -11671,6 +11681,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         if run.phase == "supersession-waiting" {
             return self.evaluate_active_mission_run(run, None);
+        }
+        // A durable unresolved effect blocks the run before mission-level dependency
+        // completion, final-phase selection, and cleanup can bypass the per-step fence.
+        if let Some(changed) = self.unresolved_effect_run_fence(run)? {
+            return Ok(changed);
         }
         if run.phase.starts_with("cleanup-") {
             return self.reconcile_mission_run_cleanup(run);
@@ -11924,6 +11939,15 @@ impl<R: RuntimeControl> Reconciler<R> {
             let step_changed = self
                 .isolate("step", &view.subject, || -> Result<bool> {
                     let mut changed = false;
+                    // An unresolved native effect forbids lease recovery, gate evaluation and
+                    // completion, even when a later work report replaced the visible reason.
+                    if self.store.step_has_unresolved_effect(&view.subject)? {
+                        return self.store.set_step_state(
+                            &view.subject,
+                            "blocked",
+                            Some("effect-unresolved"),
+                        );
+                    }
                     let eligible_phase = ((run.phase == "normal"
                         || run.phase == "revision-draining")
                         && !step.spec.finally)
@@ -12489,6 +12513,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_mission_run_cleanup(&self, run: &MissionRunView) -> Result<bool> {
+        if let Some(changed) = self.unresolved_effect_run_fence(run)? {
+            return Ok(changed);
+        }
         // A child can still own execution after its superseded parent ended.
         // Preserve its cleanup confirmation and recovery path as well.
         let mut supersession_cleanup = run.superseded_by.is_some();

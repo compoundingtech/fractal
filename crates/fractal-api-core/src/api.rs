@@ -11826,6 +11826,33 @@ pub fn accept_message_receipt_with_upload_owner(
     upload_owner: Option<&str>,
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<MessageSendReceipt, ApiError> {
+    accept_message_receipt_authorized(state, request, session_id, device_signature,
+        upload_owner, assistant_authorization, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn accept_message_receipt_authorized(
+    state: &AppState,
+    mut request: MessageSendRequest,
+    session_id: Option<String>,
+    device_signature: Option<smallclaims::principal::ClaimSignature>,
+    upload_owner: Option<&str>,
+    assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
+    effect_caller: Option<&str>,
+) -> Result<MessageSendReceipt, ApiError> {
+    let effect_digest = if let Some(owner) = request.owner.as_ref() {
+        if effect_caller.is_none() || device_signature.is_some() || assistant_authorization.is_some() {
+            return Err(ApiError::bad(FractalError::new("effect-caller-refused",
+                "effect-bound sends require an attested worker at the native message endpoint")));
+        }
+        let payload = serde_json::to_vec(&(
+            &request.from, &request.to, &request.content, &request.title,
+            &request.in_reply_to, &request.tags, &request.attachments,
+        )).map_err(ApiError::internal)?;
+        request.idempotency_key = crate::store::effects::native_message_key(owner)
+            .map_err(ApiError::bad)?;
+        Some(hex::encode(Sha256::digest(&payload)))
+    } else { None };
     let requested_recipient = normalize_message_party(&request.to);
     let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
@@ -11914,12 +11941,38 @@ pub fn accept_message_receipt_with_upload_owner(
         upload_owner.unwrap_or(&from),
         &request.attachments,
     )?;
+    let effect = match (request.owner.as_ref(), effect_digest.as_deref()) {
+        (Some(owner), Some(digest)) => {
+            use crate::store::effects::EffectAdmission;
+            let caller = effect_caller.expect("effect callers were attested before admission");
+            let (_, caller) = receipt_recipient(&state.store, caller)?;
+            match state.store.admit_message_effect(owner, &caller, &from, digest, &to)
+                .map_err(ApiError::bad)? {
+                EffectAdmission::Originate(record) => Some((record, true, caller)),
+                EffectAdmission::Recover(record) => Some((record, false, caller)),
+                EffectAdmission::Blocked(error) => return Err(ApiError::bad(error)),
+            }
+        }
+        _ => None,
+    };
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
     let subject = format!("message/{id}");
     let previous = state
         .store
         .operation_claim(&request.idempotency_key)
         .map_err(ApiError::internal)?;
+    let recovered = if let Some((effect, false, caller)) = effect.as_ref() {
+        match previous.as_ref().filter(|claim| claim.kind == "message.sent" && claim.subject == subject) {
+            Some(record) => Some(record.clone()),
+            None => {
+                state.store.unresolved_message_effect(effect,
+                    "the originating store's committed message is unavailable; absence here is not proof of non-delivery", caller)
+                    .map_err(ApiError::bad)?;
+                return Err(ApiError::bad(FractalError::new("effect-unresolved",
+                    "the effect cannot be recovered by key; nothing was sent")));
+            }
+        }
+    } else { None };
     let parent = request
         .in_reply_to
         .as_deref()
@@ -12027,13 +12080,27 @@ pub fn accept_message_receipt_with_upload_owner(
         message_body::bodies(&state.state_dir)
             .ensure_room(&from, &subject, request.content.len())
             .map_err(ApiError::bad)?;
-        let entry = crate::model::MessageAttachment {
+        let mut entry = crate::model::MessageAttachment {
             sha256: hex::encode(Sha256::digest(request.content.as_bytes())),
             media_type: message_body::MEDIA_TYPE.into(),
             name: None,
             size: request.content.len() as u64,
             origin: client_host_id(&state.node),
         };
+        if let Some(stored) = previous.as_ref()
+            .filter(|claim| claim.kind == "message.sent" && claim.subject == subject)
+            .and_then(|claim| claim.body["fields"]["attachments"].as_array())
+            .and_then(|entries| entries.iter().find(|entry| entry["media_type"] == message_body::MEDIA_TYPE))
+        {
+            let stored: crate::model::MessageAttachment =
+                serde_json::from_value(stored.clone()).map_err(ApiError::internal)?;
+            // The body belongs to the accepting host, not the host recovering the key.
+            // Reuse its metadata only for identical full text; otherwise keep the supplied
+            // hash and size so the immutable operation comparison below refuses the retry.
+            if stored.sha256 == entry.sha256 && stored.size == entry.size {
+                entry = stored;
+            }
+        }
         claim_attachments.push(entry.clone());
         body = Some(entry);
     }
@@ -12084,19 +12151,47 @@ pub fn accept_message_receipt_with_upload_owner(
         idempotency_key: Some(request.idempotency_key.clone()),
     };
     // A repeated key returns the first claim and says it appended nothing.
-    let (record, appended) = match &device_signature {
-        Some(signature) => state.store.append_signed_message(&input, signature),
-        None => match assistant_authorization {
-            Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
-            // A reply settles its parent citing the reply's claim, so it stays on the graph until
-            // 4c-3; any other send goes where its recipient's host reads it (message_routing).
-            None if request.in_reply_to.is_some() => state.store.append_claim_outcome(&input),
-            None => crate::store::message_routing::send_message(&state.store, &input),
-        },
-    }
+    let sent = if let Some(record) = recovered {
+        let operation = smallclaims::store::claim_operation(&input).map_err(ApiError::bad)?;
+        if operation.as_ref().is_none_or(|(operation, digest)|
+            smallclaims::store::operation_parts(&record.body) != Some((operation.as_str(), digest.as_str())))
+        {
+            Err(FractalError::new("idempotency-mismatch",
+                "the recovered message key identifies a different immutable payload"))
+        } else {
+            Ok((record, false))
+        }
+    } else {
+        if let Some((effect, true, caller)) = effect.as_ref() {
+            state.store.effect_in_flight(effect).map_err(|error| {
+                if let Some(staged) = staged.as_ref() {
+                    staged.discard();
+                }
+                if let Err(parking) = state.store.unresolved_message_effect(effect, &error.message, caller) {
+                    return ApiError::bad(parking);
+                }
+                ApiError::bad(error)
+            })?;
+        }
+        match &device_signature {
+            Some(signature) => state.store.append_signed_message(&input, signature),
+            None => match assistant_authorization {
+                Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
+                // Replies retain the graph lifecycle evidence of their parent.
+                None if request.in_reply_to.is_some() => state.store.append_claim_outcome(&input),
+                None => crate::store::message_routing::send_message(&state.store, &input),
+            },
+        }
+    };
+    let (record, appended) = sent
     .map_err(|error| {
         if let Some(staged) = staged.as_ref() {
             staged.discard();
+        }
+        if let Some((effect, _, caller)) = effect.as_ref()
+            && let Err(parking) = state.store.unresolved_message_effect(effect, &error.message, caller)
+        {
+            return ApiError::bad(parking);
         }
         ApiError::bad(error)
     })?;
@@ -12108,6 +12203,9 @@ pub fn accept_message_receipt_with_upload_owner(
                 "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
             ))
         })?;
+    }
+    if let Some((effect, _, caller)) = effect.as_ref() {
+        state.store.confirm_message_effect(effect, &record, caller).map_err(ApiError::bad)?;
     }
     // A concurrent sender may have accepted this key first with the same canonical input.
     // Return its accepted classification, rather than this attempt's speculative tags.
@@ -13363,6 +13461,8 @@ pub fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod effects_tests;
 #[cfg(test)]
 mod ready_work_tests;
 #[cfg(any(test, feature = "test-support"))]

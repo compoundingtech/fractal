@@ -8482,35 +8482,36 @@ async fn dispatch_action(
             let result = accept_message_receipt_with_upload_owner(
                 state,
                 MessageSendRequest {
-                    idempotency_key: request.idempotency_key.clone(),
-                    // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if let Some(authorization) = session.assistant_write.as_ref() {
-                        authorization.principal().into()
-                    } else {
-                        authority_actor.clone()
-                    },
-                    to,
-                    // An attachment may travel alone; text is then optional.
-                    content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
-                        p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
-                    } else {
-                        parameter_string(p, "content")?
-                    },
-                    title: p.get("title").and_then(Value::as_str).map(str::to_owned),
-                    in_reply_to: p
-                        .get("in_reply_to")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    tags: message_send_tags(p)?,
-                    attachments: p
-                        .get("attachments")
-                        .cloned()
-                        .map(serde_json::from_value)
-                        .transpose()
-                        .map_err(|_| {
-                            validation("attachments are `{blob, media_type, name?}` records")
-                        })?
-                        .unwrap_or_default(),
+                owner: None,
+                idempotency_key: request.idempotency_key.clone(),
+                // Owner authority permits the operation, but is never the assistant's sender.
+                from: if let Some(authorization) = session.assistant_write.as_ref() {
+                    authorization.principal().into()
+                } else {
+                    authority_actor.clone()
+                },
+                to,
+                // An attachment may travel alone; text is then optional.
+                content: if p.get("attachments").is_some_and(|value| value.as_array().is_some_and(|list| !list.is_empty())) {
+                    p.get("content").and_then(Value::as_str).unwrap_or_default().to_owned()
+                } else {
+                    parameter_string(p, "content")?
+                },
+                title: p.get("title").and_then(Value::as_str).map(str::to_owned),
+                in_reply_to: p
+                    .get("in_reply_to")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                tags: message_send_tags(p)?,
+                attachments: p
+                    .get("attachments")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| {
+                        validation("attachments are `{blob, media_type, name?}` records")
+                    })?
+                    .unwrap_or_default(),
                 },
                 session_id,
                 p.get("signature")
@@ -13824,18 +13825,19 @@ mission "differential" state="ready" {
         let sent = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-attachment".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "see image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: vec![crate::model::AttachmentInput {
-                    blob: format!("blob/{hash}"),
-                    media_type: "image/png".into(),
-                    name: Some("paste.png".into()),
-                }],
+            owner: None,
+            idempotency_key: "timeline-attachment".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "see image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: vec![crate::model::AttachmentInput {
+                blob: format!("blob/{hash}"),
+                media_type: "image/png".into(),
+                name: Some("paste.png".into()),
+            }],
             },
             None,
             None,
@@ -13861,14 +13863,15 @@ mission "differential" state="ready" {
         let plain = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "timeline-plain".into(),
-                from: "person/alex".into(),
-                to: "agent/terminal-test.seat".into(),
-                content: "no image".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "timeline-plain".into(),
+            from: "person/alex".into(),
+            to: "agent/terminal-test.seat".into(),
+            content: "no image".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,
@@ -20461,14 +20464,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-older".into(),
-                from: client_session.authority_actor.clone(),
-                to: subject.into(),
-                content: "older session message".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-older".into(),
+            from: client_session.authority_actor.clone(),
+            to: subject.into(),
+            content: "older session message".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             Some("session/older-incarnation".into()),
             None,
@@ -20519,14 +20523,15 @@ mission "example/zero-run" state="ready" {
         let _ = accept_message(
             &state,
             MessageSendRequest {
-                idempotency_key: "session-message-outgoing".into(),
-                from: subject.into(),
-                to: "agent/session-message-peer".into(),
-                content: "outgoing Fractal message".into(),
-                title: Some("A question".into()),
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "session-message-outgoing".into(),
+            from: subject.into(),
+            to: "agent/session-message-peer".into(),
+            content: "outgoing Fractal message".into(),
+            title: Some("A question".into()),
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,

@@ -21,6 +21,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `custom` | `custom/NAMESPACE/NAME` | yes | An extension subject. |
 | `daemon` | `daemon/NODE` | no | A Fractal daemon. |
 | `doc` | `doc/NAME` | no | A named immutable document lineage. |
+| `effect` | `effect/OPERATION_ID` | no | A durable native effect bound to one operation. |
 | `exec` | `exec/RUN/LOCAL_ID` | no | A mission-run exec runtime. |
 | `external` | `external/PROVIDER/KIND/IDENTITY` | no | An external account or actor, distinct from a native person. |
 | `file` | `file/HOST:/ABSOLUTE_PATH` | no | A read-only file gate target. |
@@ -109,6 +110,10 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `deploy.stop` | `resource` | `system-only` | `append` | `durable` | `hosts!:array`, `liftCondition!:string`, `scope!:string`, `stopId!:string`, `version!:integer` |  |
 | `deploy.stop-lifted` | `resource` | `system-only` | `append` | `durable` | `releaseGoId!:string`, `stopId!:string`, `version!:integer` |  |
 | `doc.bound` | `doc` | `authorized-requester` | `append` | `durable` | `executable:boolean`, `hash:string`, `name:string`, `size:integer` | `doc` |
+| `effect.confirmed` | `effect` | `system-only` | `append` | `durable` | `bound_attempt!:integer`, `bound_step_run!:subject-reference(step-run)`, `class!:string`, `effect_id!:subject-reference(effect)`, `error:string`, `evidence:array`, `lease_incarnation!:string`, `lease_owner!:string`, `operation_id!:string`, `payload_digest!:string`, `provider!:string`, `provider_ref:string`, `recovering_actor:string`, `result_digest:string`, `target!:string` |  |
+| `effect.in-flight` | `effect` | `system-only` | `append` | `durable` | `bound_attempt!:integer`, `bound_step_run!:subject-reference(step-run)`, `class!:string`, `effect_id!:subject-reference(effect)`, `error:string`, `evidence:array`, `lease_incarnation!:string`, `lease_owner!:string`, `operation_id!:string`, `payload_digest!:string`, `provider!:string`, `provider_ref:string`, `recovering_actor:string`, `result_digest:string`, `target!:string` |  |
+| `effect.intended` | `effect` | `system-only` | `append` | `durable` | `bound_attempt!:integer`, `bound_step_run!:subject-reference(step-run)`, `class!:string`, `effect_id!:subject-reference(effect)`, `error:string`, `evidence:array`, `lease_incarnation!:string`, `lease_owner!:string`, `operation_id!:string`, `payload_digest!:string`, `provider!:string`, `provider_ref:string`, `recovering_actor:string`, `result_digest:string`, `target!:string` |  |
+| `effect.unresolved` | `effect` | `system-only` | `append` | `durable` | `bound_attempt!:integer`, `bound_step_run!:subject-reference(step-run)`, `class!:string`, `effect_id!:subject-reference(effect)`, `error:string`, `evidence:array`, `lease_incarnation!:string`, `lease_owner!:string`, `operation_id!:string`, `payload_digest!:string`, `provider!:string`, `provider_ref:string`, `recovering_actor:string`, `result_digest:string`, `target!:string` |  |
 | `eval.verdict` | `mission-run` | `system-only` | `once` | `durable` | `reason:string`, `residue:array`, `verdict!:string` |  |
 | `fault.dismissed` | `agent`, `exec`, `pty`, `observer`, `subscription`, `schedule`, `daemon`, `machine`, `step-run`, `mission-run`, `loop-run`, `resource`, `checkpoint` | `system-only` | `append` | `durable` | `episode!:string`, `reason!:string` |  |
 | `file.observed` | `file` | `system-only` | `append` | `durable` | `blob_hash:string`, `content:string`, `content_hash:string`, `mode:integer`, `path!:string`, `reason:string`, `status!:string` | `gate` |
