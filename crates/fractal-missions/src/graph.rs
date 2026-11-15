@@ -407,7 +407,7 @@ subscription "hygiene" {{
             r#"on "pull_requests"; on "comments""#,
             r#"admission "relevant-changes"; author "Orchid-bot"; author "fern""#,
         );
-        let intent = parse_intent(&source, "node").unwrap();
+        let intent = parse_test_intent(&source, "node").unwrap();
         let desired = &intent.subjects["subscription/hygiene"].desired;
         let spec = subscription_spec(desired).unwrap();
         assert_eq!(spec.admission, Some(SubscriptionAdmission::RelevantChanges));
@@ -416,7 +416,7 @@ subscription "hygiene" {{
         assert_eq!(encoded["admission"], "relevant-changes");
         assert_eq!(serde_json::from_value::<SubscriptionSpec>(encoded).unwrap(), spec);
         let rendered = format!("version 2\n{}", render_desired_node(desired).unwrap());
-        let reparsed = parse_intent(&rendered, "node").unwrap();
+        let reparsed = parse_test_intent(&rendered, "node").unwrap();
         assert_eq!(&reparsed.subjects["subscription/hygiene"].desired, desired);
         assert_eq!(
             subscription_spec(&reparsed.subjects["subscription/hygiene"].desired),
@@ -429,7 +429,7 @@ subscription "hygiene" {{
         use crate::model::SubscriptionAdmission;
 
         let source = admission_source("github.repository", r#"on "pull_requests""#, "");
-        let intent = parse_intent(&source, "node").unwrap();
+        let intent = parse_test_intent(&source, "node").unwrap();
         let desired = &intent.subjects["subscription/hygiene"].desired;
         let spec = subscription_spec(desired).unwrap();
         assert_eq!(spec.admission, None);
@@ -451,7 +451,7 @@ subscription "hygiene" {{
             intent.source_hash,
             hex::encode(Sha256::digest(serde_json::to_vec(&legacy_normalized).unwrap())),
         );
-        let stopped = parse_intent("version 2\nsubscription \"hygiene\" { stop; }\n", "node").unwrap();
+        let stopped = parse_test_intent("version 2\nsubscription \"hygiene\" { stop; }\n", "node").unwrap();
         let stopped = subscription_spec(&stopped.subjects["subscription/hygiene"].desired).unwrap();
         assert_eq!(stopped.admission, None);
         assert_eq!(stopped.authors, None);
@@ -464,7 +464,7 @@ subscription "hygiene" {{
             r#"on "pull_requests""#,
             r#"admission "ready-heads"; author "orchid-bot""#,
         );
-        let intent = parse_intent(&source, "node").unwrap();
+        let intent = parse_test_intent(&source, "node").unwrap();
         let spec = subscription_spec(&intent.subjects["subscription/hygiene"].desired).unwrap();
         assert_eq!(spec.admission, Some(crate::model::SubscriptionAdmission::ReadyHeads));
         assert_eq!(spec.authors, Some(vec!["orchid-bot".into()]));
@@ -484,7 +484,7 @@ subscription "hygiene" {{
             ("github.repository", r#"on "pull_requests""#, r#"author "orchid"; author "Orchid""#, "duplicate-subscription-author"),
         ] {
             let source = admission_source(provider, fields, options);
-            assert_eq!(parse_intent(&source, "node").unwrap_err().code, code, "{source}");
+            assert_eq!(parse_test_intent(&source, "node").unwrap_err().code, code, "{source}");
         }
         for source in [
             r#"version 2
@@ -494,7 +494,7 @@ subscription "s" { observer "observer/github"; on "pull_requests"; to "agent/exa
 subscription "s" { observer "observer/github"; on "pull_requests"; admission "relevant-changes"; delivery "mission" { mission "example/evaluate"; resource "pull-request"; workspace "/srv/hygiene"; } }
 "#,
         ] {
-            assert!(parse_intent(source, "node").is_err(), "{source}");
+            assert!(parse_test_intent(source, "node").is_err(), "{source}");
         }
     }
 
