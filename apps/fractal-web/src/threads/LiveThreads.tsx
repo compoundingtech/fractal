@@ -368,12 +368,12 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
 }
 
 function useThreadViewport(enabled: boolean) {
-  const timeline = React.useRef<HTMLDivElement>(null)
+  // The timeline mounts only once the thread's detail is observed, so observation follows the element itself.
+  const [container, timeline] = React.useState<HTMLDivElement | null>(null)
   const [canMark, setCanMark] = React.useState(false)
   const capture = React.useRef<() => string[]>(() => [])
   React.useLayoutEffect(() => {
     setCanMark(false)
-    const container = timeline.current
     if (!enabled || container === null || typeof IntersectionObserver === 'undefined') return
     const tracked = new Set<Element>()
     const visible = new Set<Element>()
@@ -428,7 +428,7 @@ function useThreadViewport(enabled: boolean) {
       observer.disconnect()
       capture.current = () => []
     }
-  }, [enabled])
+  }, [enabled, container])
   return { timeline, canMark, capture: () => capture.current() }
 }
 

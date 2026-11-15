@@ -203,6 +203,69 @@ it.each([
   } finally { silence.mockRestore(); await view.dispose() }
 })
 
+it.each(['is still pending', 'fails until Retry'] as const)('lets an unread Inbox row opened while its detail read %s mark its visible reply read once the detail arrives', async (path) => {
+  const observers: Viewport[] = []
+  class Viewport {
+    readonly rows = new Set<Element>()
+    constructor(readonly changed: (entries: IntersectionObserverEntry[]) => void) { observers.push(this) }
+    observe(row: Element) { this.rows.add(row) }
+    unobserve(row: Element) { this.rows.delete(row) }
+    disconnect() { this.rows.clear() }
+    takeRecords() { return [] }
+  }
+  vi.stubGlobal('IntersectionObserver', Viewport)
+  let release = () => {}
+  const held = new Promise<void>(resolve => { release = resolve })
+  let detailBroken = path === 'fails until Retry'
+  let unread = true
+  const writes: unknown[] = []
+  const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const summary = () => ({ ...row('thread/one', 'Release checklist'), unread })
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    actions: ['thread.read'],
+    reply: async (url, init) => {
+      if (url.pathname.endsWith('/threads')) return page(url.searchParams.get('recently_closed') === 'true' ? [] : [summary()])
+      if (url.pathname.endsWith('/timeline')) return page([{ kind: 'message', id: 'message/first', actor_id: agent, content: 'The checklist is complete.',
+        accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null }])
+      if (url.pathname.endsWith('/actions')) {
+        const body = JSON.parse(String(init?.body))
+        writes.push(body)
+        unread = false
+        return Response.json({ ...base, value: { kind: 'action-result', action_id: body.id, operation_id: 'operation/read',
+          status: 'completed', affected_ids: ['message/first'], snapshot_id: base.snapshot.id } })
+      }
+      if (path === 'is still pending') await held
+      return detailBroken ? refusal(500, 'internal') : Response.json({ ...base, value: summary() })
+    },
+  })
+  const mark = () => view.button('Mark visible replies read')
+  try {
+    const header = () => view.host.querySelector<HTMLButtonElement>('[data-thread-panel][aria-label="Release checklist"] button')
+    await vi.waitFor(() => expect(header()).not.toBeNull())
+    if (header()?.getAttribute('aria-expanded') !== 'true') await act(async () => header()?.click())
+    if (path === 'is still pending') {
+      await vi.waitFor(() => expect(view.host.textContent).toContain('Loading thread'))
+      await act(async () => release())
+    } else {
+      await vi.waitFor(() => expect(view.button('Retry: Fractal could not load threads.')).toBeDefined())
+      detailBroken = false
+      await act(async () => view.button('Retry: Fractal could not load threads.')?.click())
+    }
+    // The timeline mounts only now; its rows are observed without the row being reopened.
+    await vi.waitFor(() => expect(observers.at(-1)?.rows.size).toBe(1))
+    const viewport = observers.at(-1)!
+    const reply = [...viewport.rows][0]!
+    vi.spyOn(reply, 'getBoundingClientRect').mockReturnValue(new DOMRect(8, 120, 100, 40))
+    expect(mark()?.disabled).toBe(true)
+    await act(async () => viewport.changed([{ target: reply, isIntersecting: true, intersectionRatio: 1 } as unknown as IntersectionObserverEntry]))
+    expect(mark()?.disabled).toBe(false)
+    await act(async () => mark()?.click())
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatchObject({ type: 'thread.read', parameters: { target_id: 'thread/one', through_message_id: 'message/first', seen_message_ids: ['message/first'] } })
+    await vi.waitFor(() => expect(mark()).toBeUndefined())
+  } finally { release(); silence.mockRestore(); await view.dispose() }
+})
+
 it('says a thread link names no thread instead of offering Retry', async () => {
   const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
   const view = await mount(<LiveThreadPane threadId="thread/missing" />, { reply: () => refusal(404, 'not-found') })
