@@ -30,7 +30,7 @@ private enum WireValidation {
 
 public struct NoticeActor: Codable, Sendable, Hashable {
     public let value: String
-    private static let pattern = try! NSRegularExpression(pattern: "^(?:agent|person)/[^\\s]+\\z")
+    private static let pattern = try! NSRegularExpression(pattern: "^(?:(?:agent|person)/[^\\s]+|daemon/runtime)\\z")
     public init(_ value: String) throws {
         guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeActor: constraint violation") }
         self.value = value
@@ -488,6 +488,190 @@ public enum NoticeDelivery: Codable, Sendable, Hashable {
     }
 }
 
+public typealias NoticeDigestActionsWorkOverride = NoticeDigestOverride
+
+public struct NoticeDigestActions: Codable, Sendable, Hashable {
+    public let `workOverride`: NoticeDigestActionsWorkOverride
+    public init(`workOverride`: NoticeDigestActionsWorkOverride) throws {
+        self.`workOverride` = `workOverride`
+    }
+    enum CodingKeys: String, CodingKey {
+        case `workOverride` = "work.override"
+    }
+    public init(from decoder: Decoder) throws {
+        let keys = try decoder.container(keyedBy: WireValidation.Key.self)
+        guard keys.allKeys.allSatisfy({ CodingKeys(rawValue: $0.stringValue) != nil }) else { throw WireValidation.error("NoticeDigestActions: unknown property") }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.`workOverride` = try container.decode(NoticeDigestActionsWorkOverride.self, forKey: .`workOverride`)
+    }
+}
+
+public struct NoticeDigestDefaultAnswerId: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestDefaultAnswerId: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeDigestDefaultAnswerLabel: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestDefaultAnswerLabel: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeDigestDefaultAnswer: Codable, Sendable, Hashable {
+    public let `id`: NoticeDigestDefaultAnswerId
+    public let `label`: NoticeDigestDefaultAnswerLabel
+    public init(`id`: NoticeDigestDefaultAnswerId, `label`: NoticeDigestDefaultAnswerLabel) throws {
+        self.`id` = `id`
+        self.`label` = `label`
+    }
+    enum CodingKeys: String, CodingKey {
+        case `id` = "id"
+        case `label` = "label"
+    }
+    public init(from decoder: Decoder) throws {
+        let keys = try decoder.container(keyedBy: WireValidation.Key.self)
+        guard keys.allKeys.allSatisfy({ CodingKeys(rawValue: $0.stringValue) != nil }) else { throw WireValidation.error("NoticeDigestDefaultAnswer: unknown property") }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.`id` = try container.decode(NoticeDigestDefaultAnswerId.self, forKey: .`id`)
+        self.`label` = try container.decode(NoticeDigestDefaultAnswerLabel.self, forKey: .`label`)
+    }
+}
+
+public struct NoticeDigestOverrideEpisode: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestOverrideEpisode: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeDigestOverrideTargetId: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestOverrideTargetId: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeDigestOverride: Codable, Sendable, Hashable {
+    public let `episode`: NoticeDigestOverrideEpisode
+    public let `targetID`: NoticeDigestOverrideTargetId
+    public init(`episode`: NoticeDigestOverrideEpisode, `targetID`: NoticeDigestOverrideTargetId) throws {
+        self.`episode` = `episode`
+        self.`targetID` = `targetID`
+    }
+    enum CodingKeys: String, CodingKey {
+        case `episode` = "episode"
+        case `targetID` = "target_id"
+    }
+    public init(from decoder: Decoder) throws {
+        let keys = try decoder.container(keyedBy: WireValidation.Key.self)
+        guard keys.allKeys.allSatisfy({ CodingKeys(rawValue: $0.stringValue) != nil }) else { throw WireValidation.error("NoticeDigestOverride: unknown property") }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.`episode` = try container.decode(NoticeDigestOverrideEpisode.self, forKey: .`episode`)
+        self.`targetID` = try container.decode(NoticeDigestOverrideTargetId.self, forKey: .`targetID`)
+    }
+}
+
+public typealias NoticeDigestRowActionParameters = NoticeDigestActions
+
+public typealias NoticeDigestRowDefaultAnswer = NoticeDigestDefaultAnswer
+
+public struct NoticeDigestRowEpisode: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestRowEpisode: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeDigestRowRequesterId: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestRowRequesterId: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public typealias NoticeDigestRowResolvedAt = NoticeTimestamp
+
+public struct NoticeDigestRowTargetId: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestRowTargetId: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeDigestRowTitle: Codable, Sendable, Hashable {
+    public let value: String
+    public init(_ value: String) throws {
+        guard value.unicodeScalars.count >= 1 else { throw WireValidation.error("NoticeDigestRowTitle: constraint violation") }
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode(String.self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
+public struct NoticeDigestRow: Codable, Sendable, Hashable {
+    public let `actionParameters`: NoticeDigestRowActionParameters?
+    public let `defaultAnswer`: NoticeDigestRowDefaultAnswer?
+    public let `episode`: NoticeDigestRowEpisode
+    public let `requesterID`: NoticeDigestRowRequesterId
+    public let `resolvedAt`: NoticeDigestRowResolvedAt
+    public let `targetID`: NoticeDigestRowTargetId
+    public let `title`: NoticeDigestRowTitle
+    public init(`actionParameters`: NoticeDigestRowActionParameters? = nil, `defaultAnswer`: NoticeDigestRowDefaultAnswer? = nil, `episode`: NoticeDigestRowEpisode, `requesterID`: NoticeDigestRowRequesterId, `resolvedAt`: NoticeDigestRowResolvedAt, `targetID`: NoticeDigestRowTargetId, `title`: NoticeDigestRowTitle) throws {
+        self.`actionParameters` = `actionParameters`
+        self.`defaultAnswer` = `defaultAnswer`
+        self.`episode` = `episode`
+        self.`requesterID` = `requesterID`
+        self.`resolvedAt` = `resolvedAt`
+        self.`targetID` = `targetID`
+        self.`title` = `title`
+    }
+    enum CodingKeys: String, CodingKey {
+        case `actionParameters` = "action_parameters"
+        case `defaultAnswer` = "default_answer"
+        case `episode` = "episode"
+        case `requesterID` = "requester_id"
+        case `resolvedAt` = "resolved_at"
+        case `targetID` = "target_id"
+        case `title` = "title"
+    }
+    public init(from decoder: Decoder) throws {
+        let keys = try decoder.container(keyedBy: WireValidation.Key.self)
+        guard keys.allKeys.allSatisfy({ CodingKeys(rawValue: $0.stringValue) != nil }) else { throw WireValidation.error("NoticeDigestRow: unknown property") }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.`actionParameters` = container.contains(.`actionParameters`) ? try container.decode(NoticeDigestRowActionParameters.self, forKey: .`actionParameters`) : nil
+        self.`defaultAnswer` = container.contains(.`defaultAnswer`) ? try container.decode(NoticeDigestRowDefaultAnswer.self, forKey: .`defaultAnswer`) : nil
+        self.`episode` = try container.decode(NoticeDigestRowEpisode.self, forKey: .`episode`)
+        self.`requesterID` = try container.decode(NoticeDigestRowRequesterId.self, forKey: .`requesterID`)
+        self.`resolvedAt` = try container.decode(NoticeDigestRowResolvedAt.self, forKey: .`resolvedAt`)
+        self.`targetID` = try container.decode(NoticeDigestRowTargetId.self, forKey: .`targetID`)
+        self.`title` = try container.decode(NoticeDigestRowTitle.self, forKey: .`title`)
+    }
+}
+
 public typealias NoticeDismissParametersNoticeId = NoticeId
 
 public struct NoticeDismissParameters: Codable, Sendable, Hashable {
@@ -567,7 +751,7 @@ public struct NoticeFence: Codable, Sendable, Hashable {
 
 public struct NoticeId: Codable, Sendable, Hashable {
     public let value: String
-    private static let pattern = try! NSRegularExpression(pattern: "^custom/attention/snapshot/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z")
+    private static let pattern = try! NSRegularExpression(pattern: "^custom/attention/snapshot/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})\\z")
     public init(_ value: String) throws {
         guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeId: constraint violation") }
         self.value = value
@@ -1226,6 +1410,17 @@ public struct NoticeSourceCwd: Codable, Sendable, Hashable {
     public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
 }
 
+public typealias NoticeSourceDigestItem = NoticeDigestRow
+
+public struct NoticeSourceDigest: Codable, Sendable, Hashable {
+    public let value: [NoticeSourceDigestItem]
+    public init(_ value: [NoticeSourceDigestItem]) throws {
+        self.value = value
+    }
+    public init(from decoder: Decoder) throws { try self.init(decoder.singleValueContainer().decode([NoticeSourceDigestItem].self)) }
+    public func encode(to encoder: Encoder) throws { var container = encoder.singleValueContainer(); try container.encode(value) }
+}
+
 public struct NoticeSourceHost: Codable, Sendable, Hashable {
     public let value: String
     private static let pattern = try! NSRegularExpression(pattern: "^(?:host)/[^\\s]+\\z")
@@ -1260,12 +1455,14 @@ public struct NoticeSourceRepo: Codable, Sendable, Hashable {
 public struct NoticeSource: Codable, Sendable, Hashable {
     public let `agent`: NoticeSourceAgent?
     public let `cwd`: NoticeSourceCwd?
+    public let `digest`: NoticeSourceDigest?
     public let `host`: NoticeSourceHost
     public let `pty`: NoticeSourcePty?
     public let `repo`: NoticeSourceRepo?
-    public init(`agent`: NoticeSourceAgent? = nil, `cwd`: NoticeSourceCwd? = nil, `host`: NoticeSourceHost, `pty`: NoticeSourcePty? = nil, `repo`: NoticeSourceRepo? = nil) throws {
+    public init(`agent`: NoticeSourceAgent? = nil, `cwd`: NoticeSourceCwd? = nil, `digest`: NoticeSourceDigest? = nil, `host`: NoticeSourceHost, `pty`: NoticeSourcePty? = nil, `repo`: NoticeSourceRepo? = nil) throws {
         self.`agent` = `agent`
         self.`cwd` = `cwd`
+        self.`digest` = `digest`
         self.`host` = `host`
         self.`pty` = `pty`
         self.`repo` = `repo`
@@ -1273,6 +1470,7 @@ public struct NoticeSource: Codable, Sendable, Hashable {
     enum CodingKeys: String, CodingKey {
         case `agent` = "agent"
         case `cwd` = "cwd"
+        case `digest` = "digest"
         case `host` = "host"
         case `pty` = "pty"
         case `repo` = "repo"
@@ -1283,6 +1481,7 @@ public struct NoticeSource: Codable, Sendable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.`agent` = container.contains(.`agent`) ? try container.decode(NoticeSourceAgent.self, forKey: .`agent`) : nil
         self.`cwd` = container.contains(.`cwd`) ? try container.decode(NoticeSourceCwd.self, forKey: .`cwd`) : nil
+        self.`digest` = container.contains(.`digest`) ? try container.decode(NoticeSourceDigest.self, forKey: .`digest`) : nil
         self.`host` = try container.decode(NoticeSourceHost.self, forKey: .`host`)
         self.`pty` = container.contains(.`pty`) ? try container.decode(NoticeSourcePty.self, forKey: .`pty`) : nil
         self.`repo` = container.contains(.`repo`) ? try container.decode(NoticeSourceRepo.self, forKey: .`repo`) : nil
@@ -1291,7 +1490,7 @@ public struct NoticeSource: Codable, Sendable, Hashable {
 
 public struct NoticeSourceId: Codable, Sendable, Hashable {
     public let value: String
-    private static let pattern = try! NSRegularExpression(pattern: "^custom/attention/source/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\z")
+    private static let pattern = try! NSRegularExpression(pattern: "^custom/attention/source/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|digest/person/[^\\s]+/[0-9]{4}-[0-9]{2}-[0-9]{2})\\z")
     public init(_ value: String) throws {
         guard Self.pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil else { throw WireValidation.error("NoticeSourceId: constraint violation") }
         self.value = value

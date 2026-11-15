@@ -583,6 +583,10 @@ impl ReconcileConfig {
 /// The deadline an ask gets when it names none and `[asks] default_deadline` is not set.
 pub const DEFAULT_ASK_DEADLINE: &str = "24h";
 
+/// The local daily time and fleet timezone used for ask auto-resolution digests.
+pub const DEFAULT_ASK_DIGEST_AT: &str = "09:00";
+pub const DEFAULT_ASK_DIGEST_TIMEZONE: &str = "UTC";
+
 /// `[asks]`: with `deadlines` on, every ask a person gets has a deadline, at which it resolves
 /// by itself with its default answer. `default_deadline` is the deadline of an ask that names
 /// none.
@@ -595,11 +599,20 @@ pub struct AsksConfig {
     pub deadlines: bool,
     /// A duration such as `24h` or `3d`, at least `1m` and at most `30d`.
     pub default_deadline: String,
+    /// Daily digest time in strict 24-hour `HH:MM` notation.
+    pub digest_at: String,
+    /// Fleet IANA timezone fallback until person availability records carry a timezone.
+    pub digest_timezone: String,
 }
 
 impl Default for AsksConfig {
     fn default() -> Self {
-        Self { deadlines: false, default_deadline: DEFAULT_ASK_DEADLINE.into() }
+        Self {
+            deadlines: false,
+            default_deadline: DEFAULT_ASK_DEADLINE.into(),
+            digest_at: DEFAULT_ASK_DIGEST_AT.into(),
+            digest_timezone: DEFAULT_ASK_DIGEST_TIMEZONE.into(),
+        }
     }
 }
 
@@ -607,7 +620,8 @@ impl AsksConfig {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 
     pub fn validate(&self) -> Result<()> {
-        self.default_deadline_ms().map(drop)
+        self.default_deadline_ms()?;
+        self.digest_at_minute().map(drop)
     }
 
     /// The default deadline in milliseconds.
@@ -618,6 +632,27 @@ impl AsksConfig {
             "asks.default_deadline must be between 1m and 30d"
         );
         Ok(ms)
+    }
+
+    /// The digest's local wall-clock minute. Timezone names are validated by the store's
+    /// timezone-aware scheduler when the policy is installed.
+    pub fn digest_at_minute(&self) -> Result<u16> {
+        Self::parse_digest_at_minute(&self.digest_at)
+    }
+
+    /// Parse a configured daily digest wall time without allocating.
+    pub fn parse_digest_at_minute(digest_at: &str) -> Result<u16> {
+        let bytes = digest_at.as_bytes();
+        anyhow::ensure!(
+            bytes.len() == 5
+                && bytes[2] == b':'
+                && [bytes[0], bytes[1], bytes[3], bytes[4]].iter().all(u8::is_ascii_digit),
+            "asks.digest_at must be HH:MM in 24-hour time"
+        );
+        let hour = u16::from(bytes[0] - b'0') * 10 + u16::from(bytes[1] - b'0');
+        let minute = u16::from(bytes[3] - b'0') * 10 + u16::from(bytes[4] - b'0');
+        anyhow::ensure!(hour < 24 && minute < 60, "asks.digest_at must be HH:MM in 24-hour time");
+        Ok(hour * 60 + minute)
     }
 }
 
@@ -1829,6 +1864,24 @@ mod tests {
                 .contains("claude_primary_ownership")
         );
         assert!(toml::from_str::<Config>("claude_primary_ownership=\"true\"").is_err());
+    }
+
+    #[test]
+    fn ask_digest_defaults_and_strict_local_wall_time() {
+        use super::*;
+        let old: AsksConfig = toml::from_str("deadlines = true\ndefault_deadline = \"24h\"").unwrap();
+        assert_eq!(old.digest_at, "09:00");
+        assert_eq!(old.digest_timezone, "UTC");
+        assert_eq!(old.digest_at_minute().unwrap(), 9 * 60);
+        for (at, minute) in [("00:00", 0), ("09:00", 540), ("23:59", 1439)] {
+            let config = AsksConfig { digest_at: at.into(), ..AsksConfig::default() };
+            config.validate().unwrap();
+            assert_eq!(config.digest_at_minute().unwrap(), minute);
+        }
+        for at in ["", "9:00", "09:0", "24:00", "09:60", "09:00:00", " 09:00", "09:00 ", "ab:cd", "０9:00"] {
+            let config = AsksConfig { digest_at: at.into(), ..AsksConfig::default() };
+            assert!(config.validate().unwrap_err().to_string().contains("asks.digest_at"), "{at}");
+        }
     }
 
     #[test]

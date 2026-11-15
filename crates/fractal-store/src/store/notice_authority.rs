@@ -2,8 +2,8 @@
 //! member incarnation; only that member's daemon, writing as `daemon/runtime`, writes snapshots.
 //! Every daemon writes as `daemon/runtime`, so the actor alone proves nothing: the authority is
 //! the claim's origin member and writer sequence checked against the binding. A missing,
-//! conflicted, invalid or ended binding fails closed, with no election. Sources and their
-//! lineage never depend on the binding, so a handover rebuilds snapshots and keeps sources.
+//! conflicted, invalid or ended binding fails closed, with no election. Ordinary producer
+//! sources never depend on the binding; daemon-owned digest sources do.
 //! Payload timestamps and declaration hashes are deliberately never authority evidence here.
 use super::*;
 use crate::fleet::MemberState;
@@ -34,10 +34,10 @@ impl<'a> Position<'a> {
 /// it binds against changes. Membership already counts every change in `fleet_generation`.
 pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()> {
     let dirty = format!(
-        /* sqlite-large-value: allow-for-now lv-hfd8be8e12073 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
+        /* sqlite-large-value: allow-for-now lv-h1fd7a459c656 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO local_custom_dirty SELECT subject FROM custom_sources WHERE subject LIKE '{}%'
-         ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;",
-        notice::SNAPSHOT_PREFIX,
+         OR subject LIKE '{}%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject;",
+        notice::SNAPSHOT_PREFIX, notice::DIGEST_SOURCE_PREFIX,
     );
     let owner = notice_owner::SUBJECT;
     let mut triggers = Vec::new();
@@ -120,6 +120,35 @@ pub(super) fn owner(connection: &Connection) -> Result<(NoticeOwner, crate::flee
     Ok((declared, membership))
 }
 
+/// Install only the compiled reviewed notice manifests, without borrowing a person's identity.
+/// The runtime registration exception in the fold is restricted to these pins and this owner.
+pub(super) fn ensure_digest_registrations_tx(tx: &Transaction<'_>, origin: &str) -> Result<()> {
+    validate_owner_writer(tx, notice::RUNTIME_ACTOR, Some(Position::next(tx, origin)?))?;
+    custom::flush(tx)?;
+    for (manifest, hash) in notice::manifests().iter().zip(notice::HASHES) {
+        notice::validate_registration(manifest, hash)?;
+        if let Some((prior, _, state)) = custom::registration(tx, &format!("{}digest/", manifest.subject_prefix))? {
+            anyhow::ensure!(prior == hash && state == "ready",
+                "notices unavailable: reviewed registration conflicts with existing registration");
+            continue;
+        }
+        let bytes = serde_json::to_vec(manifest)?;
+        let name = format!("doc/custom-kinds/{}.v{}/{hash}", manifest.kind, manifest.version);
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h3dba2b97c423 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO blobs(hash,bytes,size) VALUES(?1,?2,?3)",
+            params![hash, bytes, bytes.len() as u64])?;
+        let binding = append_claim_tx(tx, origin, &name, "doc.bound", None,
+            &json!({"name":name,"hash":hash,"size":bytes.len()}), &[], None)?;
+        select_replicated_document(tx, &binding, binding.store_index)?;
+        append_claim_tx(tx, origin, &manifest.subject(), fractal_schema::custom::REGISTERED,
+            Some(notice::RUNTIME_ACTOR), &json!({"fields":{"document":format!("{name}@{hash}")}}), &[], None)?;
+        custom::flush(tx)?;
+        anyhow::ensure!(custom::registration(tx, &format!("{}digest/", manifest.subject_prefix))?
+            .is_some_and(|(pin, _, state)| pin == hash && state == "ready"),
+            "notices unavailable: reviewed registration could not be installed");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn validate(
     connection: &Connection, subject: &str, manifest: &Manifest, kind: &str,
@@ -135,6 +164,10 @@ pub(super) fn validate(
         if let Some(prior) = creation {
             anyhow::ensure!(prior.actor.as_deref() == Some(actor) && custom::fields(prior) == *fields,
                 "notices unavailable: source creation conflict");
+        }
+        if subject.starts_with(notice::DIGEST_SOURCE_PREFIX) {
+            validate_digest_source(subject, actor, fields)?;
+            return validate_owner_writer(connection, actor, position);
         }
         return validate_source(actor, fields);
     }
@@ -163,8 +196,18 @@ pub(super) fn validate(
         .ok_or_else(|| unavailable("invalid source recipient"))?;
     let producer = source.actor.as_deref().ok_or_else(|| unavailable("missing source author"))?;
     fractal_schema::custom::validate_fields(&source_manifest.claims[&source.kind], &source_fields)?;
-    validate_source(producer, &source_fields)?;
-    let (owner, membership) = owner(connection)?;
+    if source_id.starts_with(notice::DIGEST_SOURCE_PREFIX) {
+        validate_digest_source(source_id, producer, &source_fields)?;
+        validate_owner_writer(connection, producer, Some(Position::written(connection, &source)?))?;
+        anyhow::ensure!(subject.strip_prefix(notice::DIGEST_SNAPSHOT_PREFIX)
+            == source_id.strip_prefix(notice::DIGEST_SOURCE_PREFIX),
+            "notices unavailable: digest snapshot identity differs from its source");
+    } else {
+        anyhow::ensure!(!subject.starts_with(notice::DIGEST_SNAPSHOT_PREFIX),
+            "notices unavailable: digest snapshots require a digest source");
+        validate_source(producer, &source_fields)?;
+    }
+    let (owner, _) = owner(connection)?;
     let runtime = format!("host/{}", owner.member);
     for (field, expected) in [("recipient", recipient), ("producer", producer), ("runtime", runtime.as_str())] {
         anyhow::ensure!(fields.get(field).and_then(Value::as_str) == Some(expected),
@@ -176,20 +219,62 @@ pub(super) fn validate(
             anyhow::ensure!(prior_fields.get(field) == fields.get(field), "notices unavailable: immutable {field} changed");
         }
     }
+    validate_owner_writer(connection, actor, position)?;
+    Ok(())
+}
+
+pub(super) fn validate_owner_writer(connection: &Connection, actor: &str, position: Option<Position<'_>>) -> Result<()> {
     anyhow::ensure!(actor == notice::RUNTIME_ACTOR,
-        "notices unavailable: only {} writes snapshots", notice::RUNTIME_ACTOR);
-    let position = position.ok_or_else(|| unavailable("a snapshot needs its writer position"))?;
+        "notices unavailable: only {} writes daemon notices", notice::RUNTIME_ACTOR);
+    let (owner, membership) = owner(connection)?;
+    let position = position.ok_or_else(|| unavailable("a daemon notice needs its writer position"))?;
     anyhow::ensure!(
         position.origin == owner.member
             && membership.keys_for(position.origin, position.sequence).contains(&owner.member_key),
-        "notices unavailable: only the bound notice owner's daemon writes snapshots"
+        "notices unavailable: only the bound notice owner's daemon writes daemon notices"
     );
+    Ok(())
+}
+
+fn validate_digest_source(subject: &str, actor: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+    anyhow::ensure!(actor == notice::RUNTIME_ACTOR && !fields.contains_key("producer"),
+        "notices unavailable: digest sources are daemon-owned without a producer field");
+    let recipient = fields.get("recipient").and_then(Value::as_str)
+        .filter(|person| person.starts_with("person/"))
+        .ok_or_else(|| unavailable("digest recipient must be a person"))?;
+    let suffix = subject.strip_prefix(notice::DIGEST_SOURCE_PREFIX).unwrap_or_default();
+    let date = suffix.strip_prefix(recipient).and_then(|rest| rest.strip_prefix('/'))
+        .ok_or_else(|| unavailable("digest identity must bind its recipient"))?;
+    anyhow::ensure!(date.len() == 10 && date.bytes().enumerate().all(|(index, byte)|
+        if index == 4 || index == 7 { byte == b'-' } else { byte.is_ascii_digit() }),
+        "notices unavailable: digest identity needs a local date");
+    let rows = fields.get("source").and_then(|source| source.get("digest")).and_then(Value::as_array)
+        .ok_or_else(|| unavailable("digest source needs digest rows"))?;
+    for row in rows {
+        let row = row.as_object().ok_or_else(|| unavailable("digest row must be an object"))?;
+        anyhow::ensure!(row.keys().all(|key| matches!(key.as_str(),
+            "title" | "requester_id" | "default_answer" | "resolved_at" | "target_id" | "episode" | "action_parameters")),
+            "notices unavailable: unknown digest row field");
+        for field in ["title", "requester_id", "resolved_at", "target_id", "episode"] {
+            anyhow::ensure!(row.get(field).and_then(Value::as_str).is_some_and(|value| !value.is_empty()),
+                "notices unavailable: digest row needs {field}");
+        }
+        if let Some(parameters) = row.get("action_parameters") {
+            anyhow::ensure!(parameters == &json!({"work.override":{
+                "target_id": row["target_id"], "episode": row["episode"]
+            }}), "notices unavailable: digest override must bind its row");
+        }
+        anyhow::ensure!(row.get("default_answer").is_none_or(Value::is_object),
+            "notices unavailable: digest default answer must be an object");
+    }
     Ok(())
 }
 
 /// A source is a producer's own input: an agent or person, never a daemon, and never pinning
 /// the runtime, so its lineage survives an owner handover.
 fn validate_source(producer: &str, fields: &BTreeMap<String, Value>) -> Result<()> {
+    anyhow::ensure!(fields.get("source").and_then(|source| source.get("digest")).is_none(),
+        "notices unavailable: digest rows require a digest source");
     anyhow::ensure!(producer.starts_with("agent/") || producer.starts_with("person/"),
         "notices unavailable: a source producer is an agent or person");
     anyhow::ensure!(fields.get("producer").is_none_or(|value| value.as_str() == Some(producer)),

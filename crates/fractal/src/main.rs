@@ -7921,6 +7921,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_default_stall_reports(config.reconcile.default_stall_reports);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
+    reconciler.set_ask_digest_policy(&config.asks)?;
     fractal_store::store::run_authority::set_run_authority_mode(config.programs.authority);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -21215,6 +21216,9 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                     tracing::warn!("the ask deadline default could not be recorded: {error:#}");
                 }
                 store.set_ask_deadlines(asks.deadlines);
+                if let Err(error) = reconciler.set_ask_digest_policy(&asks) {
+                    tracing::warn!("the ask digest policy keeps its last config: {error:#}");
+                }
                 limits = reloaded;
                 last_error = None;
             }
