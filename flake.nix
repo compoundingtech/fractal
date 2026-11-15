@@ -2016,8 +2016,8 @@
             };
             unitText = units rendered;
             forbiddenPaths = map (package: builtins.unsafeDiscardStringContext (toString package)) [
-              rendered.services.smalltalk.package
-              rendered.services.smalltalk.ptyPackage
+              rendered.services.fractal.package
+              rendered.services.fractal.ptyPackage
               (builtins.head hmModuleEval.config.home.packages)
             ];
             applyScript = if pkgs.stdenv.hostPlatform.isLinux then
