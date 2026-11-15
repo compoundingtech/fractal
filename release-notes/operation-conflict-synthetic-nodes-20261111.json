@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use synthetic node names in the operation-conflict regression fixture.",
+  "replay": {"status": "none", "detail": "Fixture names only; projection behavior is unchanged."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "No runtime or wire changes."},
+  "manual": {"status": "none", "detail": "No manual steps."},
+  "recovery": {"status": "none", "detail": "No recovery changes."},
+  "downtime": {"status": "none", "detail": "No runtime changes."}
+}

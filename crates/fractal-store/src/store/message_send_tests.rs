@@ -155,8 +155,9 @@ fn message_operation_conflict_receipt_cost_depends_on_its_own_history() {
         assert!(cost.vm_steps > 0);
         costs.push(cost);
     }
-    assert_eq!(costs[0].statements, costs[1].statements);
-    assert_eq!(costs[1].statements, costs[2].statements);
+    // Reader discovery may issue additional keyed/page statements. It must not add a
+    // whole-log scan as this operation's history grows; keep the linear VM-work bound too.
+    assert_eq!(costs[0].fullscan_steps, costs[2].fullscan_steps);
     assert!(
         costs[2].vm_steps < costs[0].vm_steps * 50,
         "one indexed fold should grow linearly, not repeat a whole-store replay per receipt"

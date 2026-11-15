@@ -2294,7 +2294,7 @@ fn planning_replication_keeps_malformed_operation_and_unknown_kind_guards() {
             | IncrementalProjection::ReplayWithContext { reason, .. } => {
                 assert_eq!(reason, expected)
             }
-            IncrementalProjection::Projected => panic!("{kind} bypassed {expected}"),
+            IncrementalProjection::Projected | IncrementalProjection::ProjectedWithContext { .. } => panic!("{kind} bypassed {expected}"),
         }
         transaction.rollback().unwrap();
     }
@@ -2308,7 +2308,6 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         "frontier-ahead",
         "non-incremental-kind",
         "malformed-operation",
-        "operation-conflict",
         "incremental-error:internal",
     ] {
         FULL_REPLAYS.with(|count| count.set(0));
@@ -2320,24 +2319,18 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         {
             let mut connection = store.connection.lock().unwrap();
             let transaction = connection.transaction().unwrap();
-            let operation = json!({"id":"op/replay-test", "request_digest":"digest-a"});
             let (kind, body) = match reason {
                 "non-incremental-kind" => ("work.unknown", json!({"fields":{}})),
                 "malformed-operation" => (
                     "harness.observed",
                     json!({"fields":{"state":"ready"}, "_operation":{"id":"op/malformed"}}),
                 ),
-                "operation-conflict" => (
-                    "work.nudged",
-                    json!({"fields":{"attempt":1,"agent":"agent/node.test",
-                        "message":"message/invented-nudge","idle_since_unix_ms":"1",
-                        "reason":"invented control","waits":[]}, "_operation":operation}),
-                ),
+
                 "incremental-error:internal" => ("intent.desired", json!({})),
                 _ => ("harness.observed", json!({"fields":{"state":"ready"}})),
             };
             // Seed historical input without pre-projecting it or requiring a current schema.
-            let claim = append_claim_record_tx(
+            append_claim_record_tx(
                 &transaction,
                 "node",
                 "agent/node.test",
@@ -2348,9 +2341,6 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                 None,
             )
             .unwrap();
-            if reason == "operation-conflict" {
-                transaction.execute(/* sqlite-large-value: allow-for-now lv-h5c80b3d61773 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO operations(id, request_digest, canonical_claim_id, state) VALUES ('op/replay-test', 'digest-b', ?1, 'active')", [&claim.id]).unwrap();
-            }
             match reason {
                 "missing-health" => {
                     transaction
@@ -2408,7 +2398,7 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
             .filter_map(|line| line.strip_prefix("fractal: projection failure detail "))
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
-        if matches!(reason, "incremental-error:internal" | "operation-conflict"
+        if matches!(reason, "incremental-error:internal"
             | "malformed-operation" | "non-incremental-kind") {
             assert_eq!(details.len(), 1, "{reason}");
             assert_eq!(details[0]["subject"], "agent/node.test");
@@ -2418,10 +2408,7 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                     .is_some_and(|id| id.len() == 64)
             );
             assert_eq!(details[0]["error_truncated"], false);
-            if reason == "operation-conflict" {
-                assert_eq!(details[0]["operation_id"], "op/replay-test");
-                assert!(details[0]["error"].as_str().unwrap().contains("digest_matches=false"));
-            } else if reason == "incremental-error:internal" {
+            if reason == "incremental-error:internal" {
                 assert!(
                     details[0]["error"]
                         .as_str()
@@ -2579,10 +2566,10 @@ fn simple_replication_registers_unambiguous_event_operations() {
 }
 
 #[test]
-fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
+fn simple_replication_bounds_structural_operation_conflicts_without_full_replay() {
     let store = Store::open_memory("node").unwrap();
     store.project_replication_backlog().unwrap();
-    for (index, digest) in ["digest-one", "digest-two"].into_iter().enumerate() {
+    for digest in ["digest-one", "digest-two"] {
         let mut connection = store.connection.lock().unwrap();
         let transaction = connection.transaction().unwrap();
         append_claim_tx(
@@ -2599,17 +2586,14 @@ fn simple_replication_keeps_structural_operation_conflicts_on_replay_path() {
             None,
         )
         .unwrap();
-        assert_eq!(
-            try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap(),
-            index == 0
-        );
+        assert!(try_project_all_simple_replication_tx(&transaction, &store.origin).unwrap());
         transaction.commit().unwrap();
         drop(connection);
         let replays = FULL_REPLAYS.with(std::cell::Cell::get);
         store.project_replication_backlog().unwrap();
         assert_eq!(
             FULL_REPLAYS.with(std::cell::Cell::get),
-            replays + usize::from(index == 1)
+            replays
         );
     }
     assert_eq!(
@@ -4579,6 +4563,10 @@ fn work_nudged_incremental_guards_and_rollback_preserve_the_committed_frontier()
             IncrementalProjection::Projected => {
                 assert_eq!(refusal, "none");
                 assert_eq!(operation_tx(&transaction, "op/nudge-guard").unwrap().unwrap().2, "active");
+            }
+            IncrementalProjection::ProjectedWithContext { code, .. } => {
+                assert_eq!(refusal, "operation-conflict");
+                assert_eq!(code, "operation-conflict");
             }
             IncrementalProjection::Replay(reason)
             | IncrementalProjection::ReplayWithContext { reason, .. } => assert_eq!(reason, refusal),
