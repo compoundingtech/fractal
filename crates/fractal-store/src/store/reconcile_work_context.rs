@@ -58,6 +58,7 @@ pub struct DefinitionFields {
     pub queue_position: Option<u32>,
     pub timeout_ms: Option<u64>,
     pub fresh_context: bool,
+    pub retry: Option<crate::model::RetrySpec>,
 }
 
 #[derive(Default)]
@@ -74,7 +75,7 @@ impl DefinitionIndex {
     }
 
     // Match find_step's display-order depth-first traversal and its first matching path.
-    // Store only the four fields this reader uses; nested mission trees are never cloned.
+    // Store only the metadata this reader uses; nested mission trees are never cloned.
     fn visit(&mut self, mission: &MissionSpec) -> bool {
         for id in &mission.display_order {
             let Some(step) = mission.steps.get(id) else {
@@ -88,6 +89,7 @@ impl DefinitionIndex {
                     queue_position: step.queue_position,
                     timeout_ms: step.timeout_ms,
                     fresh_context: step.fresh_context,
+                    retry: (step.retry != crate::model::RetrySpec::default()).then(|| step.retry.clone()),
                 });
             if let Some(nested) = &step.nested_mission
                 && !self.visit(nested)
@@ -165,6 +167,7 @@ pub fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
             view.queue_position = step.queue_position;
             view.timeout_ms = step.timeout_ms;
             view.fresh_context = step.fresh_context;
+            view.retry.clone_from(&step.retry);
         }
     }
     // Match work_at_snapshot_selected's order and filtering, including terminal work used to

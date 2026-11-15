@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Retire failed step resource scopes before retries and show retry policies and attempt deadlines in missions show",
+  "replay": {"status": "changed", "detail": "Retries retire earlier attempts' queued and admitted lane memberships rather than reusing grants. Inherited parent scopes remain owned by the parent."},
+  "schema": {"status": "changed", "detail": "Step run views optionally include the declared retry policy; absent policies are omitted."},
+  "rules": {"status": "changed", "detail": "Automatic and operator retries cannot dispatch a new program attempt or admit a new direct execution until earlier scopes of the same logical step have retired, including across reopened run generations."},
+  "compatibility": {"status": "changed", "detail": "Retry admission rejoins the lane queue with a new attempt identity. Existing retry policy fields and failure classification remain unchanged."},
+  "downtime": {"status": "none", "detail": "No restart or data migration is required."},
+  "manual": {"status": "none", "detail": "External flock tickets are outside native lane custody and must be released by the owning process exiting."},
+  "recovery": {"status": "changed", "detail": "Pending or uncertain retirement retains custody and blocks retry dispatch until execution roots and linked children have terminated."}
+}

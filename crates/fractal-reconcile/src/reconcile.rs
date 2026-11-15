@@ -15203,6 +15203,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     definition_hash: step.spec.definition_hash.clone(),
                     status: "pending".into(),
                     attempt: 1,
+                    retry: None,
                     assigned_to: None,
                     available_to: Vec::new(),
                     agentless: true,
@@ -15274,6 +15275,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         view: &crate::model::StepRunView,
         program: &crate::model::ProgramSpec,
     ) -> Result<bool> {
+        if !self.retire_previous_step_resources(&run.subject, view)? {
+            return Ok(false);
+        }
         let dispatch = program::Dispatch {
             step: view.subject.clone(),
             attempt: view.attempt,

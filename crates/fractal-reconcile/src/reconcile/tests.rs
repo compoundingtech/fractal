@@ -29665,7 +29665,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn inherited_nested_work_keeps_one_parent_alert() {
-        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { executions: None, subject: subject.into(),
+        let step = |subject: &str, path: &str, assignee: &str| crate::model::StepRunView { retry: None, executions: None, subject: subject.into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: path.into(),
@@ -29836,7 +29836,7 @@ mission "ios-proof-blocked" state="ready" {
 
     #[test]
     fn busy_agent_keeps_cross_run_work_queued_without_wake_deadline() {
-        let mut first = StepRunView { executions: None, subject: "step-run/older/work".into(),
+        let mut first = StepRunView { retry: None, executions: None, subject: "step-run/older/work".into(),
         run: "mission-run/older".into(),
         generation: "run-generation/older".into(),
         step: "work".into(),
@@ -30346,7 +30346,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
 
     #[test]
     fn only_the_assignee_host_arms_a_work_wake_deadline() {
-        let step = StepRunView { executions: None, subject: "step-run/run-1/work".into(),
+        let step = StepRunView { retry: None, executions: None, subject: "step-run/run-1/work".into(),
         run: "mission-run/run-1".into(),
         generation: "run-generation/run-1".into(),
         step: "work".into(),
