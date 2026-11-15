@@ -1,12 +1,10 @@
 import * as React from 'react'
-import * as stylex from '@stylexjs/stylex'
 import { markStart, measureEnd } from './perfMarks.ts'
 import { useAtomValue } from '@effect/atom-react'
 import { systemEventsPreference } from './conversationPreferences.ts'
 import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
-import { readingColumnStyles } from '../../../../packages/fractal-ui/src/assistant-ui/reading-column.stylex.ts'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import type { AgentStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { useAgent, useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useFleetSelection, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
@@ -266,7 +264,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: state._tag === 'Unavailable' ? 'auto' : 'hidden' }}>
-    {state._tag === 'Unavailable' ? <><ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable} /><div {...stylex.props(readingColumnStyles.column)}>{embeddedThreads}</div></> : <ConversationTranscript
+    {state._tag === 'Unavailable' ? <ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable}>{embeddedThreads}</ThreadUnavailable> : <ConversationTranscript
       agentRef={agentRef}
       feed={feed}
       active={visible}
