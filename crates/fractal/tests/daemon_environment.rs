@@ -621,7 +621,7 @@ async fn fixture_agent_attribution_is_declared_only_and_never_enabled_by_the_pro
             root.path(), &home, &root.path().join("state-home"), binary,
             &["--config", config.to_str().unwrap()],
         );
-        let client = fractal_daemon::client::Client::unix_as(&socket, agent).unwrap();
+        let client = fractal_daemon::client::Client::unix_agent(&socket, agent).unwrap();
         let snapshot = fractal_client::Client::unix_as(&socket, agent)
             .capabilities().await.unwrap().snapshot.id;
         for (kind, parameters) in [
@@ -642,7 +642,7 @@ async fn fixture_agent_attribution_is_declared_only_and_never_enabled_by_the_pro
             }
         }
         if fixture {
-            let undeclared = fractal_daemon::client::Client::unix_as(&socket, "agent/example/unknown").unwrap();
+            let undeclared = fractal_daemon::client::Client::unix_agent(&socket, "agent/example/unknown").unwrap();
             let error = undeclared.get::<Value>("/v1/client/capabilities").await.unwrap_err();
             assert!(error.to_string().contains("fixture identity must name a declared agent"), "{error}");
             let store = Store::open(&state.join("claims.sqlite3"), "orchid").unwrap();
