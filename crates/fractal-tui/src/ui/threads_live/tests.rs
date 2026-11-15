@@ -238,7 +238,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         legacy_request: None, person: person.into(), title: "Review the worker".into(),
         reason: "Discuss the review without answering the ask.".into(), actor: agent.into(),
         step: None, new_run: None, incarnation: None, request: None,
-        deadline_ms: None, default_answer: None, idempotency_key: "native-thread-origin".into(),
+        deadline_ms: None, default_answer: None, priority: None, idempotency_key: "native-thread-origin".into(),
     }).unwrap();
     let ask_item = store.attention_items(Some(person)).unwrap().into_iter()
         .find(|item| item.subject == ask.subject).unwrap();

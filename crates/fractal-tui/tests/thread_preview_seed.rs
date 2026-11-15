@@ -196,6 +196,7 @@ fn seed_scratch_trial_asks() {
             request: None,
             deadline_ms: None,
             default_answer: None,
+            priority: None,
             idempotency_key: key.into(),
         };
         let ask = store.ask_person(&input).unwrap();
