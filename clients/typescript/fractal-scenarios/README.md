@@ -79,6 +79,9 @@ is allowlisted, because exempt declarations never invoke that loader. A primitiv
 import any `*fixture*`-named module. Its inline domain data remains review-only.
 Contract fixtures may use local exact-contract inputs; their allowed contract-data modules and
 exempt importers print in check output. Inline and closure-held contract inputs require review.
+For example, the inline system-notice wrapping story lives in a separate primitive CSF from the
+roster-backed system states. The web thread workspace's clock-skew ordering contract uses local
+decoded timeline inputs, not a runtime import from the scenario kit's domain-fixture root.
 Import `scenarioDomainFixture` from `/domain-fixture` to mark a domain source with the exported
 `scenarioDomainFixtureMarker` unique-symbol value. Marker coverage is checked for kit domain roots.
 
