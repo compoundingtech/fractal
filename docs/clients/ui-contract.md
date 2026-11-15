@@ -433,6 +433,10 @@ the usual bounded `limit` and opaque `cursor`. Inconsistent selectors are
 validation errors, not silently widened searches. Empty text lists recent inputs;
 nonempty text is a literal, Unicode case-folded substring search, not regex,
 shell syntax or transcript search. Preserve original input bytes in the result.
+An optional exact `message` selector resolves one previously selected message
+within that scope against current authorization and eligibility, without an old
+cursor. Before replacing a draft from cached history, perform this lookup and
+use its returned text; an excluded/unavailable result leaves the draft unchanged.
 
 Return a standard page of `InputHistoryEntry`, plus a monotonic
 `history_revision` and explicit completeness/coverage information. An entry has
