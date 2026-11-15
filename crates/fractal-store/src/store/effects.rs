@@ -251,16 +251,16 @@ impl Store {
             if kind != KIND_INTENDED {
                 return Err(FractalError::new("effect-not-intended", "the effect has already entered execution or resolution"));
             }
-            let original = intended_tx(tx, &record.effect_id)?.ok_or_else(|| internal("the intended effect is missing"))?;
-            if &original != record {
-                return Err(FractalError::new("idempotency-mismatch", "the admitted effect changed"));
-            }
             if operation_conflicted_tx(tx, &record.operation_id)?
             {
                 park_tx(tx, self.origin(), record, &record.bound_step_run,
                     "idempotency-conflict", &record.lease_owner)?;
                 return Ok(Err(FractalError::new("idempotency-conflict",
                     "the effect operation has conflicting requests")));
+            }
+            let original = intended_tx(tx, &record.effect_id)?.ok_or_else(|| internal("the intended effect is missing"))?;
+            if &original != record {
+                return Err(FractalError::new("idempotency-mismatch", "the admitted effect changed"));
             }
             // Recheck the originating lease at the final durable boundary before send.
             let mission: String = tx.query_row("SELECT m.mission_id FROM step_runs s JOIN mission_runs m ON m.id=s.run_id WHERE s.subject=?1",

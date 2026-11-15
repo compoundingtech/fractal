@@ -553,22 +553,29 @@ fn split_host_first_send_converges_with_a_durable_peer_fence_and_never_two_messa
 
 #[test]
 fn visible_two_writer_admission_conflict_parks_before_either_host_sends() {
-    let first = Fixture::on_origin("first");
-    let second = Fixture::on_origin("second");
-    let left = first.admit();
-    let right = second.admit();
-    assert_eq!(left.operation_id, right.operation_id);
-    // Both independently admitted before either intent was visible to the other.
-    replicate(&first.state, &second.state);
-    replicate(&second.state, &first.state);
-    for (fixture, admitted) in [(&first, &left), (&second, &right)] {
-        let key = crate::store::effects::effect_key(fixture.owner()).unwrap();
-        let (writers, _) = fixture.state.store.operation_claims(&key).unwrap();
-        assert_eq!(writers.len(), 2);
-        assert_eq!(fixture.accept().unwrap_err().code, "idempotency-conflict");
-        fixture.assert_parked(admitted);
-        assert!(fixture.state.store.effect_in_flight(admitted).is_err());
-        assert_message_count(&fixture.state, 0);
+    for at_send_boundary in [false, true] {
+        let first = Fixture::on_origin("first");
+        let second = Fixture::on_origin("second");
+        let left = first.admit();
+        let right = second.admit();
+        assert_eq!(left.operation_id, right.operation_id);
+        // Both independently admitted before either intent was visible to the other.
+        replicate(&first.state, &second.state);
+        replicate(&second.state, &first.state);
+        for (fixture, admitted) in [(&first, &left), (&second, &right)] {
+            let key = crate::store::effects::effect_key(fixture.owner()).unwrap();
+            let (writers, _) = fixture.state.store.operation_claims(&key).unwrap();
+            assert_eq!(writers.len(), 2);
+            let error = if at_send_boundary {
+                fixture.state.store.effect_in_flight(admitted).unwrap_err().code.to_owned()
+            } else {
+                fixture.accept().unwrap_err().code
+            };
+            assert_eq!(error, "idempotency-conflict");
+            fixture.assert_parked(admitted);
+            assert!(fixture.state.store.effect_in_flight(admitted).is_err());
+            assert_message_count(&fixture.state, 0);
+        }
     }
 }
 
