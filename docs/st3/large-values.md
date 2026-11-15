@@ -723,3 +723,21 @@ Their `trace-statement-and-value-representation` task is to review the producer
 and any future persistence consumer before changing that representation; the
 conservative include inventory is not a permanent exemption or a byte-size bound.
 
+### Native effect resolution
+
+`fractal_store::store::effects` owns `lv-h4d33c1e58bfd`, the step/effect reverse
+index. Its step and effect subject TEXT keys remain inline like the existing
+claim-subject indexes; their representation still needs chunk/reference review.
+`lv-hb9a49c3cca1c` walks one effect's predecessor graph to distinguish a person's
+covered unresolved episodes from concurrent observations. `lv-h01c4365780a3`
+selects that effect's monotonic phase through canonical ordering. Both reads
+reuse existing claim identity/body/predecessor representation, not a size proof:
+the owner must trace those values to bounded physical references without
+weakening causal resolution or immutable receipt selection.
+
+`fractal_store::store` owns `lv-he1edfe7bd7b2`, which reopens the existing current
+generation on a causally backed late effect conflict. Run identity and timestamp
+TEXT stay inline with the surrounding run-state projection. Representation and
+reclamation review must preserve the evidence-backed hold and terminal-tree
+invariants; no growing receipt body is synthesized by this update.
+
