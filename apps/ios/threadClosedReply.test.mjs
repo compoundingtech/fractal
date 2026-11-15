@@ -36,15 +36,17 @@ function hooks() {
   };
 }
 
-test('the composer exposes Message thread exactly once as its accessible name', () => {
+test('the composer exposes Message thread exactly once when empty and after typing', () => {
   const compose = compile('ThreadComposeField', undefined, { View: 'View', Field: 'Field', Button: 'Button' });
-  const tree = compose({ text: '', onChange() {}, onSend() {}, enabled: true, canSend: false });
-  const field = find(tree, 'Field');
-  // iOS exposes both an explicit label and the placeholder when both are supplied.
-  const accessibleName = [field.props.accessibilityLabel, field.props.placeholder].filter(Boolean).join(' ');
-  assert.equal(accessibleName, 'Message thread');
-  assert.equal(field.props.accessibilityLabel, undefined);
-  assert.equal(tree.props.accessibilityLabel, undefined, 'the wrapper does not repeat the field name');
+  for (const text of ['', 'A reply']) {
+    const tree = compose({ text, onChange() {}, onSend() {}, enabled: true, canSend: false });
+    const field = find(tree, 'Field');
+    // RN 0.86.3 RCTUITextView appends the placeholder only when its text is empty.
+    const accessibleName = [field.props.accessibilityLabel, !field.props.value.length ? field.props.placeholder : undefined].filter(Boolean).join(' ');
+    assert.equal(accessibleName, 'Message thread');
+    assert.equal(field.props.accessibilityLabel, text.length ? 'Message thread' : undefined);
+    assert.equal(tree.props.accessibilityLabel, undefined, 'the wrapper does not repeat the field name');
+  }
 });
 
 test('a closed thread keeps its composer and exact-message quote without implicitly reopening', async () => {

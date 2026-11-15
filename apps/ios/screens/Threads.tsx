@@ -761,8 +761,8 @@ function ThreadComposeField({ inputRef, rowRef, onReveal, text, onChange, onSend
   onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean;
 }) {
   return <View ref={rowRef} onLayout={onReveal} style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
-    {/* The native text field exposes its placeholder; a matching label is spoken twice on iOS. */}
-    <Field ref={inputRef} onFocus={onReveal} placeholder="Message thread" value={text} editable={enabled}
+    {/* iOS appends the placeholder to the label only while empty; keep one name in both states. */}
+    <Field ref={inputRef} onFocus={onReveal} accessibilityLabel={text.length ? 'Message thread' : undefined} placeholder="Message thread" value={text} editable={enabled}
       onChangeText={onChange} multiline autoFocus={autoFocus} style={{ flex: 1 }} />
     <Button label="Send" disabled={!enabled || !canSend} onPress={onSend} />
     {onCancel ? <Button label="Cancel" disabled={!enabled} onPress={onCancel} /> : null}
