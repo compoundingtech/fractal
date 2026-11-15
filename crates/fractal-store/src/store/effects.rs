@@ -282,15 +282,18 @@ impl Store {
             let mut statement = tx.prepare_cached(
                 "SELECT body FROM claims WHERE subject=?1 AND kind='effect.confirmed'
                  AND json_extract(body,'$._resolution.key')=?2").map_err(internal)?;
-            let existing = statement.query_map(params![subject,key], |row| row.get::<_, String>(0)).map_err(internal)?
-                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
-            for body in existing {
-                let body: Value = serde_json::from_str(&body).map_err(internal)?;
+            let rows = statement.query_map(params![subject,key], |row| row.get::<_, String>(0)).map_err(internal)?;
+            let mut existing = None;
+            for body in rows {
+                let body: Value = serde_json::from_str(&body.map_err(internal)?).map_err(internal)?;
                 if body["_resolution"]["request"] != request {
                     return Err(FractalError::new("idempotency-conflict", "the resolution key already identifies different terms"));
                 }
-                return serde_json::from_value(body["fields"].clone()).map_err(internal);
+                if existing.is_none() {
+                    existing = Some(serde_json::from_value(body["fields"].clone()).map_err(internal)?);
+                }
             }
+            if let Some(existing) = existing { return Ok(existing); }
             let Some((kind, _)) = latest_tx(tx, subject)? else { return Err(internal("effect disappeared")); };
             if kind != KIND_UNRESOLVED {
                 return Err(FractalError::new("effect-not-unresolved", "only an unresolved effect can be human resolved"));
