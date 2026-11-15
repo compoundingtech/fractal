@@ -108,7 +108,7 @@ async fn assistant_summary_nonempty_queue_work_by_grant_count() {
     use smallclaims::store::assistant_grant_authority as authority;
     for grants in [2, 15, 50] {
         let fixture = fixture(SCOPES, true).await;
-        let subject = format!("custom/client/assistant-v1-{}", fixture.grant.strip_prefix("assistant-grant/").unwrap());
+        let subject = subject(&fixture.grant).unwrap();
         let template = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
         for index in 1..grants {
             let suffix = format!("{index:024x}");
@@ -118,7 +118,9 @@ async fn assistant_summary_nonempty_queue_work_by_grant_count() {
             body["fields"]["credential_hash"] = json!(format!("{index:064x}"));
             fixture.state.store.append_claim(&ClaimInput {
                 subject: format!("custom/client/assistant-v1-{suffix}"), kind: GRANTED.into(),
-                actor: template.actor.clone(), fields: body["fields"].clone(), ..Default::default()
+                actor: template.actor.clone(),
+                fields: serde_json::from_value(body["fields"].clone()).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
         {
