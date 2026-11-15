@@ -39,14 +39,15 @@ const live: FeedSyncObservation = { status: { _tag: 'Live', since: 0 }, observed
 
 type Reply = (url: URL, init: RequestInit | undefined) => Response | Promise<Response>
 
-/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities. */
-async function mount(element: React.ReactElement, { actions = [], reply }: { readonly actions?: readonly string[]; readonly reply: Reply }) {
+/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, and `unreachable` fails every request, capabilities included. */
+async function mount(element: React.ReactElement, { actions = [], reply, unreachable }: { readonly actions?: readonly string[]; readonly reply: Reply; readonly unreachable?: () => boolean }) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
   const requests: URL[] = []
   const client = new FractalClient({ baseUrl: 'http://gateway.test', fetchImpl: async (input, init) => {
     const url = new URL(String(input))
     requests.push(url)
+    if (unreachable?.()) throw new TypeError('Failed to fetch')
     if (url.pathname.endsWith('/capabilities')) return Response.json({
       ...base, value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
@@ -238,16 +239,17 @@ it.each([['lost', true], ['held elsewhere', false]] as const)('focuses a thread 
 })
 
 it('retires the unreachable-send advice once the gateway is live again and keeps the draft', async () => {
+  // While the gateway is down every request fails before reaching it, the capabilities read for the fence included.
+  let down = false
   const view = await mount(<LiveThreadPane threadId="thread/one" />, {
     actions: ['thread.reply'],
-    reply: (url, init) => {
-      if (init?.method === 'POST') throw new TypeError('Failed to fetch')
-      return url.pathname.endsWith('/timeline') ? page([]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') })
-    },
+    reply: url => url.pathname.endsWith('/timeline') ? page([]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+    unreachable: () => down,
   })
   const advice = 'Fractal could not be reached, so nothing changed. Try again once it reconnects.'
   try {
     await vi.waitFor(() => expect(view.host.querySelector('textarea')).not.toBeNull())
+    down = true
     await view.setGateway({ status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 1, nextAt: 1_000, issue: 'socket closed' } }, observedAt: 1 })
     await type(view.host.querySelector('textarea'), 'Drafted while offline')
     await act(async () => view.button('Send')?.click())
@@ -255,5 +257,20 @@ it('retires the unreachable-send advice once the gateway is live again and keeps
     await view.setGateway({ status: { _tag: 'Live', since: 2 }, observedAt: 2 })
     expect(view.host.textContent).not.toContain(advice)
     expect(view.host.querySelector('textarea')?.value).toBe('Drafted while offline')
+  } finally { await view.dispose() }
+})
+
+it('keeps a thread tab loading while Fractal has not answered which thread operations it allows', async () => {
+  let failed = 0
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    reply: () => Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+    unreachable: () => { failed += 1; return true },
+  })
+  try {
+    // Once the capabilities read has failed the answer stays unknown, not a connection without threads.
+    await vi.waitFor(() => expect(failed).toBeGreaterThan(0))
+    await act(async () => {})
+    expect(view.host.textContent).toContain('Loading thread')
+    expect(view.host.textContent).not.toContain('does not support threads')
   } finally { await view.dispose() }
 })
