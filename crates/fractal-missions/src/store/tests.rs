@@ -13436,3 +13436,41 @@ fn relevant_admission_frontier_lookup_is_bounded_across_history_and_subscription
         assert!((cost - costs[0]).abs() < 20, "frontier seek grew with history: {costs:?}");
     }
 }
+
+#[test]
+fn relevant_admission_preserves_each_mission_frontier_when_a_subscription_switches_back() {
+    let store = Store::open_memory("node").unwrap();
+    let mut subscriptions = publish_admission_watch(
+        &store, &[("relevant", r#"admission "relevant-changes""#)],
+    );
+    publish_mission(&store, r#"version 2
+mission "admission-other" state="ready" {
+  goal "Evaluate another responsibility."
+  input "source" kind="resource"
+  step "evaluate" { agentless }
+}"#, "admission-other");
+    observe_admission_pulls(&store, &subscriptions, json!([]));
+    let mut pull = admission_pull();
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    pull["body_digest"] = json!("body-b");
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    let previous = admission_requests(&store, "relevant")[1].body["fields"]["delivery_key"].clone();
+    subscriptions[0].1.mission = Some("admission-other".into());
+    pull["body_digest"] = json!("body-c");
+    observe_admission_pulls(&store, &subscriptions, json!([pull.clone()]));
+    assert_eq!(admission_requests(&store, "relevant").len(), 3);
+    // The all-status mission frontier is authoritative across rebuild and replication,
+    // independently of the one current pending request for this subscription/resource.
+    store.rebuild_claim_projections().unwrap();
+    let replica = Store::open_memory("replica").unwrap();
+    replicate_fully(&store, &replica);
+    subscriptions[0].1.mission = Some("admission-review".into());
+    pull["body_digest"] = json!("body-a");
+    observe_admission_pulls(&replica, &subscriptions, json!([pull.clone()]));
+    observe_admission_pulls(&replica, &subscriptions, json!([pull]));
+    let requests = admission_requests(&replica, "relevant");
+    assert_eq!(requests.len(), 4, "M → N → M must not rediscover the first M delivery key");
+    assert_eq!(requests[3].body["fields"]["previous_delivery_key"], previous);
+    assert_ne!(requests[3].body["fields"]["delivery_key"], requests[0].body["fields"]["delivery_key"]);
+    assert_eq!(replica.pending_subscription_mission_requests("subscription/relevant").unwrap().len(), 1);
+}

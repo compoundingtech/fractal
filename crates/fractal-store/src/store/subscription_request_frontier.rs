@@ -9,12 +9,14 @@ const RELEVANT: &str = "kind='subscription.mission-requested' AND json_extract(b
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("
 CREATE TABLE IF NOT EXISTS local_subscription_request_frontier (
- subject TEXT NOT NULL, resource TEXT NOT NULL, mission TEXT NOT NULL, scope TEXT NOT NULL,
- claim_id TEXT NOT NULL, head_key BLOB NOT NULL,
+ subject TEXT NOT NULL, resource TEXT NOT NULL, claim_id TEXT NOT NULL, head_key BLOB NOT NULL,
  PRIMARY KEY(subject,resource)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS subscription_request_stable_frontier
- ON local_subscription_request_frontier(mission,scope,resource,head_key DESC);
+CREATE TABLE IF NOT EXISTS local_subscription_admission_frontier (
+ mission TEXT NOT NULL, scope TEXT NOT NULL, resource TEXT NOT NULL,
+ claim_id TEXT NOT NULL, head_key BLOB NOT NULL,
+ PRIMARY KEY(mission,scope,resource)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_subscription_request_pending (claim_id TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_subscription_request_dirty (
  subject TEXT NOT NULL, resource TEXT NOT NULL, PRIMARY KEY(subject,resource)
@@ -33,11 +35,11 @@ CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_insert AFTER INSERT O
  END;
 ")?;
     // Ordinary inserts take the constant-size pending path. Changes to ordering metadata or
-    // removal are exceptional: replay only the affected resource from authoritative claims.
+    // removal are exceptional and rebuild admission history so earlier mission targets survive.
     for (name, event, selection) in [
         ("claim_update", "AFTER UPDATE OF id,subject,kind,body,batch_id,accepted_at_unix_ms,store_index ON claims", "SELECT OLD.subject,json_extract(OLD.body,'$.fields.resource') WHERE OLD.kind='subscription.mission-requested' AND json_extract(OLD.body,'$.fields.admission')='relevant-changes' UNION SELECT NEW.subject,json_extract(NEW.body,'$.fields.resource') WHERE NEW.kind='subscription.mission-requested' AND json_extract(NEW.body,'$.fields.admission')='relevant-changes'"),
         ("claim_delete", "AFTER DELETE ON claims", "SELECT OLD.subject,json_extract(OLD.body,'$.fields.resource') WHERE OLD.kind='subscription.mission-requested' AND json_extract(OLD.body,'$.fields.admission')='relevant-changes'"),
-        ("position_insert", "AFTER INSERT ON claim_positions", "SELECT subject,json_extract(body,'$.fields.resource') FROM claims WHERE id=NEW.claim_id"),
+        ("position_insert", "AFTER INSERT ON claim_positions", "SELECT subject,json_extract(body,'$.fields.resource') FROM claims WHERE id=NEW.claim_id AND NOT EXISTS(SELECT 1 FROM local_subscription_request_pending WHERE claim_id=NEW.claim_id)"),
         ("position_update", "AFTER UPDATE ON claim_positions", "SELECT subject,json_extract(body,'$.fields.resource') FROM claims WHERE id IN(OLD.claim_id,NEW.claim_id)"),
         ("position_delete", "AFTER DELETE ON claim_positions", "SELECT subject,json_extract(body,'$.fields.resource') FROM claims WHERE id=OLD.claim_id"),
         ("batch_update", "AFTER UPDATE OF origin,replica_sequence ON batches", "SELECT subject,json_extract(body,'$.fields.resource') FROM claims WHERE batch_id=NEW.id"),
@@ -60,6 +62,7 @@ CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_insert AFTER INSERT O
 
 pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("DELETE FROM local_subscription_request_frontier;
+        DELETE FROM local_subscription_admission_frontier;
         DELETE FROM local_subscription_request_dirty;
         DELETE FROM local_subscription_request_pending;")?;
     tx.execute(&format!("INSERT INTO local_subscription_request_pending SELECT id FROM claims WHERE {RELEVANT}"), [])?;
@@ -72,6 +75,14 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     let dirty = tx.prepare("SELECT subject,resource FROM local_subscription_request_dirty")?
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !dirty.is_empty() {
+        // A deleted or reordered historical request can own an admission frontier even when
+        // another mission owns the pending frontier. Reconstruct both from authority only on
+        // these exceptional corrections, never for normal append-only observation traffic.
+        tx.execute_batch("DELETE FROM local_subscription_admission_frontier;")?;
+        tx.execute(&format!("INSERT OR IGNORE INTO local_subscription_request_pending
+            SELECT id FROM claims WHERE {RELEVANT}"), [])?;
+    }
     for (subject, resource) in dirty {
         tx.execute("DELETE FROM local_subscription_request_frontier WHERE subject=?1 AND resource=?2", params![subject,resource])?;
         tx.execute(&format!("INSERT OR IGNORE INTO local_subscription_request_pending
@@ -86,11 +97,14 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     for (id, subject, resource, mission) in pending {
         let key = canonical::sortable_key(&canonical::claim_key(tx, &id)?);
         let scope = subject.rsplit('/').next().unwrap_or(&subject);
-        tx.execute("INSERT INTO local_subscription_request_frontier(subject,resource,mission,scope,claim_id,head_key)
-            VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(subject,resource) DO UPDATE SET
-            mission=excluded.mission,scope=excluded.scope,
+        tx.execute("INSERT INTO local_subscription_request_frontier(subject,resource,claim_id,head_key)
+            VALUES(?1,?2,?3,?4) ON CONFLICT(subject,resource) DO UPDATE SET
             claim_id=excluded.claim_id,head_key=excluded.head_key WHERE excluded.head_key>head_key",
-            params![subject,resource,mission,scope,id,key])?;
+            params![subject,resource,id,key])?;
+        tx.execute("INSERT INTO local_subscription_admission_frontier(mission,scope,resource,claim_id,head_key)
+            VALUES(?1,?2,?3,?4,?5) ON CONFLICT(mission,scope,resource) DO UPDATE SET
+            claim_id=excluded.claim_id,head_key=excluded.head_key WHERE excluded.head_key>head_key",
+            params![mission,scope,resource,id,key])?;
     }
     tx.execute_batch("DELETE FROM local_subscription_request_dirty; DELETE FROM local_subscription_request_pending;")?;
     Ok(())

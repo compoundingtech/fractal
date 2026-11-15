@@ -446,15 +446,14 @@ fn collection_delivery_was_requested_tx(
 }
 
 /// Seek the stable mission/scope/resource frontier, including finished requests and
-/// earlier subscription incarnations. The covering ordering index bounds this read
-/// independently of lifetime delivery history.
+/// earlier subscription incarnations. Its primary key bounds this read independently
+/// of lifetime delivery history and preserves separate frontiers when missions change.
 pub(super) const LATEST_RELEVANT_DELIVERY_SQL: &str =
     "SELECT json_extract(claims.body, '$.fields.delivery_key'),
             json_extract(claims.body, '$.fields.change_identity')
-     FROM local_subscription_request_frontier AS frontier
+     FROM local_subscription_admission_frontier AS frontier
      JOIN claims ON claims.id=frontier.claim_id
-     WHERE frontier.mission=?1 AND frontier.scope=?2 AND frontier.resource=?3
-     ORDER BY frontier.head_key DESC LIMIT 1";
+     WHERE frontier.mission=?1 AND frontier.scope=?2 AND frontier.resource=?3";
 
 fn latest_relevant_delivery_tx(
     transaction: &rusqlite::Transaction<'_>,
