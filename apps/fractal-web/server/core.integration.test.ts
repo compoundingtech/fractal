@@ -11,7 +11,8 @@ import type { Duplex } from 'node:stream'
 import { brotliCompressSync } from 'node:zlib'
 import { Option, Tracer } from 'effect'
 import { createFractalWebMiddleware, createFractalWebServer } from './core.mts'
-import type { FractalWebServer } from './core.mts'
+import type { FractalWebServer, MiddlewareOptions } from './core.mts'
+import { tailnetAdmissionDecision } from './host.mts'
 import { cleanHeaders, clientRoute, upgradeClientHeaders } from './gateway.mts'
 import { traceparent } from './tracing.mts'
 // Assembled so the source itself never carries a literal bearer credential pair.
@@ -29,7 +30,7 @@ const listen = async (server: Server, path?: string): Promise<void> => {
   await once(server, 'listening')
 }
 const fixture = async (
-  admit: (request: IncomingMessage) => boolean | Promise<boolean> = () => true,
+  admit: MiddlewareOptions['admit'] = () => true,
   responseBody: string | Buffer = '{"paired":true}',
   responseHeaders: OutgoingHttpHeaders = { 'content-type': 'application/json' },
 ) => {
@@ -94,6 +95,62 @@ const openUpgrade = async (port: number, path: string, headers: Record<string, s
   socket.write(`GET ${path} HTTP/1.1\r\nHost: fixture\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n${Object.entries(headers).map(([name, value]) => `${name}: ${value}\r\n`).join('')}\r\n`)
   return reply
 }
+
+it('admits tagged HTTP reads and collections upgrades using only the preview credential', async () => {
+  const origin = 'https://preview.example'
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
+  const headers = { host: 'fixture', origin, 'tailscale-node-tags': 'tag:dev-host', cookie: `fractal_device=${'a'.repeat(43)}` }
+  expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(200)
+  expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('101')
+  expect(setup.received).toHaveLength(2)
+  for (const received of setup.received) expect(received.auth).toBe(gatewayAuthorization)
+})
+
+it('keeps person login upgrades and paired-browser credential selection', async () => {
+  const origin = 'https://preview.example'
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
+  const headers = { host: 'fixture', origin, 'tailscale-user-login': 'robin@example.com', cookie: `fractal_device=${'a'.repeat(43)}` }
+  expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(200)
+  expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('101')
+  for (const received of setup.received) expect(received.auth).toBe(`Bearer ${'a'.repeat(43)}`)
+})
+
+it('refuses tag pairing, write HTTP and non-read upgrade paths before the gateway', async () => {
+  const origin = 'https://preview.example'
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
+  const headers = { host: 'fixture', origin, 'tailscale-node-tags': 'tag:dev-host' }
+  for (const path of ['/v1/client/actions', '/_fractal/pair/start', '/_fractal/pair/redeem', '/_fractal/pair/status', '/v1/client/pairing/browser-requests']) {
+    expect((await fetch(setup.base + path, { method: 'POST', headers })).status).toBe(403)
+    expect(await openUpgrade(setup.port, path, headers)).toContain('403')
+  }
+  expect(await openUpgrade(setup.port, '/v1/client/terminal/raw', headers)).toContain('403')
+  expect((await fetch(`${setup.base}/_fractal/pair/status`, { headers })).status).toBe(403)
+  expect(setup.received).toHaveLength(0)
+})
+
+it.each([
+  {}, { 'tailscale-node-tags': 'tag:unknown' }, { 'tailscale-user-login': 'unknown@example.com' },
+  { 'tailscale-node-tags': 'tag:dev-host', 'tailscale-user-login': 'unknown@example.com' },
+])('refuses unknown, missing and ambiguous identity on HTTP and upgrades (%j)', async identity => {
+  const origin = 'https://preview.example'
+  const setup = await fixture(tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' }))
+  const headers: Record<string, string> = { host: 'fixture', origin, ...identity }
+  expect((await fetch(`${setup.base}/v1/client/capabilities`, { headers })).status).toBe(403)
+  expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('403')
+  expect(setup.received).toHaveLength(0)
+})
+
+it('strips all forwarded identity headers for HTTP and WebSocket gateway requests', async () => {
+  const setup = await fixture()
+  const identities: IncomingMessage['headers'][] = []
+  setup.gateway.on('request', req => identities.push(req.headers))
+  setup.gateway.on('upgrade', req => identities.push(req.headers))
+  const headers = { 'tailscale-user-login': 'spoof@example.com', 'tailscale-node-tags': 'tag:dev-host', 'tailscale-node-name': 'spoof', 'tailscale-extra': 'spoof' }
+  await fetch(`${setup.base}/v1/client/capabilities`, { headers })
+  expect(await openUpgrade(setup.port, '/v1/client/collections/stream', headers)).toContain('101')
+  expect(identities).toHaveLength(2)
+  for (const identity of identities) expect(Object.keys(identity).filter(name => name.startsWith('tailscale-'))).toEqual([])
+})
 const requestSpans = (spans: readonly Tracer.Span[]) => {
   const server = spans.filter((span) => span.name === 'fractal.server.request')
   const gateway = spans.filter((span) => span.name === 'fractal.gateway.request')

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The opt-in web publisher admits configured tailnet tags as distinct read-only preview identities, including the collections read WebSocket, while keeping browser pairing login-only and stripping identity headers before the daemon gateway.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No checkpoint changes." },
+  "compatibility": { "status": "none", "detail": "Tag admission is opt-in through WF_TAILNET_TAGS; ambiguous login-plus-tag headers fail closed." },
+  "downtime": { "status": "none", "detail": "No daemon restart required." },
+  "manual": { "status": "changed", "detail": "To enable tagged previews, configure WF_TAILNET_TAGS behind an identity-stripping filter and provide a read-only preview credential in WF_ST_AUTHORIZATION_FILE; restart the publisher." },
+  "recovery": { "status": "none", "detail": "Unset WF_TAILNET_TAGS to disable tag admission." }
+}

@@ -18,7 +18,7 @@ export const cleanHeaders = (headers: IncomingHttpHeaders, upgrade = false): Out
   for (const token of String(headers.connection ?? '').split(',')) blocked.add(token.trim().toLowerCase())
   const result: OutgoingHttpHeaders = {}
   for (const [name, value] of Object.entries(headers)) {
-    if (blocked.has(name) || ['authorization', 'origin', 'host', 'cookie', 'traceparent', 'tracestate', 'baggage', 'forwarded'].includes(name) || name.startsWith('x-forwarded-') || name.startsWith('sec-fetch-')) continue
+    if (blocked.has(name) || ['authorization', 'origin', 'host', 'cookie', 'traceparent', 'tracestate', 'baggage', 'forwarded'].includes(name) || name.startsWith('tailscale-') || name.startsWith('x-forwarded-') || name.startsWith('sec-fetch-')) continue
     result[name] = value
   }
   if (upgrade) { result.connection = 'Upgrade'; result.upgrade = 'websocket' }
@@ -78,7 +78,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
     for (const socket of sockets) socket.destroy()
     sockets.clear()
   }))
-  const http = (req: IncomingMessage, res: ServerResponse, parent: Tracer.AnySpan) => Effect.gen(function* () {
+  const http = (req: IncomingMessage, res: ServerResponse, parent: Tracer.AnySpan, preview = false) => Effect.gen(function* () {
     const span = yield* Effect.currentSpan.pipe(Effect.orDie)
     const status = yield* Effect.callback<number, BoundaryError>((resume) => {
       let reply: IncomingMessage | undefined
@@ -101,7 +101,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
         settled = true; cleanup(); resume(Effect.succeed(reply?.statusCode ?? 502))
       }
       const upstream = request({ socketPath, path: req.url, method: req.method, headers: {
-        ...cleanHeaders(req.headers), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
+        ...cleanHeaders(req.headers), host, authorization: preview ? authorization : browserAuthorization(req.headers, authorization), ...traceHeaders(span),
         'x-st3-features': withClientFeatures(req.headers['x-st3-features']),
       }, agent: false }, (incoming) => {
         reply = incoming
@@ -151,7 +151,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
       else reject(res, 502, 'Client gateway unavailable\n')
     })))
 
-  const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer, parent: Tracer.AnySpan) => Effect.gen(function* () {
+  const upgrade = (req: IncomingMessage, socket: Duplex, head: Buffer, parent: Tracer.AnySpan, preview = false) => Effect.gen(function* () {
     const span = yield* Effect.currentSpan.pipe(Effect.orDie)
     const status = yield* Effect.callback<number, BoundaryError>((resume) => {
       let settled = false
@@ -163,7 +163,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
       const clientClosed = () => fail()
       const cleanup = () => { socket.off('error', error); socket.off('close', clientClosed) }
       const upstream = request({ socketPath, path: withoutTraceQuery(req.url), method: req.method, headers: {
-        ...cleanHeaders(req.headers, true), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
+        ...cleanHeaders(req.headers, true), host, authorization: preview ? authorization : browserAuthorization(req.headers, authorization), ...traceHeaders(span),
         ...upgradeClientHeaders(req),
         // Browser WebSocket cannot send SDK headers, including on the early socket.
         // Old daemons ignore this additive feature; readers still detect optional blocks.
@@ -208,8 +208,8 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
 })
 export interface GatewayOptions { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly timeoutMs: number }
 export interface GatewayService {
-  http(req: IncomingMessage, res: ServerResponse, parent: Tracer.AnySpan): Effect.Effect<void>
-  upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, parent: Tracer.AnySpan): Effect.Effect<number>
+  http(req: IncomingMessage, res: ServerResponse, parent: Tracer.AnySpan, preview?: boolean): Effect.Effect<void>
+  upgrade(req: IncomingMessage, socket: Duplex, head: Buffer, parent: Tracer.AnySpan, preview?: boolean): Effect.Effect<number>
 }
 export class Gateway extends Context.Service<Gateway, GatewayService>()('fractal-web/Gateway') {
   static layer(options: GatewayOptions) { return Layer.effect(this, makeGateway(options)) }

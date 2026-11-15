@@ -10,10 +10,25 @@ import { RuntimeIdentity, StaticAssets } from './static.mts'
 import { requestSpanOptions } from './tracing.mts'
 import { handlePairing, pairingRoute, type BrowserPairingOptions } from './pairing.mts'
 
+export interface AdmissionIdentity {
+  readonly kind: 'login' | 'tag'
+  readonly value: string
+}
+type Admission = boolean | AdmissionIdentity
+const tagPreviewRoute = (req: IncomingMessage): boolean => {
+  const path = browserPath(req.url ?? '')
+  if (path === undefined || pairingRoute(req.url ?? '') || /^\/v1\/client\/pairings?(?:\/|$)/i.test(path) || !['GET', 'HEAD'].includes(req.method ?? 'GET')) return false
+  // Only this read subscription tunnel is exposed to tagged readers. The daemon enforces
+  // frame authorization using the publisher's read-only credential; we never parse frames.
+  return req.headers.upgrade === undefined || path === '/v1/client/collections/stream'
+}
+const identityLog = (admission: Admission) => typeof admission === 'object'
+  ? Effect.logInfo('Publisher admission').pipe(Effect.annotateLogs({ 'identity.kind': admission.kind, 'identity.value': admission.value }))
+  : Effect.void
 /** The host supplies authentication/CSRF policy; no deployment identity is assumed. */
 export interface MiddlewareOptions {
   readonly server: Server
-  readonly admit: (request: IncomingMessage) => boolean | Promise<boolean>
+  readonly admit: (request: IncomingMessage) => Admission | Promise<Admission>
   readonly gateway: { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly timeoutMs: number }
   readonly tracer: Tracer.Tracer
   readonly pairing?: BrowserPairingOptions
@@ -71,15 +86,21 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
         }
       })
     }
-    const admitted = async (req: IncomingMessage): Promise<boolean> => {
-      try { return !closed && await options.admit(req) }
+    const admitted = async (req: IncomingMessage): Promise<Admission> => {
+      try {
+        const admission = !closed && await options.admit(req)
+        return typeof admission === 'object' && admission.kind === 'tag' && !tagPreviewRoute(req) ? false : admission
+      }
       catch { return false }
     }
     const handle = async (req: IncomingMessage, res: ServerResponse, next: Effect.Effect<void>): Promise<void> => {
       res.setHeader('content-security-policy', policy(req.headers.host))
       // Admission refusals and auth-hook failures do not enter tracing.
-      if (!await admitted(req)) { reject(res, 403, 'Forbidden\n'); return }
+      const admission = await admitted(req)
+      if (!admission) { reject(res, 403, 'Forbidden\n'); return }
+      const preview = typeof admission === 'object' && admission.kind === 'tag'
       const dispatch = Effect.gen(function* () {
+        yield* identityLog(admission)
         const url = req.url ?? ''
         const path = browserPath(url)
         if (path === undefined) { reject(res, 404, 'Not found\n'); return }
@@ -88,7 +109,7 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
         }
         if (clientRoute(url)) {
           const parent = yield* Effect.currentSpan.pipe(Effect.orDie)
-          return yield* gateway.http(req, res, parent)
+          return yield* gateway.http(req, res, parent, preview)
         }
         // No privileged local API or application-specific private routes.
         if (/^\/(?:v1|wf|otlp)(?:\/|$)/.test(path)) { reject(res, 404, 'Not found\n'); return }
@@ -123,8 +144,9 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
           return
         }
         await run(Effect.gen(function* () {
+          yield* identityLog(allowed)
           const parent = yield* Effect.currentSpan.pipe(Effect.orDie)
-          const status = yield* gateway.upgrade(req, socket, head, parent)
+          const status = yield* gateway.upgrade(req, socket, head, parent, typeof allowed === 'object' && allowed.kind === 'tag')
           yield* Effect.annotateCurrentSpan('http.response.status_code', status)
         }).pipe(Effect.withSpan('fractal.server.request', requestSpanOptions(req, true))), socket)
       })().catch(() => socket.destroy())

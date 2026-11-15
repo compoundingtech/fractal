@@ -2,7 +2,7 @@ import type { IncomingMessage } from 'node:http'
 
 import { describe, expect, it } from 'vitest'
 
-import { readHostConfig, tailnetAdmission } from './host.mts'
+import { readHostConfig, tailnetAdmission, tailnetAdmissionDecision } from './host.mts'
 
 const origin = 'https://atlas.example.ts.net:8443'
 const request = (headers: IncomingMessage['headers'], method = 'GET') => ({ headers, method }) as IncomingMessage
@@ -56,6 +56,26 @@ describe('tailnetAdmission', () => {
   })
 })
 
+describe('tag identity', () => {
+  const decide = tailnetAdmissionDecision({ origin, logins: ['robin@example.com'], tags: ['tag:dev-host'], listener: () => 'fixture' })
+  const headers = { host: 'fixture', origin }
+  it('records the distinct identity kind and exact admitted value', () => {
+    expect(decide(request({ ...headers, ...signedIn }))).toEqual({ kind: 'login', value: 'robin@example.com' })
+    expect(decide(request({ ...headers, 'tailscale-node-tags': 'tag:other,tag:dev-host' }))).toEqual({ kind: 'tag', value: 'tag:dev-host' })
+  })
+  it('fails closed for ambiguous identities and never treats a tag as a login', () => {
+    for (const login of ['robin@example.com', 'unknown@example.com', 'tag:dev-host'])
+      expect(decide(request({ ...headers, 'tailscale-user-login': login, 'tailscale-node-tags': 'tag:dev-host' }))).toBe(false)
+    expect(admit(request({ ...headers, 'tailscale-node-tags': 'tag:dev-host' }))).toBe(false)
+  })
+  it('keeps host, Origin and originless upgrade checks for tags', () => {
+    const tag = { 'tailscale-node-tags': 'tag:dev-host' }
+    expect(decide(request({ ...headers, ...tag, upgrade: 'websocket' }))).toEqual({ kind: 'tag', value: 'tag:dev-host' })
+    for (const changes of [{ host: 'foreign' }, { origin: 'https://foreign.example' }, { origin: undefined, upgrade: 'websocket' }, { origin: undefined, 'sec-fetch-site': 'cross-site' }])
+      expect(decide(request({ ...headers, ...tag, ...changes }))).toBe(false)
+  })
+})
+
 describe('readHostConfig', () => {
   const env = {
     WF_PORT: '7411', WF_PUBLIC_ORIGIN: origin, WF_TAILNET_LOGINS: 'robin@example.com, blair@example.com',
@@ -69,7 +89,7 @@ describe('readHostConfig', () => {
 
   it('reads the bearer from its file and defaults to a loopback listener', () => {
     expect(readHostConfig(env, files, 1000)).toEqual({
-      dist: '/srv/web', host: '127.0.0.1', port: 7411, origin, logins: ['robin@example.com', 'blair@example.com'],
+      dist: '/srv/web', host: '127.0.0.1', port: 7411, origin, logins: ['robin@example.com', 'blair@example.com'], tags: [],
       socketPath: '/run/example/st3-client.sock', authorization: ['Bearer', 'synthetic-token'].join(' '), deploymentId: 'atlas.example.ts.net:8443',
     })
   })
@@ -77,6 +97,12 @@ describe('readHostConfig', () => {
   it('requires an explicit publisher port and preserves the configured value', () => {
     expect(() => readHostConfig({ ...env, WF_PORT: undefined }, files, 1000)).toThrow(/WF_PORT/)
     expect(readHostConfig({ ...env, WF_PORT: '8444' }, files, 1000).port).toBe(8444)
+  })
+
+  it('parses optional comma-separated tag allowlists and requires tag prefixes', () => {
+    expect(readHostConfig({ ...env, WF_TAILNET_TAGS: ' tag:dev-host, tag:preview ' }, files, 1000).tags).toEqual(['tag:dev-host', 'tag:preview'])
+    expect(readHostConfig({ ...env, WF_TAILNET_TAGS: ' , ' }, files, 1000).tags).toEqual([])
+    expect(() => readHostConfig({ ...env, WF_TAILNET_TAGS: 'dev-host' }, files, 1000)).toThrow(/WF_TAILNET_TAGS/)
   })
 
   it('refuses a non-loopback listener, an invalid port, no logins and a malformed bearer', () => {

@@ -198,17 +198,32 @@ daemon restart; missing assets/person do not disable the API listeners.
 
 ## Opt-in tailnet publisher
 
-`apps/fractal-web/server/main.mts` remains a separate, opt-in publisher for one
-person; the daemon does not start it. The example uses loopback port `7411`, separate
-from the daemon's local browser port `7410`. `tailscale serve` publishes this
-publisher over HTTPS on the tailnet. The server injects one paired
-bearer into every admitted request, so admission is the whole authorization. With a full-control
-pairing, any script running in the app holds that person's full Fractal authority. A request must
-carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for tailnet users. Any
-browser `Origin` must be exactly the published origin, and upgrades and unsafe methods must
-carry one. An Origin-less read is refused when the browser's `Sec-Fetch-Site` says another site sent it. Never publish it with Funnel, which carries no tailnet identity. Anything else that
-can reach the loopback port could claim a login, so run it only on a host where every local
-user is already trusted with that person's Fractal.
+`apps/fractal-web/server/main.mts` is a separate, opt-in loopback publisher; the
+daemon does not start it. Use port `7411`, separate from the local browser port
+`7410`. The published-surface filter is the only legitimate caller: it strips
+every inbound `tailscale-*` header and re-emits `tailscale-user-login` for
+untagged nodes, or `tailscale-node-tags` for tagged nodes (comma-separated ACL
+tags including the `tag:` prefix), plus `tailscale-node-name`. Never expose the
+listener directly: local processes can forge these headers. The publisher drops
+all `tailscale-*` headers before forwarding HTTP or WebSocket requests to the daemon.
+
+Admission requires an exact configured login OR an exact configured tag. Both
+identity headers present is ambiguous and always refused, even if one is allowed.
+The decision and admission log retain the identity's kind (`login` or `tag`) and
+the value that matched; tags never become person logins. Host and Origin checks
+are identical for both: canonical or listener Host, exact published browser
+Origin, mandatory Origin for upgrades and unsafe methods. Origin-less GET/HEAD
+also require absent, `same-origin`, or `none` Sec-Fetch-Site.
+
+Tagged readers receive preview access only: GET/HEAD and the
+`/v1/client/collections/stream` read WebSocket. Pairing, non-read HTTP and all
+other upgrades are refused. Tags always use `WF_ST_AUTHORIZATION_FILE`, never a
+browser cookie's paired or limited-scope grant. **When enabling tags, this file
+must contain a read-only preview credential (`read.*` and `terminal.read`, no
+write/control scopes).** The daemon enforces frame authorization with that
+credential; the publisher tunnels frames without parsing them. Browser pairing
+remains login-only. Revoking the preview credential also revokes tagged reads;
+there is no fallback to a browser grant.
 
 ```sh
 pnpm --dir apps/fractal-web build            # writes dist/web, including build-identity.json
@@ -252,17 +267,21 @@ installer record alone does not prove that the daemon restarted with those asset
 The settings:
 
 - `WF_ST_GATEWAY` names Fractal's paired client gateway socket, never the privileged `fractal.sock`.
-- `WF_ST_AUTHORIZATION_FILE` holds the paired device's bearer. The composer needs a full-control pairing.
+- `WF_ST_AUTHORIZATION_FILE` holds the publisher's preview bearer. It must be read-only when tags are enabled.
   The host refuses to start unless the file belongs to its user and nobody else can read it.
+- `WF_TAILNET_LOGINS` is a required comma-separated person-login allowlist.
+- `WF_TAILNET_TAGS` is an optional comma-separated tag allowlist, for example `tag:dev-host`.
+  Values must include `tag:`; unset or empty admits no tags.
 - `WF_DIST` defaults to `dist/web`.
 - `WF_HOST` must be a loopback address.
 - `WF_PORT` is required; use `7411` to keep it separate from the daemon's local browser port.
 - `WF_DEPLOYMENT_ID` defaults to the published host.
 
-Before relying on a published endpoint, prove that `tailscale serve` replaces a forged login. A request
-to the published HTTPS address carrying `Tailscale-User-Login: <an allowed login>` from a tailnet
-user who is not on the list must still get `403`. Also check that `tailscale funnel status` shows
-nothing for the port.
+Before relying on a published endpoint, prove that the ingress strips a forged
+login and forged tag header: an unknown user or unknown tagged node must still
+receive `403` when sending either allowed identity. Direct `tailscale serve`
+does not supply this tagged-node header contract; use an identity-stripping
+filter that does. Never publish with Funnel, which carries no tailnet identity.
 
 The build records `rev`, `dirty`, `commitTs` and `buildTs` from git. The bundle embeds them, and
 the host serves them at `/build-identity.json`. That response names the exact commit that is
