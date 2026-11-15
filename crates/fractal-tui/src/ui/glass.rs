@@ -1025,6 +1025,17 @@ struct Choice {
     action: Action,
 }
 
+/// The graph path a row stands for, without its kind: `example/atlas/builder` for an agent.
+fn choice_path(action: &Action) -> Option<String> {
+    match action {
+        Action::Open(Pane::Agent(Some(id)) | Pane::Terminal(id)) => {
+            Some(id.trim_start_matches("agent/").to_owned())
+        }
+        Action::Open(Pane::Mission(Some(id))) => Some(id.trim_start_matches("mission/").to_owned()),
+        _ => None,
+    }
+}
+
 /// `query` against `text`, or, when it holds several words, every word against it: "atlas builder"
 /// finds `agent/example/atlas/builder`, which no one-run match reaches across the slashes.
 fn fuzzy_words(query: &str, text: &str) -> Option<i64> {
@@ -3256,7 +3267,14 @@ impl Ui {
             };
             let detail_width = text::width(&choice.detail).min(inner / 3);
             let label = text::truncate(&choice.label, inner.saturating_sub(detail_width + 6));
-            let fill = inner.saturating_sub(text::width(&label) + detail_width + 4);
+            // The whole path after the name, so two agents with one name are told apart and
+            // what was typed against the path is seen to match (Nathan, 2026-10-06).
+            let room = inner.saturating_sub(text::width(&label) + detail_width + 6);
+            let path = choice_path(&choice.action)
+                .filter(|path| room > 6 && !path.eq_ignore_ascii_case(&choice.label))
+                .map(|path| format!("  {}", text::truncate(&path, room - 2)))
+                .unwrap_or_default();
+            let fill = inner.saturating_sub(text::width(&label) + text::width(&path) + detail_width + 4);
             rows.push((
                 Some(index),
                 Line::from(vec![
@@ -3269,6 +3287,7 @@ impl Ui {
                         theme::fg(choice.glyph.1).bg(bg),
                     ),
                     Span::styled(label, theme::text().bg(bg)),
+                    Span::styled(path, theme::dim().bg(bg)),
                     Span::styled(" ".repeat(fill), Style::default().bg(bg)),
                     Span::styled(
                         text::truncate(&choice.detail, detail_width),
@@ -10128,8 +10147,8 @@ mod tests {
         let first_mission = found.iter().position(|choice| choice.section == 2);
         let first_agent = found.iter().position(|choice| choice.section == 1);
         assert!(first_agent < first_mission, "agents lead: {first_agent:?} {first_mission:?}");
-        // Words typed against the path still find the agent across its slashes, without
-        // exposing the path in the result row.
+        // Words typed against the path find the agent across its slashes, and the row shows
+        // the whole path.
         let path = agent.id.trim_start_matches("agent/").to_owned();
         let words = path.split('/').take(2).collect::<Vec<_>>().join(" ");
         ctrl(&mut ui, 'k');
@@ -10139,11 +10158,10 @@ mod tests {
         assert!(
             found
                 .iter()
-                .any(|choice| matches!(&choice.action, Action::Open(Pane::Agent(Some(id))) if id == &agent.id)),
+                .any(|choice| choice_path(&choice.action).as_deref() == Some(path.as_str())),
             "{words:?} finds {path}"
         );
-        assert!(screen(&ui).contains(&title), "{}", screen(&ui));
-        assert!(!screen(&ui).contains(&path), "{}", screen(&ui));
+        assert!(screen(&ui).contains(&path), "{}", screen(&ui));
     }
 
     #[test]
