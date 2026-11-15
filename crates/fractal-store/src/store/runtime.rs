@@ -215,6 +215,7 @@ impl FractalRuntime {
         slo_breaches::create_schema(connection)?;
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
+        input_history::create_schema(connection)?;
         client_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
         // After every projection its triggers maintain.

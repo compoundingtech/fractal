@@ -425,6 +425,15 @@ input tool, not a transcript search and not a recorder of unsent drafts.
   page boundaries; nonadjacent repetitions remain distinct. This never mutates
   sent messages or loses the selected message's provenance.
 
+The store's `input_history_candidates` primitive seeks body-free accepted-send
+headers by exact author and agent, optionally narrowing by source session. It
+uses derived source indexes rather than a separate journal. A bounded candidate
+window exposes its examined continuation independently of visible entries;
+authorization/eligibility errors abort the page, and current repair exclusions
+override frozen membership. This internal window is not a visible result count
+or text search. The client API owns body resolution, conversation identity
+mapping, search and opaque authorized result pagination.
+
 #### Authorized projection API
 
 The read operation is `input-history.list`,
