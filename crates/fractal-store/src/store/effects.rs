@@ -22,6 +22,12 @@ pub enum EffectAdmission {
     Blocked(FractalError),
 }
 
+pub struct EffectTarget<'a> {
+    pub provider: &'a str,
+    pub class: EffectClass,
+    pub target: &'a str,
+}
+
 /// JSON tuples are unambiguous even when mission names or user keys contain separators.
 pub fn effect_key(owner: &EffectOwner) -> Result<String, FractalError> {
     Ok(format!("native-effect/{}", serde_json::to_string(&(owner.mission.strip_prefix("mission/").unwrap_or(&owner.mission), &owner.key)).map_err(internal)?))
@@ -387,13 +393,15 @@ impl Store {
 
     pub fn admit_message_effect(&self, owner: &EffectOwner, caller: &str, payload_sender: &str,
         payload_digest: &str, target: &str) -> Result<EffectAdmission, FractalError> {
-        self.admit_effect(owner, caller, payload_sender, payload_digest, "native-message",
-            EffectClass::NativeCoordinated, target)
+        self.admit_effect(owner, caller, payload_sender, payload_digest, EffectTarget {
+            provider: "native-message", class: EffectClass::NativeCoordinated, target,
+        })
     }
 
     /// All adapters pass through daemon-owned capability validation before admission.
     pub fn admit_effect(&self, owner: &EffectOwner, caller: &str, payload_sender: &str,
-        payload_digest: &str, provider: &str, class: EffectClass, target: &str) -> Result<EffectAdmission, FractalError> {
+        payload_digest: &str, target: EffectTarget<'_>) -> Result<EffectAdmission, FractalError> {
+        let EffectTarget { provider, class, target } = target;
         fractal_schema::effects::validate_provider(provider, class, target)
             .map_err(|error| FractalError::new(error.code, error.message))?;
         let key = effect_key(owner)?;
