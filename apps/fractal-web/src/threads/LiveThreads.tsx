@@ -93,13 +93,14 @@ function ThreadGroupContent({ source, query, label, placement, lane, onOpenThrea
   readonly lane: boolean
 }) {
   const narrow = React.useContext(NarrowLayoutContext)
-  const { read, upgradeRequired } = useAtomValue(source.access)
+  const { read, upgradeRequired, failure } = useAtomValue(source.access)
   const list = useAtomValue(source.list(query))
   const paused = useUpdatesPaused(list._tag === 'Observed' && list.freshness === 'stale')
   const [open, setOpen] = React.useState(false)
   // Only a complete first page states how many threads there are.
   const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
   const content = upgradeRequired ? <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
+    : accessFailed(failure) ? <ReadStatus feed={failure} subject="threads" onRetry={source.reload} />
     : !read || (list._tag === 'Observed' && list.value.items.length === 0 && Option.isNone(list.value.next_cursor)) ? null
     : <details aria-label={label} onToggle={event => setOpen(event.currentTarget.open)} {...stylex.props(styles.fold, placement === 'pane' && styles.strip)}>
       <summary aria-label={countedName(label, count, paused)} {...stylex.props(styles.foldSummary, placement === 'sidebar' && styles.foldSidebar, narrow && styles.foldTouch)}>
@@ -163,7 +164,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   readonly title: string
   readonly canStart: boolean
 }) {
-  const { read, actions, inboxOrigins, upgradeRequired } = useAtomValue(source.access)
+  const { read, actions, inboxOrigins, upgradeRequired, failure } = useAtomValue(source.access)
   const retained = useAtomValue(source.pendingStarts?.(originSource) ?? noPendingStarts)
     .filter(start => start.parameters.origin.episode === episode)
   const query = React.useMemo(() => ({ origin_source: originSource, origin_episode: episode }), [originSource, episode])
@@ -187,6 +188,7 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   }, [starting])
   const startInput = React.useCallback((input: HTMLTextAreaElement | null) => { input?.focus() }, [])
   if (upgradeRequired || (read && !inboxOrigins)) return <ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="threads" />
+  if (accessFailed(failure)) return <ReadStatus feed={failure} subject="threads" onRetry={source.reload} />
   if (!read) return null
   // Only a complete first page states how many threads this item has.
   const count = list._tag === 'Observed' && Option.isNone(list.value.next_cursor) ? list.value.items.length : undefined
@@ -283,14 +285,14 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
   readonly embedded?: boolean
   readonly focusComposer?: FocusComposer
 }) {
-  const { read, upgradeRequired, unknown, refusal } = useAtomValue(source.access)
+  const { read, upgradeRequired, unknown, failure } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
   const paused = useUpdatesPaused(detail._tag === 'Observed' && detail.freshness === 'stale')
   // A thread in its own tab keeps its status in the thread's measure, where its heading would be.
   const status = (notice: React.ReactNode) => embedded ? notice : <div {...stylex.props(styles.dedicatedNotice)}>{notice}</div>
   if (upgradeRequired) return status(<ReadStatus feed={{ _tag: 'Unavailable', reason: 'unsupported', detail: upgradeThreadEndpoint }} subject="thread" />)
   // Until Fractal answers which operations this connection holds, the thread is still loading, not unsupported.
-  if (!read) return status(refusal !== undefined && refusal._tag !== 'Observed' ? <ReadStatus feed={refusal} subject="thread" />
+  if (!read) return status(failure !== undefined && failure._tag !== 'Observed' ? <ReadStatus feed={failure} subject="thread" onRetry={source.reload} />
     : unknown ? <ReadStatus feed={{ _tag: 'Waiting' }} subject="thread" />
     : <p>This connection does not support threads.</p>)
   // Reading again cannot bring back a thread Fractal says does not exist.
@@ -323,6 +325,10 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
   const [expanded, setExpanded] = React.useState(!embedded || initiallyExpanded)
   const detail = useAtomValue(expanded ? source.detail(thread.id) : idleDetail)
   const observation = detail._tag === 'Observed' ? detail.value : undefined
+  // An open row shows its detail read's loading or failure instead of messages and controls it can no longer vouch for.
+  const detailStatus = !expanded || detail._tag === 'Observed' ? null
+    : detail._tag === 'Unavailable' && detail.code === 'not-found' ? <SystemNotice kind="empty" scope="inline" title="Fractal no longer has this thread." />
+    : <ReadStatus feed={detail} subject="thread" onRetry={source.reload} />
   const summary = observation?.summary ?? thread
   const agent = useAgent(summary.agent_id)
   const agentName = agent._tag === 'Observed' ? agent.value?.name : undefined
@@ -355,8 +361,8 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
       },
     })}
   >
-    <ThreadConversation source={source} thread={summary} agentName={agentName} canReply={actions.has('thread.reply')} observed={observation !== undefined}
-      focusComposer={focusComposer} timelineRef={viewport.timeline} />
+    {detailStatus ?? <ThreadConversation source={source} thread={summary} agentName={agentName} canReply={actions.has('thread.reply')} observed={observation !== undefined}
+      focusComposer={focusComposer} timelineRef={viewport.timeline} />}
   </ThreadPanel>
 }
 
@@ -532,6 +538,10 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
     </ol>
   </>
 }
+
+/** A completed but broken access read. A refused credential is the connection's own notice, so lists do not repeat it. */
+const accessFailed = (failure: Feed<never> | undefined): failure is Extract<Feed<never>, { readonly _tag: 'Unavailable' }> =>
+  failure?._tag === 'Unavailable' && failure.reason === 'failed'
 
 /** Loading is only loading; a refusal says what Fractal refused, and only a failed read offers Retry. */
 function ReadStatus({ feed, subject, onRetry }: {

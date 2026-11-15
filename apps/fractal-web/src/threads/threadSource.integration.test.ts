@@ -212,6 +212,31 @@ it('keeps access unknown while capabilities are unanswered and reads them again 
   } finally { stop(); registry.dispose() }
 })
 
+it.each([
+  ['an answer that does not decode', () => Response.json({ ...base, value: { kind: 'capabilities' } })],
+  ['a server error', () => refusal(500, 'internal')],
+] as const)('shows %s from the capabilities read as a recorded failure while the connection is live, and Retry reads it again', async (_case, broken) => {
+  let healthy = false
+  const fetchImpl = vi.fn(async () => healthy ? readable() : broken())
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry, undefined, Atom.make(true))
+  const stop = registry.mount(source.access)
+  const spies = consoleSpies()
+  try {
+    // A completed but broken answer is not an unanswered one: it never reads as loading.
+    await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({
+      read: false, failure: { _tag: 'Unavailable', reason: 'failed', detail: 'Fractal could not load threads.' },
+    }))
+    expect(registry.get(source.access)).not.toHaveProperty('unknown')
+    expect(JSON.stringify(registry.get(source.access))).not.toContain('Private server diagnostic')
+    expect(recorded(spies, 'Thread access read failed')).toBe(true)
+    healthy = true
+    source.reload?.()
+    await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({ read: true }))
+    expect(registry.get(source.access)).not.toHaveProperty('failure')
+  } finally { for (const spy of spies) spy.mockRestore(); stop(); registry.dispose() }
+})
+
 it('observes exact summary receipt updates without a write grant or a follow-up HTTP read', async () => {
   const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
     if (String(input).endsWith('/capabilities')) return Response.json({
@@ -473,8 +498,8 @@ const readList = (watches?: ThreadWatches) => {
 /** The data layer records a failed read through the Effect logger, which writes to the console. */
 const consoleSpies = (): readonly MockInstance[] => (['log', 'info', 'warn', 'error', 'group', 'groupCollapsed'] as const)
   .map(method => vi.spyOn(console, method).mockImplementation(() => {}))
-const recorded = (spies: readonly MockInstance[]) =>
-  spies.some(spy => spy.mock.calls.some(call => call.some(argument => String(argument).includes('Thread read failed'))))
+const recorded = (spies: readonly MockInstance[], message = 'Thread read failed') =>
+  spies.some(spy => spy.mock.calls.some(call => call.some(argument => String(argument).includes(message))))
 
 it('replaces an observed list with the pairing notice when the browser credential is rejected, then reads again on reload', async () => {
   const view = readList()

@@ -40,10 +40,10 @@ type ThreadAccess = {
   readonly upgradeRequired?: boolean
   readonly actions: ReadonlySet<string>
   readonly actor?: string
-  /** Fractal has not answered which thread operations this connection holds: `read: false` is a default, not a refusal. */
+  /** Fractal has not answered which thread operations this connection holds, because the path to it is lost: `read: false` is a default, not a refusal. */
   readonly unknown?: true
-  /** Fractal refused the capabilities read itself, for example a revoked browser credential. */
-  readonly refusal?: Feed<never>
+  /** The capabilities read completed and failed: a refused credential, or a broken answer (an HTTP error or one that does not decode). */
+  readonly failure?: Feed<never>
 }
 
 export interface ThreadSource {
@@ -91,11 +91,19 @@ const refused = (error: unknown): Feed<never> => {
     ...(reason === 'failed' && error instanceof ClientError ? { code: error.response.code } : {}),
   })
 }
+// Only a lost path to Fractal (the network, or a gateway that cannot reach the daemon) leaves a read unanswered.
+const lostPath = (error: unknown): boolean =>
+  error instanceof TypeError || (error instanceof ClientError && (error.status === 502 || error.status === 503 || error.status === 504))
+const logReadFailure = (message: string, error: unknown) => Effect.runSync(Effect.logWarning(message, {
+  error: error instanceof ClientError ? `${error.status} ${error.response.code}` : error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+}))
 
 /** `transportLive`, when given, re-reads access each time the gateway connection is live again, as grants do. */
 export function gatewayThreads(client: FractalClient, registry: AtomRegistry.AtomRegistry, watches?: ThreadWatches, transportLive?: Atom.Atom<boolean>): ThreadSource {
   let observedAccess: ThreadAccess | undefined
   const access = Atom.make<ThreadAccess>(get => {
+    // Retry (`reload`) reads access again too, so a failed capabilities read can recover.
+    get(revision)
     // While disconnected the last answer stands; a read that failed then is retried once the connection is live.
     if (transportLive !== undefined && !get(transportLive) && observedAccess !== undefined) return observedAccess
     const abort = new AbortController()
@@ -116,9 +124,19 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       }
     }).catch(error => {
       if (abort.signal.aborted) return
-      // An unanswered read leaves access unknown; only Fractal's refusal of the credential is a refusal.
-      if (clientReadAuthorization(error) === undefined) get.setSelf(observedAccess ?? unknownAccess)
-      else get.setSelf(observedAccess = { ...noAccess, refusal: refused(error) })
+      if (clientReadAuthorization(error) !== undefined) {
+        get.setSelf(observedAccess = { ...noAccess, failure: refused(error) })
+        return
+      }
+      // Unanswered over a lost path: unknown until the connection is live again, which reads access anew.
+      // A lost path while the connection reports Live would never be retried that way, so it is a failure.
+      if (lostPath(error) && !(transportLive !== undefined && registry.get(transportLive))) {
+        get.setSelf(observedAccess ?? unknownAccess)
+        return
+      }
+      // A completed but broken read (an HTTP error, an answer that does not decode) is shown with Retry and recorded.
+      logReadFailure('Thread access read failed', error)
+      get.setSelf({ ...noAccess, failure: refused(error) })
     })
     return observedAccess ?? unknownAccess
   })
@@ -190,15 +208,10 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
             if (error instanceof ClientError && (error.status === 401 || error.status === 403)) active = false
             settings?.onFailure?.(error)
             const failure = refused(error)
-            // Only a lost path to Fractal (the network, or a gateway that cannot reach the daemon) keeps what was
-            // observed, marked paused. A decode, validation or other HTTP failure is shown and recorded instead.
-            const lost = failure._tag === 'Unavailable' && failure.reason === 'failed'
-              && (error instanceof TypeError || (error instanceof ClientError && (error.status === 502 || error.status === 503 || error.status === 504)))
-            if (failure._tag === 'Unavailable' && failure.reason === 'failed' && !lost) {
-              Effect.runSync(Effect.logWarning('Thread read failed', {
-                error: error instanceof ClientError ? `${error.status} ${error.response.code}` : error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-              }))
-            }
+            // Only a lost path to Fractal keeps what was observed, marked paused. A decode, validation or other
+            // HTTP failure is shown and recorded instead.
+            const lost = failure._tag === 'Unavailable' && failure.reason === 'failed' && lostPath(error)
+            if (failure._tag === 'Unavailable' && failure.reason === 'failed' && !lost) logReadFailure('Thread read failed', error)
             get.setSelf(previous = previous._tag === 'Observed' && lost ? { ...previous, freshness: 'stale' } : failure)
           }
         })

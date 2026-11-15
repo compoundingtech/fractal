@@ -39,8 +39,10 @@ const live: FeedSyncObservation = { status: { _tag: 'Live', since: 0 }, observed
 
 type Reply = (url: URL, init: RequestInit | undefined) => Response | Promise<Response>
 
-/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, and `unreachable` fails every request, capabilities included. */
-async function mount(element: React.ReactElement, { actions = [], reply, unreachable }: { readonly actions?: readonly string[]; readonly reply: Reply; readonly unreachable?: () => boolean }) {
+/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, and `unreachable` fails every request, capabilities included. */
+async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable }: {
+  readonly actions?: readonly string[]; readonly reply: Reply; readonly capabilities?: () => Response | undefined; readonly unreachable?: () => boolean
+}) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
   const requests: URL[] = []
@@ -48,7 +50,7 @@ async function mount(element: React.ReactElement, { actions = [], reply, unreach
     const url = new URL(String(input))
     requests.push(url)
     if (unreachable?.()) throw new TypeError('Failed to fetch')
-    if (url.pathname.endsWith('/capabilities')) return Response.json({
+    if (url.pathname.endsWith('/capabilities')) return capabilities?.() ?? Response.json({
       ...base, value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 2, state: 'granted' },
@@ -148,6 +150,55 @@ it('offers Retry after a failed read and shows the threads it then observes', as
     broken = false
     await act(async () => view.button('Retry: Fractal could not load threads.')?.click())
     await vi.waitFor(() => expect(view.host.querySelector('[data-thread-panel][aria-label="Release checklist"]')).not.toBeNull())
+    expect(view.host.textContent).not.toContain('Fractal could not load threads.')
+  } finally { silence.mockRestore(); await view.dispose() }
+})
+
+it('shows a broken capabilities answer as a failed read with Retry, not as loading, and Retry reads access again', async () => {
+  let broken = true
+  const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    actions: ['thread.reply', 'thread.close'],
+    capabilities: () => broken ? refusal(500, 'internal') : undefined,
+    reply: url => url.pathname.endsWith('/timeline') ? page([]) : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.button('Retry: Fractal could not load threads.')).toBeDefined())
+    expect(view.host.textContent).not.toContain('Loading thread')
+    expect(view.host.textContent).not.toContain('Private server diagnostic')
+    broken = false
+    await act(async () => view.button('Retry: Fractal could not load threads.')?.click())
+    await vi.waitFor(() => expect(view.button('Close thread')).toBeDefined())
+    expect(view.host.textContent).not.toContain('Fractal could not load threads.')
+  } finally { silence.mockRestore(); await view.dispose() }
+})
+
+it.each([
+  ['fails', () => refusal(500, 'internal')],
+  ['answers for another thread', () => Response.json({ ...base, value: row('thread/other', 'Rollout notes') })],
+] as const)('replaces an open Inbox row with a Retry notice when its detail read %s, and Retry restores its messages and controls', async (_case, broken) => {
+  let detailBroken = true
+  const silence = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const view = await mount(<LiveInboxThreads alert={ask} />, {
+    actions: ['thread.reply', 'thread.close'],
+    reply: url => url.pathname.endsWith('/threads') ? page(url.searchParams.get('recently_closed') === 'true' ? [] : [row('thread/one', 'Release checklist')])
+      : url.pathname.endsWith('/timeline') ? page([{ kind: 'message', id: 'message/first', actor_id: agent, content: 'The checklist is complete.',
+        accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null }])
+      : detailBroken ? broken() : Response.json({ ...base, value: row('thread/one', 'Release checklist') }),
+  })
+  try {
+    const header = () => view.host.querySelector<HTMLButtonElement>('[data-thread-panel][aria-label="Release checklist"] button')
+    await vi.waitFor(() => expect(header()).not.toBeNull())
+    if (header()?.getAttribute('aria-expanded') !== 'true') await act(async () => header()?.click())
+    await vi.waitFor(() => expect(view.button('Retry: Fractal could not load threads.')).toBeDefined())
+    // The list and timeline answered, but the row cannot vouch for this thread, so it shows neither messages nor controls.
+    expect(view.host.textContent).not.toContain('The checklist is complete.')
+    expect(view.button('Close thread')).toBeUndefined()
+    expect(view.host.querySelector('textarea')).toBeNull()
+    detailBroken = false
+    await act(async () => view.button('Retry: Fractal could not load threads.')?.click())
+    await vi.waitFor(() => expect(view.button('Close thread')).toBeDefined())
+    expect(view.host.textContent).toContain('The checklist is complete.')
     expect(view.host.textContent).not.toContain('Fractal could not load threads.')
   } finally { silence.mockRestore(); await view.dispose() }
 })
