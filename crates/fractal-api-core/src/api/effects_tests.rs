@@ -775,7 +775,7 @@ async fn human_resolution_does_not_clear_a_concurrent_unseen_unresolved_episode(
 }
 
 #[tokio::test]
-async fn effect_routes_authenticate_person_authority_and_return_unwrapped_receipts() {
+async fn effect_routes_authenticate_person_authority_and_return_standard_receipts() {
     let fixture = Fixture::new();
     let effect = fixture.admit();
     fixture.state.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
@@ -792,15 +792,15 @@ async fn effect_routes_authenticate_person_authority_and_return_unwrapped_receip
     let response = app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let resolved: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
-    assert_eq!(resolved["state"], "abandoned");
-    assert_eq!(resolved["effect_id"], effect.effect_id);
+    assert_eq!(resolved["value"]["state"], "abandoned");
+    assert_eq!(resolved["value"]["effect_id"], effect.effect_id);
     let key = crate::store::effects::effect_key(fixture.owner()).unwrap();
     let response = app.oneshot(Request::builder().uri(format!("/v1/effects/by-key?key={}", urlencoding::encode(&key)))
         .body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let found: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
-    assert_eq!(found["state"], "abandoned");
-    assert!(found["record"].get("provider_ref").is_none());
+    assert_eq!(found["value"]["state"], "abandoned");
+    assert!(found["value"]["record"].get("provider_ref").is_none());
 }
 
 #[test]

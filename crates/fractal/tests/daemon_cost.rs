@@ -717,6 +717,13 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    get("GET /v1/effects/by-key", "/v1/effects/by-key?key={effect_key}"),
+    post("POST /v1/effects/{*subject}", "/v1/effects/{effect_subject}/resolve", |_, attempt| json!({
+        "actor": "person/bench-operator",
+        "outcome": "abandoned",
+        "evidence": ["message/cost-effect-evidence"],
+        "idempotency_key": format!("cost-effect-resolution-{attempt}"),
+    })),
     get("GET /v1/client/claims", "/v1/client/claims?limit=100"),
     get("GET /v1/client/claims/by-id/{id}", "/v1/client/claims/by-id/{service_claim}"),
     get("GET /v1/client/work-items/{*subject}", "/v1/client/work-items/{step}"),
@@ -3647,6 +3654,37 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
+            // Seed a fresh durable uncertainty outside the measured region. In particular,
+            // resolution must write a new receipt on every sample, never an idempotent replay.
+            if probe.route.contains("/v1/effects/") {
+                let key = format!("native-effect/[\"cost\",\"{}-{attempt}\"]", probe.route);
+                let operation = smallclaims::store::operation_id_for_key(&key);
+                let subject = format!("effect/{operation}");
+                let fields: BTreeMap<String, Value> = serde_json::from_value(json!({
+                    "effect_id": subject,
+                    "operation_id": operation,
+                    "provider": "native-message",
+                    "target": "agent/ada",
+                    "payload_digest": "cost-effect-payload",
+                    "class": "native-coordinated",
+                    "bound_step_run": fixture.items["step"],
+                    "bound_attempt": 1,
+                    "lease_owner": fixture.subjects.seats[0],
+                    "lease_incarnation": SEAT_RUNTIME,
+                    "error": "delivery-unknown",
+                    "evidence": [],
+                })).unwrap();
+                for kind in ["effect.intended", "effect.unresolved"] {
+                    store.append_claim(&ClaimInput {
+                        subject: subject.clone(), kind: kind.into(),
+                        actor: Some(fixture.subjects.seats[0].clone()),
+                        fields: fields.clone(), evidence: vec![],
+                        expected_subject: None, idempotency_key: None,
+                    }).unwrap();
+                }
+                fixture.items.insert("effect_key", urlencoding::encode(&key).into_owned());
+                fixture.items.insert("effect_subject", urlencoding::encode(&subject).into_owned());
+            }
             if probe.route.contains("/replication/") {
                 prepare_replication(&mut fixture, &store, &peer).await;
             }
@@ -3686,7 +3724,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") {
+                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
                     person.clone()
                 } else {
                     client.clone()
@@ -3710,6 +3748,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route.contains("/v1/effects/") {
+                                anyhow::ensure!(
+                                    value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
+                                    "the effect probe must read a populated uncertainty or record a real human resolution",
+                                );
+                            }
                             if probe.route == "POST /v1/fleet/transports" {
                                 anyhow::ensure!(
                                     value["published"] == true,

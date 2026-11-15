@@ -78,6 +78,7 @@ mission "example/report" state="ready" {
                 actor: Some(WORKER.into()),
                 fields: BTreeMap::from([("from".into(), json!(WORKER)),
                     ("to".into(), json!("agent/example/reader")),
+                    ("status".into(), json!("sent")),
                     ("content".into(), json!("The example report is ready."))]),
                 evidence: vec![], expected_subject: None,
                 idempotency_key: Some(native_message_key(&self.owner).unwrap()),

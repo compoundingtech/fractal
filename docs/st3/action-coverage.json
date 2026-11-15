@@ -483,6 +483,23 @@
   ],
   "cli": [
     {
+      "command": "st effects status",
+      "description": "Read durable native-effect state by its full idempotency key without sending",
+      "tests": [
+        "crates/fractal-api-core/src/api/effects_tests.rs::effect_by_key_reports_effective_state_and_conventional_not_found"
+      ],
+      "verification": "Real daemon keyed effect reads, including resolved outcomes and not-found"
+    },
+    {
+      "command": "st effects resolve",
+      "description": "Explicitly confirm or abandon an unresolved effect with authenticated person authority and evidence",
+      "tests": [
+        "crates/fractal/src/effects_cli.rs::tests::resolution_requires_explicit_outcome_and_confirmation_evidence",
+        "crates/fractal-api-core/src/api/effects_tests.rs::effect_routes_authenticate_person_authority_and_return_standard_receipts"
+      ],
+      "verification": "CLI outcome and evidence parsing; real daemon person authorization and durable resolution"
+    },
+    {
       "command": "st harness-questions list",
       "description": "Read one explicit page of metadata-only native harness questions",
       "tests": [
