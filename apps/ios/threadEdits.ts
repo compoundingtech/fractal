@@ -7,7 +7,7 @@ export function threadRefusalMessage(reason: string): string {
 export type ThreadEdit = { kind: "rename"; title: string } | { kind: "close" | "reopen" };
 export type ThreadEditResult =
   | { how: "sent"; snapshot?: Snapshot }
-  | { how: "failed"; error: string }
+  | { how: "failed"; error: string; action?: ThreadEdit["kind"] }
   | { how: "unconfirmed"; retry: () => Promise<ThreadEditResult> };
 type Summary = Pick<ThreadSummary, "id" | "title" | "state">;
 type Patch = Partial<Pick<Summary, "title" | "state">>;
@@ -56,7 +56,7 @@ export class ThreadEdits {
 
   async run(thread: Summary, edit: ThreadEdit, send: () => Promise<ThreadEditResult>): Promise<ThreadEditResult> {
     if (this.entries.get(thread.id)?.phase === "pending") {
-      return { how: "failed", error: "Resolve the earlier change before starting another." };
+      return { how: "failed", action: edit.kind, error: "Resolve the earlier change before starting another." };
     }
     const title = this.project(thread).title;
     const priorPatch = { ...this.entries.get(thread.id)?.patch };
@@ -75,11 +75,15 @@ export class ThreadEdits {
       } catch (error) {
         result = { how: "failed", error: this.errorText(error) };
       }
-      if (result.how === "unconfirmed") return { how: "unconfirmed", retry: () => finish(result.retry) };
+      if (result.how === "unconfirmed") {
+        const retry = result.retry;
+        return { how: "unconfirmed", retry: () => finish(retry) };
+      }
       if (result.how === "failed") {
         if (priorPatch.title !== undefined || priorPatch.state !== undefined)
           this.entries.set(thread.id, { patch: priorPatch, snapshot: priorSnapshot, phase: "sent" });
         else this.entries.delete(thread.id);
+        result = { ...result, action: edit.kind };
       } else {
         entry.phase = "sent";
         entry.snapshot = result.snapshot;

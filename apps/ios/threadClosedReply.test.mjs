@@ -664,7 +664,7 @@ test('thread buttons and inline rename act immediately without dialogs, flash af
   await new Promise(resolve => setImmediate(resolve));
   tree = render();
   assert.equal(findButton(tree, 'Reopen thread').props.disabled, false);
-  assert.deepEqual(find(tree, 'ThreadActionFeedback').props.result, { how: 'failed', error: 'Permission was revoked.' });
+  assert.deepEqual(find(tree, 'ThreadActionFeedback').props.result, { how: 'failed', action: 'reopen', error: 'Permission was revoked.' });
   assert.equal(find(tree, 'ThreadEditFlash'), undefined);
 
   findButton(tree, 'Rename').props.onPress();
@@ -779,4 +779,16 @@ test('Retry re-reads an inline thread page and clears its live error only after 
   assert.equal(reads, 3);
   assert.equal(render().issue, undefined);
   assert.deepEqual(render().items, [thread]);
+});
+
+test('close, reopen and rename refusals put action copy and the server reason in separate Text elements', () => {
+  const feedback = compile('ThreadActionFeedback', 'type ThreadMessage', { View: 'View', T: 'Text', Button: 'Button', theme: {} });
+  for (const action of ['close', 'reopen', 'rename']) {
+    const tree = feedback({ result: { how: 'failed', action, error: 'This fixture intentionally rejects thread changes.' }, busy: false, onRetry() {} });
+    const lines = tree.children.filter(child => child?.type === 'Text');
+    assert.equal(lines.length, 2);
+    assert.deepEqual(lines.map(line => line.children), [[`Couldn't ${action} this thread.`], ['This fixture intentionally rejects thread changes.']]);
+    assert.equal(button(tree, 'Retry original change'), undefined, 'a definitive refusal does not gain an automatic/original-request retry');
+    assert.equal(findBy(tree, node => node.children?.some(child => typeof child === 'string' && child.includes('You no longer have access'))), undefined);
+  }
 });

@@ -69,16 +69,22 @@ for (const [code, variant] of [['recipient-retired', 'Retired'], ['lifecycle-una
   assert.equal(attempts, 1);
 }
 
-test('native HTTP thread refusals show an access sentence and server reason without changing retry semantics', () => {
+test('thread read refusals explain access while action refusals retain only the server reason', () => {
   const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
-  const a = source.indexOf('export function threadErrorText(');
+  const a = source.indexOf('export function threadReadErrorText(');
   const b = source.indexOf('\nasync function readPhoneSigning', a);
   const { outputText } = ts.transpileModule(source.slice(a, b), { compilerOptions: { module: ts.ModuleKind.CommonJS } });
   const exports = {};
   new Function('exports', 'ClientError', 'threadRefusalMessage', 'errorText', outputText)(exports, ClientError, threadRefusalMessage, plainError);
   const error = refused('forbidden');
-  assert.equal(exports.threadErrorText(error), 'You no longer have access to this thread. m.');
-  assert.equal(exports.threadErrorText(refused('not-found')), plainError(refused('not-found')));
+  assert.equal(exports.threadReadErrorText(error), 'You no longer have access to this thread. m.');
+  assert.equal(exports.threadReadErrorText(refused('not-found')), plainError(refused('not-found')));
+  for (const code of ['forbidden', 'stale-fence', 'not-found']) {
+    const actionError = refused(code);
+    assert.equal(exports.threadActionErrorText(actionError), 'm');
+    assert.equal(actionError.response.code, code);
+    assert.equal(actionError.response.retryable, false);
+  }
   assert.equal(error.response.code, 'forbidden');
   assert.equal(error.response.retryable, false);
   assert.equal(isTransient(error), false);

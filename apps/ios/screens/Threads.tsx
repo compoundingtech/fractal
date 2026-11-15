@@ -13,7 +13,7 @@ import { rememberBounded } from '../boundedCache';
 import { agentName } from '../agentsView';
 import { ContextMenu } from '../menu';
 import type { RootScreen } from '../navigation';
-import { threadErrorText as errorText, threadEditScope, threadDraftKey, threadStartScope, useStore, type ThreadStartOrigin } from '../store';
+import { threadReadErrorText as errorText, threadEditScope, threadDraftKey, threadStartScope, useStore, type ThreadStartOrigin } from '../store';
 import type { ThreadEditResult } from '../threadEdits';
 import { visibleThreadMessages } from '../threadVisibility';
 import { measureThreadBounds, measureThreadViewport, ThreadViewport, useThreadViewports } from '../threadViewport';
@@ -470,7 +470,10 @@ function threadTextIssue(content: string): string | undefined {
 }
 
 function ThreadActionFeedback({ result, busy, onRetry }: { result?: ThreadEditResult; busy: boolean; onRetry: () => void }) {
-  if (result?.how === 'failed') return <T color={theme.waiting}>{result.error}</T>;
+  if (result?.how === 'failed') return <View style={{ gap: 6 }}>
+    {result.action ? <T color={theme.waiting}>{`Couldn't ${result.action} this thread.`}</T> : null}
+    <T color={theme.waiting}>{result.error}</T>
+  </View>;
   if (result?.how !== 'unconfirmed') return null;
   return <View style={{ gap: 6 }}>
     <T color={theme.waiting}>The original connection has not confirmed this change.</T>

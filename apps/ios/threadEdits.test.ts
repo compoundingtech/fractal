@@ -81,7 +81,7 @@ for (const scenario of cases) {
     assert.equal(edits.project(thread).state, scenario.after);
     assert.equal(edits.project(thread).title, scenario.title);
     server.resolve({ how: "failed", error: "Permission was revoked." });
-    assert.deepEqual(await result, { how: "failed", error: "Permission was revoked." });
+    assert.deepEqual(await result, { how: "failed", action: scenario.edit.kind, error: "Permission was revoked." });
     assert.equal(edits.project(thread), thread);
     assert.equal(edits.flash(thread.id), undefined);
   });
@@ -116,7 +116,7 @@ test("thrown server failures revert and expose the human error", async () => {
   const result = await edits.run(thread, { kind: "rename", title: "New title" }, async () => {
     throw new Error("The original connection is unavailable.");
   });
-  assert.deepEqual(result, { how: "failed", error: "The original connection is unavailable." });
+  assert.deepEqual(result, { how: "failed", action: "rename", error: "The original connection is unavailable." });
   assert.equal(edits.project(thread), thread);
   assert.equal(edits.flash(thread.id), undefined);
 });

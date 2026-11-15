@@ -86,9 +86,13 @@ export function errorText(error: unknown): string {
   return plainError(error);
 }
 
-export function threadErrorText(error: unknown): string {
+export function threadReadErrorText(error: unknown): string {
   return error instanceof ClientError && error.response.code === 'forbidden'
     ? threadRefusalMessage(error.response.message) : errorText(error);
+}
+
+export function threadActionErrorText(error: unknown): string {
+  return error instanceof ClientError ? error.response.message : errorText(error);
 }
 
 async function readPhoneSigning(profileKey: string): Promise<PhoneSigning | undefined> {
@@ -368,7 +372,7 @@ function useAppStore(proof?: FabricProfile) {
     if (!threadClient) return undefined;
     let edits = editsByClient.current.get(threadClient);
     if (!edits) {
-      edits = new ThreadEdits(() => setThreadDeliveryRevision(previous => previous + 1), threadErrorText);
+      edits = new ThreadEdits(() => setThreadDeliveryRevision(previous => previous + 1), threadActionErrorText);
       editsByClient.current.set(threadClient, edits);
     }
     return edits;
@@ -982,7 +986,7 @@ function useAppStore(proof?: FabricProfile) {
       if (result.how === 'sent' || (result.error instanceof ClientError && result.error.status === 409)) {
         setThreadRefresh(previous => previous + 1);
       }
-      return result.how === 'sent' ? { ...result, snapshot: acceptedSnapshot } : { how: 'failed', error: threadErrorText(result.error) };
+      return result.how === 'sent' ? { ...result, snapshot: acceptedSnapshot } : { how: 'failed', error: threadActionErrorText(result.error) };
     };
     return finish(await sendBoundAction(member, {
       build: async () => {
@@ -1020,7 +1024,7 @@ function useAppStore(proof?: FabricProfile) {
       setThreadDeliveryRevision(previous => previous + 1);
       let result: ThreadEditResult;
       try { result = await operation(); }
-      catch (error) { result = { how: 'failed', error: threadErrorText(error) }; }
+      catch (error) { result = { how: 'failed', error: threadActionErrorText(error) }; }
       if (result.how === 'unconfirmed') {
         const original = result.retry;
         const retry = () => active.get(scope)?.retry === retry ? run(original) : Promise.resolve(result);
