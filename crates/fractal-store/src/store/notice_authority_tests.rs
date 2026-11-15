@@ -219,6 +219,157 @@ fn notice_sources_are_producer_input_without_runtime_or_daemon_authors() {
     }
 }
 
+const DIGEST_SOURCE: &str = "custom/attention/source/digest/person/example/2026-11-15";
+const DIGEST_SNAPSHOT: &str = "custom/attention/snapshot/digest/person/example/2026-11-15";
+
+fn digest_fields(source: &ClaimRecord) -> Value {
+    let mut fields = serde_json::to_value(custom::fields(source)).unwrap();
+    fields.as_object_mut().unwrap().remove("_registration");
+    fields.as_object_mut().unwrap().remove("producer");
+    fields["source"]["digest"] = json!([{
+        "resolution_id":"resolution-1",
+        "title":"Choose a deployment", "requester_id":"agent/example/requester",
+        "default_answer":{"id":"wait","label":"Wait"}, "resolved_at":"2026-11-15T08:00:00Z",
+        "target_id":"mission/example/step/approve", "episode":"episode-1",
+        "action_parameters":{"work.override":{"target_id":"mission/example/step/approve","episode":"episode-1"}}
+    }]);
+    fields
+}
+
+#[test]
+fn digest_sources_and_snapshots_require_the_bound_owner_and_matching_identity() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    for (store, actor) in [(&fleet.birch, RUNTIME), (&fleet.alder, "person/example"), (&fleet.alder, "agent/example/producer")] {
+        assert!(store.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, actor, fields.clone())).is_err());
+    }
+    let mut forged = fields.clone();
+    forged["producer"] = json!(RUNTIME);
+    assert!(fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, forged)).is_err());
+    let mut forged = fields.clone();
+    forged["recipient"] = json!("person/other");
+    assert!(fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, forged)).is_err());
+    let mut forged = fields.clone();
+    forged["source"]["digest"][0]["action_parameters"]["work.override"]["episode"] = json!("forged");
+    assert!(fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, forged)).is_err());
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap();
+    let mut snapshot = snapshot(&source);
+    snapshot["source_id"] = json!(DIGEST_SOURCE);
+    snapshot["producer"] = json!(RUNTIME);
+    assert!(fleet.alder.append_claim(&input(SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, snapshot.clone())).is_err());
+    fleet.alder.append_claim(&input(DIGEST_SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, snapshot)).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    assert_eq!(state(&fleet.birch, DIGEST_SOURCE)["state"], "ready");
+    assert_eq!(state(&fleet.birch, DIGEST_SNAPSHOT)["state"], "ready");
+}
+
+#[test]
+fn imported_non_owner_digest_source_cannot_fence_or_conflict_a_legitimate_emission() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    let forged = fleet.birch.connection.batched(|tx| {
+        let mut fields = fields.clone();
+        fields["_registration"] = json!(custom::registration(tx, DIGEST_SOURCE)?.unwrap().0);
+        fields["source"]["owner_claim"] = json!(current_desired_row_tx(tx, notice_owner::SUBJECT)?.unwrap().claim_id);
+        append_claim_tx(tx, &fleet.birch.origin, DIGEST_SOURCE, &fleet.source.kind,
+            Some(RUNTIME), &json!({"fields":fields}), &[], None)
+    }).unwrap().unwrap();
+    sync(&fleet.birch, &fleet.alder);
+    assert!(!authenticated_digest_source(&fleet.alder.readers.get(), &forged).unwrap());
+    let row = state(&fleet.alder, DIGEST_SOURCE);
+    assert_ne!(row["state"], "ready");
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap();
+    let mut snapshot = snapshot(&source);
+    snapshot["source_id"] = json!(DIGEST_SOURCE);
+    snapshot["producer"] = json!(RUNTIME);
+    fleet.alder.append_claim(&input(DIGEST_SNAPSHOT, "custom.attention.snapshot-created", RUNTIME, snapshot)).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
+        assert_eq!(state(store, DIGEST_SNAPSHOT)["state"], "ready");
+        store.connection.batched(|tx| {
+            assert!(authenticated_digest_source(tx, &source)?);
+            custom::rebuild(tx)?;
+            assert_eq!(custom::source(tx, DIGEST_SOURCE)?.unwrap()["state"], "ready");
+            assert_eq!(custom::source(tx, DIGEST_SNAPSHOT)?.unwrap()["state"], "ready");
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap();
+    }
+}
+
+#[test]
+fn digest_registration_bootstrap_requires_an_owner_and_installs_only_reviewed_pins() {
+    let store = Store::open_memory("alder").unwrap();
+    store.connection.batched(|tx| {
+        assert!(ensure_digest_registrations_tx(tx, "alder").unwrap_err().to_string().contains("missing notice-owner"));
+        Ok::<_, anyhow::Error>(())
+    }).unwrap().unwrap();
+    let alder_key = key();
+    let (_, _, stores) = fleet(&[("alder", &alder_key)]);
+    let alder = &stores[0];
+    declare(alder, "alder", alder_key.public()).unwrap();
+    alder.connection.batched(|tx| {
+        ensure_digest_registrations_tx(tx, "alder")?;
+        ensure_digest_registrations_tx(tx, "alder")?;
+        for (subject, pin) in [(DIGEST_SOURCE, notice::HASHES[0]), (DIGEST_SNAPSHOT, notice::HASHES[1])] {
+            let (hash, _, state) = custom::registration(tx, subject)?.unwrap();
+            assert_eq!((hash.as_str(), state.as_str()), (pin, "ready"));
+        }
+        Ok::<_, anyhow::Error>(())
+    }).unwrap().unwrap();
+}
+
+#[test]
+fn reviewed_runtime_registrations_survive_handover_and_unrelated_registry_refresh() {
+    let (alder_key, birch_key) = (key(), key());
+    let (_, _, stores) = fleet(&[("alder", &alder_key), ("birch", &birch_key)]);
+    let (alder, birch) = (&stores[0], &stores[1]);
+    declare(alder, "alder", alder_key.public()).unwrap();
+    alder.connection.batched(|tx| ensure_digest_registrations_tx(tx, "alder")).unwrap().unwrap();
+    declare(alder, "birch", birch_key.public()).unwrap();
+    sync(alder, birch);
+    custom::tests_shared_delivery::registration(birch);
+    birch.connection.batched(|tx| {
+        ensure_digest_registrations_tx(tx, "birch")?;
+        custom::rebuild(tx)?;
+        for (subject, pin) in [(DIGEST_SOURCE, notice::HASHES[0]), (DIGEST_SNAPSHOT, notice::HASHES[1])] {
+            let (hash, _, state) = custom::registration(tx, subject)?.unwrap();
+            assert_eq!((hash.as_str(), state.as_str()), (pin, "ready"));
+        }
+        assert!(ensure_digest_registrations_tx(tx, "alder").is_err(),
+            "registration persistence must not authorize the former owner to write");
+        Ok::<_, anyhow::Error>(())
+    }).unwrap().unwrap();
+}
+
+#[test]
+fn authenticated_digest_emission_survives_handover_and_still_fences_the_date() {
+    let fleet = setup();
+    let fields = digest_fields(&fleet.source);
+    let source = fleet.alder.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields.clone())).unwrap();
+    declare(&fleet.alder, "birch", &fleet.birch.member_public_key().unwrap()).unwrap();
+    sync(&fleet.alder, &fleet.birch);
+    for store in [&fleet.alder, &fleet.birch] {
+        assert!(authenticated_digest_source(&store.readers.get(), &source).unwrap());
+        assert_eq!(state(store, DIGEST_SOURCE)["state"], "ready");
+    }
+    let error = fleet.birch.append_claim(&input(DIGEST_SOURCE, &fleet.source.kind, RUNTIME, fields)).unwrap_err();
+    assert!(error.message.contains("producer input is immutable"), "{error:?}");
+}
+
+#[test]
+fn digest_source_without_an_owner_is_unavailable_even_with_reviewed_registrations() {
+    let store = Store::open_memory("alder").unwrap();
+    for manifest in notice::manifests() {
+        store.register_custom_kind(&RegistrationRequest { manifest: manifest.clone(), actor: "person/example".into() }).unwrap();
+    }
+    let fixture: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h785fc345c83c owner=fractal_store::store::notice_authority_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../docs/st3/client-v0/fixtures/notice-conformance.json")).unwrap();
+    let mut fields = fixture["snapshot"]["input"].clone();
+    fields["source"]["digest"] = json!([]);
+    let error = store.append_claim(&input(DIGEST_SOURCE, "custom.attention.notice-created", RUNTIME, fields)).unwrap_err();
+    assert!(error.message.contains("missing notice-owner declaration"), "{error:?}");
+}
+
 #[test]
 fn notice_snapshot_update_preserves_links_like_rebuild() {
     let fleet = written();

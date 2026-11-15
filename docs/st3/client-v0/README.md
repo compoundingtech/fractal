@@ -36,6 +36,29 @@ reviewed manifest digest; it does not authenticate external git commits named in
 authenticated sender evidence. Notice finalization is SQL-free when no notice
 work is pending; touched authority or custom state still triggers revalidation.
 This is a finalization contract, not a checked performance result.
+Daily ask digests are daemon-owned notices under
+`custom/attention/{source,snapshot}/digest/person/{person}/{local-date}`.
+Small payloads inline at most 128 rows in `input.source.digest`; larger days
+use one `digest_document` exact native document reference and a decimal-string
+`digest_count`. Immutable content-addressed documents contain at most 16KiB of
+UTF-8 JSONL `data` and an optional `previous` exact reference, never an unbounded
+reference array. Concatenating fragments from oldest to newest recovers every
+row losslessly, including titles longer than a fragment or the 64KiB source
+budget. Native document reads retrieve each binding and blob; no UI is added.
+Rows preserve each ask's title, requester, applied default answer, resolution
+timestamp, subject, episode and required `resolution_id` claim hash. Optional
+`covered_through` is an RFC3339 coverage boundary; `owner_claim` pins emission
+authority. Absent optional fields are omitted, not null. A row's optional
+`action_parameters["work.override"]` binds that subject and episode; it is
+omitted when no default applied or the seven-day override window has closed.
+Asks already overridden when the digest is created are excluded. Digest source
+and snapshot writes require the bound notice-owner member; ordinary notices
+remain producer-owned. The existing reviewed storage manifests are unchanged:
+the native digest validator admits only the exact `daemon/runtime` producer
+for digest snapshots while validating the remaining snapshot fields normally.
+Immutable source identity, keyed by person and date, prevents duplicate emission on retries
+and owner handover; prior-owner notices otherwise follow normal fail-closed
+authority revalidation. These records do not register a notice client surface.
 Generic seat-summary visibility and reduction use one pinned read snapshot and
 effective claim cut. Exact incarnation summaries neither use nor advance the shared
 subject cache; unrelated claim backlogs do not trigger its maintenance. The reduction
