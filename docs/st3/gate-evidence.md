@@ -4,6 +4,11 @@
 signing support, OpenSSH, repository objects, and an operator-supplied allowed
 signers file. They do not load daemon configuration or contact a Fractal instance.
 
+Native outward actions have a separate [effect receipt and explicit human
+resolution contract](effects.md). An unresolved effect waits like a broken gate;
+neither a passing unrelated gate nor lease expiry proves delivery.
+
+
 One immutable record represents one observation; its trust tier is explicit. The first kinds are `tests` and
 `review`. `produced-by` is reserved as a name for a future trusted observer's
 verified trace receipt; v1 rejects it until its predicate and verifier exist.

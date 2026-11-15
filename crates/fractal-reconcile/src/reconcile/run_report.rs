@@ -247,6 +247,9 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// have if it has not yet. Only a stall is reported by default. A run linked from a parent
     /// step is left to its parent, which counts its activity and its stuck agents.
     pub(super) fn report_stall_by_default(&self, run: &MissionRunView, now: u128) -> Result<Option<u128>> {
+        if self.store.mission_run_has_unresolved_effect(&run.id)? {
+            return Ok(None);
+        }
         let Some(enabled_since) = *self
             .default_stall_reports_since
             .lock()
@@ -310,6 +313,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         report: &RunReport,
         now: u128,
     ) -> Result<Option<u128>> {
+        // Ambiguous delivery is a human-resolution wait, not completion or a timed stall.
+        if self.store.mission_run_has_unresolved_effect(&run.id)? {
+            return Ok(None);
+        }
         let event = match run.phase.as_str() {
             "cleanup-failed" => Some(RunEvent::Failed),
             "cleanup-cancelled" | "final-cancelled" => Some(RunEvent::Cancelled),

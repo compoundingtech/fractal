@@ -846,6 +846,9 @@ WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
+CREATE INDEX IF NOT EXISTS claims_effect_step_index
+ON claims(json_extract(body,'$.fields.bound_step_run'), subject)
+WHERE kind IN ('effect.intended','effect.in-flight','effect.confirmed','effect.unresolved');
 CREATE INDEX IF NOT EXISTS claims_run_report_to_index
 ON claims(json_extract(body, '$.fields.report_to'), subject)
 WHERE kind IN ('mission-run.created','mission-run.report-to');
@@ -19425,10 +19428,36 @@ pub fn project_mission_run_update(
             )
             .optional()
             .map_err(internal)?;
+        // A newly converged ambiguity can invalidate a previous success. Only a
+        // daemon hold backed by a current-generation unresolved effect may reopen it.
+        let mut effect_resolution_hold = false;
+        if status == "blocked" && phase == "normal"
+            && fields.get("reason").and_then(Value::as_str) == Some("effect-unresolved")
+            && claim.actor.as_deref() == Some("daemon/runtime")
+        {
+            for effect in claim.body["evidence"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if effects::effect_is_unresolved_tx(transaction, effect).map_err(internal)?
+                    && transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mission_runs m JOIN step_runs s
+                         ON s.run_id=m.id AND s.generation_id=m.current_generation_id
+                         JOIN claims c ON c.subject=?2 AND c.kind='effect.unresolved'
+                           AND json_extract(c.body,'$.fields.bound_step_run')=s.subject
+                         WHERE m.id=?1)",
+                        params![run_id, effect], |row| row.get::<_, bool>(0),
+                    ).map_err(internal)?
+                {
+                    effect_resolution_hold = true;
+                    break;
+                }
+            }
+        }
+        let reopening_effect = effect_resolution_hold && current.as_ref().is_some_and(
+            |(status, phase)| is_terminal_run_state(status) || phase == "terminal",
+        );
         if current.is_some_and(|(current_status, current_phase)| {
             (is_terminal_run_state(&current_status) || current_phase == "terminal")
                 && !(is_terminal_run_state(status) || phase == "terminal")
-        }) {
+        }) && !effect_resolution_hold {
             return Ok(());
         }
         transaction
@@ -19437,6 +19466,13 @@ pub fn project_mission_run_update(
                 /* sqlite-large-value: allow-for-now lv-he4b8f413eb73 owner=fractal_store::store TODO=trace-statement-and-value-representation */ params![run_id, status, phase, claim.accepted_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
+        if reopening_effect {
+            transaction.execute(
+                "UPDATE run_generations SET status='running', updated_at_unix_ms=?2
+                 WHERE id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
+                params![run_id, claim.accepted_at_unix_ms.to_string()],
+            ).map_err(internal)?;
+        }
         if phase == "normal"
             && fields.get("previous_phase").and_then(Value::as_str) == Some("supersession-waiting")
         {
@@ -21117,7 +21153,7 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
         .nth(1)
         .map(|id| format!("run-generation/{id}"))
         .unwrap_or_default();
-    Ok(StepRunView { executions: None, subject,
+    Ok(StepRunView { executions: None, effects: Vec::new(), subject,
     run: format!("mission-run/{}", row.get::<_, String>(1)?),
     generation,
     step: row.get(2)?,
@@ -23258,6 +23294,7 @@ pub fn mission_run_view_and_definition_tx(
     let mut definitions = PinnedDefinitions::default();
     for step in &mut view.steps {
         if presentation {
+            step.effects = effects::effect_views_for_step_tx(connection, &step.subject)?;
             enrich_step_queue_with(connection, step, now_ms(), &mut definitions, history)?;
         } else {
             let snapshot_unix_ms = now_ms();

@@ -88,6 +88,7 @@ use crate::model::{
     SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
+pub mod effects;
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
@@ -864,6 +865,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(messages::message_delivery))
         .route("/v1/messages/by-key", get(messages::message_by_key))
+        .route("/v1/effects/by-key", get(effects::by_key))
+        .route("/v1/effects/{*subject}", post(effects::resolve))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
         .route("/v1/desired", get(operations::desired_batch))
@@ -1186,6 +1189,9 @@ async fn response_envelope_unbounded(
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
+    let effect_resolution = request.method() == axum::http::Method::POST
+        && request.uri().path().starts_with("/v1/effects/")
+        && request.uri().path().ends_with("/resolve");
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
@@ -1287,6 +1293,7 @@ async fn response_envelope_unbounded(
     // must leave the async acceptor free to admit independent requests when SQLite is busy.
     // Bearers on native Unix routes must not evade the assistant route boundary.
     let (client_authentication, client_snapshot) = if client_request
+        || effect_resolution
         || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
