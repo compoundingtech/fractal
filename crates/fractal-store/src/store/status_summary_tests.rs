@@ -516,3 +516,79 @@ fn status_summary_benchmark() {
 }
 
 
+/// Generic visibility must cost subject/kind probes, not runtime history scans.
+#[test]
+fn generic_visibility_probes_reserved_kinds_without_reading_runtime_history() {
+    const BEFORE: &str =
+        "SELECT DISTINCT claims.subject,claims.kind FROM json_each(?1) selected
+         JOIN claims ON claims.subject=selected.value WHERE claims.store_index<=?2";
+    let store = seat_with(3_000);
+    let names = BTreeSet::from([SEAT.to_owned()]);
+    let cut = store.index().unwrap();
+    let encoded = serde_json::to_string(&names).unwrap();
+    let connection = store.readers.get();
+    for (label, sql) in [("before", BEFORE), ("after", Store::GENERIC_RESERVED_SUBJECTS_SQL)] {
+        let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+            .query_map(params![encoded, cut], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        eprintln!("generic visibility {label} plan: {plan:?}");
+        if label == "after" {
+            assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+            // Either existing subject/kind covering index can win a prefix probe.
+            assert_eq!(plan.iter().filter(|line| line.contains(
+                "COVERING INDEX claims_subject_kind")).count(), 4, "{plan:?}");
+        }
+    }
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let started = std::time::Instant::now();
+    let before = connection.prepare(BEFORE).unwrap()
+        .query_map(params![encoded, cut], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    let before_elapsed = started.elapsed();
+    let before_work = scope.finish();
+    assert_eq!(before, vec![(SEAT.to_owned(), "runtime.observed".into())]);
+    drop(connection);
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let started = std::time::Instant::now();
+    assert_eq!(store.generic_status_subject_names_at(names, cut).unwrap(),
+        BTreeSet::from([SEAT.to_owned()]));
+    let after_elapsed = started.elapsed();
+    let after_work = scope.finish();
+    eprintln!("generic visibility 3000 observations: before={before_work:?} {before_elapsed:?}; after={after_work:?} {after_elapsed:?}");
+    assert!(before_work.vm_steps > after_work.vm_steps * 10,
+        "before={before_work:?}, after={after_work:?}");
+}
+
+#[test]
+fn generic_visibility_reserved_kind_probes_match_namespace_and_snapshot_boundaries() {
+    let kinds = [
+        "custom.attention", "custom.attention.", "custom.attention.source-created",
+        "attention.notice", "attention.notice-", "attention.notice-source",
+        "custom.attention-", "custom.attention/", "custom.attentionX",
+        "attention.notice.", "attention.notice/", "attention.noticeX", "runtime.observed",
+    ];
+    let store = seat_with(kinds.len());
+    let names = kinds.iter().enumerate().map(|(index, _)| format!("agent/kind-{index}"))
+        .collect::<BTreeSet<_>>();
+    // Rewrite only this in-memory fixture to exercise hostile and legacy kinds
+    // independently of today's write-time schema validation.
+    for (index, kind) in kinds.iter().enumerate() {
+        store.connection.write().execute(
+            "UPDATE claims SET subject=?1,kind=?2 WHERE store_index=?3",
+            params![format!("agent/kind-{index}"), kind, index + 1],
+        ).unwrap();
+    }
+    for cut in 0..=kinds.len() as u64 {
+        let expected = kinds.iter().enumerate().filter_map(|(index, kind)| {
+            (index as u64 >= cut || !fractal_schema::notice::is_reserved_kind(kind))
+                .then(|| format!("agent/kind-{index}"))
+        }).collect::<BTreeSet<_>>();
+        assert_eq!(store.generic_status_subject_names_at(names.clone(), cut).unwrap(),
+            expected, "cut={cut}");
+    }
+    let roots = BTreeSet::from([
+        "custom/attention".to_owned(), "custom/attention/source/x".to_owned(),
+    ]);
+    assert!(store.generic_status_subject_names_at(roots, 0).unwrap().is_empty());
+}
