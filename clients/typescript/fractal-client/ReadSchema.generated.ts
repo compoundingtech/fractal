@@ -1623,6 +1623,76 @@ export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","h
 export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type
 export type AvailabilityDeadlineClockEncoded = typeof AvailabilityDeadlineClock.Encoded
 
+/** Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words. */
+export const AvailabilityDeadlineClockDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "hold-all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "hold-routine": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "run": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityDeadlineClockDurations", description: "Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words." }))()
+export type AvailabilityDeadlineClockDurations = typeof AvailabilityDeadlineClockDurations.Type
+export type AvailabilityDeadlineClockDurationsEncoded = typeof AvailabilityDeadlineClockDurations.Encoded
+
+/** Milliseconds of each interruptions setting during a history bucket. */
+export const AvailabilityInterruptionsDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "none": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "urgent": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityInterruptionsDurations", description: "Milliseconds of each interruptions setting during a history bucket." }))()
+export type AvailabilityInterruptionsDurations = typeof AvailabilityInterruptionsDurations.Type
+export type AvailabilityInterruptionsDurationsEncoded = typeof AvailabilityInterruptionsDurations.Encoded
+
+/** Milliseconds of each derived presence during a history bucket. */
+export const AvailabilityPresenceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "idle": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "locked": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "present": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityPresenceDurations", description: "Milliseconds of each derived presence during a history bucket." }))()
+export type AvailabilityPresenceDurations = typeof AvailabilityPresenceDurations.Type
+export type AvailabilityPresenceDurationsEncoded = typeof AvailabilityPresenceDurations.Encoded
+
+/** Milliseconds spent in each status during a history bucket. */
+export const AvailabilityStatusDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "available": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "away": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusDurations", description: "Milliseconds spent in each status during a history bucket." }))()
+export type AvailabilityStatusDurations = typeof AvailabilityStatusDurations.Type
+export type AvailabilityStatusDurationsEncoded = typeof AvailabilityStatusDurations.Encoded
+
+/** Milliseconds the status came from each source during a history bucket. */
+export const AvailabilityStatusSourceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "override": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "presence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusSourceDurations", description: "Milliseconds the status came from each source during a history bucket." }))()
+export type AvailabilityStatusSourceDurations = typeof AvailabilityStatusSourceDurations.Type
+export type AvailabilityStatusSourceDurationsEncoded = typeof AvailabilityStatusSourceDurations.Encoded
+
+/** One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range. */
+export const AvailabilityHistoryBucket = /*#__PURE__*/ (() => Schema.Struct({
+  "covered_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "deadline_clock": AvailabilityDeadlineClockDurations,
+  "interruptions": AvailabilityInterruptionsDurations,
+  /** Null for anyone but the person. */
+  "presence": Schema.OptionFromNullOr(AvailabilityPresenceDurations).annotate({ description: "Null for anyone but the person." }),
+  "start": Timestamp,
+  "status": AvailabilityStatusDurations,
+  "status_source": AvailabilityStatusSourceDurations
+}).annotate({ identifier: "AvailabilityHistoryBucket", description: "One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range." }))()
+export type AvailabilityHistoryBucket = typeof AvailabilityHistoryBucket.Type
+export type AvailabilityHistoryBucketEncoded = typeof AvailabilityHistoryBucket.Encoded
+
+/** A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available). */
+export const AvailabilityHistory = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "buckets": Schema.Array(AvailabilityHistoryBucket).check(Schema.isMaxLength(2016)),
+  "from": Timestamp,
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "to": Timestamp
+}).annotate({ identifier: "AvailabilityHistory", description: "A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available)." }))()
+export type AvailabilityHistory = typeof AvailabilityHistory.Type
+export type AvailabilityHistoryEncoded = typeof AvailabilityHistory.Encoded
+
 /** Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown. */
 export const AvailabilityInterruptions = /*#__PURE__*/ (() => openEnum(["all","urgent","none"]).annotate({ identifier: "AvailabilityInterruptions", description: "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown." }))()
 export type AvailabilityInterruptions = typeof AvailabilityInterruptions.Type

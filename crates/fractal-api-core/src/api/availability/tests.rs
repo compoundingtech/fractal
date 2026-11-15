@@ -319,3 +319,63 @@ async fn a_local_peer_naming_the_person_neither_writes_nor_reads_raw_presence() 
     assert_eq!(row["person"], "person/ada", "{body}");
     assert!(row["presence"].is_null() && row["presence_observed_at"].is_null(), "{row}");
 }
+
+#[tokio::test]
+async fn availability_history_answers_past_buckets_and_shows_presence_only_to_the_person() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::super::tests::state(root.path());
+    let app = router(state.clone());
+    let now = client_now_ms();
+    let (status, _) = send(&app, "POST", "/v1/client/presence", local("person/ada"), Some(json!({
+        "state": "active", "observed_at": at(now),
+    }))).await;
+    assert_eq!(status, StatusCode::OK);
+    // An hour that ends a minute from now, in ten-minute buckets: the future is never answered.
+    let (from, to) = (now - 59 * MINUTE, now + MINUTE);
+    let path = |extra: &str| format!("/v1/client/availability/history?from={}&to={}&bucket_seconds=600{extra}", at(from), at(to));
+    let (status, own) = send(&app, "GET", &path(""), local("person/ada"), None).await;
+    assert_eq!(status, StatusCode::OK, "{own}");
+    let value = &own["value"];
+    assert_eq!((&value["person"], &value["from"], &value["bucket_seconds"]), (&json!("person/ada"), &json!(at(from)), &json!(600)));
+    let end = unix_ms(value["to"].as_str().unwrap(), "to").unwrap();
+    assert!(now <= end && end < to, "{value}");
+    let buckets = value["buckets"].as_array().unwrap();
+    assert_eq!(buckets.len(), 6);
+    let ms = |value: &Value| u128::from(value.as_u64().unwrap());
+    assert_eq!(buckets.iter().map(|bucket| ms(&bucket["covered_ms"])).sum::<u128>(), end - from);
+    for bucket in buckets {
+        let covered = ms(&bucket["covered_ms"]);
+        for axis in ["status", "status_source", "presence", "interruptions", "deadline_clock"] {
+            let total: u128 = bucket[axis].as_object().unwrap().values().map(ms).sum();
+            assert_eq!(total, covered, "{axis} {bucket}");
+        }
+    }
+    // Before the first report the person was unreported, which reads available.
+    assert_eq!((ms(&buckets[0]["status"]["available"]), ms(&buckets[0]["presence"]["unreported"])), (10 * MINUTE, 10 * MINUTE));
+    assert_eq!(buckets[0]["deadline_clock"]["hold-routine"], 0);
+
+    for reader in ["person/avery", "agent/worker"] {
+        let (status, other) = send(&app, "GET", &path("&person=person/ada"), local(reader), None).await;
+        assert_eq!(status, StatusCode::OK, "{other}");
+        assert_eq!(other["value"]["buckets"].as_array().unwrap().len(), 6);
+        assert!(other["value"]["buckets"].as_array().unwrap().iter().all(|bucket| bucket["presence"].is_null()), "{other}");
+    }
+    let peer = client_v0::ClientSession { local_peer: true, ..client_v0::ClientSession::local(Some("person/ada")).unwrap() };
+    let query = HistoryQuery { person: None, from: at(from), to: at(to), bucket_seconds: 600 };
+    let coarse = history(State(state.clone()), Extension(peer), Query(query)).await.unwrap().1.0;
+    assert!(coarse["buckets"][0]["presence"].is_null(), "a local peer naming the person reads coarsely: {coarse}");
+
+    for (reader, path) in [
+        ("agent/worker", path("")),
+        ("person/ada", path("&person=agent/worker")),
+        ("person/ada", format!("/v1/client/availability/history?from=yesterday&to={}&bucket_seconds=600", at(to))),
+        ("person/ada", format!("/v1/client/availability/history?from={}&to={}&bucket_seconds=600", at(to), at(from))),
+        ("person/ada", format!("/v1/client/availability/history?from={}&to={}&bucket_seconds=86400", at(now - 32 * 24 * 60 * MINUTE), at(now))),
+        ("person/ada", format!("/v1/client/availability/history?from={}&to={}&bucket_seconds=60", at(now - 2017 * MINUTE), at(now))),
+    ] {
+        let (status, refused) = send(&app, "GET", &path, local(reader), None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{reader} {path} {refused}");
+    }
+    let (status, _) = send(&app, "GET", &path(""), ("x-st3-features", String::new()), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "an anonymous local reader is no person or agent");
+}

@@ -82,3 +82,21 @@ fn latest_claim_is_the_last_of_the_whole_history() {
     );
     assert!(store.latest_claim(SUBJECT, Some("example.absent")).unwrap().is_none());
 }
+
+#[test]
+fn claims_before_seeks_exclusive_end_preserving_ties_and_callback_stop() {
+    let store = store();
+    let all = store.claims_for(SUBJECT, Some("example.note")).unwrap();
+    for end in [0, 999, 1_000, 1_001, 2_000, 2_001, 3_000, 10_000, u128::MAX] {
+        let expected = all.iter().rev().filter(|claim| claim.accepted_at_unix_ms < end)
+            .map(|claim| claim.id.clone()).collect::<Vec<_>>();
+        for limit in [1, 3, usize::MAX] {
+            let mut seen = Vec::new();
+            store.claims_in_order_before(SUBJECT, "example.note", end, |claim| {
+                seen.push(claim.id.clone());
+                seen.len() < limit
+            }).unwrap();
+            assert_eq!(seen, expected.iter().take(limit).cloned().collect::<Vec<_>>(), "end={end}, limit={limit}");
+        }
+    }
+}
