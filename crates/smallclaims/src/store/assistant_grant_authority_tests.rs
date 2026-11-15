@@ -1660,8 +1660,14 @@ fn subject_readiness_seeks_only_its_indexed_obligations_with_large_unrelated_que
              VALUES(?1,7,'proof','lost-key')", [&writer],
         ).unwrap();
     }
-    assert_eq!(cost(&grant.subject),fenced);
-    assert_eq!(cost(&independent.subject),clean);
+    for (subject, before) in [(&grant.subject, fenced), (&independent.subject, clean)] {
+        let after = cost(subject);
+        assert_eq!((after.0, after.2), (before.0, before.2));
+        // The proof-invalidation queue changes from empty to nonempty here:
+        // its subject seek is now executed, but adding 4096 unrelated entries
+        // must add only this fixed arm cost, not queue-size-proportional work.
+        assert!(after.1 <= before.1 + 64, "{before:?} -> {after:?}");
+    }
 }
 
 // Exercise the production query and indexes, not an EXPLAIN-plan surrogate.
