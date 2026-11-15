@@ -16,7 +16,6 @@ import { fixtureSidebarState } from '../shell/sidebar/state.ts'
 import { LiveAgentWorkspace, type WorkspaceNavigation } from '../web/LiveAgentWorkspace.tsx'
 import { alertPaneId, workspaceHref } from '../web/workspaceView.ts'
 import type { ThreadDraft, ThreadSource } from './threadSource.ts'
-import { threadClockSkewEvents } from '../../../../clients/typescript/fractal-scenarios/src/index.ts'
 
 const review = 'Review PR #42'
 const existing = 'Worker tests'
@@ -67,7 +66,15 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
   ]))
   const history = Atom.keepAlive(Atom.make<Readonly<Record<string, readonly Native.ThreadTimelineEvent[]>>>({
     [existingId]: [
-      ...(scenario === 'clock-skew' ? threadClockSkewEvents(now, actor).map(event => Native.decodeUnknownSync(Native.ThreadTimelineEvent)(event)) : []),
+      // Local contract inputs: authoritative reopen precedes close in wall-clock order.
+      ...(scenario === 'clock-skew' ? [
+        Native.decodeUnknownSync(Native.ThreadTimelineEvent)({
+          kind: 'thread.reopened', id: 'event/skew-reopen', actor_id: actor, accepted_at_unix_ms: now - 120_000,
+        }),
+        Native.decodeUnknownSync(Native.ThreadTimelineEvent)({
+          kind: 'thread.closed', id: 'event/skew-close', actor_id: actor, accepted_at_unix_ms: now - 60_000,
+        }),
+      ] : []),
       message('message/review-ready', agentRef, -2, 'Worker tests pass on Linux. The macOS job is still running.'),
       message('message/review-scope', actor, -9, 'Can you verify the cancellation case too?'),
       message('message/review-first', agentRef, -24, 'The retry fix is ready. I will verify the worker tests before merge.'),
@@ -268,7 +275,26 @@ const meta = {
 } satisfies Meta<Args>
 export default meta
 
-export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture', 'AgentThreads:contract-fixture', 'MissionThreads:contract-fixture', 'Loading:contract-fixture', 'Refused:contract-fixture', 'RetryAfterFailure:contract-fixture', 'UpdatesPaused:contract-fixture', 'UnconfirmedChange:contract-fixture', 'CloseConfirmation:contract-fixture', 'RefusedAction:contract-fixture', 'RefusedThread:contract-fixture', 'LatestPreview:contract-fixture'] as const
+export const scenarioExemptions = [
+  'AgentThreads:contract-fixture',
+  'AllStates:contract-fixture',
+  'CloseConfirmation:contract-fixture',
+  'ClosedThread:contract-fixture',
+  'CustomInboxSource:contract-fixture',
+  'DedicatedTab:contract-fixture',
+  'EmptyStart:contract-fixture',
+  'LatestPreview:contract-fixture',
+  'Loading:contract-fixture',
+  'MissionThreads:contract-fixture',
+  'MultipleThreads:contract-fixture',
+  'ReadOnly:contract-fixture',
+  'Refused:contract-fixture',
+  'RefusedAction:contract-fixture',
+  'RefusedThread:contract-fixture',
+  'RetryAfterFailure:contract-fixture',
+  'UnconfirmedChange:contract-fixture',
+  'UpdatesPaused:contract-fixture',
+] as const
 type Story = StoryObj<typeof meta>
 
 export const AllStates: Story = {

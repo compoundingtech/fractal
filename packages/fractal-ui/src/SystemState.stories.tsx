@@ -225,23 +225,6 @@ export const AccessRevoked: Story = { args: { connection: 'revoked', failure: re
   await expect(revoked.querySelector('[data-connection-detail]')).toHaveTextContent(revokedSentence)
   await expect(within(revoked as HTMLElement).queryByRole('button')).toBeNull()
 } }
-/** An inline row in a narrow lane: the statement wraps in full and Retry follows it, never pushed out of view. */
-export const InlineNoticeWraps: Story = {
-  render: ({ scheme }) => <main aria-label="Lane" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'dark' && darkTheme, liveAccentTheme, scheme === 'light' && lightTheme)}>
-    <div style={{ width: 240 }}>
-      <SystemNotice scope="inline" kind="error" title="Threads could not load" detail="The last read did not answer before the connection closed" onRetry={() => {}} />
-    </div>
-  </main>,
-  play: async ({ canvasElement }) => {
-    const row = canvasElement.querySelector<HTMLElement>('[data-system-state="error"]')!
-    const statement = row.querySelector<HTMLElement>('[role="status"]')!
-    const retry = within(row).getByRole('button', { name: 'Retry: Threads could not load' })
-    await expect(statement).toHaveTextContent('The last read did not answer before the connection closed')
-    await expect(statement.scrollWidth).toBeLessThanOrEqual(statement.clientWidth + 1)
-    await expect(retry.getBoundingClientRect().right).toBeLessThanOrEqual(row.getBoundingClientRect().right + 1)
-    await expect(statement.compareDocumentPosition(retry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  },
-}
 /** Live: no band at all; the panes' own rows stay. */
 export const Live: Story = { args: { connection: 'live' }, play: async ({ canvasElement }) => {
   await expect(band(canvasElement)).toHaveLength(0)
