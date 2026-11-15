@@ -68,11 +68,14 @@ pub fn classify(harness: &str, record: &Value, part: Option<&Value>) -> Category
         ("omp" | "pi", "custom_message") => match word(record, "customType") {
             "launch-completion" | "async-result" => Tool,
             "skill-prompt" => Notice,
-            _ => Chat, // Native extension messages are an explicitly open conversation family.
+            "" => Diagnostic,
+            _ if record["display"] == true => Chat, // Native extension explicitly requests display.
+            _ => Unknown,
         },
         ("omp" | "pi", "custom") => match word(record, "customType") {
             "tool_execution_start" => Tool,
             "session_exit" => Notice,
+            "" => Diagnostic,
             _ => Unknown,
         },
         ("omp" | "pi", "message") => match word(&record["message"], "role") {
@@ -97,6 +100,7 @@ pub fn classify(harness: &str, record: &Value, part: Option<&Value>) -> Category
         ("claude", "system") => match word(record, "subtype") {
             "api_error" => Notice,
             "turn_duration" => Internal,
+            "" => Diagnostic,
             _ => Unknown,
         },
         ("claude", "permission-mode" | "mode") => Notice,
@@ -159,7 +163,14 @@ mod tests {
         for (harness, fixture) in fixtures {
             for line in fixture.lines() {
                 let record: Value = serde_json::from_str(line).unwrap();
-                assert_ne!(classify(harness, &record, None), Category::Unknown, "unclassified {harness}: {record}");
+                let unshown_extension = harness == "omp" && record["type"] == "custom_message"
+                    && record["display"] != true
+                    && !matches!(word(&record, "customType"), "" | "launch-completion" | "async-result" | "skill-prompt");
+                if unshown_extension {
+                    assert_eq!(classify(harness, &record, None), Category::Unknown, "unshown extension: {record}");
+                } else {
+                    assert_ne!(classify(harness, &record, None), Category::Unknown, "unclassified {harness}: {record}");
+                }
                 let content = record.pointer("/message/content").or_else(|| record.pointer("/payload/content"));
                 if let Some(parts) = content.and_then(Value::as_array) {
                     for part in parts {
