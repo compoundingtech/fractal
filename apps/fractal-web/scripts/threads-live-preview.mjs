@@ -89,11 +89,11 @@ const fractalJson = (args, options) => JSON.parse(fractal(['--json', ...args], o
 const alive = () => existsSync(gateway()) && fractal(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
 const marker = (name) => join(root, name)
 
-const gatewayCall = (method, path, body, authorization, extra = {}) => new Promise((resolve, reject) => {
+const gatewayCall = (method, path, body, authorization, extra = {}, socketPath = gateway()) => new Promise((resolve, reject) => {
   const payload = body === undefined ? undefined : JSON.stringify(body)
   const headers = { host: '127.0.0.1', ...extra, ...(authorization === undefined ? {} : { authorization }),
     ...(payload === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }) }
-  const req = request({ socketPath: gateway(), path, method, headers }, (res) => {
+  const req = request({ socketPath, path, method, headers }, (res) => {
     let text = ''
     res.on('data', (chunk) => { text += chunk })
     res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`${method} ${path}: ${res.statusCode} ${text}`)))
@@ -249,17 +249,20 @@ function discussGate() {
 }
 
 /**
- * A declared agent acts through the local identity header on the Unix socket. Only a fixture executable with
- * declared-agent attribution binds it as that agent; any other build answers 403, and nothing is written.
+ * A declared agent acts through the local identity header on the daemon's own Unix socket; the client socket
+ * serves paired devices only. Only a fixture executable with declared-agent attribution binds the header as
+ * that agent; any other build refuses it, and nothing is written.
  */
 async function actAs(agent, type, parameters) {
   const as = { 'x-st3-person': agent }
-  const capabilities = await gatewayCall('GET', '/v1/client/capabilities', undefined, undefined, as)
+  const daemonSocket = join(runDir, 'fractal.sock')
+  const capabilities = await gatewayCall('GET', '/v1/client/capabilities', undefined, undefined, as, daemonSocket)
+  if (capabilities.value?.session_actor !== agent) throw new Error(`${type}: the daemon did not bind ${agent}: ${JSON.stringify(capabilities.value?.session_actor)}`)
   const id = `action/${randomUUID()}`
   const response = await gatewayCall('POST', '/v1/client/actions', {
     api_version: capabilities.api_version, id, type, idempotency_key: id,
     fence: { snapshot_id: capabilities.snapshot.id }, parameters,
-  }, undefined, as)
+  }, undefined, as, daemonSocket)
   if (response.value?.status !== 'completed') throw new Error(`${type} as ${agent} was not completed: ${JSON.stringify(response)}`)
   console.log(`${type} as ${agent}: completed`)
 }
