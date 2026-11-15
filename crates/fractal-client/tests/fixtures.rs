@@ -51,6 +51,28 @@ fn availability_words_a_newer_daemon_adds_read_as_unknown() {
 }
 
 #[test]
+fn availability_history_fixture_round_trips_and_every_axis_covers_its_bucket() {
+    let read: Envelope<AvailabilityHistory> = decode("availability-history.json");
+    let wire = serde_json::from_slice::<serde_json::Value>(&fixture("availability-history.json")).unwrap();
+    assert_eq!(serde_json::to_value(&read.value).unwrap(), wire["value"]);
+    let [first, last] = &read.value.buckets[..] else { panic!("two buckets") };
+    assert_eq!((first.status_source.r#override, last.status_source.r#override), (0, 1_200_000));
+    assert_eq!((last.covered_ms, last.deadline_clock.hold_routine), (1_800_000, 1_200_000));
+    for bucket in &read.value.buckets {
+        let presence = bucket.presence.unwrap();
+        for total in [
+            bucket.status.available + bucket.status.away,
+            bucket.status_source.r#override + bucket.status_source.presence + bucket.status_source.unreported,
+            presence.present + presence.idle + presence.locked + presence.unreported,
+            bucket.interruptions.all + bucket.interruptions.urgent + bucket.interruptions.none,
+            bucket.deadline_clock.run + bucket.deadline_clock.hold_routine + bucket.deadline_clock.hold_all,
+        ] {
+            assert_eq!(total, bucket.covered_ms, "{bucket:?}");
+        }
+    }
+}
+
+#[test]
 fn directive_note_set_fixtures_decode_and_encode_a_clear_as_null() {
     let set: DirectiveNoteSet = decode("directive-note-set.json");
     assert_eq!(serde_json::to_value(&set).unwrap(), serde_json::from_slice::<serde_json::Value>(&fixture("directive-note-set.json")).unwrap());

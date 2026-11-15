@@ -2909,12 +2909,20 @@ impl Client {
         let (status, bytes) = outcome?;
         if !(200..300).contains(&status) {
             // These projections have no missing-item 404; an older router may return no envelope.
-            let related_runs = path.starts_with("/v1/client/agent-related-runs/");
-            if status == 404 && (related_runs || path.split('?').next() == Some("/v1/client/schedules")) {
+            let unsupported = if path.starts_with("/v1/client/agent-related-runs/") {
+                Some("agent-related-runs.get")
+            } else {
+                match path.split('?').next() {
+                    Some("/v1/client/schedules") => Some("schedules.list"),
+                    Some("/v1/client/availability/history") => Some("availability.history"),
+                    _ => None,
+                }
+            };
+            if let (404, Some(operation)) = (status, unsupported) {
                 let error = ErrorEnvelope {
                     api_version: "st3.client.v0".into(), error_version: "st3.client.error.v0".into(),
                     request_id: String::new(), code: ErrorCode::UnsupportedCapability,
-                    message: format!("this server does not support {}; upgrade the server", if related_runs { "agent-related-runs.get" } else { "schedules.list" }),
+                    message: format!("this server does not support {operation}; upgrade the server"),
                     retryable: false, retry_after_ms: None, details: Default::default(),
                 };
                 return Err(ClientError::Api(error.code.clone(), error.message.clone(), Box::new(error)));
@@ -4395,6 +4403,24 @@ mod tests {
             assert_eq!(lines.len(),3);
             assert_eq!(lines[0],"GET /v1/client/schedules?cursor=next%26cursor&limit=1&unheard_after_ms=300000 HTTP/1.1");
             assert_eq!(lines[1],"GET /v1/client/schedules HTTP/1.1");
+        });
+    }
+
+    #[test]
+    fn availability_history_reads_its_fixture_and_keeps_an_old_server_unsupported() {
+        runtime().block_on(async {
+            let fixture=include_str!("../../../docs/st3/client-v0/fixtures/availability-history.json");
+            let directory=tempfile::tempdir().unwrap(); let socket=directory.path().join("history.sock");
+            let server=scripted_server(&socket,vec![(0,200,fixture.into()),(0,404,String::new())]);
+            let client=Client::unix_as(&socket,"person/ada");
+            let history=client.availability_history(Some("person/ada"),"2026-11-12T09:00:00Z","2026-11-12T11:00:00Z",3600).await.unwrap();
+            assert_eq!((history.value.bucket_seconds,history.value.buckets.len()),(3600,2));
+            assert_eq!(history.value.buckets[1].deadline_clock.hold_routine,1_200_000);
+            assert!(matches!(client.availability_history(None,"2026-11-12T09:00:00Z","2026-11-12T11:00:00Z",3600).await,Err(ClientError::Api(ErrorCode::UnsupportedCapability,_,_))));
+            let lines=server.await.unwrap();
+            assert!(lines[0].starts_with("GET /v1/client/availability/history?from=2026-11-12T09"),"{}",lines[0]);
+            assert!(lines[0].contains("&bucket_seconds=3600&person=person/ada HTTP/1.1"),"{}",lines[0]);
+            assert!(lines[1].contains("&bucket_seconds=3600 HTTP/1.1"),"{}",lines[1]);
         });
     }
 

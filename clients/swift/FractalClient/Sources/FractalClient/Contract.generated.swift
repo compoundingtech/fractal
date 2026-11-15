@@ -73,6 +73,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case harnessQuestionsGet = "harness-questions.get"
     case notesList = "notes.list"
     case availabilityList = "availability.list"
+    case availabilityHistory = "availability.history"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
     case privateNotesGet = "private-notes.get"
@@ -175,6 +176,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .harnessQuestionsGet: "/v1/client/harness-questions/{id}",
     .notesList: "/v1/client/notes",
     .availabilityList: "/v1/client/availability",
+    .availabilityHistory: "/v1/client/availability/history",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
     .privateNotesGet: "/v1/client/private-notes/{uri}",
