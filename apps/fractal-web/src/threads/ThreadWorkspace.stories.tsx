@@ -534,7 +534,18 @@ export const LatestPreview: Story = {
     await userEvent.click(scenarios.getByRole('radio', { name: 'Conversation' }))
     await userEvent.click(scenarios.getByRole('radio', { name: 'Inbox source' }))
     await canvas.findByTestId('alert-details', {}, { timeout: 60_000 })
-    await expect(canvas.getByRole('tab', { name: /^Alerts\b/ })).toHaveAttribute('aria-selected', 'true')
+    // Below 900px the sidebar tabs are accessible only while the Agents drawer is open.
+    // Close it afterwards so its modal scrim does not cover the remaining preview controls.
+    const navigation = await waitFor(() => canvas.queryByRole('tab', { name: /^Alerts\b/ })
+      ?? canvas.getByRole('button', { name: 'Expand sidebar' }))
+    if (navigation.getAttribute('role') === 'tab') await expect(navigation).toHaveAttribute('aria-selected', 'true')
+    else {
+      await userEvent.click(navigation)
+      const drawer = within(await canvas.findByRole('dialog', { name: 'Agents' }))
+      await expect(await drawer.findByRole('tab', { name: /^Alerts\b/ })).toHaveAttribute('aria-selected', 'true')
+      await userEvent.click(drawer.getByRole('button', { name: 'Close agents' }))
+      await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull())
+    }
     await expect(surfaces.getByRole('radio', { name: 'Thread tab' })).toBeDisabled()
     await userEvent.click(await canvas.findByRole('button', { name: 'Start thread' }))
     await userEvent.type(await canvas.findByRole('textbox', { name: 'Message' }), 'Verify cancellation before merge.')
