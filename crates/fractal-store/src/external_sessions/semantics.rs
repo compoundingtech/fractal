@@ -9,6 +9,7 @@ pub(super) fn annotate(driver: ExternalDriver, record: &Value, sequence: u64, it
     let mut assistant_usage_attached = false;
     for item in items {
         let error = item["type"] == "error";
+        let part = native_part(driver, record, sequence, item["sequence"].as_u64());
         let Some(blocks) = item["body"]["blocks"].as_array_mut() else { continue };
         for block in blocks {
             let category = match block["kind"].as_str().unwrap_or("") {
@@ -16,6 +17,7 @@ pub(super) fn annotate(driver: ExternalDriver, record: &Value, sequence: u64, it
                 "raw_text" => Category::SourceDiagnostic,
                 "error" if error && record.is_null() => Category::SourceDiagnostic,
                 "error" => Category::ActionableNotice,
+                _ if part.is_some() => classify(driver.as_str(), record, part),
                 "tool_call" | "tool_output" | "job" | "subagent" | "ask" => Category::ToolActivity,
                 "text" | "reasoning" | "image" if record.pointer("/message/role").and_then(Value::as_str) == Some("assistant") => Category::Conversation,
                 "unknown" if block.pointer("/payload/raw/type") != record.get("type") => {
@@ -50,6 +52,23 @@ pub(super) fn annotate(driver: ExternalDriver, record: &Value, sequence: u64, it
             block["semantic"] = semantic;
         }
     }
+}
+
+/// Normalizers reserve the root sequence for the message, then one sequence per native part.
+/// Use that source offset, never the normalized block kind, to classify open content arrays.
+fn native_part(driver: ExternalDriver, record: &Value, sequence: u64, item_sequence: Option<u64>) -> Option<&Value> {
+    let (content, first) = match (driver.as_str(), record["type"].as_str()) {
+        ("codex", Some("response_item")) if record["payload"]["type"] == "message" =>
+            (&record["payload"]["content"], sequence.checked_add(1)?),
+        ("claude", Some("user" | "assistant")) =>
+            (&record["message"]["content"], sequence.checked_add(1)?),
+        ("omp" | "pi", Some("message")) if record["message"]["role"] != "toolResult" =>
+            (&record["message"]["content"], sequence.checked_add(1)?),
+        ("omp" | "pi", Some("custom_message")) => (&record["content"], sequence),
+        _ => return None,
+    };
+    let offset = usize::try_from(item_sequence?.checked_sub(first)?).ok()?;
+    content.as_array()?.get(offset)
 }
 
 fn usage(record: &Value, assistant: bool) -> Value {
@@ -159,5 +178,28 @@ mod tests {
         let broken = normalized(json!({"type":"custom","customType":"tool_execution_start",
             "data":{"toolCallId":"call-one","toolName":"bash"}}));
         assert_eq!(broken[0]["body"]["blocks"][0]["semantic"]["category"], "source_diagnostic");
+    }
+
+    #[test]
+    fn semantic_projection_native_part_discriminators_cannot_be_bypassed_by_text() {
+        for (driver, record, expected) in [
+            (ExternalDriver::Codex, json!({"type":"response_item","payload":{"type":"message",
+                "role":"assistant","content":[{"type":"future_part","text":"opaque data"},
+                    {"type":"output_text","text":"actual prose"}]}}), "unknown"),
+            (ExternalDriver::Claude, json!({"type":"assistant","message":{"role":"assistant",
+                "content":[{"text":"malformed data"},{"type":"text","text":"actual prose"}]}}), "source_diagnostic"),
+            (ExternalDriver::Omp, json!({"type":"message","message":{"role":"assistant",
+                "content":[{"text":"malformed data"},{"type":"text","text":"actual prose"}]}}), "source_diagnostic"),
+        ] {
+            let mut items = Vec::new();
+            normalize_native_line(driver, &record, 100, "2026-10-04T00:00:00Z", &mut items);
+            let part = items.iter().find(|item| item["sequence"] == 101).unwrap();
+            assert_eq!(part["body"]["blocks"][0]["semantic"]["category"], expected);
+            assert_ne!(part["body"]["blocks"][0]["semantic"]["disposition"], "reading_lane");
+            let prose = items.iter().find(|item| item["sequence"] == 102).unwrap();
+            assert_eq!(prose["body"]["blocks"][0]["semantic"]["category"], "conversation");
+            assert!(items.iter().flat_map(|item| item["body"]["blocks"].as_array().unwrap())
+                .any(|block| block["kind"] == "source_record" && block["payload"]["raw"] == record));
+        }
     }
 }
