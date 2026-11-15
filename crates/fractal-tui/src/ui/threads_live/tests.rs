@@ -2254,13 +2254,15 @@ fn an_active_message_box_keeps_alt_chords_from_thread_actions() {
     assert!(matches!(&ui.threads.focused, Some((_, Input::Reply(_)))));
 }
 
+type ShortcutCase = (char, fn(String) -> thread::Tap);
+
 #[test]
 fn inbox_thread_detail_keeps_bare_action_letters() {
     let id = "thread/worker";
     let inbox = Pane::Home(Some(id.into()));
     let mut threads = observed_threads(ThreadState::Open);
     threads.set_access(ThreadAccess { mark_read: true, ..threads.access });
-    let cases: [(char, fn(String) -> thread::Tap); 4] = [
+    let cases: [ShortcutCase; 4] = [
         ('z', thread::Tap::Close),
         ('n', thread::Tap::Rename),
         ('v', thread::Tap::MarkVisibleRead),
