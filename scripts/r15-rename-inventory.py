@@ -92,7 +92,6 @@ def main():
         if len(previous_sites) != 1 or previous_sites[0].fingerprint != entry['fingerprint'] or forward(previous) != raw:
             raise ValueError(f'{site.path}:{site.line}: include-source changed beyond the rename')
         entry['fingerprint'] = site.fingerprint
-        entry['excerpt'] = site.excerpt
         changed += 1
     for flow in manifest.get('flows', []):
         current_path = forward(flow['path'])

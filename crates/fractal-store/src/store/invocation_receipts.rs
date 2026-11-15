@@ -150,6 +150,14 @@ impl Store {
         self.read_invocation_receipts(Some(agent), None)
     }
 
+    /// Return only the original admitted launch member, never the current declaration.
+    pub fn invocation_launch_member(&self, invocation: &str) -> Result<Option<Value>> {
+        let Some(operation) = invocation.strip_prefix("invocation/") else { return Ok(None); };
+        let member: Option<String> = self.readers.get().query_row(
+            "SELECT json_extract(body,'$.launch_member') FROM local_runtime_starts WHERE id=?1", [operation],
+            |row| row.get::<_, Option<String>>(0)).optional()?.flatten();
+        member.map(|member| serde_json::from_str(&member).map_err(Into::into)).transpose()
+    }
     fn read_invocation_receipts(&self, agent: Option<&str>, invocation_id: Option<&str>) -> Result<Vec<InvocationReceipt>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
@@ -174,6 +182,24 @@ impl Store {
         Ok(())
     }
 
+    /// Retain a private CAS reference as an additive launch observation, never as provider text.
+    pub fn record_invocation_transcript_reference(&self, receipt: &InvocationReceipt,
+        artifact: &crate::invocation_artifacts::InvocationArtifact) -> Result<()> {
+        anyhow::ensure!(artifact.kind == "transcript" && artifact.invocation_id == receipt.invocation_id
+            && artifact.incarnation.is_some() && artifact.incarnation == receipt.incarnation
+            && self.invocation_launch_member(&receipt.invocation_id)?.is_some(),
+            "transcript reference must bind the exact admitted launch incarnation");
+        let mut observed = receipt.clone();
+        observed.phase = InvocationPhase::Observed;
+        observed.event_key = Some(format!("transcript:{}", artifact.sha256));
+        observed.transcript_ref = Some(format!("sha256:{}", artifact.sha256));
+        if let Some(binding) = artifact.binding_claim.as_ref() {
+            observed.evidence.push(binding.clone());
+        }
+        self.connection.batched(|tx| append_receipt_tx(tx, self.origin(), &observed))
+            .map_err(|error| anyhow::anyhow!("{error}"))??;
+        Ok(())
+    }
     /// A terminal runtime observation may close only an already verified exact incarnation.
     /// The source observation can be local; the resulting receipt remains durable.
     pub fn record_invocation_runtime_end(&self, observation: &ClaimRecord) -> Result<()> {

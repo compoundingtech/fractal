@@ -1316,7 +1316,7 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
         {"agent":"agent/local","mission_run":"","step":"","model":"model-local","account":"","host":"host/a","cost_microusd":0,"total_tokens":50,"input_tokens":50,"output_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"unpriced_tokens":50},
     ]});
     let output = render_usage_report(&report, 24, None);
-    assert_eq!(output.matches("USAGE  ").count(), 6);
+    assert_eq!(output.matches("USAGE  ").count(), 8);
     assert!(
         output.starts_with("SPEND  $4.25+ · 990 tokens · 24h · API-equivalent\n"),
         "{output}"
@@ -1367,6 +1367,24 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
     let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));
     assert_eq!(by_step.matches("USAGE  ").count(), 1);
     assert!(by_step.contains("by step"));
+}
+
+#[test]
+fn usage_report_groups_exact_invocations_and_step_scoped_attempts() {
+    let report = json!({"rows":[
+        {"agent":"agent/a","step":"step-run/one/build","attempt":1,"invocation_id":"invocation/one","total_tokens":10,"cost_microusd":10},
+        {"agent":"agent/a","step":"step-run/two/build","attempt":1,"invocation_id":"invocation/two","total_tokens":20,"cost_microusd":20},
+        {"agent":"agent/a","step":"step-run/unknown/build","total_tokens":3,"cost_microusd":0}
+    ]});
+    let attempts = render_usage_report(&report, 24, Some(UsageBy::Attempt));
+    assert!(attempts.contains("step-run/one/build attempt 1"));
+    assert!(attempts.contains("step-run/two/build attempt 1"));
+    assert!(attempts.contains("unknown"));
+    let invocations = render_usage_report(&report, 24, Some(UsageBy::Invocation));
+    assert!(invocations.contains("by invocation"));
+    assert!(invocations.contains("invocation/one"));
+    assert!(invocations.contains("invocation/two"));
+    assert!(invocations.contains("unknown"));
 }
 
 #[test]
@@ -6361,14 +6379,15 @@ fn message_send_and_reply_accept_a_key_for_unconfirmed_retries() {
 #[test]
 fn a_derived_message_key_names_one_message_in_one_hour() {
     let request = MessageSendRequest {
-        idempotency_key: String::new(),
-        from: "person/avery".into(),
-        to: "agent/example/worker".into(),
-        content: "The merge train is live.".into(),
-        title: Some("Merge train".into()),
-        in_reply_to: None,
-        tags: Vec::new(),
-        attachments: Vec::new(),
+    owner: None,
+    idempotency_key: String::new(),
+    from: "person/avery".into(),
+    to: "agent/example/worker".into(),
+    content: "The merge train is live.".into(),
+    title: Some("Merge train".into()),
+    in_reply_to: None,
+    tags: Vec::new(),
+    attachments: Vec::new(),
     };
     let key = derived_message_key(&request, None, 490_000);
     // The key never changes between builds: a retry after an upgrade finds the first send.
@@ -6633,14 +6652,15 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "message-read-final-state".into(),
-                from: "agent/sender".into(),
-                to: "agent/sup".into(),
-                content: "Read me".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "message-read-final-state".into(),
+            from: "agent/sender".into(),
+            to: "agent/sup".into(),
+            content: "Read me".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
         )
         .await
@@ -6654,14 +6674,15 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         .post(
             "/v1/messages",
             &MessageSendRequest {
-                idempotency_key: "message-read-archive-final-state".into(),
-                from: "agent/sender".into(),
-                to: "agent/sup".into(),
-                content: "Archive me".into(),
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: "message-read-archive-final-state".into(),
+            from: "agent/sender".into(),
+            to: "agent/sup".into(),
+            content: "Archive me".into(),
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
         )
         .await

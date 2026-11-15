@@ -24,6 +24,10 @@ same stable ID, owning **producer module**, and a breakup/reference TODO.
 IDs use `lv-h<12hex>` / `flow-h<12hex>`: the alphabetic hash tag distinguishes
 source fingerprints from numbered decision citations. Full content fingerprints
 remain separate and unchanged by that namespace.
+Site records store only reviewed identity and metadata (`id`, `path`, `kind`,
+`fingerprint`, `owner`, `todo`, `disposition`). Excerpts and line locations are
+diagnostics the guard recomputes from source when it reports a finding; they are
+not stored per record, and a record carrying extra fields is rejected.
 `declarations` records every column and index expression found by the declared
 lexical catalog, including types that look small. A template that cannot be
 resolved stays explicitly unresolved. No catalog entry proves a value's size.
