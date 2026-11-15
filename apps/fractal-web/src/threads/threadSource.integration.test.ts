@@ -4,7 +4,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi, type MockInstance } from 'vitest'
 import fixture from '../data/subjectReadPort.gateway.fixtures.json'
-import { credentialExpiredMessage } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed } from '../data/source.ts'
 import { gatewayThreads, unreachableSend, type ThreadSource, type ThreadWatches } from './threadSource.ts'
 
 const base = fixture.capabilities
@@ -671,13 +671,17 @@ it.each(['detail', 'messages'] as const)('names the thread when Fractal refuses 
     : actionReply(403, 'Thread read is no longer granted.'))
   const registry = AtomRegistry.make()
   const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry)
-  const feed = read === 'detail' ? source.detail(id) : source.timeline(id)
-  const stop = registry.mount(feed)
+  const refusedRead = async <T,>(feed: Atom.Atom<Feed<T>>) => {
+    const stop = registry.mount(feed)
+    try {
+      await vi.waitFor(() => expect(registry.get(feed)).toStrictEqual({
+        _tag: 'Unavailable', reason: 'ungranted', detail: 'You no longer have access to this thread.', explanation: 'Thread read is no longer granted.',
+      }))
+    } finally { stop() }
+  }
   try {
-    await vi.waitFor(() => expect(registry.get(feed)).toStrictEqual({
-      _tag: 'Unavailable', reason: 'ungranted', detail: 'You no longer have access to this thread.', explanation: 'Thread read is no longer granted.',
-    }))
-  } finally { stop(); registry.dispose() }
+    await (read === 'detail' ? refusedRead(source.detail(id)) : refusedRead(source.timeline(id)))
+  } finally { registry.dispose() }
 })
 
 it('keeps the connection sentence, without Fractal\'s words, when it refuses the thread list', async () => {
