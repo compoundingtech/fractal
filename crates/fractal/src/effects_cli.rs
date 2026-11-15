@@ -1,5 +1,6 @@
 //! Operator reads and explicit human resolution share the daemon's effect contract.
 use super::*;
+use fractal_daemon::cli_println as println;
 
 #[derive(Subcommand)]
 pub(super) enum EffectsCommand {

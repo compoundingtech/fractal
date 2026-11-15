@@ -683,7 +683,8 @@ async fn human_confirmation_and_abandonment_release_fences_without_changing_inte
         assert!(!fixture.state.store.mission_run_has_unresolved_effect(
             &fixture.state.store.step_run(&effect.bound_step_run).unwrap().unwrap().run).unwrap());
         assert_eq!(fixture.state.store.step_run(&effect.bound_step_run).unwrap().unwrap().status, "ready");
-        resolve_as(&fixture, &effect, request.clone(), Some("person/example")).await.unwrap();
+        let Json(replay) = resolve_as(&fixture, &effect, request.clone(), Some("person/example")).await.unwrap();
+        assert_eq!(replay.state, resolved.state);
         assert_eq!(fixture.state.store.claims_for(&effect.effect_id, Some("effect.confirmed")).unwrap().len(), 1);
         let mut changed = request;
         changed.evidence.push("decision/changed".into());
@@ -729,7 +730,8 @@ async fn effect_by_key_reports_effective_state_and_conventional_not_found() {
         assert!(encoded["record"].get(field).is_none(), "{field}");
     }
     fixture.state.store.unresolved_message_effect(&effect, "delivery-unknown", "daemon/runtime").unwrap();
-    resolve_as(&fixture, &effect, resolution_request(effects::EffectResolutionOutcome::Abandoned), Some("person/example")).await.unwrap();
+    let Json(resolved) = resolve_as(&fixture, &effect, resolution_request(effects::EffectResolutionOutcome::Abandoned), Some("person/example")).await.unwrap();
+    assert_eq!(resolved.state, "abandoned");
     let Json(found) = effects::by_key(State(fixture.state.clone()), Query(effects::EffectKeyQuery { key })).await.unwrap();
     assert_eq!(found.state, "abandoned");
     assert_eq!(effects::by_key(State(fixture.state.clone()), Query(effects::EffectKeyQuery { key: "missing".into() }))
@@ -762,7 +764,8 @@ async fn human_resolution_does_not_clear_a_concurrent_unseen_unresolved_episode(
     peer.store.bind_fleet(FLEET).unwrap();
     replicate(&fixture.state, &peer);
     fixture.state.store.unresolved_message_effect(&effect, "origin-unknown", "daemon/runtime").unwrap();
-    resolve_as(&fixture, &effect, resolution_request(effects::EffectResolutionOutcome::Abandoned), Some("person/example")).await.unwrap();
+    let Json(resolved) = resolve_as(&fixture, &effect, resolution_request(effects::EffectResolutionOutcome::Abandoned), Some("person/example")).await.unwrap();
+    assert_eq!(resolved.state, "abandoned");
     peer.store.unresolved_message_effect(&effect, "peer-unknown", "daemon/runtime").unwrap();
     replicate(&peer, &fixture.state);
     assert_eq!(fixture.state.store.effect_state(&effect.effect_id).unwrap().unwrap().0, "unresolved");
