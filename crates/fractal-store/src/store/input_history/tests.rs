@@ -24,7 +24,7 @@ fn exact_author_agent_conversation_and_accepted_identity() {
     }
     let q=query(&store);
     let page=store.input_history_candidates(&q, |_| Ok(true)).unwrap();
-    let mut expected=vec![&old,&newest];
+    let mut expected=[&old,&newest];
     expected.sort_by(|a,b|b.accepted_at_unix_ms.cmp(&a.accepted_at_unix_ms).then_with(||b.subject.cmp(&a.subject)));
     assert_eq!(page.entries.iter().map(|e|e.claim_id.as_str()).collect::<Vec<_>>(),expected.iter().map(|e|e.id.as_str()).collect::<Vec<_>>());
     assert!(!page.has_more_candidates);

@@ -98,7 +98,7 @@ impl Store {
                 agent:row.get(3)?,conversation:row.get(4)?,accepted_order:row.get(5)? }, row.get::<_,bool>(6)?))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         let has_more_candidates = candidates.len() > query.limit;
-        let examined_through = candidates.iter().take(query.limit).last().map(|(c,_)| Cursor {
+        let examined_through = candidates.iter().take(query.limit).next_back().map(|(c,_)| Cursor {
             accepted_order:c.accepted_order.clone(),message_id:c.message_id.clone(),claim_id:c.claim_id.clone()
         });
         let mut page = Page { entries: Vec::new(), examined_through, has_more_candidates };
