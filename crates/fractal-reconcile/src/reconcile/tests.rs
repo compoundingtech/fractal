@@ -31077,7 +31077,7 @@ mission "fresh" state="ready" {
             mission: "mission/queued".into(), key: "announce".into(), step: step.clone(),
             attempt: claimed.attempt, incarnation: "seat-one".into(),
         };
-        let fractal_store::store::effects::EffectAdmission::Originate(effect) =
+        let crate::store::effects::EffectAdmission::Originate(effect) =
             seat.store.admit_message_effect(&owner, SEAT, SEAT, "original-payload", SEAT).unwrap()
         else { panic!("the creation host must admit the original effect"); };
         if matches!(case, "submitted" | "late-projection") {
@@ -31094,7 +31094,7 @@ mission "fresh" state="ready" {
                 let actual = seat.store.latest_claim(SEAT, Some("runtime.observed")).unwrap().unwrap();
                 let mut fields: BTreeMap<String, Value> =
                     serde_json::from_value(actual.body["fields"].clone()).unwrap();
-                fields.insert("status".into(), json!("stopped"));
+                fields.insert("status".into(), serde_json::json!("stopped"));
                 seat.store.append_claim(&ClaimInput {
                     subject: SEAT.into(), kind: "runtime.observed".into(), actor: None,
                     fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
@@ -31113,7 +31113,7 @@ mission "fresh" state="ready" {
                 seat.store.append_claim(&ClaimInput {
                     subject: step.clone(), kind: "step-run.state".into(),
                     actor: Some("daemon/runtime".into()),
-                    fields: BTreeMap::from([("status".into(), json!("ready"))]),
+                    fields: BTreeMap::from([("status".into(), serde_json::json!("ready"))]),
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                 }).unwrap();
             }
