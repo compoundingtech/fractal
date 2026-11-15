@@ -2223,7 +2223,7 @@ fn work_refresher() -> Refresher<WorkRows> {
     }
 }
 
-/// The runtimes fold has no change check: no local claim cuts its pause.
+/// Runtime commits are coalesced on the ordinary pause, without a local-commit hold.
 fn runtimes_refresher() -> Refresher<crate::store::runtime_list::RuntimeRows> {
     Refresher {
         list: |store| store.published_runtime_list(), name: "runtimes", label: "runtimes/refresh", fold: fold_runtimes,
@@ -2411,4 +2411,135 @@ async fn every_refresher_on_a_store_shares_one_look_at_each_commit() {
     // Once every holder is gone, the next one starts a scanner of its own.
     drop((holders, waiting));
     assert_eq!(store.local_commits("test", local_commits::every_local_claim(&store)).looks(), 0);
+}
+
+#[test]
+fn incremental_runtimes_equal_full_folds_through_mixed_commits_and_visibility_flips() {
+    use crate::api::client_v0::published_runtimes::fold as runtimes;
+    use crate::store::published_list::Publication;
+    use crate::store::runtime_list::RuntimeRows;
+    fn raw(store: &Store, subject: &str, kind: &str, body: Value) -> String {
+        let claim = store.connection.batched(|tx| -> anyhow::Result<_> {
+            let claim = smallclaims::store::append_claim_record_tx(
+                tx, store.origin(), subject, kind, None, &body, &[], None)?;
+            smallclaims::store::register_operation_tx(tx, &claim)?;
+            if kind == "owned-set.revised" { crate::store::owned_sets::project_tx(tx)?; }
+            Ok(claim)
+        }).unwrap().unwrap();
+        store.committed_index.fetch_max(claim.store_index, std::sync::atomic::Ordering::Release);
+        claim.id
+    }
+    fn check(store: &Store, base: &mut Publication<RuntimeRows>) -> bool {
+        let (next, changed) = runtimes(store, Some(base)).unwrap().unwrap();
+        *store.fractal.subject_cache.lock().unwrap() = Default::default();
+        let (oracle, _) = runtimes(store, None).unwrap().unwrap();
+        assert_eq!(next.cut, oracle.cut);
+        assert_eq!(next.rows.items, oracle.rows.items);
+        assert_eq!(next.rows.digest, oracle.rows.digest);
+        assert_eq!(next.rows.time_unix_ms, oracle.rows.time_unix_ms);
+        assert_eq!(changed, next.rows.items != base.rows.items);
+        *base = next;
+        changed
+    }
+    for reverse in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().join("graph.db"), "cedar").unwrap();
+        publish(&store, r#"version 2
+mission "garden/runtime" state="ready" {
+  goal "Exercise runtime ownership"
+  agent "worker" { command "true" }
+  step "plant" { assigned-to "agent/${ST_MISSION_RUN}/worker" }
+}"#, "runtime-mission");
+        let run = start(&store, "garden/runtime", "runtime-1");
+        let (_, owned) = step(&run, "plant");
+        let mut declarations = crate::graph::parse_execution_intent(
+            "version 2\nagent \"worker\" { command \"true\" }", "cedar", &run.id).unwrap();
+        for desired in declarations.subjects.values_mut() {
+            desired.owner_run = Some(run.subject.clone());
+            desired.owner_generation = Some(run.generation.clone());
+        }
+        crate::store::owned_sets_tests_shared::direct(&store, &declarations, "runtime-declaration").unwrap();
+        assert_eq!(store.desired_subjects().unwrap().iter().find(|row| row.subject == owned)
+            .unwrap().owner_run.as_deref(), Some(run.subject.as_str()));
+        let subjects = if reverse {
+            vec![owned.as_str(), "agent/cedar.z", "agent/cedar.a"]
+        } else {
+            vec!["agent/cedar.a", "agent/cedar.z", owned.as_str()]
+        };
+        let mut base = runtimes(&store, None).unwrap().unwrap().0;
+        for status in ["running", "stopped", "running"] {
+            for subject in &subjects {
+                store.append_claim(&crate::model::ClaimInput {
+                    subject: (*subject).into(), kind: "runtime.observed".into(), actor: None,
+                    fields: BTreeMap::from([
+                        ("runtime_id".into(), json!(subject)),
+                        ("status".into(), json!(status)),
+                        ("terminal".into(), json!(true)),
+                    ]),
+                    evidence: vec![], expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                assert_eq!(store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap(),
+                    BTreeSet::from([(*subject).to_owned()]));
+                check(&store, &mut base);
+                let items = Arc::clone(&base.rows.items);
+                crate::test_support::note_local_claim(&store, &format!("message/unrelated-runtime-{}", base.cut));
+                assert!(store.runtime_list_changes(base.cut, store.index().unwrap()).unwrap().is_empty());
+                assert!(!check(&store, &mut base));
+                assert!(Arc::ptr_eq(&items, &base.rows.items), "unrelated commits do not fold or copy rows");
+            }
+        }
+        store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("test")).unwrap();
+        check(&store, &mut base);
+        assert!(!base.rows.items.iter().any(|row| row["owner_id"] == owned));
+        // Model old-peer history below today's reserved-kind write admission, just as
+        // the native publication visibility fixtures do.
+        raw(&store, "agent/cedar.a", "custom.attention.notice-created",
+            json!({"fields":{"status":"running"}}));
+        check(&store, &mut base);
+        assert!(!base.rows.items.iter().any(|row| row["owner_id"] == "agent/cedar.a"));
+    }
+    let store = Store::open_memory("cedar").unwrap();
+    raw(&store, "agent/cedar.conflict", "runtime.observed", json!({
+        "fields":{"runtime_id":"conflict","status":"running","terminal":true},
+        "_operation":{"id":"runtime-operation","request_digest":"first"}
+    }));
+    let mut base = runtimes(&store, None).unwrap().unwrap().0;
+    raw(&store, "daemon/unrelated", "daemon.started", json!({
+        "fields":{"status":"running"},
+        "_operation":{"id":"runtime-operation","request_digest":"different"}
+    }));
+    assert!(check(&store, &mut base));
+    assert_eq!(base.rows.items[0]["state"], "unreachable");
+    assert_eq!(base.rows.items[0]["terminal_access"]["read"], "unavailable");
+    assert!(base.rows.items[0]["operational"]["reasons"][0].as_str().unwrap().contains("idempotency-conflict"));
+
+    let store = Store::open_memory("amber").unwrap();
+    let intent = crate::store::owned_sets_tests_shared::bundle("true", true);
+    let mut options = crate::store::owned_sets::Options {
+        set: "garden".into(),
+        source: crate::store::owned_sets::Source { repository: "example/garden".into(),
+            r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
+        expected_set: "absent".into(), rollout: None, adopt: Default::default(),
+        allow_empty: false, confirm_retire: None, policy: None, expected_subjects: Default::default(),
+    };
+    options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
+    store.apply_owned_set(&intent, &options, "runtime-owned", "person/operator").unwrap();
+    raw(&store, "agent/garden/meadow", "runtime.observed",
+        json!({"fields":{"runtime_id":"meadow","status":"stopped"}}));
+    let mut base = runtimes(&store, None).unwrap().unwrap().0;
+    assert_eq!(base.rows.items.len(), 1, "a declared stopped agent remains current");
+    let prior = crate::store::owned_sets::selected(&store.readers.get(), None).unwrap().remove(0);
+    let mut receipt = prior.receipt;
+    receipt.previous = Some(format!("{}@{}", prior.id, prior.revision));
+    receipt.source.sequence += 1;
+    receipt.members.remove("agent/garden/meadow");
+    let revision = smallclaims::hash::canonical_hash(&receipt).unwrap();
+    // A winning receipt omits a previously known member: no declaration is appended
+    // for it, but its implicit stop's desired token becomes the receipt claim.
+    let receipt_claim = raw(&store, "owned-set/garden", "owned-set.revised",
+        json!({"fields":{"revision":revision,"body":receipt}}));
+    assert!(crate::store::owned_sets::selected(&store.readers.get(), None).unwrap()[0].blockers.is_empty());
+    assert!(check(&store, &mut base));
+    assert!(base.rows.items.is_empty(), "the implicit stop moves the runtime to history");
+    assert_eq!(store.selected_desired_tokens(&["agent/garden/meadow"]).unwrap()["agent/garden/meadow"], receipt_claim);
 }
