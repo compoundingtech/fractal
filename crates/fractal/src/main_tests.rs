@@ -1232,7 +1232,7 @@ fn missions_runs_query_fixture_renders_summaries_and_truncation() {
     );
     assert_eq!(
         launch_cli::render_mission_runs_query(&json!({
-            "snapshot": {}, "value": {"runs": [], "truncated": false}
+            "runs": [], "truncated": false
         })),
         "MISSION RUNS\n  none\n"
     );

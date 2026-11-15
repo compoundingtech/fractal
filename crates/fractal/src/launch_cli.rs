@@ -465,7 +465,8 @@ pub(super) fn mission_runs_path(mission_prefix: &str, active: bool, limit: u16) 
 pub(super) fn render_mission_runs_query(response: &Value) -> String {
     use std::fmt::Write as _;
 
-    let value = &response["value"];
+    // The native client has already removed the HTTP response envelope.
+    let value = response;
     let mut output = String::from("MISSION RUNS\n");
     let runs = value["runs"].as_array();
     if runs.is_none_or(Vec::is_empty) {

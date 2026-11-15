@@ -700,12 +700,14 @@ creation-time/run-ID ordering and the nonterminal predicate when those keys move
 to a bounded or referenced representation.
 
 The `fractal_store::store::mission_run_query` maintainer owns
-`lv-hbc959d871d00`, `lv-h890a38462624` and `lv-hf58566f1b601`.
-The dynamic run reader binds literal mission-prefix bounds and a row limit,
-selecting existing run/mission/generation IDs, revision, status, phase and
-timestamps. Its step reader selects existing step subject/status values for
-the current generation. The canonical host reader binds the exact run subject
-and selects the creation claim's origin, excluding repaired replica records.
+`lv-hbc959d871d00`, `lv-h890a38462624`, `lv-hf58566f1b601` and
+`lv-hd7513b5c921e`. The run reader binds literal mission-prefix bounds and a row
+limit, selecting existing run/mission/generation IDs, revision, status, phase and
+timestamps. Its bounded current-generation step reader hydrates step rows for
+the shared effective-state rules. The ownership reader binds one run ID and
+selects run, generation and root-run status/phase by their indexed identities.
+The canonical host reader binds the exact run subject and selects the creation
+claim's origin, excluding repaired replica records.
 These narrow projections avoid hydrating claim bodies or folding run history;
 run and step row limits are not encoded byte-size or statement-cost proofs.
 Values remain inline to reuse existing projections and canonical claim identity.

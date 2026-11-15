@@ -3,8 +3,8 @@ MISSION RUNS
     status: running
     revision: rev-abc
     host: orchid
-    started: 1000
-    updated: 2000
+    started: 2026-11-15T10:00:00Z
+    updated: 2026-11-15T10:01:00Z
     prepare  completed
     deploy  claimed
   mission-run/garden/deploy/2  terminal  mission/garden/deploy
