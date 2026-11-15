@@ -132,8 +132,9 @@ mission "example/report" state="ready" {
         assert!(completed.iter().all(|effect| bootstrap.contains(effect)));
         for index in 0..3 {
             fixture.store.append_claim(&ClaimInput {
-                subject: format!("unrelated/{index}"), kind: "example.changed".into(), actor: None,
-                fields: BTreeMap::new(), evidence: vec![], expected_subject: None, idempotency_key: None,
+                subject: format!("resource/unrelated-{index}"), kind: "resource.observed".into(), actor: None,
+                fields: BTreeMap::from([("kind".into(), json!("vcs.repository"))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
             let ((), reads) = smallclaims::touched::record(|| fixture.converge());
             assert!(!reads.contains("effect-history"));
