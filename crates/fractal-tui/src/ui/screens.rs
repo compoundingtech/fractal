@@ -3661,10 +3661,32 @@ mod tree_tests {
         let mut world = crate::ui::demo::world();
         let Load::Ready(missions) = &mut world.missions else { panic!() };
         let mission = &mut missions[0];
-        let opaque_id = "D415892ea7a1dab11e6ba7ed22a8eb13";
-        mission.title = format!("person-ask · {opaque_id}");
+        let opaque_id = "d415892ea7a1dab11e6ba7ed22a8eb13";
         let step_id = mission.steps[0].id.clone();
         let expected = "Choose the delivery target";
+        let mut raw: fractal_client::Mission = serde_json::from_value(serde_json::json!({
+            "id": mission.id, "kind": "mission", "revision": "r1",
+            "updated_at": "2026-11-15T10:00:00Z",
+            "title": format!("person-ask/{opaque_id}"), "state": "running",
+            "mission_revision": "r1",
+            "run_details": [{
+                "id": "mission-run/example/ask", "requester": "person/example",
+                "status": "running", "phase": "normal",
+                "progress": {"done": 0, "total": 1}, "current_steps": [],
+                "must_act": "you", "state_since": "2026-11-15T10:00:00Z",
+                "steps": [{
+                    "id": step_id, "path": "ask", "title": expected,
+                    "state": "claimed", "attempt": 1,
+                    "since": "2026-11-15T10:00:00Z", "goals": ["Choose a target."]
+                }]
+            }]
+        })).unwrap();
+        mission.title = crate::mission_display_label(&raw);
+        assert_eq!(mission.title, expected);
+        raw.run_details[0].steps.as_mut().unwrap()[0].title = None;
+        assert_eq!(crate::mission_display_label(&raw), "Choose a target.");
+        raw.run_details[0].steps.as_mut().unwrap()[0].goals.clear();
+        assert_eq!(crate::mission_display_label(&raw), "Untitled mission");
         mission.step_metadata.entry(step_id.clone()).or_default().title = Some(expected.into());
         let Load::Ready(items) = &mut world.attention else { panic!() };
         items[0].related = vec![(step_id.clone(), None), ("step-run/missing".into(), None)];
@@ -3682,6 +3704,15 @@ mod tree_tests {
         assert!(shown.contains("raised by Atlas/Manager"), "{shown}");
         assert!(!shown.contains("agent/"), "{shown}");
         assert!(!shown.contains(opaque_id), "{shown}");
+        assert!(!shown.contains(&opaque_id.to_ascii_uppercase()), "{shown}");
+        let listing = missions_list(&world, 200, "·", false);
+        let rows = listing.items.iter().filter_map(|item| match item {
+            Item::Row { first, right, second, .. } => Some(first.iter().chain(right).chain(second)
+                .map(|span| span.content.as_ref()).collect::<String>()),
+            _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(rows.contains(expected), "{rows}");
+        assert!(!rows.to_ascii_lowercase().contains(opaque_id), "{rows}");
         assert!(shown.contains("a step"), "{shown}");
         assert!(!shown.contains(&step_id), "{shown}");
         assert!(!shown.contains("step-run/missing"), "{shown}");
