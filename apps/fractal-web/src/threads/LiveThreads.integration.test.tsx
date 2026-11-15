@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { FractalClient } from '@fractal/client'
 import { Attention, decodeUnknownSync } from '@fractal/client/schema/read'
-import type { Attention as AttentionRow, Mission, TerminalScreen } from '@fractal/client/schema'
+import { Agent as AgentRow, decodeUnknownSync as decodeNative, type Attention as AttentionRow, type Mission, type TerminalScreen } from '@fractal/client/schema'
 import type { DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -40,9 +40,10 @@ const live: FeedSyncObservation = { status: { _tag: 'Live', since: 0 }, observed
 
 type Reply = (url: URL, init: RequestInit | undefined) => Response | Promise<Response>
 
-/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, and `unreachable` fails every request, capabilities included. */
-async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation }: {
+/** Mounts one thread surface against a real gateway thread source; `reply` answers every read after capabilities, `capabilities` may replace the granted answer, `unreachable` fails every request, capabilities included, and `agents` is the roster. */
+async function mount(element: React.ReactElement, { actions = [], reply, capabilities, unreachable, conversation, agents = [] }: {
   readonly actions?: readonly string[]; readonly reply: Reply; readonly capabilities?: () => Response | undefined; readonly unreachable?: () => boolean; readonly conversation?: ConversationPage
+  readonly agents?: readonly AgentRow[]
 }) {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
@@ -65,7 +66,7 @@ async function mount(element: React.ReactElement, { actions = [], reply, capabil
   const gateway = Atom.make<FeedSyncObservation>(live).pipe(Atom.keepAlive)
   const threads = gatewayThreads(client, registry)
   const source = { ...fixtureSource({ world: {
-    now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents: [], missions: [], attention: [ask],
+    now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents, missions: [], attention: [ask],
     conversations: conversation === undefined ? {} : { [agent]: conversation }, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }), threads, sync: {
     gateway,
@@ -500,6 +501,32 @@ it('names thread senders without their ids: an unobserved agent by its short nam
     ])
     expect(view.host.querySelector('[data-thread-event="thread.closed"]')?.textContent).toMatch(/^Fractal closed the thread/)
     expect(view.host.textContent).not.toMatch(/build-host-a|reconciler|daemon\//)
+  } finally { await view.dispose() }
+})
+
+it.each([
+  // The roster names the reconciler like any seat; it still reads as Fractal, as in the terminal app.
+  { id: 'agent/st3/reconciler', name: 'Reconciler', shown: 'Fractal' },
+  // The daemon labels a seat that declares no name by its path; that path is not a name.
+  { id: 'agent/build-host-a/worker-tests', name: 'build-host-a/worker-tests', shown: 'worker-tests' },
+])('names an observed thread agent $name as $shown in the thread origin and as its sender, with the id only as the title', async ({ id, name, shown }) => {
+  const view = await mount(<LiveThreadPane threadId="thread/one" />, {
+    agents: [decodeNative(AgentRow)({ kind: 'agent', id, name, host_id: 'host/build-1', runtime_ids: [], reachability: 'reachable',
+      state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })],
+    reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.renamed', id: 'event/renamed', actor_id: id, previous_title: 'Checklist', title: 'Release checklist', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z') },
+      { kind: 'message', id: 'message/first', actor_id: id, content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
+    ]) : Response.json({ ...base, value: { ...row('thread/one', 'Release checklist'), agent_id: id } }),
+  })
+  try {
+    await vi.waitFor(() => expect(view.host.querySelector('[data-thread-origin]')?.textContent).toBe(`With ${shown}`))
+    expect(view.host.querySelector('[data-thread-origin] [title]')?.getAttribute('title')).toBe(id)
+    await vi.waitFor(() => expect(view.host.textContent).toContain('The checklist is complete.'))
+    const sender = view.host.querySelector('ol > li > div > strong')
+    expect(sender?.textContent).toBe(shown)
+    expect(sender?.getAttribute('title')).toBe(id)
+    expect(view.host.querySelector('[data-thread-event="thread.renamed"]')?.textContent).toMatch(new RegExp(`^${shown} renamed it to`))
+    expect(view.host.textContent).not.toContain(name)
   } finally { await view.dispose() }
 })
 

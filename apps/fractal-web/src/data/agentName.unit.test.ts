@@ -29,4 +29,10 @@ describe('agent display names', () => {
     for (const machinery of ['daemon/runtime', 'daemon/site-a', 'agent/st3/reconciler']) expect(isFractalMachinery(machinery)).toBe(true)
     for (const actor of [id, 'agent/st3/reconciler/session/1', 'agent/st3', 'agent/example/reconciler', 'person/avery', 'daemon']) expect(isFractalMachinery(actor)).toBe(false)
   })
+
+  it('names Fractal machinery Fractal whatever the roster calls it, as the terminal app does', () => {
+    for (const name of [undefined, 'Reconciler', 'st3/reconciler', 'agent/st3/reconciler']) expect(agentDisplayName({ id: 'agent/st3/reconciler', name })).toBe('Fractal')
+    expect(agentDisplayName({ id: 'daemon/runtime', name: 'runtime' })).toBe('Fractal')
+    expect(agentDisplayName({ id: 'agent/example/reconciler', name: 'Reconciler' })).toBe('Reconciler')
+  })
 })

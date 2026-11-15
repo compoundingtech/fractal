@@ -10,7 +10,7 @@ import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { threadTitleFromAsk } from '../../../../clients/typescript/fractal-views/thread.ts'
 import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAgent, useDataSource, useGatewaySync, useNow } from '../data/react.tsx'
-import { agentDisplayName, FRACTAL_NAME, isFractalMachinery } from '../data/agentName.ts'
+import { agentDisplayName } from '../data/agentName.ts'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
@@ -373,7 +373,8 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
   const summary = observation?.summary ?? thread
   useReportStale(detail)
   const agent = useAgent(summary.agent_id)
-  const agentName = agent._tag === 'Observed' ? agent.value?.name : undefined
+  const observedAgent = agent._tag === 'Observed' ? agent.value : undefined
+  const agentName = observedAgent === undefined ? undefined : agentDisplayName({ id: summary.agent_id, name: observedAgent.name })
   const retryChange = source.retryChange
   const pendingChange = useAtomValue(source.pendingChange?.(thread.id) ?? noPendingChange)
   const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
@@ -382,7 +383,7 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
     {...(retryChange === undefined ? {} : { onRetryChange: () => retryChange(thread.id) })}
     embedded={embedded} inList={inList} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
     {...(opensInTab && onOpenThread !== undefined ? { onActivate: () => onOpenThread(thread.id) } : {})}
-    {...(embedded || agentName === undefined ? {} : { origin: <>With {agentName}</> })}
+    {...(embedded || agentName === undefined ? {} : { origin: <>With <span title={summary.agent_id}>{agentName}</span></> })}
     {...(summary.message_count === undefined ? {} : { messageCount: summary.message_count })}
     unread={summary.unread === true}
     {...(onOpenThread === undefined || opensInTab ? {} : { onOpenInTab: () => onOpenThread(thread.id) })}
@@ -556,8 +557,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
     <ol {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {
         const sender = event.actor_id === actor || actor?.startsWith(`${event.actor_id}/session/`) ? 'You'
-          : isFractalMachinery(event.actor_id) ? FRACTAL_NAME
-            : agentDisplayName({ id: event.actor_id, name: event.actor_id === agentId ? agentName : undefined })
+          : agentDisplayName({ id: event.actor_id, name: event.actor_id === agentId ? agentName : undefined })
         const date = new Date(event.accepted_at_unix_ms)
         const iso = Number.isFinite(date.getTime()) ? date.toISOString() : undefined
         const time = iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>
