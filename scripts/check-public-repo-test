@@ -22,6 +22,28 @@ class PublicRepositoryCheck(unittest.TestCase):
             'agent/fleet/fixture-web/standing/web agent%2Ffleet%2Ffixture-web%2Fworker'
         ), [])
 
+    def test_compound_words_are_not_principal_references(self):
+        self.assertEqual(self.findings('per-' + 'person' + '/per-message per-' + 'person' + '%2Fper-message'), [])
+
+    def test_principal_references_remain_checked_in_text_and_urls(self):
+        for reference in ['person' + '/unknown-fixture', 'person' + '%2Funknown-fixture']:
+            for text in [reference, f'"{reference}"', f'https://example.invalid/{reference}',
+                         f'https%3A%2F%2Fexample.invalid%2F{reference}']:
+                with self.subTest(text=text):
+                    self.assertTrue(self.findings(text))
+
+    def test_encoded_wrappers_cannot_hide_principal_references(self):
+        for wrapper in ['%22', '%27', '%28', '%29', '%3A', '%3a', '%2F', '%2f', '%23', '%3F']:
+            for reference in ['person' + '/unknown-fixture', 'person' + '%2Funknown-fixture']:
+                with self.subTest(wrapper=wrapper, reference=reference):
+                    self.assertTrue(self.findings(wrapper + reference))
+
+    def test_reserved_authorization_fixture_principals(self):
+        for name in ['another', 'foreign', 'outsider', 'private', 'reader-floor']:
+            for reference in [f'person/{name}', f'person%2F{name}']:
+                with self.subTest(reference=reference):
+                    self.assertEqual(self.findings(reference), [])
+
     def test_unknown_identity_and_home(self):
         for text in ['person' + '/unknown-fixture', 'person' + '%2Funknown-fixture',
                      '/home/' + 'unknown-fixture/src', '/Users/' + 'unknown-fixture/src']:
