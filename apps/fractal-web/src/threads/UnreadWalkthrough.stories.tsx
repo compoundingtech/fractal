@@ -387,8 +387,14 @@ function useForeground() {
   React.useEffect(() => {
     const read = () => setForeground(document.visibilityState === 'visible' && document.hasFocus())
     read()
-    const timer = window.setInterval(read, 250)
-    return () => window.clearInterval(timer)
+    window.addEventListener('focus', read)
+    window.addEventListener('blur', read)
+    document.addEventListener('visibilitychange', read)
+    return () => {
+      window.removeEventListener('focus', read)
+      window.removeEventListener('blur', read)
+      document.removeEventListener('visibilitychange', read)
+    }
   }, [])
   return foreground
 }

@@ -27,6 +27,7 @@ const mountOlderPage = async ({ get, follow = false }: {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
   const base = fixture.capabilities
+  const detailRequests: string[] = []
   const client = new FractalClient({ baseUrl: 'http://gateway.test', fetchImpl: async input => {
     const url = new URL(String(input))
     if (url.pathname.endsWith('/capabilities')) return Response.json({ ...base, value: {
@@ -43,6 +44,7 @@ const mountOlderPage = async ({ get, follow = false }: {
       })),
       next_cursor: url.searchParams.has('cursor') ? null : 'older',
     } })
+    detailRequests.push(url.pathname)
     return get()
   } })
   const registry = AtomRegistry.make()
@@ -67,6 +69,8 @@ const mountOlderPage = async ({ get, follow = false }: {
   await act(async () => [...host.querySelectorAll('button')].find(button => button.textContent === 'Load more threads')?.click())
   await vi.waitFor(() => expect(host.querySelector('[data-thread-panel][aria-label="Older title"]')).not.toBeNull())
   const panel = host.querySelector('[data-thread-panel][aria-label="Older title"]')!
+  // Collapsed list rows must not demand per-thread detail through the reminder port.
+  expect(detailRequests).toEqual([])
   return {
     host, panel, registry, threads, unsubscribe,
     toggle: () => act(async () => panel.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click()),

@@ -401,7 +401,7 @@ function LiveThread({ source, thread, visitRef, active = true, embedded = true, 
     viewport.timeline(node)
     foreground.timeline(node)
   }, [viewport.timeline, foreground.timeline])
-  const reminderRead = useAtomValue(source.unreadActions?.reminder(thread.id) ?? noReminder)
+  const reminderRead = useAtomValue(expanded ? source.unreadActions?.reminder(thread.id) ?? noReminder : noReminder)
   const reminder = reminderRead._tag === 'Known' ? reminderRead.reminder : undefined
   const localVisit = React.useRef<UnreadVisit>(awayVisit)
   const visit = visitRef ?? localVisit
