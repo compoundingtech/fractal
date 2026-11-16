@@ -1,5 +1,6 @@
 //! Shell transport: bound callers access only their native owner; admission stays with the host reconciler.
 use super::*;
+use anyhow::Context;
 use crate::store::shell_resources::{Command, Execution};
 use crate::store::resource_membership::{Coverage, RequestClass};
 
