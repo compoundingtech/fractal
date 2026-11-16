@@ -74,6 +74,15 @@ names the actual thread and its first message. Same-key receipt replay is unchan
 Current-source starts retain their existing behavior. Starting or replying to a retained
 discussion does not reactivate its resolved Inbox source or settle its original work.
 
+Unread Inbox-position lookup batch-qualifies the selected exact episodes through that
+same source qualifier before inspecting owned thread replies. Opening/current-policy
+discovery is one keyed SQL lookup for the full input, with indexed batched notice snapshot
+discovery. Reserved notices additionally reuse the native per-notice keyed
+source/registration/member-chain security validation; there is no per-row source
+qualifier call or live Inbox refold for supported retained sources. Live-only families
+keep their existing current-source qualification. This separate unread integration is
+owned by the shared writer, under FPL's backend contract.
+
 The native CLI convenience `fractal alerts discuss ITEM --body TEXT --as PERSON`
 starts the same durable thread through `thread.start`. It uses the exact current source and
 episode and the daemon-assigned responsible agent. It offers no recipient override. Use

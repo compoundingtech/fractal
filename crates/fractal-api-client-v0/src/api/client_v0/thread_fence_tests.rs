@@ -539,4 +539,32 @@ pub(crate) mod retained_discussion {
         assert_eq!(denied.status, StatusCode::FORBIDDEN);
         assert!(state.store.claims_for("thread/expired-retained", None).unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn retained_discussion_unread_positions_batch_exact_episodes_without_restoring_attention() {
+        let (_root, state, origin) = fixture(true);
+        let owner = ClientSession::local(Some(PERSON)).unwrap();
+        let result = start(&state, &owner,
+            request(&state, &origin, "thread/retained-unread", "retained-unread")).await.unwrap();
+        let thread = result["affected_ids"][0].as_str().unwrap();
+        crate::store::thread_delivery::append_reply(&state.store, &ClaimInput {
+            subject:"message/retained-unread-incoming".into(), kind:"message.sent".into(),
+            actor:Some(AGENT.into()),
+            fields:serde_json::from_value(json!({
+                "from":AGENT, "to":PERSON, "content":"The retained discussion reply.",
+                "thread_id":thread,
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("retained-unread-incoming".into()),
+        }, thread_metadata::PersonAuthority::BoundAgent { actor:AGENT }, None).unwrap();
+        let keys = [
+            (SOURCE, origin.episode.as_str()),
+            (SOURCE, "claim/never-opened"),
+            ("custom/garden/review/v1/foreign", origin.episode.as_str()),
+            (SOURCE, origin.episode.as_str()),
+        ];
+        assert_eq!(thread_metadata::unread_inbox_positions(&state.store, PERSON, &keys).unwrap(),
+            std::collections::BTreeSet::from([0, 3]));
+        assert!(thread_metadata::unread_inbox_positions(&state.store, "person/other", &keys).unwrap().is_empty());
+        assert_not_in_attention(&state);
+    }
 }

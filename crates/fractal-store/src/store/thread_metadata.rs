@@ -765,6 +765,13 @@ pub fn unread_inbox_positions(
     }
     let conn = store.readers.get();
     let person = identities::resolve_reference_conn(&conn, person)?;
+    let at = now_ms();
+    let source_keys = asks.iter().map(|(source, episode)| request_history::SourceEpisode {
+        source_id: (*source).into(), episode: (*episode).into(),
+    }).collect::<Vec<_>>();
+    // One exact-opening/current-policy lookup for every retained row, not N
+    // single-source calls. Live-only families keep their existing admission.
+    let retained = discussion_source::qualify_batch(&conn, &person, &source_keys, at)?;
     let keys = asks.iter().map(|(ask, episode)| {
         Ok((ask, episode, thread_links::ask_link_subject(ask, episode)?))
     }).collect::<Result<Vec<_>, FractalError>>()?;
@@ -799,9 +806,10 @@ pub fn unread_inbox_positions(
         }
         let qualified = match qualification {
             Some((previous, qualified)) if previous == position => qualified,
+            _ if retained[position].is_some() => true,
             _ => match inbox_source::resolve(store, &conn, &person, &InboxOrigin {
                 source_id: ask.into(), episode: episode.into(),
-            }, now_ms()) {
+            }, at) {
                 Ok(_) => true,
                 Err(error) if error.code == "thread-unavailable" => false,
                 Err(error) => return Err(error),
