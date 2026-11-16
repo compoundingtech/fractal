@@ -125,11 +125,12 @@ for (const invalid of [{ deleted: true }, { deleted: null }, { owner: 'person/ot
     const h = setup(() => exists(), () => ({ id: selection.subject, owner: selection.owner, deleted: false, body: { version: 2 }, ...invalid }));
     const write = new QuickAccessWrite(h.client, selection, identity, operations, create);
     await assert.rejects(write.send(), /cannot be adopted/); await assert.rejects(write.send(), /cannot be adopted/);
-    assert.equal(write.needsAdoption, true); assert.equal(h.actions.length, 1); assert.equal(h.reads.length, 2);
+    assert.equal(write.needsAdoption, true); assert.match(write.adoptionIssue, /cannot be adopted/);
+    assert.equal(h.actions.length, 1); assert.equal(h.reads.length, 2);
   });
 }
 
-for (const details of [undefined, { applied: 'unknown' }, { replay_unsafe: true }]) {
+for (const details of [{ applied: 'unknown' }, { replay_unsafe: true }]) {
   test(`ambiguous create replay refused as exists cannot adopt ${JSON.stringify(details)}`, async () => {
     const h = setup((_, count) => count === 1 ? new TypeError('create receipt lost') : exists(details));
     const write = new QuickAccessWrite(h.client, selection, identity, operations, create);
@@ -146,3 +147,26 @@ for (const details of [{ applied: 'unknown' }, { replay_unsafe: true }]) {
     assert.equal(write.needsAdoption, false); assert.equal(h.reads.length, 0);
   });
 }
+
+
+test('safe create conflict after ambiguous replay ensures the container then sends one original membership', async () => {
+  const h = setup((action, count) => count === 1 ? new TypeError('create response lost') : action.type === 'arrangement.edit' ? exists() : 'completed');
+  const write = new QuickAccessWrite(h.client, selection, identity, operations, create);
+  await assert.rejects(write.send()); await write.send();
+  assert.equal(h.reads.length, 1); assert.equal(write.unconfirmed, false);
+  assert.deepEqual(h.actions[0], h.actions[1]);
+  assert.deepEqual(h.actions.map(a => a.type), ['arrangement.edit', 'arrangement.edit', 'arrangement.membership.edit']);
+  assert.equal(h.actions[2].id, identity.id);
+});
+
+test('safe conflict after ambiguous replay retains GET-only validation when that read is lost', async () => {
+  const h = setup((action, count) => count === 1 ? new TypeError('create response lost') : action.type === 'arrangement.edit' ? exists() : 'completed', count => count === 1 ? new TypeError('GET lost') : undefined);
+  const write = new QuickAccessWrite(h.client, selection, identity, operations, create);
+  await assert.rejects(write.send()); await assert.rejects(write.send());
+  assert.equal(write.needsAdoption, true); assert.equal(h.actions.length, 2);
+  await write.send();
+  assert.equal(h.reads.length, 2); assert.equal(write.unconfirmed, false);
+  assert.deepEqual(h.actions[0], h.actions[1]);
+  assert.deepEqual(h.actions.map(a => a.type), ['arrangement.edit', 'arrangement.edit', 'arrangement.membership.edit']);
+  assert.equal(h.actions[2].id, identity.id);
+});

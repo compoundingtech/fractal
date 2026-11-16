@@ -27,6 +27,8 @@ export class QuickAccessWrite {
   unconfirmed = false
   refused = false
   private adopting = false
+  private issue: string | undefined
+  get adoptionIssue(): string | undefined { return this.issue }
   get needsAdoption(): boolean { return this.adopting }
   private readonly create: Create | undefined
   private readonly membership: Membership
@@ -47,8 +49,8 @@ export class QuickAccessWrite {
             const created = await this.gateway.arrangementEdit(this.create!)
             if (created.value.status !== 'completed' || created.value.action_id !== this.create!.id) throw new TypeError('Quick access creation is not confirmed')
           } catch (error) {
-            // This canonical first-attempt refusal precedes the write. It has no applied field.
-            if (checking || code(error) !== 'arrangement-exists' || unsafe(error)) {
+            // This safe canonical conflict permits ensuring the exact shared container, not inferring our create receipt.
+            if (code(error) !== 'arrangement-exists' || unsafe(error)) {
               this.refused = !checking && quickAccessNotApplied(error)
               throw error
             }
@@ -57,10 +59,17 @@ export class QuickAccessWrite {
         }
         if (this.adopting) {
           // A failed read retains validation, not an ambiguous CREATE. Explicit checks only GET.
+          this.issue = undefined
           const { owner, subject } = this.membership.parameters
           const existing = (await this.gateway.arrangementsGet(owner.slice('person/'.length), subject.slice(subject.lastIndexOf('/') + 1))).value
-          if (existing.id !== subject || existing.owner !== owner || existing.deleted !== false || existing.body.version !== 2)
-            throw new TypeError('The reserved Quick access collection cannot be adopted')
+          const reason = existing.id !== subject ? 'the returned collection has another identity'
+            : existing.owner !== owner ? 'the returned collection belongs to another person'
+            : existing.deleted !== false ? 'the collection is retired or its live status is unavailable'
+            : existing.body.version !== 2 ? 'the collection does not support ordered Quick access' : undefined
+          if (reason !== undefined) {
+            this.issue = `Quick access cannot be adopted because ${reason}. This collection will not be recreated.`
+            throw new TypeError(this.issue)
+          }
           this.adopting = false
         }
         this.stage = 'membership'
