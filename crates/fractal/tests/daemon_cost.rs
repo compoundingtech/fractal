@@ -3220,6 +3220,15 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     store.pin_fleet_anchor(anchor.public()).unwrap();
     store.set_member_key(Some(anchor.clone())).unwrap();
     store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+    let source = format!(
+        "version 2\nnotice-owner {{ member {NODE:?}; member-key {:?}; always-on }}\n",
+        anchor.public(),
+    );
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
+    let preview = store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source, source_name: None,
+    }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, "cost-scheduled-owner", Some("person/bench-operator")).unwrap();
     store.append_claim(&ClaimInput {
         subject:format!("host/{PEER}"), kind:"fleet.member-admitted".into(), actor:None,
         fields:serde_json::from_value(json!({
@@ -3407,7 +3416,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .insert("incarnation_id".into(), json!(SEAT_RUNTIME));
         store.append_claim(&running).unwrap();
     }
-    let mut fixture = fixture(&person, &client, subjects).await;
+    let scheduled_sender = Client::unix_as(&socket, &subjects.seats[0]).unwrap();
+    let mut fixture = fixture(&person, &client, &scheduled_sender, subjects).await;
     fixture.items.insert("service_claim",service_claim);
     fixture.items.insert(
         "harness_question",
@@ -3746,8 +3756,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/")
-                    || path.starts_with("/v1/messages/scheduled-cancel/") {
+                } else if path.starts_with("/v1/messages/scheduled-cancel/") {
+                    scheduled_sender.clone()
+                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
                     person.clone()
                 } else {
                     client.clone()
@@ -4110,7 +4121,7 @@ fn prepare_custom_fixture(store: &Store, fixture: &mut Fixture, scale: f64) {
 }
 
 /// Ids from the store's own lists, a sent message, and a person ask per attempt.
-async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixture {
+async fn fixture(person: &Client, client: &Client, scheduled_sender: &Client, subjects: Subjects) -> Fixture {
     let mut items = BTreeMap::new();
     for (name, list) in [
         ("agent", "/v1/client/agents"),
@@ -4208,9 +4219,9 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         .subject;
     let mut scheduled = Vec::new();
     for attempt in 0..4 {
-        let response: Value = person.post("/v1/messages", &json!({
+        let response: Value = scheduled_sender.post("/v1/messages", &json!({
             "idempotency_key": format!("cost-fixture-scheduled-{attempt}"),
-            "from": "person/bench-operator",
+            "from": subjects.seats[0],
             "to": subjects.seats[0],
             "content": "An invented future check.",
             "at": "2100-01-02T03:04:05Z",

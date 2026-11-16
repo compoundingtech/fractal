@@ -561,6 +561,7 @@ struct Daemon {
     root: tempfile::TempDir,
     state: AppState,
     server: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    member_key: Option<Arc<fractal_daemon::fleet::MemberKey>>,
 }
 
 impl Daemon {
@@ -582,6 +583,7 @@ impl Daemon {
             root,
             state,
             server: None,
+            member_key: None,
         };
         daemon.serve().await;
         daemon
@@ -670,7 +672,25 @@ impl Daemon {
         assert!(server.await.unwrap_err().is_cancelled());
         std::fs::remove_file(self.socket()).unwrap();
         self.state = Self::state(self.root.path(), &self.state.node);
+        if let Some(key) = &self.member_key {
+            self.state.store.set_member_key(Some(key.clone())).unwrap();
+            self.state.fleet_id = Some("action-coverage-fleet".into());
+        }
         self.serve().await;
+    }
+
+    async fn scheduled_owner(&mut self) {
+        let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+        self.store().bind_fleet("action-coverage-fleet").unwrap();
+        self.store().pin_fleet_anchor(key.public()).unwrap();
+        self.store().set_member_key(Some(key.clone())).unwrap();
+        self.store().admit_fleet_anchor("action-coverage-fleet", key.public(), "listening").unwrap();
+        self.apply(&format!(
+            "version 2\nnotice-owner {{ member {NODE:?}; member-key {:?}; always-on }}\n",
+            key.public(),
+        ), "coverage-scheduled-owner");
+        self.member_key = Some(key);
+        self.restart().await;
     }
 
     async fn fence(&self, actor: &str) -> Fence {
@@ -1383,14 +1403,15 @@ async fn scheduled_message_cancellation_survives_stale_fences_and_restarts() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
-    let fence = daemon.fence(PERSON).await;
+    daemon.scheduled_owner().await;
+    let fence = daemon.fence(WORKER).await;
     let sent = daemon.exercise(
-        PERSON, "message.send",
+        WORKER, "message.send",
         json!({"to": WORKER, "content": "A future copper kite.", "at": "2100-01-02T03:04:05Z"}),
         fence,
     ).await;
     let id = sent["affected_ids"][0].as_str().unwrap();
-    assert!(id.starts_with("scheduled-message/"), "{sent}");
+    assert!(id.starts_with("message-schedule/"), "{sent}");
     assert_eq!(daemon.store().scheduled_message(id).unwrap().unwrap().state, "pending");
     assert!(daemon.store().messages(Some(WORKER), true).unwrap().is_empty());
     let listed: Value = daemon.transport().get("/v1/client/scheduled-messages").await.unwrap();
@@ -1398,9 +1419,9 @@ async fn scheduled_message_cancellation_survives_stale_fences_and_restarts() {
     let shown: Value = daemon.transport().get(&format!("/v1/client/scheduled-messages/{id}")).await.unwrap();
     assert_eq!(shown["value"]["id"], id);
     assert_eq!(shown["value"]["state"], "pending");
-    let fence = daemon.fence(PERSON).await;
+    let fence = daemon.fence(WORKER).await;
     let cancelled = daemon.exercise(
-        PERSON, "message.cancel-scheduled",
+        WORKER, "message.cancel-scheduled",
         json!({"target_id": id, "reason": "The future check is no longer needed."}), fence,
     ).await;
     assert_eq!(cancelled["affected_ids"][0], id);
@@ -1415,8 +1436,10 @@ async fn cli_scheduled_messages_list_show_and_cancel_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
-    let sent = cli_value(daemon.cli(PERSON, &[
-        "messages", "send", WORKER, "--from", PERSON, "--body", "A future CLI kite.",
+    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-scheduled-unrelated-seat");
+    daemon.scheduled_owner().await;
+    let sent = cli_value(daemon.cli(WORKER, &[
+        "messages", "send", WORKER, "--from", WORKER, "--body", "A future CLI kite.",
         "--at", "2100-01-02T03:04:05Z", "--idempotency-key", "coverage-cli-scheduled",
     ]).await);
     let id = sent["id"].as_str().unwrap();
@@ -1436,8 +1459,12 @@ async fn cli_scheduled_messages_list_show_and_cancel_survive_restart() {
                 "messages", "scheduled", "cancel", id, "--reason", "Not my reminder",
             ]).await;
             assert!(!refused.status.success());
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("only the sender or target can cancel"),
+                "{}", String::from_utf8_lossy(&refused.stderr),
+            );
             assert_eq!(daemon.store().scheduled_message(id).unwrap().unwrap().state, "pending");
-            let cancelled = cli_value(daemon.cli(PERSON, &[
+            let cancelled = cli_value(daemon.cli(WORKER, &[
                 "messages", "scheduled", "cancel", id, "--reason", "No longer needed",
             ]).await);
             assert_eq!(cancelled["id"], id);
