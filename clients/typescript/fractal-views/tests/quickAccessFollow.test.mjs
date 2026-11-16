@@ -242,3 +242,22 @@ test('incompatible adoption explains the reason and refreshed source cannot unlo
   await follow.checkEdit(); assert.equal(h.states.at(-1).editable, true);
   assert.deepEqual(h.actions.map(a => a.type), ['arrangement.edit', 'arrangement.membership.edit']); follow.close();
 });
+
+
+test('canonical outer uncertainty survives refresh and permits only the identical explicit check', async () => {
+  for (const [outer, details] of [
+    [{ applied: 'unknown' }, { applied: 'none' }],
+    [{ applied: 'none' }, { applied: 'unknown' }],
+    [{ applied: 'future-state' }, {}],
+  ]) {
+    const h = setup({ actionReply: (_, count) => count === 1 ? Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/unknown', code: 'stale-fence', message: 'uncertain', retryable: false, ...outer, details }, { status: 409 }) : 'completed' });
+    const follow = await followQuickAccess({ gateway: h.client, onState: h.onState });
+    await assert.rejects(follow.edit(identity, [{ op: 'remove', member: 'agent/example' }]));
+    await follow.refresh();
+    assert.equal(h.states.at(-1).phase, 'unconfirmed'); assert.equal(h.states.at(-1).editable, false);
+    await assert.rejects(follow.edit({ ...identity, id: 'action/fresh' }, [{ op: 'remove', member: 'mission/example' }]));
+    assert.equal(h.actions.length, 1);
+    await follow.checkEdit(); assert.deepEqual(h.actions[0], h.actions[1]);
+    assert.equal(h.states.at(-1).editable, true); follow.close();
+  }
+});
