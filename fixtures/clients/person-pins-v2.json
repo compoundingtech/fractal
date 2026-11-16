@@ -1,7 +1,0 @@
-{
-  "owner": "person/example",
-  "subject": "arrangement/person/example/00000000-0000-7000-8000-000000000002",
-  "create": {"owner": "person/example", "subject": "arrangement/person/example/00000000-0000-7000-8000-000000000002", "version": 2, "operations": [{"op": "create", "name": "Pins"}]},
-  "pin": {"owner": "person/example", "subject": "arrangement/person/example/00000000-0000-7000-8000-000000000002", "operations": [{"op": "place", "member": "agent/example", "bucket": null, "key": "a0"}]},
-  "unpin": {"owner": "person/example", "subject": "arrangement/person/example/00000000-0000-7000-8000-000000000002", "operations": [{"op": "remove", "member": "agent/example"}]}
-}
