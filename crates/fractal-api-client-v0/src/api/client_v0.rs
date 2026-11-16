@@ -16831,9 +16831,10 @@ subscription "watch/source" {
         let mut changed = claim.clone();
         changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
         assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        // Exact withdrawal must not select a completion using the wall clock.
         state.store.append_client_operation_claim(&ClaimInput {
             subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
-            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            actor:Some("person/alex".into()), fields:BTreeMap::from([("completion_id".into(), json!(claim.id))]),
             evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
         }).unwrap();
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
