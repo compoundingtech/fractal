@@ -876,7 +876,10 @@ the load averages (exact on a dedicated runner).
 `kit-play-isolation.browser-test.mjs` runs in the same kit-input-gated CI lane before
 the full play matrix. It exercises storage/service-worker/popup isolation, concurrent
 worker independence, retained HTTP asset caching, and failing-story/leaked-state
-negative controls against real Chromium. The matrix receipt retains story/case/worker
+negative controls against real Chromium. The retained-renderer stale-view fixture
+waits for that renderer's matching Web Storage notification before reading its
+snapshot; a write acknowledged by a different renderer is not that boundary.
+The matrix receipt retains story/case/worker
 counts and per-case seconds and adds reset, page-creation, guard, navigation-to-DOM,
 post-DOM readiness, assertion and close timings. The strict lifecycle assertions,
 story-identity checks, matrix size and job timeout are unchanged.
