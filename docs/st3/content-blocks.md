@@ -195,6 +195,115 @@ Additions are industry-standard green; deletions are red in every client and bot
 
 Messages, notices and transcript adapters may reuse these definitions through explicit carrier adoption. Do not reinterpret harness tool/reasoning/source events as authored content, widen assistant disclosure grants, or put rich detail in push/speech transport. New profiles have independent capabilities; reserving an extension point does not advertise implementation.
 
+### GitHub resource cards: carrier-neutral contract
+
+This is the docs-only contract for R080: GitHub first, then a separately reviewed provider allowlist. It does not enable a block kind, capability or resolver. Client-v0 schemas, generators, SDKs, threads and renderers remain unchanged until the threads freeze associated with fractal#6609 lifts. The notation below specifies semantics, not a second wire schema; later implementation must use the canonical client-v0 authority and existing composition seams.
+
+#### Authored identity and carriers
+
+A reference is the typed tuple `(provider = github, host = github.com, repository owner, repository name, kind = pull_request | issue, number)`, with a positive safe-integer number. Kind is mandatory: an issue-shaped GitHub API response for a PR must not silently turn it into an issue. Owner/name are validated GitHub path components, compared case-insensitively; no slashes, traversal, percent-encoded separators, query, fragment, userinfo or caller-selected API origin are permitted. Enterprise hosts are not admitted by this profile.
+
+The safe external link is derived from that tuple: `https://github.com/{owner}/{repo}/pull/{number}` or `/issues/{number}`. A supported canonical URL may be parsed into the tuple before admission; arbitrary URLs are not resolver input. Repository/node IDs returned by GitHub may disambiguate renames in an authorized observation but never replace the immutable authored tuple silently. A moved resource falls back to the original link pending explicitly authorized identity handling.
+
+The sender supplies only identity and plain-text fallback, never title, state, checks, visibility, revision or a claim of read authority. Fallback is untrusted authored text subject to carrier disclosure and secret policy, not provider-verified metadata; the safe default is the authored canonical link. A sender who names a private repository has already disclosed that authored name to the carrier audience; the resolver must not confirm its existence or add any provider-derived fact for an unauthorized viewer.
+
+| Carrier | Adoption boundary |
+| --- | --- |
+| Structured person request and person update | Eligible through their separate negotiated block capabilities; a card is informational, not an answer button, approval or new update action. |
+| Authored message and notice | Eligible only after explicit domain validation, retention/replay and projection/capability adoption for that carrier; not automatically enabled by ask support. |
+| Transcript adapter | May preserve an explicitly authored reference only after explicit adapter/carrier adoption; must not reinterpret arbitrary harness tool, reasoning or source events as authored cards. |
+| Observed-resource/detail surface | May render the same authorized normalized view for an existing typed PR/issue identity; an observation alone is neither viewer authority nor an on-demand resolver protocol. |
+| Push, speech and notification transport | Plain authored fallback/link only under existing disclosure rules; no resolved title, private metadata, provider revision or embedded live card. |
+
+All eligible carriers use the same reference, resolver semantics and pure rendering inputs. There is no ask-only `previews[]`, markdown-component fetcher, independent per-client resolver or widening of assistant disclosure grants. Until a carrier adopts the profile it retains its existing plain-link behavior. Card refresh never edits historical carrier claims or content-bound approvals; reviewing a PR still requires an explicit immutable head pin and renewed review when that head moves.
+
+#### Normalized static view
+
+The daemon projects a bounded static snapshot, not HTML or an executable provider widget. It contains the authored reference/link, a resolution result, and, only when disclosure is authorized, the following normalized facts:
+
+| Fact | Meaning |
+| --- | --- |
+| `title` | Plain text, at most 512 Unicode scalar values; visibly shorten overlong display titles, never interpret markup, terminal escapes or HTML. Do not fetch body text, comments, avatars or images for the card. |
+| Resource state | PR: `open`, `draft`, `closed`, `merged`; issue: `open`, `closed`. Draft is an open PR presentation state; unknown provider values remain visibly `unknown`, never inferred success. |
+| Checks summary | PR head-scoped aggregate with `success`, `failure`, `pending`, `unknown` or `not_applicable`, plus bounded counts for successful, failed, pending and unknown checks when available. Failure wins over pending, pending over success; success requires a complete readable set with all conclusions successful, neutral or skipped. Missing, unreadable, truncated or inconsistent checks yield `unknown`, not green. An issue is `not_applicable`; an empty PR check set is `unknown` (“No checks reported”), not success. |
+| `checked_at` | UTC RFC 3339 time of the last completed authorized provider validation; never the render time. A successful conditional not-modified response may advance it only after current disclosure authority is established. |
+| Provider revision | PR immutable head commit object ID plus opaque response validator and resource update time when supplied; checks must refer to that same head. Issues have no Git head: use their opaque validator/update time, explicitly labelled as such. Validators are cache provenance, not approval pins or a total ordering. Missing provenance is explicit, not invented. |
+
+Resolution result and resource state are distinct: a closed PR can be freshly resolved. `resolved` requires readable identity/title/state; unavailable optional checks can produce a resolved card with `unknown` checks. A head change during a bounded fetch makes the checks unknown rather than attaching the old head's success to the new head. Do not claim an atomic provider snapshot when endpoints were read separately.
+
+No raw provider response, credential, installation identity, request header, private error body or cache key is exposed. Views remain within the carrier's projected byte budget and non-image block count; one encoded normalized card is at most 4 KiB. Unsupported/malformed known views render the authored plain link, never trusted partial metadata.
+
+#### Authorized daemon resolution and disclosure
+
+Both carrier read permission and current GitHub read permission for this viewer are required before disclosing any provider-derived fact. Resolve only with the viewer's authority: daemon-account PAT/App installation reachability is not proof that the viewer may read the repository. The daemon must bind the authenticated viewer to an existing authorized provider route and a repository read grant; if that binding cannot be established, return the authored plain link without a provider lookup. Never substitute a broader daemon credential, another person's cached result, or anonymous access after a viewer-authorized request fails.
+
+Revalidate disclosure authority on every projection, cache hit, refresh and forwarding/relay boundary. Partition cached results and in-flight work by viewer authorization scope, credential/grant generation, provider and typed identity; matching repository names or the current `cache_principal()` label alone are not sufficient isolation. A view fetched for one recipient must not be stored in the shared authored carrier or broadcast to its other recipients. Revocation invalidates derived facts and outstanding delivery; a late success from an old authority generation must not repopulate the view. No new offline persistence of private card facts is permitted by this profile.
+
+Do not distinguish inaccessible private resources from nonexistent ones to a viewer without affirmative read authority. `unauthorized`, ambiguous provider 404 and inability to establish permission have the same public “Preview unavailable” link-only shape, including absent timestamps/revisions/counts. A definitive deletion label requires independently established current repository authority and unambiguous provider deletion evidence; 404 alone is not such evidence. Diagnostic detail stays inside the authorized daemon boundary and must not leak through logs, metrics labels, tool errors, notifications or shared caches.
+
+Use the existing `crates/fractal-github-base/src/github_http.rs` authenticated send/admission path and `github_admission` budgets, not a new HTTP client or direct fetch. Every actual request, including conditional validation and any selected credential replay, spends the existing core/GraphQL budget under the daemon-assigned spender. A renderer or caller cannot choose a cheaper spender or bypass exhausted admission. Honor provider retry/reset hints and the existing credential acquisition/rejection policy; do not add card-level automatic retry or credential fallback.
+
+The authorized RPC boundary already restricts requests to HTTPS `api.github.com:443`, with no userinfo/caller Authorization, and caps request/response bodies at 16/64 MiB. Those transport ceilings are not suitable card payload budgets. Build a fixed read-only endpoint/query from validated identity; use the existing no-redirect `send_read_once` path for cards and map 3xx to unavailable/link-only, rather than fetching provider-supplied Location, pagination or media URLs. Do not use a configurable provider API base as an arbitrary-preview SSRF boundary. No mutation endpoint, arbitrary GraphQL text, browser/iOS credential, shell command or generic URL crawler is part of resolution.
+
+#### Freshness, cache and refresh budget
+
+These are proposed card limits, stricter than transport ceilings; global GitHub admission may always refuse or reduce work:
+
+| Boundary | Contract limit |
+| --- | --- |
+| One resolution batch | At most 3 admitted provider HTTP requests, 1 MiB decoded JSON per response, 10 seconds total elapsed time including admission/credential work; no unbounded pagination. Existing transport replays still count against the batch. |
+| Concurrency | At most 4 card batches in flight per daemon and 1 per viewer-authority/reference key; coalesce duplicate visible references across carriers within that key. |
+| Freshness | A successful snapshot is fresh for 60 seconds from `checked_at`; freshness never substitutes for disclosure authorization. Older snapshots are stale, not silently “live”. |
+| Refresh | Initial authorized visibility, an existing provider/resource invalidation, or explicit refresh may request a batch. At most one batch per key per 60 seconds, including manual refresh; no per-row, offscreen or timer polling. After expiry, show a plain link until one of those triggers requests fresh facts. |
+| Cache | Bounded in-memory LRU: at most 256 entries and 1 MiB total encoded normalized views per daemon, evicted after 5 minutes without authorized use. Eviction never forces background work. No new durable provider-body cache. |
+| Failure suppression | Link-only failed results may be retained within the same authority partition for 60 seconds; rate limits suppress work until the later of that interval and provider retry/reset time. Permission/credential changes invalidate this suppression. No replay loop on provider failure. |
+
+Use conditional validators when supported and admissible; a 304 without its authorized matching snapshot is not a resolved result. A partial or over-budget check list is unknown, never paginated until success. Do not refresh merely because a client reconnects, expands, reflows or rerenders a card while a fresh authorized snapshot exists. An existing observer may invalidate data but cannot supply disclosure authority or circumvent these caps.
+
+| Resolution state | Shared rendering and fallback |
+| --- | --- |
+| Not requested/loading | Authored plain link; optional local loading label without provider facts or blocking carrier actions. |
+| Resolved/fresh | Static title, typed identity, resource state, checks, “Checked …” time and labelled revision; explicit external open only. |
+| Unauthorized/permission unknown | Plain link and generic unavailable label; no provider facts, existence confirmation or previous cached title. |
+| Deleted/not found | Plain link; “Deleted” only with the authorized definitive evidence above, otherwise generic unavailable. |
+| Rate-limited/admission denied | Plain link and “Preview unavailable”; show a retry time only if it is safe for this viewer, never provider quota/credential details. |
+| Stale | Plain link and “Preview stale”; do not retain stale title/state/checks as if current. Last check time may be shown only while current disclosure authority remains established. |
+| Provider down/timeout/oversize/invalid response/moved | Plain link and unavailable label; no error body, redirect following, automatic retry or cached-success substitution. |
+
+Fallbacks preserve carrier reading, answering and navigation semantics; a failed informational card never blocks a person action or grants approval. Offline rendering is link-only and retains existing no-action rules where applicable. External navigation is an explicit user action using the host's safe HTTPS opener, not an implicit network fetch during layout.
+
+#### Shared rendering and security fixture matrix
+
+The following are normative fixture cases to implement after the freeze, not claims of tests already present. Use one language-neutral set of reference/view/authority/clock inputs and expected semantic text across TUI, web and iOS; screenshots are surface-specific evidence, not separate source facts. Synthetic repository names and titles only. The same fixture must also run in each adopted carrier, with fallback-only legacy/unknown-capability readers.
+
+| Fixture | Input or transition | Required shared result/security assertion |
+| --- | --- | --- |
+| `pr-open-success` | Authorized PR #42, title “Release notes”, head `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, 3 successful complete checks, checked `2026-11-13T12:00:00Z`; clock +30s | Open, success 3, exact title/head/check time and one canonical `/pull/42` link; no inferred approval. |
+| `pr-draft-pending` | Same head, draft with pending checks | Draft and pending text visible without colour; never merged or success. |
+| `pr-failed-merged-closed` | Separate failed/open, merged and closed-unmerged snapshots | Preserve distinct resource states; checks remain head-scoped and failures visible. |
+| `issue-open-closed` | Typed issue #42, open then closed; validator/update time, no Git head | `/issues/42`, checks not applicable and no invented commit pin. |
+| `checks-incomplete-head-race` | Missing check scope, empty set, truncated list, unknown conclusion, or head changes mid-batch | Unknown checks with honest explanation; old head success never appears on new head. |
+| `private-two-viewers` | A can read private repo; B can read carrier but not repo; same authored reference | A gets facts; B gets authored link/generic unavailable only. No cross-viewer coalescing, title, existence, timestamps or revisions. |
+| `revoked-in-flight` | A loses read grant after cache fill or while request is in flight | Cached/late facts removed before projection; no offline/private persisted copy or other-recipient broadcast. |
+| `missing-versus-deleted` | Unauthorized/private 404, authorized ambiguous 404, authorized definitive deletion | First two indistinguishable unavailable views; only last may say deleted; never leak private error bodies. |
+| `rate-limit-budget` | Admission refusal, 429/reset, repeated refresh and 100 duplicate rows | Plain link; no hidden retries; coalesced bounded work; every actual request admitted; retry/reset suppression honored. |
+| `stale-down-recovery` | Clock +61s, offline/503/timeout, then authorized visibility/refresh after suppression | Stale/down are link-only, not old green checks; successful later validation supplies new check time without changing authored content. |
+| `conditional-cache` | Matching 304, orphan 304, changed credential/grant generation, LRU eviction | Only matching authorized snapshot becomes fresh; orphan/refused scope stays link-only; eviction does not fetch. |
+| `egress-hostile` | Crafted owner/path/URL, Enterprise host, localhost/metadata address, redirect to another origin or same-origin location | Invalid input refused or safe plain-link handling; no unauthorized origin, redirect, media or pagination fetch; no credential forwarded. |
+| `untrusted-title` | HTML, terminal escapes, bidi/control characters, very long Unicode title | Plain sanitized bounded text using existing surface text safety; no HTML/script/terminal execution or hidden check state. |
+| `unknown-legacy-carriers` | Unknown profile/version, malformed view, no carrier adoption, ordinary markdown/tool event | Authored plain link/fallback only; no automatic new rich field or resolver call; carrier actions unchanged. |
+| `approval-head-moved` | PR card refresh observes a new head after a pinned review | New informational snapshot never rewrites the approval pin or authorizes the new head. |
+
+TUI fixtures include 30/60-column cards and monochrome: title wraps/truncates safely but state, stale warning and openable link remain accessible. Web fixtures use the shared composition path, escaped text, safe external-link attributes and no remote image/HTML load. iOS fixtures use native text/accessibility labels and the safe link opener, not a web widget. All three expose the same state/check/time/revision text to accessibility or text read-back, do not rely on colour alone, and perform zero provider requests from render code. Layout/expansion never creates a new resolution operation.
+
+#### Later: non-GitHub allowlist
+
+Non-GitHub cards remain deferred; this section grants no provider or arbitrary-URL capability. Each later allowlist entry needs a reviewed typed identity, fixed HTTPS origin/port/path rules, viewer-authority/disclosure policy and explicit request/response/time/concurrency/cache budgets before admission. Validate DNS results and connected peers against private, loopback, link-local, multicast and metadata ranges (IPv4 and IPv6), prevent DNS rebinding, and revalidate every allowed redirect hop with a hard hop limit and no cross-origin credential forwarding. Bound compressed and decoded bytes, MIME/media types and image dimensions; prohibit active content, provider HTML and browser-side credentials. Media requires its own authorized bounded fetch policy, not a URL handed to a renderer. No general resolver framework or generic crawler is authorized here.
+
+#### Decisions requiring product confirmation
+
+The proposed 60-second freshness/refresh floor and link-only stale policy deliberately trade continuous status display for bounded work and fail-closed disclosure. Johannes should confirm that product trade-off before implementation. Viewer-to-GitHub authority mapping is an implementation prerequisite: if existing routes cannot prove that binding for a viewer, cards remain plain links; this document does not authorize a daemon-wide credential shortcut. Additional carrier rollout order and non-GitHub provider selection remain subsequent decisions, not blockers for this docs-only contract.
+
 ## Conformance
 
 Contract fixtures and focused tests cover strict input/forged metadata, unknown read pairs versus malformed known data, UTF-8 boundaries, repeated text and empty-before insertions, overlap/size refusal, exact and stale/unverifiable checks, uncommitted file changes, unrelated commits, unavailable/missing paths, image ownership/expiry/carrier access, legacy normalization without duplicates, and N/N-1 retention/replay. Answer tests prove exact hunks, the daemon's answer-time checks and separately labelled client-reported shown states are retained; changed-content digests fail; stale stays answerable with warning; fallback-only accept is refused; no rich bindings are fabricated for old/delegated answers or timeouts; and no apply/post-commit action occurs. Each client covers prose insertion/replacement/deletion, code, narrow layout, unknown fallback, provenance and no-colour/accessibility. Web additionally requires lazy graph, palette and production CSP proofs.
