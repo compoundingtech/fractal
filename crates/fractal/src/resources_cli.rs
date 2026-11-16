@@ -63,6 +63,14 @@ fn default_coverage() -> &'static str {
     if cfg!(target_os = "linux") { "enforced" } else { "logical" }
 }
 
+fn require_exec_platform() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        return Err(fractal_daemon::FractalError::new("unsupported-platform",
+            "resource exec is unavailable on macOS: no whole-tree retirement proof").into());
+    }
+    Ok(())
+}
+
 pub(super) async fn run(client: &Client, person: Option<&str>, command: ResourcesCommand, json_output: bool) -> Result<()> {
     match command {
         ResourcesCommand::Exec(args) => execute(client, args).await,
@@ -105,6 +113,7 @@ pub(super) async fn run(client: &Client, person: Option<&str>, command: Resource
 }
 
 async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
+    require_exec_platform()?;
     let capabilities: Value = client.get("/v1/health").await?;
     anyhow::ensure!(capabilities.pointer("/capabilities/shell_resource_exec").and_then(Value::as_u64).is_some_and(|version| version >= 1)
         && capabilities.pointer("/capabilities/mission_resource_lane").and_then(Value::as_u64).is_some_and(|version| version >= 2),
@@ -201,6 +210,16 @@ mod tests {
         assert_eq!(args.timeout, Some(300_000));
         assert_eq!(matches!(args.coverage, CliCoverage::Enforced), cfg!(target_os = "linux"));
         assert!(Cli::try_parse_from(["fractal","resources","exec","--lane","x","--cores","1","--memory","1G","--disk","1G","--","true"]).is_err());
+    }
+    #[test]
+    fn platform_refusal_precedes_daemon_contact_and_capacity_acquisition() {
+        let result = require_exec_platform();
+        if cfg!(target_os = "macos") {
+            let error = result.unwrap_err();
+            assert_eq!(error.downcast_ref::<fractal_daemon::FractalError>().unwrap().code, "unsupported-platform");
+        } else {
+            result.unwrap();
+        }
     }
     #[test]
     fn payload_exit_code_is_passed_through_and_result_is_durable() {

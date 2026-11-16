@@ -1422,7 +1422,7 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
     let disk = match (property_string(node, "disk")?, property_string(node, "disk-path")?) {
         (None, None) => None,
         (Some(bytes), Some(path)) if !path.trim().is_empty() => {
-            let bytes = fractal_runtime::parse_memory(&bytes)
+            let bytes = fractal_runtime::parse_lane_memory(&bytes)
                 .map_err(|error| FractalError::new("invalid-step-lane", format!("invalid disk footprint: {error}")))?;
             if bytes == 0 {
                 return Err(FractalError::new("invalid-step-lane", "disk footprint must be positive"));

@@ -8356,6 +8356,11 @@ pub async fn guard_bound_request(
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        // Resource handlers bind submission to native ownership and scope inspection/control
+        // to that same owner. No other internal route (or method) admits bound callers.
+        if resources::allows_bound_request(request.method(), request.uri().path()) {
+            return Ok(request);
+        }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),

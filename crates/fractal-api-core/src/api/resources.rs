@@ -1,7 +1,72 @@
-//! Trusted-local shell transport. Admission remains owned by the host reconciler.
+//! Shell transport: bound callers access only their native owner; admission stays with the host reconciler.
 use super::*;
 use crate::store::shell_resources::{Command, Execution};
 use crate::store::resource_membership::{Coverage, RequestClass};
+
+pub(super) fn allows_bound_request(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    match path.strip_prefix("/v1/internal/resources") {
+        Some("") => *method == Method::GET,
+        Some("/exec") => *method == Method::POST,
+        Some(rest) => {
+            let Some(rest) = rest.strip_prefix('/') else { return false; };
+            let mut segments = rest.split('/');
+            match (segments.next(), segments.next(), segments.next()) {
+                (Some(id), None, None) if !id.is_empty() => *method == Method::GET,
+                (Some(id), Some("wait" | "cancel"), None) if !id.is_empty() => *method == Method::POST,
+                _ => false,
+            }
+        },
+        None => false,
+    }
+}
+
+fn require_exec_platform(macos: bool) -> Result<(), ApiError> {
+    if macos {
+        return Err(ApiError::bad(FractalError::new("unsupported-platform",
+            "resources exec is unavailable on macOS: no whole-tree retirement proof")));
+    }
+    Ok(())
+}
+
+/// A run credential owns its exact attempt; an agent additionally owns its native invocation.
+/// Missing/stale native evidence never falls back to local-operator authority.
+struct CallerOwner {
+    owner: crate::store::resource_membership::Owner,
+    agent: bool,
+}
+
+impl CallerOwner {
+    fn resolve(state: &AppState, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>) -> Result<Option<Self>, ApiError> {
+        let owner_error = |error: anyhow::Error| ApiError::bad(FractalError::new("resource-exec-owner", error.to_string()));
+        if let Some(Extension(BoundRun(binding))) = run {
+            return Ok(Some(Self { owner: crate::store::resource_membership::Owner {
+                run: binding.run, step: binding.step_run, attempt: binding.attempt, invocation: None,
+            }, agent: false }));
+        }
+        match bound {
+            Some(BoundActor::Agent(agent)) => Ok(Some(Self {
+                owner: state.store.shell_resource_agent_owner(&agent).map_err(owner_error)?, agent: true,
+            })),
+            Some(BoundActor::Run(_)) => Err(ApiError::bad(FractalError::new(
+                "resource-exec-owner", "run caller has no verified attempt binding"))),
+            None => Ok(None),
+        }
+    }
+
+    fn owns(&self, owner: &crate::store::resource_membership::Owner) -> bool {
+        self.owner.run == owner.run && self.owner.step == owner.step && self.owner.attempt == owner.attempt
+            && (!self.agent || self.owner.invocation == owner.invocation)
+    }
+}
+
+fn authorize_execution(caller: Option<&CallerOwner>, execution: &Execution) -> Result<(), ApiError> {
+    if caller.is_some_and(|caller| !caller.owns(&execution.command.lane.owner)) {
+        return Err(ApiError::bad(FractalError::new("resource-exec-owner",
+            "shell execution belongs to another execution owner")));
+    }
+    Ok(())
+}
 
 #[derive(Default, Deserialize)]
 pub(super) struct ListQuery {
@@ -13,6 +78,7 @@ pub(super) struct ListQuery {
 pub(super) struct WaitQuery { after: u64 }
 
 pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Json(mut command): Json<Command>) -> Result<Json<Execution>, ApiError> {
+    require_exec_platform(cfg!(target_os = "macos"))?;
     (|| -> anyhow::Result<()> {
         anyhow::ensure!(command.lane.host.is_empty() || command.lane.host == state.node, "shell execution must use the connected host");
         let id = format!("shell:{}", command.id);
@@ -24,6 +90,7 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
     })().map_err(|error| ApiError::bad(FractalError::new("resource-exec-refused", error.to_string())))?;
     command.lane.host.clone_from(&state.node);
     let local_operator = run.is_none() && !matches!(&bound, Some(BoundActor::Agent(_) | BoundActor::Run(_)));
+    let agent_caller = run.is_none() && matches!(&bound, Some(BoundActor::Agent(_)));
     let owner = if let Some(Extension(BoundRun(binding))) = run {
         crate::store::resource_membership::Owner { run: binding.run, step: binding.step_run, attempt: binding.attempt,
             invocation: Some(format!("shell:{}", command.id)) }
@@ -43,7 +110,8 @@ pub(super) async fn submit(State(state): State<AppState>, bound: Option<BoundAct
     if let Some(parent) = &command.parent {
         let record = state.store.resource_membership_for_grant(parent).map_err(ApiError::internal)?;
         if record.request.owner.run != owner.run || (!local_operator
-            && (record.request.owner.step != owner.step || record.request.owner.attempt != owner.attempt)) {
+            && (record.request.owner.step != owner.step || record.request.owner.attempt != owner.attempt))
+            || (agent_caller && record.request.owner.invocation != owner.invocation) {
             return Err(ApiError::bad(FractalError::new("resource-exec-owner", "nested membership belongs to another execution owner")));
         }
         validate_parent(&command, &record.request, &record.state).map_err(ApiError::internal)?;
@@ -83,39 +151,51 @@ fn present(mut execution: Execution) -> Execution {
     execution
 }
 
-pub(super) async fn list(State(state): State<AppState>, Query(query): Query<ListQuery>) -> Result<Json<Value>, ApiError> {
+pub(super) async fn list(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, Query(query): Query<ListQuery>) -> Result<Json<Value>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
     let host = query.host.as_deref().unwrap_or(&state.node);
     let rows: Vec<_> = state.store.shell_resources(host, false).map_err(ApiError::internal)?.into_iter()
+        .filter(|row| caller.as_ref().is_none_or(|caller| caller.owns(&row.command.lane.owner)))
         .filter(|row| query.class.is_none_or(|class| row.command.lane.class == class))
         .filter(|row| query.head.as_ref().is_none_or(|head| row.head_start.as_ref() == Some(head)))
         .map(present).collect();
     let memberships: Vec<_> = state.store.resource_memberships_for_host(host).map_err(ApiError::internal)?.into_iter()
+        .filter(|row| caller.as_ref().is_none_or(|caller| caller.owns(&row.request.owner)))
         .filter(|row| query.class.is_none_or(|class| row.request.class == class))
         .map(|mut row| { row.grant = None; row }).collect();
-    let holds = state.store.host_holds(Some(host), false).map_err(ApiError::internal)?;
-    let accountant = state.seat_admission.snapshot(admission_now());
+    let holds = if caller.is_none() { state.store.host_holds(Some(host), false).map_err(ApiError::internal)? } else { Vec::new() };
+    let accountant = caller.is_none().then(|| state.seat_admission.snapshot(admission_now()));
     Ok(Json(json!({"executions":rows,"memberships":memberships,"holds":holds,"accountant":accountant})))
 }
 
-pub(super) async fn show(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+pub(super) async fn show(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
     let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
+    authorize_execution(caller.as_ref(), &execution)?;
     let membership = state.store.resource_memberships_for_host(&execution.command.lane.host).map_err(ApiError::internal)?.into_iter()
-        .find(|member| member.request.id == execution.command.lane.id)
+        .find(|member| member.request.id == execution.command.lane.id
+            && caller.as_ref().is_none_or(|caller| caller.owns(&member.request.owner)))
         .map(|mut member| { member.grant = None; member });
-    let holds = state.store.host_holds(Some(&execution.command.lane.host), false).map_err(ApiError::internal)?;
-    Ok(Json(json!({"execution":present(execution),"membership":membership,"holds":holds,"accountant":state.seat_admission.snapshot(admission_now())})))
+    let holds = if caller.is_none() { state.store.host_holds(Some(&execution.command.lane.host), false).map_err(ApiError::internal)? } else { Vec::new() };
+    let accountant = caller.is_none().then(|| state.seat_admission.snapshot(admission_now()));
+    Ok(Json(json!({"execution":present(execution),"membership":membership,"holds":holds,"accountant":accountant})))
 }
 
-pub(super) async fn wait(State(state): State<AppState>, AxumPath(id): AxumPath<String>, Query(query): Query<WaitQuery>) -> Result<Json<Execution>, ApiError> {
+pub(super) async fn wait(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>, Query(query): Query<WaitQuery>) -> Result<Json<Execution>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
     let mut changed = state.event_notify.subscribe();
     loop {
         let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
+        authorize_execution(caller.as_ref(), &execution)?;
         if execution.revision > query.after || matches!(execution.state.as_str(), "completed" | "cancelled" | "refused") { return Ok(Json(present(execution))); }
         changed.changed().await.map_err(ApiError::internal)?;
     }
 }
 
-pub(super) async fn cancel(State(state): State<AppState>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+pub(super) async fn cancel(State(state): State<AppState>, bound: Option<BoundActor>, run: Option<Extension<BoundRun>>, AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
+    let caller = CallerOwner::resolve(&state, bound, run)?;
+    let execution = state.store.shell_resource(&id).map_err(ApiError::internal)?;
+    authorize_execution(caller.as_ref(), &execution)?;
     state.store.cancel_shell_resource(&id).map_err(ApiError::internal)?;
     state.notify.notify_one();
     Ok(Json(json!({"cancelled":id})))
@@ -144,6 +224,7 @@ mod tests {
         assert!(validate_parent(&command,&parent,"launched").is_err());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn nested_submission_keeps_one_membership_and_rejects_a_stale_marker() {
         use crate::store::resource_membership::{Admission, Fit};
@@ -166,7 +247,7 @@ mod tests {
         let Json(child) = submit(State(state.clone()), None, None, Json(command.clone())).await.unwrap();
         assert_eq!(child.command.lane, parent);
         assert!(child.command.parent.is_none(), "inspection must not export replayable parent grants");
-        let Json(details) = show(State(state.clone()), AxumPath(child.command.id.clone())).await.unwrap();
+        let Json(details) = show(State(state.clone()), None, None, AxumPath(child.command.id.clone())).await.unwrap();
         assert!(details["membership"]["grant"].is_null(), "operator inspection must not export grants");
         assert!(state.store.shell_resource(&child.command.id).unwrap().command.parent.is_some());
         assert_eq!(state.store.resource_memberships_for_host(&state.node).unwrap().len(), 1);
@@ -208,7 +289,7 @@ mod tests {
             id:"waiter".into(), lane:request(), argv:vec!["true".into()], cwd:"/work".into(),
             environment:BTreeMap::from([("EXAMPLE_TOKEN".into(),"private-test-value".into())]), timeout_ms:None, parent:None,
         }, 10).unwrap();
-        let waiting = wait(State(state.clone()),AxumPath("waiter".into()),Query(WaitQuery { after:0 }));
+        let waiting = wait(State(state.clone()),None,None,AxumPath("waiter".into()),Query(WaitQuery { after:0 }));
         tokio::pin!(waiting);
         assert!(std::future::poll_fn(|context| std::task::Poll::Ready(Future::poll(waiting.as_mut(),context).is_pending())).await);
         let mut completed = execution;
@@ -221,6 +302,7 @@ mod tests {
         assert_eq!(state.store.shell_resource("waiter").unwrap().command.environment.len(),1);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn submission_persists_authenticated_owner_and_never_promotes_environment_identity() {
         let directory = tempfile::tempdir().unwrap();
@@ -240,5 +322,137 @@ mod tests {
         persisted.command.environment.clear();
         state.store.update_shell_resource(&persisted).unwrap();
         assert_eq!(state.store.shell_resource(&id).unwrap().command.lane.owner.run,"person/operator");
+    }
+
+    #[test]
+    fn macos_exec_requires_whole_tree_retirement_proof() {
+        let error = require_exec_platform(true).unwrap_err();
+        assert_eq!(error.code, "unsupported-platform");
+        assert!(error.message.contains("no whole-tree retirement proof"));
+        assert!(require_exec_platform(false).is_ok());
+        assert!(!allows_bound_request(&axum::http::Method::HEAD, "/v1/internal/resources"));
+    }
+
+    async fn bound_request(state: &AppState, agent: Option<&str>, credential: Option<&str>, method: &str, path: &str, body: Value) -> (axum::http::StatusCode, Value) {
+        use tower::ServiceExt;
+        let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+        let mut request = Request::builder().method(method).uri(path).header("content-type", "application/json");
+        if let Some(agent) = agent { request = request.extension(BoundAgent(agent.into())); }
+        if let Some(credential) = credential { request = request.extension(RunCredential::new(credential)); }
+        let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn bound_resource_routes_enforce_native_ownership_through_transport_guard() {
+        use axum::http::StatusCode;
+        use crate::store::invocation_receipts::native_receipt;
+        use fractal_schema::invocation::{InvocationPhase, KIND};
+        let directory = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(directory.path());
+        let agent = "agent/host-a/worker";
+        let receipt = native_receipt("resource-owner", agent,
+            &json!({"subject":{"kind":"agent"},"launch_member":{"driver":"omp","environment":{}}}),
+            InvocationPhase::Started, Some(&json!({"verification":"operation-incarnation","incarnation":"exact"}))).unwrap().unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":"worker","incarnation_id":"exact"})),
+            ("harness.observed", json!({"state":"ready","driver":"omp","incarnation_id":"exact"})),
+            (KIND, serde_json::to_value(receipt).unwrap()),
+        ] {
+            state.store.append_claim(&crate::model::ClaimInput { subject:agent.into(), kind:kind.into(), actor:None,
+                fields:serde_json::from_value(fields).unwrap(), evidence:vec![], idempotency_key:None, expected_subject:None }).unwrap();
+        }
+        let agent_owner = state.store.shell_resource_agent_owner(agent).unwrap();
+        let step = state.store.start_program_step_for_tests();
+        let credential = state.store.issue_run_credential(&step.subject, 1, 60_000).unwrap();
+        let binding = state.store.run_binding(&credential).unwrap();
+        let run_owner = Owner { run:binding.run, step:binding.step_run, attempt:binding.attempt, invocation:Some("shell:run".into()) };
+        state.store.start_resource_authority(&state.node, "epoch").unwrap();
+        for (index, owner) in [agent_owner.clone(), run_owner.clone()].into_iter().enumerate() {
+            let id = format!("owned-{index}");
+            let mut lane = request(); lane.id.clone_from(&id); lane.host.clone_from(&state.node); lane.owner = owner;
+            let mut execution = state.store.submit_shell_resource(Command { id, lane:lane.clone(), argv:vec!["true".into()],
+                cwd:"/work".into(), environment:BTreeMap::from([("SECRET".into(),"must-not-export".into())]),
+                timeout_ms:None, parent:None },10).unwrap();
+            execution.state = "completed".into();
+            state.store.update_shell_resource(&execution).unwrap();
+            state.store.request_resource_membership(&lane, crate::store::resource_membership::Fit {
+                room:Some(fractal_runtime::Capacity { cores:32, memory:128 << 30 }), ..Default::default()
+            },10).unwrap();
+        }
+        for (index, bound_agent, run_credential) in [(0, Some(agent), None), (1, None, Some(credential.as_str()))] {
+            let own = format!("owned-{index}");
+            let other = format!("owned-{}", 1-index);
+            let (status, list) = bound_request(&state,bound_agent,run_credential,"GET","/v1/internal/resources",Value::Null).await;
+            assert_eq!(status,StatusCode::OK,"{list}");
+            assert_eq!(list["executions"].as_array().unwrap().len(),1);
+            assert_eq!(list["executions"][0]["command"]["id"],own);
+            assert_eq!(list["memberships"].as_array().unwrap().len(),1);
+            assert!(list["memberships"][0]["grant"].is_null());
+            assert!(list["holds"].as_array().unwrap().is_empty());
+            assert!(list["accountant"].is_null());
+            assert!(!list.to_string().contains("must-not-export"));
+            for (method, suffix) in [("GET",""),("POST","/wait?after=0"),("POST","/cancel")] {
+                let (status, body) = bound_request(&state,bound_agent,run_credential,method,&format!("/v1/internal/resources/{other}{suffix}"),Value::Null).await;
+                assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{body}");
+                assert_eq!(body["code"],"resource-exec-owner");
+                let (status, body) = bound_request(&state,bound_agent,run_credential,method,&format!("/v1/internal/resources/{own}{suffix}"),Value::Null).await;
+                assert_eq!(status,StatusCode::OK,"{body}");
+                assert!(!body.to_string().contains("must-not-export"));
+            }
+            for (method,path) in [("GET","/v1/internal/unrelated"),("POST","/v1/internal/resources"),
+                ("GET","/v1/internal/resources/exec"),("DELETE","/v1/internal/resources/owned-0"),
+                ("POST","/v1/internal/resources/owned-0/cancel/extra")] {
+                let (status, body) = bound_request(&state,bound_agent,run_credential,method,path,Value::Null).await;
+                assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{method} {path}: {body}");
+                assert_eq!(body["code"],"foreign-agent-actor");
+            }
+            let id = uuid::Uuid::now_v7().to_string();
+            let transport = format!("shell:{id}");
+            let mut lane = request(); lane.id.clone_from(&transport); lane.host.clone_from(&state.node);
+            lane.owner = Owner { run:transport.clone(), step:transport.clone(), attempt:1, invocation:Some(transport) };
+            let command = Command { id:id.clone(), lane, argv:vec!["true".into()], cwd:"/work".into(),
+                environment:BTreeMap::from([("ST_MISSION_RUN".into(),"spoofed".into())]), timeout_ms:None,parent:None };
+            let (status, body) = bound_request(&state,bound_agent,run_credential,"POST","/v1/internal/resources/exec",serde_json::to_value(command).unwrap()).await;
+            if cfg!(target_os = "macos") {
+                assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{body}");
+                assert_eq!(body["code"],"unsupported-platform");
+                assert!(state.store.shell_resource(&id).is_err());
+            } else {
+                assert_eq!(status,StatusCode::OK,"{body}");
+                let persisted = state.store.shell_resource(&id).unwrap();
+                let expected = if index == 0 { &agent_owner } else { &run_owner };
+                assert_eq!(persisted.command.lane.owner.run,expected.run);
+                assert_eq!(persisted.command.lane.owner.step,expected.step);
+                assert_eq!(persisted.command.lane.owner.attempt,1);
+                assert!(!body.to_string().contains("spoofed"));
+            }
+        }
+        state.store.set_step_run_state_for_tests(&step.subject, "working", 2);
+        for (method,path) in [("GET","/v1/internal/resources"),("GET","/v1/internal/resources/owned-1"),
+            ("POST","/v1/internal/resources/owned-1/wait?after=0"),("POST","/v1/internal/resources/owned-1/cancel")] {
+            let (status, body) = bound_request(&state,None,Some(&credential),method,path,Value::Null).await;
+            assert_eq!(status,StatusCode::UNPROCESSABLE_ENTITY,"{body}");
+            assert_eq!(body["code"],"foreign-agent-actor", "stale credentials must not fall back to operator authority");
+        }
+    }
+
+    #[test]
+    fn owner_scope_separates_attempts_steps_and_agent_invocations() {
+        let owner = request().owner;
+        let caller = CallerOwner { owner:owner.clone(), agent:true };
+        assert!(caller.owns(&owner));
+        let mut other = owner.clone(); other.attempt += 1;
+        assert!(!caller.owns(&other));
+        let mut other = owner.clone(); other.step.push_str("-other");
+        assert!(!caller.owns(&other));
+        let mut other = owner.clone(); other.run.push_str("-other");
+        assert!(!caller.owns(&other));
+        let mut other = owner.clone(); other.invocation = Some("another-invocation".into());
+        assert!(!caller.owns(&other));
+        let run = CallerOwner { owner, agent:false };
+        assert!(run.owns(&other), "run scope is the authenticated step attempt, not one shell ID");
     }
 }

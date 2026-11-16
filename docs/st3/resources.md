@@ -49,9 +49,10 @@ Waiting, admitted and refused diagnostics go to stderr with `blockedBy`; payload
 mixed with admission diagnostics, and the payload's exit status is preserved.
 
 Linux defaults to enforced coverage: a transient scope beneath `app-lanes.slice` with memory and
-CPU limits. macOS defaults to logical-only and refuses `--coverage enforced`. A nested resource
-exec validates and inherits its parent's membership through an environment marker instead of
-reserving a second footprint. The parent retains custody until every execution root is retired.
+CPU limits. macOS refuses `resources exec` before launch with `unsupported-platform` because it
+has no whole-tree retirement proof; `ls`, `show`, `hold` and `release` remain available.
+A nested resource exec validates and inherits its parent's membership through an environment
+marker instead of reserving a second footprint; custody lasts until every execution root retires.
 
 `fractal resources ls` lists host holders and waiters; `fractal resources show` exposes membership
 details and blocking reasons. `fractal resources hold` and `fractal resources release` operate on
