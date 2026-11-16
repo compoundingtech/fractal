@@ -102,3 +102,121 @@ fn admission_refuses_anyone_but_the_person_and_malformed_controls() {
         .err().expect("another person cannot control the person's rows");
     assert_eq!(error.code, "attention-control-forbidden");
 }
+
+#[test]
+fn indefinite_snooze_is_explicit_and_timed_or_clear_replaces_it() {
+    let store = Store::open_memory("attention-indefinite").unwrap();
+    let claim = record(&store, ROW, Control::SnoozeIndefinitely, "indefinite-1").unwrap();
+    assert_eq!(claim.body["fields"]["until_unix_ms"], Value::Null);
+    assert_eq!(claim.body["fields"]["indefinite"], true);
+    assert!(of(&store, ROW).snoozed_indefinitely);
+    assert_eq!(of(&store, ROW).snoozed_until_ms, None);
+    store.rebuild_claim_projections().unwrap();
+    assert!(of(&store, ROW).snoozed_indefinitely, "replay preserves manual return");
+    record(&store, ROW, Control::Snooze(Some(5_000)), "timed-2");
+    assert!(!of(&store, ROW).snoozed_indefinitely);
+    assert_eq!(of(&store, ROW).snoozed_until_ms, Some(5_000));
+    record(&store, ROW, Control::SnoozeIndefinitely, "indefinite-3");
+    record(&store, ROW, Control::Snooze(None), "clear-4");
+    assert!(!of(&store, ROW).snoozed_indefinitely);
+    assert_eq!(of(&store, ROW).snoozed_until_ms, None, "legacy null still brings it back");
+    store.rebuild_claim_projections().unwrap();
+    assert_eq!(of(&store, ROW), Controls::default());
+}
+
+#[test]
+fn indefinite_and_clear_converge_in_opposite_replication_orders() {
+    let left = Store::open_memory("indefinite-left").unwrap();
+    let right = Store::open_memory("indefinite-right").unwrap();
+    record(&left, ROW, Control::SnoozeIndefinitely, "indefinite-left-1");
+    record(&right, ROW, Control::Snooze(None), "clear-right-1");
+    let forward = Store::open_memory("indefinite-forward").unwrap();
+    let reverse = Store::open_memory("indefinite-reverse").unwrap();
+    sync(&left, &forward);
+    sync(&right, &forward);
+    sync(&right, &reverse);
+    sync(&left, &reverse);
+    let expected = of(&forward, ROW);
+    assert_eq!(of(&reverse, ROW), expected);
+    for store in [&forward, &reverse] {
+        store.rebuild_claim_projections().unwrap();
+        assert_eq!(of(store, ROW), expected, "replay chooses the same canonical winner");
+    }
+    // A later local action always replaces the merged winner and remains clear on every peer.
+    record(&forward, ROW, Control::Snooze(None), "clear-after-merge");
+    sync(&forward, &reverse);
+    assert_eq!(of(&reverse, ROW), Controls::default());
+}
+
+#[test]
+fn fresh_projection_namespace_replays_legacy_claims_without_losing_seen_or_snooze() {
+    let store = Store::open_memory("controls-namespace").unwrap();
+    record(&store, ROW, Control::Seen, "old-seen");
+    record(&store, ROW, Control::Snooze(Some(9_000)), "old-timed");
+    let expected = of(&store, ROW);
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute_batch("CREATE TABLE person_attention_controls(person TEXT, attention_id TEXT);
+            INSERT INTO person_attention_controls VALUES('person/ada','legacy');
+            DROP TABLE person_attention_controls_v2;
+            DELETE FROM meta WHERE key='person_attention_controls_v2_ready';")?;
+        tx.execute_batch(SCHEMA)?;
+        open(tx)?;
+        let old_rows: i64 = tx.query_row("SELECT COUNT(*) FROM person_attention_controls", [], |row| row.get(0))?;
+        assert_eq!(old_rows, 1, "the old projection is retained, never treated as authority");
+        Ok(())
+    }).unwrap().unwrap();
+    assert_eq!(of(&store, ROW), expected, "all authoritative legacy controls were replayed");
+}
+
+#[test]
+fn new_writes_invalidate_the_legacy_ready_marker_for_downgrade_replay() {
+    let store = Store::open_memory("controls-downgrade").unwrap();
+    record(&store, ROW, Control::Snooze(Some(5_000)), "timed-before-upgrade");
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute_batch("CREATE TABLE person_attention_controls(person TEXT, attention_id TEXT, snoozed_until_ms INTEGER);
+            INSERT INTO person_attention_controls VALUES('person/ada','legacy',5000);
+            INSERT INTO meta(key,value) VALUES('person_attention_controls_v1','1');")?;
+        Ok(())
+    }).unwrap().unwrap();
+    record(&store, ROW, Control::Snooze(None), "clear-after-upgrade");
+    store.connection.batched(|tx| -> Result<()> {
+        let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='person_attention_controls_v1')", [], |row| row.get(0))?;
+        assert!(!ready, "the actual legacy open condition must request a full known-claim replay");
+        let old_until: i64 = tx.query_row("SELECT snoozed_until_ms FROM person_attention_controls", [], |row| row.get(0))?;
+        assert_eq!(old_until, 5_000, "old projection data is retained but no longer marked fresh");
+        Ok(())
+    }).unwrap().unwrap();
+    assert_eq!(of(&store, ROW), Controls::default());
+}
+
+#[test]
+fn a_new_open_replays_legacy_writes_after_a_downgrade() {
+    let store = Store::open_memory("controls-roll-forward").unwrap();
+    record(&store, ROW, Control::Snooze(Some(5_000)), "initial-new-writer");
+    record(&store, ROW, Control::Snooze(Some(9_000)), "later-legacy-writer");
+    store.connection.batched(|tx| -> Result<()> {
+        // An old runtime writes the authoritative claim but knows only its old projection.
+        tx.execute("UPDATE person_attention_controls_v2 SET snoozed_until_ms=5000", [])?;
+        tx.execute("INSERT INTO meta(key,value) VALUES('person_attention_controls_v1','1')", [])?;
+        open(tx)?;
+        let legacy_ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='person_attention_controls_v1')", [], |row| row.get(0))?;
+        assert!(!legacy_ready);
+        Ok(())
+    }).unwrap().unwrap();
+    assert_eq!(of(&store, ROW).snoozed_until_ms, Some(9_000), "the new projection replays the known claim rather than trusting stale v2 state");
+}
+
+#[test]
+fn timed_and_cleared_overlay_omit_the_optional_flag_for_legacy_readers() {
+    let store = Store::open_memory("controls-wire-shape").unwrap();
+    let mut rows = [json!({"id":ROW,"person_id":ADA,"snoozed_indefinitely":true})];
+    store.overlay_attention_controls(&mut rows).unwrap();
+    assert!(rows[0].get("snoozed_indefinitely").is_none(), "absence clears any previously cached true flag");
+    record(&store, ROW, Control::SnoozeIndefinitely, "manual-wire");
+    store.overlay_attention_controls(&mut rows).unwrap();
+    assert_eq!(rows[0]["snoozed_indefinitely"], true);
+    record(&store, ROW, Control::Snooze(None), "clear-wire");
+    store.overlay_attention_controls(&mut rows).unwrap();
+    assert!(rows[0].get("snoozed_indefinitely").is_none());
+    assert_eq!(rows[0]["snoozed_until"], Value::Null);
+}

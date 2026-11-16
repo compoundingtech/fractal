@@ -186,7 +186,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `ordered-membership.edited` | `arrangement` | `ordinary-client` | `append` | `durable` | `action_digest:string`, `action_id:string`, `operations!:array`, `owner!:subject-reference(person)` |  |
 | `owned-set.revised` | `owned-set` | `system-only` | `append` | `durable` | `body!:object`, `revision!:string` |  |
 | `person.attention-seen` | `person` | `capability-holder` | `append` | `durable` | `attention_id!:string`, `source!:string` |  |
-| `person.attention-snoozed` | `person` | `capability-holder` | `append` | `durable` | `attention_id!:string`, `source!:string`, `until_unix_ms!:integer or null` |  |
+| `person.attention-snoozed` | `person` | `capability-holder` | `append` | `durable` | `attention_id!:string`, `indefinite:boolean`, `source!:string`, `until_unix_ms!:integer or null` |  |
 | `person.deadline-clock-set` | `person` | `capability-holder` | `state-transition` | `durable` | `deadline_clock!:string`, `source!:string`, `until_unix_ms:integer` |  |
 | `person.delegation-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `actions!:array` |  |
 | `person.directive-note-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `expires_at:string`, `source:string`, `text!:string or null` |  |
@@ -367,7 +367,7 @@ A deadline-clock hold pauses ask deadlines: `hold-all` every ask, `hold-routine`
 
 ## Person attention controls
 
-`person.attention-seen` and `person.attention-snoozed` on `person/NAME` record that person's own controls over their attention rows: required `attention_id` (`attention/HASH`) and `source`, the daemon-assigned client the person acted from (its pairing grant, or `host/MEMBER` for a local caller). `person.attention-snoozed` also takes required `until_unix_ms`, positive Unix milliseconds or null to end the snooze. Only that exact person may write them, through the `attention.seen` and `attention.snooze` actions only, including replicated admission. Per row, the earliest accepted seen claim is when the person saw it; the latest snooze by accepted time, then canonical claim key, is current. A control changes only its person's view of a row: no lifecycle, deadline or asker reads it.
+`person.attention-seen` and `person.attention-snoozed` on `person/NAME` record that person's own controls over their attention rows: required `attention_id` (`attention/HASH`) and `source`, the daemon-assigned client the person acted from (its pairing grant, or `host/MEMBER` for a local caller). `person.attention-snoozed` also takes required `until_unix_ms`, positive Unix milliseconds or null to end the snooze. Optional `indefinite: true` with null keeps the row snoozed until the person brings it back; absent or false retains the existing timed/end meaning. Only that exact person may write them, through the `attention.seen` and `attention.snooze` actions only, including replicated admission. Per row, the earliest accepted seen claim is when the person saw it; the latest snooze by accepted time, then canonical claim key, is current. A control changes only its person's view of a row: no lifecycle, deadline or asker reads it.
 
 ## Arrangement operation vocabulary
 

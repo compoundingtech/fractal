@@ -1065,6 +1065,7 @@ export type Attention = ResourceHeader & {
   requester_id?: Id;
   review_mode?: "approve" | "feedback";
   seen_at?: (Timestamp | null);
+  snoozed_indefinitely?: boolean;
   snoozed_until?: (Timestamp | null);
   source_id: Id;
   source_kind?: string;
@@ -1124,6 +1125,7 @@ export type AttentionControlId = string;
 export type AttentionControlState = {
   attention_id: AttentionControlId;
   seen_at: (Timestamp | null);
+  snoozed_indefinitely?: boolean;
   snoozed_until: (Timestamp | null);
 };
 

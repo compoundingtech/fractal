@@ -67,7 +67,11 @@ async fn open_row(state: &AppState, person: &str, id: &str) -> Result<Value, Api
 
 fn state_value(id: &str, controls: Controls) -> Value {
     let time = |at: Option<u128>| at.map_or(Value::Null, |at| json!(client_timestamp(at)));
-    json!({"attention_id": id, "seen_at": time(controls.seen_at_ms), "snoozed_until": time(controls.snoozed_until_ms)})
+    let mut state = json!({"attention_id": id, "seen_at": time(controls.seen_at_ms), "snoozed_until": time(controls.snoozed_until_ms)});
+    if controls.snoozed_indefinitely {
+        state["snoozed_indefinitely"] = json!(true);
+    }
+    state
 }
 
 pub(super) async fn control(
@@ -181,4 +185,23 @@ async fn dismiss(state: &AppState, session: &ClientSession, person: &str, reques
     // The step that waits on the ask resumes.
     signal_changed(state);
     Ok(Controlled { affected: vec![view.subject], state: None })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timed_and_clear_results_preserve_the_legacy_strict_reader_shape() {
+        let id = "attention/0123456789abcdef0123456789abcdef";
+        assert_eq!(state_value(id, Controls::default()), json!({
+            "attention_id": id, "seen_at": null, "snoozed_until": null,
+        }));
+        let timed = Controls { snoozed_until_ms: Some(2_000), ..Controls::default() };
+        assert!(state_value(id, timed).get("snoozed_indefinitely").is_none());
+        let manual = Controls { snoozed_indefinitely: true, ..Controls::default() };
+        assert_eq!(state_value(id, manual)["snoozed_indefinitely"], true);
+        assert_eq!(state_value(id, manual)["snoozed_until"], Value::Null);
+    }
+
 }
