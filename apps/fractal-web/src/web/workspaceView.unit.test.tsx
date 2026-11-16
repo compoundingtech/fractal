@@ -48,6 +48,8 @@ describe('workspace body', () => {
   })
   it('keeps the thread for the thread tab', () => {
     expect(workspaceView(undefined)).toEqual({ _tag: 'Thread' })
+    expect(workspaceView({ ref: 'thread/review-42' })).toEqual({ _tag: 'TopicThread', ref: 'thread/review-42' })
+    expect(workspaceView({ ref: 'thread/review/42' })._tag).toBe('ViewUnavailable')
   })
 })
 
@@ -76,6 +78,12 @@ describe('workspace tab labels', () => {
   })
   it('keeps a subject title verbatim', () => {
     expect(paneTabLabel('terminal/workstation-a/one', 'example agent SDK')).toBe('example agent SDK')
+  })
+  it('names a thread tab by its last observed title, else by its read, never a bare Thread', () => {
+    expect(paneTabLabel('thread/review-42', 'Checklist: database migration')).toBe('Checklist: database migration')
+    expect(paneTabLabel('thread/review-42', 'Checklist: database migration', true)).toBe('Checklist: database migration')
+    expect(paneTabLabel('thread/review-42', undefined)).toBe('Thread (loading)')
+    expect(paneTabLabel('thread/review-42', undefined, true)).toBe('Thread (unavailable)')
   })
 })
 
