@@ -157,7 +157,11 @@ lower-class request would fit. Seat starts, scoped raises and finite executions 
 host accountant rather than maintaining independent CI or shell budgets.
 
 Seat starts, bursts and finite lanes share one ARC-aware host accountant:
-`reclaimable_arc = max(0, arc.size - arc.c_min)` (zero without ZFS),
+`eligible_arc = min(max(0, arc.size - arc.c_min), evictable_arc)` (zero without ZFS),
+where `evictable_arc` sums `mru_evictable_data`, `mru_evictable_metadata`,
+`mfu_evictable_data` and `mfu_evictable_metadata`. `reclaimable_arc = eligible_arc` only
+while memory PSI `full avg60 < 1%`; otherwise credit is zero. Missing or malformed ARC/PSI
+observations give zero credit, never an optimistic estimate.
 `unreclaimable_used = max(0, MemTotal - MemAvailable - reclaimable_arc)`, and
 `outside = max(0, unreclaimable_used - live_lane_usage)`. Live lane usage is the hierarchical
 `anon + kernel` counter of `app-lanes.slice`, counted once for seats and finite members.
@@ -166,11 +170,18 @@ Free memory is host lane room minus declared held footprints, outside, and the k
 Finite lanes keep a burst reserve only while a live laned seat could ask for a burst; a finite
 request is not itself a burst-capable seat.
 
+This deliberately credits less than size minus minimum: dirty and in-use ARC buffers cannot be
+freed immediately. In one measured host shape, ARC above minimum was 27.6 GiB but only 7.3 GiB
+was evictable; the bound is 7.3 GiB, not 27.6 GiB. PSI suppresses even that credit while reclaim
+lags. The observation remains live: the next lower-pressure memory observation re-evaluates fit.
+
 A footprint exceeding host lane room is refused with code `impossible`, never left in FIFO.
 With no admitted members, granted bursts or host hold, the head fits exactly when its footprint
-fits room minus outside (and any reserve required by live seats). Waits expose `blockedBy`,
-including holders, holds, outside consumers, reserves, queue predecessors, disk floors and IO
-policy. The existing resource-lane phase telemetry carries the same attribution.
+fits room minus outside (and any reserve required by live seats). Waits expose `blockedBy` as
+`holder`, `hold`, `outside`, `psi`, `reserve`, `fifo`, `disk` or `io`; outside/PSI reasons include
+measured bytes. Resource-lane phase telemetry carries the same attribution. Queue and occupancy
+gauges expose `st.resource.host` and `st.resource.lane`, including zero-holder series, so a
+sustained nonempty queue without holders is observable from the first deployment.
 
 Optional disk requests reserve their declared peak on the filesystem containing `disk.path`.
 Admission requires available bytes above the host's per-mount floor after outstanding peak

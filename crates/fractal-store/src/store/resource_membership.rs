@@ -91,7 +91,7 @@ impl RefusalCode {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum BlockedBy { Holder, Hold, Outside, Reserve, Fifo, Disk, Io }
+pub enum BlockedBy { Holder, Hold, Outside, Psi, Reserve, Fifo, Disk, Io }
 
 impl BlockedBy {
     pub const fn as_str(self) -> &'static str {
@@ -99,6 +99,7 @@ impl BlockedBy {
             Self::Holder => "holder",
             Self::Hold => "hold",
             Self::Outside => "outside",
+            Self::Psi => "psi",
             Self::Reserve => "reserve",
             Self::Fifo => "fifo",
             Self::Disk => "disk",
@@ -115,6 +116,8 @@ pub struct Fit {
     pub room: Option<Capacity>,
     pub held_bytes: u64,
     pub outside_bytes: u64,
+    /// Reclaim credit was withheld because PSI full is >= 1% or its observation is missing.
+    pub psi_blocked: bool,
     pub reserve_bytes: u64,
     pub fifo_predecessor: Option<String>,
     pub disk: Option<DiskFit>,
@@ -508,7 +511,11 @@ impl Store {
                 else if request.capacity.is_some_and(|capacity| capacity.memory > holder_free) {
                     Some((BlockedBy::Holder, "holder footprint prevents admission".into()))
                 } else if request.capacity.is_some_and(|capacity| capacity.memory > outside_free) {
-                    Some((BlockedBy::Outside, format!("outside footprint prevents admission: {} bytes", fit.outside_bytes)))
+                    Some(if fit.psi_blocked {
+                        (BlockedBy::Psi, format!("outside footprint prevents admission: {} bytes; PSI full >= 1% or observation unavailable; reclaim credit withheld", fit.outside_bytes))
+                    } else {
+                        (BlockedBy::Outside, format!("outside footprint prevents admission: {} bytes", fit.outside_bytes))
+                    })
                 } else if request.capacity.is_some_and(|capacity| capacity.memory > free) {
                     Some((BlockedBy::Reserve, format!("host reserve prevents admission: {} bytes", fit.reserve_bytes)))
                 } else if request.disk.as_ref().is_some_and(|disk| fit.disk.is_none_or(|mount|
@@ -968,6 +975,47 @@ mod tests {
         assert_eq!(member.blocked_by, None);
         assert_eq!(member.queued_at, 1);
         assert_eq!(member.admitted_at, Some(2));
+    }
+
+    #[test]
+    fn psi_blocked_observation_then_low_psi_credit_admits_without_holder_release() {
+        let store = fixture();
+        let mut request = request("psi");
+        request.capacity = Some(Capacity { cores: 1, memory: 60 });
+        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
+            outside_bytes: 50, psi_blocked: true, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.blocked_by, Some(BlockedBy::Psi));
+        assert_eq!(serde_json::to_value(&member).unwrap()["blockedBy"], "psi");
+        assert!(member.reason.contains("50 bytes"));
+        assert!(member.reason.contains("PSI full >= 1%"));
+        assert!(member.reason.contains("observation unavailable"));
+        assert!(member.reason.contains("reclaim credit withheld"));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
+        // The next low-PSI observation permits reclaim credit in the host accountant.
+        fit.psi_blocked = false;
+        fit.outside_bytes = 40;
+        assert!(matches!(store.request_resource_membership(&request, fit, 2).unwrap(), Admission::Admitted(_)));
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.blocked_by, None);
+        assert_eq!(member.queued_at, 1);
+        assert_eq!(member.admitted_at, Some(2));
+    }
+
+    #[test]
+    fn psi_attribution_requires_an_outside_capacity_block() {
+        let store = fixture();
+        let mut request = request("psi-fit");
+        request.capacity = Some(Capacity { cores: 1, memory: 60 });
+        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
+            held_bytes: 50, outside_bytes: 50, psi_blocked: true, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
+        fit.held_bytes = 0;
+        fit.outside_bytes = 40;
+        assert!(matches!(store.request_resource_membership(&request, fit, 2).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().blocked_by, None);
     }
 
     #[test]

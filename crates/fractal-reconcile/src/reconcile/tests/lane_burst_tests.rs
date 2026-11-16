@@ -5,8 +5,8 @@ use serde_json::json;
 
 const G: u64 = 1 << 30;
 
-fn two_gib_outside() -> Option<u64> {
-    Some(2 * G)
+fn two_gib_outside() -> Option<fractal_runtime::host::HostMemoryObservation> {
+    Some(fractal_runtime::host::HostMemoryObservation { outside_bytes: 2 * G, psi_blocked: false })
 }
 
 fn observe(store: &Store, subject: &str, status: &str) {

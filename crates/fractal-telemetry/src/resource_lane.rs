@@ -68,7 +68,7 @@ impl LaneOutcome {
 struct Snapshot { occupancy: u64, queued: u64, holds: u64 }
 
 struct Instruments {
-    snapshots: Arc<RwLock<BTreeMap<String, Snapshot>>>,
+    snapshots: Arc<RwLock<BTreeMap<String, BTreeMap<String, Snapshot>>>>,
     wait: Histogram<f64>,
     execution: Histogram<f64>,
     release: Histogram<f64>,
@@ -77,7 +77,7 @@ struct Instruments {
 
 impl Instruments {
     fn new(meter: &Meter) -> Self {
-        let snapshots = Arc::new(RwLock::new(BTreeMap::<String, Snapshot>::new()));
+        let snapshots = Arc::new(RwLock::new(BTreeMap::<String, BTreeMap<String, Snapshot>>::new()));
         for (name, description, select) in [
             ("st.resource.occupancy", "Admitted memberships, including unretired generations", (|s: &Snapshot| s.occupancy) as fn(&Snapshot) -> u64),
             ("st.resource.queue", "Requests awaiting admission", (|s: &Snapshot| s.queued) as fn(&Snapshot) -> u64),
@@ -87,8 +87,13 @@ impl Instruments {
             meter.u64_observable_gauge(name).with_unit("{item}").with_description(description)
                 .with_callback(move |observer| {
                     let Ok(snapshots) = snapshots.read() else { return; };
-                    for (lane, snapshot) in snapshots.iter() {
-                        observer.observe(select(snapshot), &[KeyValue::new("st.resource.lane", lane.clone())]);
+                    for (host, lanes) in snapshots.iter() {
+                        for (lane, snapshot) in lanes {
+                            observer.observe(select(snapshot), &[
+                                KeyValue::new("st.resource.host", host.clone()),
+                                KeyValue::new("st.resource.lane", lane.clone()),
+                            ]);
+                        }
                     }
                 }).build();
         }
@@ -103,7 +108,7 @@ impl Instruments {
     }
 }
 
-/// One observer per execution host authority; the host is an exporter resource attribute.
+/// Host-authoritative snapshots carry explicit host and lane dimensions.
 #[derive(Clone)]
 pub struct LaneTelemetry { instruments: Option<Arc<Instruments>> }
 
@@ -118,11 +123,17 @@ impl LaneTelemetry {
 
     /// Counts come from the authoritative reconciled ledger, not guard creation/destruction.
     /// Include zero counts and retain occupancy until the whole generation is retired.
+    /// Queue and occupancy gauges expose waiters without holders, including after recovery.
+    /// `host` is the authority's configured identity, not an execution or membership identifier.
     /// `lane` must be a configured policy name, never a membership/run/hold identifier.
-    pub fn snapshot(&self, lane: &str, occupancy: u64, queued: u64, holds: u64) {
+    pub fn snapshot(&self, host: &str, lane: &str, occupancy: u64, queued: u64, holds: u64) {
         if let Some(metrics) = &self.instruments
             && let Ok(mut snapshots) = metrics.snapshots.write()
         {
+            if !snapshots.contains_key(host) {
+                snapshots.insert(host.to_owned(), BTreeMap::new());
+            }
+            let snapshots = snapshots.get_mut(host).expect("host snapshot was just installed");
             if let Some(snapshot) = snapshots.get_mut(lane) {
                 *snapshot = Snapshot { occupancy, queued, holds };
             } else {
@@ -274,12 +285,17 @@ mod tests {
         let telemetry = LaneTelemetry {
             instruments: Some(Arc::new(Instruments::new(&provider.meter("st3.resource")))),
         };
-        telemetry.snapshot("executor", 1, 2, 1);
+        telemetry.snapshot("host-a", "executor", 1, 2, 1);
         // Reconciliation replaces rather than adds counts. Zero queue and holds stay visible.
-        telemetry.snapshot("executor", 1, 0, 0);
+        telemetry.snapshot("host-a", "executor", 1, 0, 0);
+        // Same-named lanes on different authorities must not overwrite each other.
+        telemetry.snapshot("host-b", "executor", 0, 3, 0);
+        telemetry.snapshot("host-a", "other", 0, 1, 0);
         let id = identity();
         for phase in [LanePhaseKind::Admission, LanePhaseKind::Execution, LanePhaseKind::Release] {
-            telemetry.phase(phase, &id, &[]).rebase(Duration::from_secs(5), true).finish(LaneOutcome::Succeeded);
+            let mut observation = telemetry.phase(phase, &id, &[]).rebase(Duration::from_secs(5), true);
+            if matches!(phase, LanePhaseKind::Admission) { observation.set_blocked_by(Some("psi")); }
+            observation.finish(LaneOutcome::Succeeded);
         }
         // A dropped observer cannot imply physical retirement.
         drop(telemetry.phase(LanePhaseKind::Release, &id, &[]));
@@ -292,8 +308,15 @@ mod tests {
             match metric.data() {
                 AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
                     for point in gauge.data_points() {
-                        assert_eq!(point.attributes().collect::<Vec<_>>(), vec![&KeyValue::new("st.resource.lane", "executor")]);
-                        gauges.insert(metric.name().to_owned(), point.value());
+                        let attributes = point.attributes().map(|attribute|
+                            (attribute.key.as_str().to_owned(), attribute.value.to_string())
+                        ).collect::<BTreeMap<_, _>>();
+                        assert_eq!(attributes.len(), 2);
+                        gauges.insert((
+                            metric.name().to_owned(),
+                            attributes["st.resource.host"].clone(),
+                            attributes["st.resource.lane"].clone(),
+                        ), point.value());
                     }
                 }
                 AggregatedMetrics::F64(MetricData::Histogram(histogram)) => {
@@ -301,16 +324,27 @@ mod tests {
                         let attributes = point.attributes().map(|attribute|
                             (attribute.key.as_str().to_owned(), attribute.value.to_string())
                         ).collect::<BTreeMap<_, _>>();
-                        assert!(attributes.keys().all(|key| key == "st.resource.lane" || key == "st.resource.outcome"));
+                        assert!(attributes.keys().all(|key| matches!(key.as_str(), "st.resource.lane" | "st.resource.outcome" | "st.resource.blocked_by")));
+                        if metric.name() == "st.resource.wait.duration" {
+                            assert_eq!(attributes["st.resource.blocked_by"], "psi");
+                        }
                         durations.insert((metric.name().to_owned(), attributes.get("st.resource.outcome").cloned()), (point.count(), point.sum()));
                     }
                 }
                 _ => panic!("unexpected resource instrument"),
             }
         }
-        assert_eq!(gauges, BTreeMap::from([
-            ("st.resource.occupancy".into(), 1), ("st.resource.queue".into(), 0), ("st.resource.holds".into(), 0),
-        ]));
+        let mut expected_gauges = BTreeMap::new();
+        for (host, lane, occupancy, queued, holds) in [
+            ("host-a", "executor", 1, 0, 0),
+            ("host-b", "executor", 0, 3, 0),
+            ("host-a", "other", 0, 1, 0),
+        ] {
+            for (name, value) in [("st.resource.occupancy", occupancy), ("st.resource.queue", queued), ("st.resource.holds", holds)] {
+                expected_gauges.insert((name.to_owned(), host.to_owned(), lane.to_owned()), value);
+            }
+        }
+        assert_eq!(gauges, expected_gauges);
         for name in ["st.resource.wait.duration", "st.resource.execution.duration", "st.resource.release.duration"] {
             assert_eq!(durations[&(name.into(), Some("succeeded".into()))].0, 1);
             assert!(durations[&(name.into(), Some("succeeded".into()))].1 >= 5.0);

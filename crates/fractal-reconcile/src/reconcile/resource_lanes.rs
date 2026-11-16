@@ -152,7 +152,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             smallclaims::touched::note_read(|| "host-lane-memory".into());
             fit.held_bytes = self.lanes_held(&request.id, now, true, false)?;
             fit.reserve_bytes = self.finite_burst_reserve(&request.id)?.kept;
-            fit.outside_bytes = (host.outside)().context("UnsupportedCoverage: outside-lane host observation unavailable")?;
+            let observation = (host.outside)().context("UnsupportedCoverage: outside-lane host observation unavailable")?;
+            fit.outside_bytes = observation.outside_bytes;
+            fit.psi_blocked = observation.psi_blocked;
         } else if request.coverage == Coverage::Logical {
             // Advisory execution still reserves custody when the host's lane backend is off.
             // There is no configured lane/outside-memory probe or enforcement claim.
@@ -372,10 +374,19 @@ mod tests {
         use super::super::tests::FakeRuntime;
         use fractal_runtime::{Capacity, host};
         const GIB: u64 = 1 << 30;
-        fn outside() -> Option<u64> {
+        thread_local! { static HIGH_PSI: std::cell::Cell<bool> = const { std::cell::Cell::new(true) }; }
+        fn outside() -> Option<host::HostMemoryObservation> {
+            let pressure = HIGH_PSI.with(|high| if high.get() {
+                "full avg10=0.00 avg60=2.00 avg300=0.00 total=50\n"
+            } else {
+                "full avg10=0.00 avg60=0.99 avg300=0.00 total=50\n"
+            });
             host::outside_memory(
                 "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n",
-                Some("size 4 37258870784\nc_min 4 4187593114\n"), None)
+                Some("size 4 37258870784\nc_min 4 4187593114\n\
+                    mru_evictable_data 4 5368709120\nmru_evictable_metadata 4 5368709120\n\
+                    mfu_evictable_data 4 5368709120\nmfu_evictable_metadata 4 5368709120\n"),
+                None, Some(pressure))
         }
         let store = Arc::new(Store::open_memory("node").unwrap());
         store.start_resource_authority("node", "epoch").unwrap();
@@ -393,18 +404,25 @@ mod tests {
             class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: "run".into(), step: "step".into(), attempt: 1, invocation: None },
         }).collect();
-        // Raw MemAvailable alone reproduces the no-holder wedge: not even the head fits.
-        let raw_outside = host::outside_memory(
-            "MemTotal: 131072000 kB\nMemAvailable: 15309210 kB\n", None, None).unwrap();
+        // Twenty waiters, no holders: PSI suppresses the fictional 20 GiB evictable credit.
+        let observation = outside().unwrap();
+        assert!(observation.psi_blocked);
         for request in &requests {
-            let fit = Fit { room: Some(room), outside_bytes: raw_outside, ..Fit::default() };
+            let fit = Fit { room: Some(room), outside_bytes: observation.outside_bytes,
+                psi_blocked: observation.psi_blocked, ..Fit::default() };
             assert!(matches!(store.request_resource_membership(request, fit, 1).unwrap(), Admission::Queued { .. }));
         }
+        let waiting = store.resource_membership_record(&requests[0].id, &requests[0].owner).unwrap();
+        assert_eq!(waiting.blocked_by, Some(crate::store::resource_membership::BlockedBy::Psi));
+        assert!(waiting.reason.contains("PSI"));
         assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 0);
+        // The next host-memory observation changes fit; no holder release or admission timeout.
+        HIGH_PSI.with(|high| high.set(false));
         let head = &requests[0];
         let fit = reconciler.resource_lane_fit(head).unwrap();
         assert_eq!(fit.reserve_bytes, 0, "a finite member is not a burst-capable seat");
-        assert_eq!(fit.outside_bytes, outside().unwrap());
+        assert_eq!(fit.outside_bytes, outside().unwrap().outside_bytes);
+        assert!(!fit.psi_blocked);
         assert!(matches!(store.request_resource_membership(head, fit, 2).unwrap(), Admission::Admitted(_)));
         assert_eq!(store.held_resource_membership_bytes("node", "").unwrap(), 15 * GIB);
     }

@@ -103,7 +103,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let held = self.held_lanes(&subject.subject, now)?;
         smallclaims::touched::note_read(|| "host-lane-memory".into());
-        let outside = (host.outside)().unwrap_or(0);
+        let outside = (host.outside)().map_or(0, |observation| observation.outside_bytes);
         let free = room.memory.saturating_sub(held).saturating_sub(outside).saturating_sub(reserve.kept);
         let head = status.lane_head(now);
         if lane.memory <= free && head.as_deref().is_none_or(|head| head == subject.subject) {

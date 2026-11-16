@@ -11,7 +11,7 @@ pub struct Controller {
     pub status: Arc<Status>,
     dirty: Arc<AtomicBool>,
     checked: Mutex<Option<u64>>,
-    outside_observation: Mutex<Option<Option<u64>>>,
+    outside_observation: Mutex<Option<Option<fractal_runtime::host::HostMemoryObservation>>>,
     _watcher: Option<notify::RecommendedWatcher>,
     /// What admission by fit reads of this host; none where lanes are off.
     pub lanes: Option<LaneHost>,
@@ -23,7 +23,7 @@ pub struct Controller {
 #[derive(Clone, Copy)]
 pub struct LaneHost {
     pub room: fractal_runtime::Capacity,
-    pub outside: fn() -> Option<u64>,
+    pub outside: fn() -> Option<fractal_runtime::host::HostMemoryObservation>,
     /// The lane a burst raises a seat to: admission keeps room for one such raise from starts
     /// ([`BURST_LANE`]; none keeps none).
     pub burst_lane: Option<fractal_runtime::Capacity>,

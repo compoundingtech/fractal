@@ -133,7 +133,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(BurstJudged::Waits(format!("burst lane {} for {agent} waits behind {first}, first in line for room", show_lane(lane))));
         }
         smallclaims::touched::note_read(|| "host-lane-memory".into());
-        let outside = (host.outside)().unwrap_or(0);
+        let outside = (host.outside)().map_or(0, |observation| observation.outside_bytes);
         // A seat that has waited long to start is served before more bursts: the host drains to
         // fit for it, as it does for the first seat in line. One that would not fit even once
         // every raise were given back, beside the room kept for a burst, gains nothing from the
