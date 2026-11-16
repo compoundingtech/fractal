@@ -28,7 +28,6 @@ EXAMPLE_HOMES = {"example", "ada"}
 PERSON_NAME = r"([A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*)"
 PERSON = re.compile("person" + r"/" + PERSON_NAME)
 ENCODED_PERSON = re.compile("person" + r"%2[fF]" + PERSON_NAME)
-ENCODED_PERSON_BOUNDARY = re.compile(r"%(?:25)*[0-9A-Fa-f]{2}")
 # Default mission authority specifically requires fleet/PROJECT identities. These tests
 # use the reserved invented fixture- project prefix; other fleet seats remain forbidden.
 FLEET_AGENT = re.compile("agent" + r"/fleet/(?!fixture-)[A-Za-z0-9_./-]+")
@@ -72,6 +71,8 @@ another foreign outsider private reader-floor
 """.split())
 # Canonical principal grammar fixture exercises hyphen, underscore and dot together.
 EXAMPLE_PEOPLE.add("operator-2_name.test")
+# This exact generic prose compound is not a principal reference.
+PERSON_PROSE_COMPOUND = "per-" + "person" + "/per-message"
 
 
 def tracked_files():
@@ -79,24 +80,6 @@ def tracked_files():
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT
     )
     return sorted(set(Path(path.decode()) for path in paths.split(b"\0") if path))
-
-
-def person_matches(pattern, line):
-    # A rejected compound can overlap a later real principal; do not consume it.
-    start = 0
-    while match := pattern.search(line, start):
-        yield match
-        start = match.start() + 1
-
-
-def person_boundary(line, start):
-    # English compounds containing the person prefix are not principal references.
-    if start == 0 or line[start - 1] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-":
-        return True
-    # Retain references after encoded bytes at any nesting depth without decoding
-    # or rewriting the input. Only the final percent-prefixed token is examined.
-    escaped = line.rfind("%", 0, start)
-    return escaped >= 0 and ENCODED_PERSON_BOUNDARY.fullmatch(line, escaped, start) is not None
 
 
 def findings(path, content):
@@ -118,11 +101,12 @@ def findings(path, content):
         for match in HOME.finditer(line):
             if match.group(1) not in EXAMPLE_HOMES:
                 reasons.append("personal home path")
-        for match in person_matches(PERSON, line):
-            if person_boundary(line, match.start()) and match.group(1) not in EXAMPLE_PEOPLE:
+        for match in PERSON.finditer(line):
+            compound = line[max(0, match.start() - 4):match.end()] == PERSON_PROSE_COMPOUND
+            if match.group(1) not in EXAMPLE_PEOPLE and not compound:
                 reasons.append("unlisted person ID")
-        for match in person_matches(ENCODED_PERSON, line):
-            if person_boundary(line, match.start()) and match.group(1) not in EXAMPLE_PEOPLE:
+        for match in ENCODED_PERSON.finditer(line):
+            if match.group(1) not in EXAMPLE_PEOPLE:
                 reasons.append("unlisted encoded person ID")
         if FLEET_AGENT.search(line) or ENCODED_FLEET_AGENT.search(line):
             reasons.append("internal fleet agent ID")
