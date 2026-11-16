@@ -1733,6 +1733,7 @@ mod tests {
         unlaned_seat: None,
         seat_admission: None,
         lanes: None,
+        finite_resources: None,
         person: None,
         browser_pairing_login: None,
         pairing_legacy_allowances: Vec::new(),
