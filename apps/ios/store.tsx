@@ -982,9 +982,9 @@ function useAppStore(proof?: FabricProfile) {
     setFabricMemberList(list);
   }
   const actions = {
-    async saveUrl() {
+    async saveUrl(value: string) {
       if (proof) { setError('Close the fabric proof to change the saved gateway.'); return; }
-      const normalized = normalizeGatewayUrl(urlDraft);
+      const normalized = normalizeGatewayUrl(value);
       if (!normalized) { setError('Enter the paired gateway HTTPS URL, or http:// with a Tailscale address (100.x), a .local name, or a private LAN address (10.x, 172.16-31.x, 192.168.x).'); return; }
       if (normalized !== url) await clearCachedProjection();
       const saved = await SecureStore.getItemAsync(PROFILE_KEY);
