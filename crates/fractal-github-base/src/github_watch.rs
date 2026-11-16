@@ -1007,6 +1007,12 @@ fn without_html_tags(text: &str) -> String {
             rest = comment.find("-->").map_or("", |end| &comment[end + 3..]);
             continue;
         }
+        // A prose comparison is not a tag: its quotes must not swallow later HTML boundaries.
+        if !tag.as_bytes().get(1).is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'/' | b'!')) {
+            visible.push('<');
+            rest = &tag[1..];
+            continue;
+        }
         let mut quote = None;
         let Some(end) = tag.bytes().enumerate().skip(1).find_map(|(at, byte)| {
             if let Some(delimiter) = quote {
@@ -1888,6 +1894,17 @@ mod tests {
             }
             let unclosed = format!("<{name}>hidden</{name}ure>LEAK");
             assert_eq!(quote(&unclosed), None, "{unclosed}");
+        }
+    }
+
+    #[test]
+    fn excerpts_filter_hidden_html_after_quoted_prose_comparisons() {
+        for prose in ["a < b, it's", "a < b, \"quoted", "a < b, it's Bob's and Alice's"] {
+            for hidden in ["<!-- hidden -->", "<script>secret</script>", "<style>secret</style>"] {
+                let source = format!("{prose} {hidden}Visible");
+                let expected = format!("> {prose} Visible");
+                assert_eq!(quote(&source).as_deref(), Some(expected.as_str()), "{source}");
+            }
         }
     }
 
