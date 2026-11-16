@@ -4,9 +4,11 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -124,6 +126,165 @@ def run(argv, *, cwd=None, capture=False, env=None, timeout=None):
 
 def git(repo, *args):
     return run(["git", "-C", str(repo), *args], capture=True, timeout=60).strip()
+
+
+CLIENT_CONTRACT_PATHS = ("docs/st3/client-v0", "crates/fractal-client-codegen",
+                         "clients/typescript/fractal-client", "apps/ios/protocolVersions.ts")
+MAX_OBSERVER_BODY = 64 * 1024
+
+
+def source_commit(value):
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise ValueError("Expected a full source commit")
+    return value
+
+
+def observer_json(raw):
+    """Decode bounded raw bytes; hashes retain their original wire representation."""
+    if not isinstance(raw, bytes) or len(raw) > MAX_OBSERVER_BODY:
+        raise ValueError("Invalid observer response size or type")
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError:
+        raise ValueError("Observer JSON must be strict UTF-8") from None
+    # Count structural depth before decoding; quoted/escaped brackets are data.
+    depth, quoted, escaped = 0, False, False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            if depth > 64:
+                raise ValueError("Observer JSON nesting exceeds bounded depth")
+        elif byte in (93, 125):
+            depth -= 1
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Ambiguous observer JSON key")
+            result[key] = value
+        return result
+
+    def finite_number(value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError("Non-finite observer number")
+        return parsed
+
+    def invalid_constant(value):
+        raise ValueError("Invalid observer JSON constant")
+
+    try:
+        value = json.loads(text, object_pairs_hook=unique, parse_float=finite_number,
+                           parse_constant=invalid_constant)
+    except (UnicodeError, RecursionError, json.JSONDecodeError):
+        raise ValueError("Invalid observer JSON encoding or nesting") from None
+    if not isinstance(value, dict):
+        raise ValueError("Observer response must be an object")
+    return value
+
+
+def health_source(raw):
+    """Raw /v1/health shape only; cleanliness still needs activation provenance."""
+    health = observer_json(raw)
+    if (health.get("status") != "ready" or not isinstance(health.get("node"), str)
+            or not health["node"] or not isinstance(health.get("build"), dict)
+            or health["build"].get("dirty", False) is not False):
+        raise ValueError("Invalid raw serving health")
+    return {"commit": source_commit(health["build"].get("commit")),
+            "node": health["node"], "raw_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def capability_support(raw, commit, required, optional):
+    """Member-local anonymous support metadata, never a normal device grant."""
+    commit = source_commit(commit)
+    response = observer_json(raw)
+    value = response.get("value")
+    if (response.get("api_version") != "fractal.client.v0" or not isinstance(value, dict)
+            or value.get("kind") != "capabilities"
+            or value.get("session_actor") != "client/local/read-only"
+            or value.get("transport") != "unix" or not isinstance(value.get("machine_version"), str)
+            or not isinstance(value.get("capabilities"), list)):
+        raise ValueError("Expected the anonymous member-local capability envelope")
+    version = value["machine_version"]
+    match = re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\+([0-9a-f]{7,40})", version)
+    if match is None or not commit.startswith(match.group(1)):
+        raise ValueError("Capability snapshot and full serving commit differ")
+    supported = {}
+    for entry in value["capabilities"]:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not entry["id"]
+                or type(entry.get("version")) is not int or entry["version"] < 0
+                or not isinstance(entry.get("state"), str) or entry["id"] in supported):
+            raise ValueError("Invalid or duplicate capability entry")
+        supported[entry["id"]] = entry["version"]  # state is deliberately not a grant predicate
+    classified, results = set(), {"required": [], "optional": []}
+    for category, rules in (("required", required), ("optional", optional)):
+        if not isinstance(rules, list):
+            raise ValueError("Capability rules must be lists")
+        for rule in rules:
+            if (not isinstance(rule, dict) or not isinstance(rule.get("id"), str) or not rule["id"]
+                    or set(rule) not in ({"id", "minimum_version"}, {"id", "exact_version"})
+                    or rule["id"] in classified):
+                raise ValueError("Invalid or multiply classified capability rule")
+            key = "exact_version" if "exact_version" in rule else "minimum_version"
+            if type(rule[key]) is not int or rule[key] < 0:
+                raise ValueError("Invalid capability version rule")
+            if rule["id"] == "device-key-proofs" and (key != "exact_version" or rule[key] != 1):
+                raise ValueError("Device key proofs require exact version 1")
+            classified.add(rule["id"])
+            actual = supported.get(rule["id"])
+            passed = actual is not None and (actual == rule[key] if key == "exact_version" else actual >= rule[key])
+            if category == "required" and not passed:
+                raise ValueError("Serving snapshot lacks a required capability floor")
+            results[category].append({**rule, "observed_version": actual, "supported": passed})
+    return {"commit": commit, "machine_version": version, "raw_sha256": hashlib.sha256(raw).hexdigest(),
+            **results, "evidence": "support only; no device grant or read-sync proof"}
+
+
+def contract_identity(repo, commit):
+    """Git tree/blob identity covers the reviewed closure, without executing it."""
+    source_commit(commit)
+    result = git(repo, "ls-tree", commit, "--", *CLIENT_CONTRACT_PATHS)
+    rows = [row.split("\t", 1) for row in result.splitlines()]
+    if {row[1] for row in rows if len(row) == 2} != set(CLIENT_CONTRACT_PATHS):
+        raise ValueError("Serving or candidate contract closure is incomplete")
+    return result
+
+
+def newest_compatible_main(repo, main, serving, trusted):
+    """Newest trusted first-parent main candidate, not a permanently pinned build."""
+    source_commit(main)
+    source_commit(trusted)
+    if not isinstance(serving, list) or not serving:
+        raise ValueError("Declared serving members are required")
+    identities = {contract_identity(repo, commit) for commit in serving}
+    if len(identities) != 1:
+        raise ValueError("Declared serving members have different contract closures")
+    expected = identities.pop()
+    history = git(repo, "rev-list", "--first-parent", main).splitlines()
+    if trusted not in history:
+        raise ValueError("Trusted source anchor is not on main's first-parent history")
+    positions, limit = {commit: index for index, commit in enumerate(history)}, history.index(trusted)
+    candidates = [main]
+    # A closure can only change at these commits. The first parent of each is
+    # the newest candidate in the preceding equal-closure region.
+    changes = git(repo, "rev-list", "--first-parent", main, "--", *CLIENT_CONTRACT_PATHS).splitlines()
+    candidates += [history[positions[change] + 1] for change in changes
+                   if change in positions and positions[change] < limit]
+    for candidate in candidates:
+        if contract_identity(repo, candidate) == expected:
+            return candidate
+    raise ValueError("No trusted main candidate matches every serving member")
 
 
 def local_packages(repo, commit):

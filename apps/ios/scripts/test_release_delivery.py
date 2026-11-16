@@ -21,7 +21,8 @@ import unittest
 
 from release_delivery import (DAILY_BUILD_ENV, FABRIC_FRAMEWORK, build_environment,
                               bundle_id, framework_hash, ios_env, policy_digest, revoked_policy_digests,
-                              validate_update_policy, variant_state)
+                              validate_update_policy, variant_state, capability_support, health_source,
+                              observer_json, newest_compatible_main, CLIENT_CONTRACT_PATHS)
 
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
@@ -2187,6 +2188,108 @@ class UpdatePolicySchemaTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValueError):
                     revoked_policy_digests(invalid)
+
+
+class CompatibilityDataTests(unittest.TestCase):
+    serving = "b80aee9a72296385cc714a9c3644add717f47765"
+
+    def snapshot(self):
+        # Minimized raw member-local shape observed on dev5, not activation evidence.
+        return {"api_version": "fractal.client.v0", "request_id": "fixture", "snapshot": 1,
+                "value": {"kind": "capabilities", "machine_version": "0.1.0+b80aee9",
+                          "session_actor": "client/local/read-only", "transport": "unix",
+                          "capabilities": [{"id": "device-key-proofs", "version": 1, "state": "ungranted"},
+                                           {"id": "read-positions", "version": 1, "state": "ungranted"}]}}
+
+    def support(self, value, required=None, optional=None):
+        return capability_support(json.dumps(value).encode(), self.serving,
+                                  required if required is not None else [{"id": "read-positions", "minimum_version": 1}],
+                                  optional if optional is not None else [])
+
+    def test_support_is_not_a_device_grant_and_optional_missing_is_retained(self):
+        result = self.support(self.snapshot(), optional=[{"id": "documents", "minimum_version": 1}])
+        self.assertTrue(result["required"][0]["supported"])
+        self.assertFalse(result["optional"][0]["supported"])
+        self.assertIsNone(result["optional"][0]["observed_version"])
+        self.assertIn("no device grant", result["evidence"])
+        self.assertEqual(len(result["raw_sha256"]), 64)
+
+    def test_refuses_gateway_subset_wrong_actor_source_and_malformed_capabilities(self):
+        changes = [lambda x: x.update(api_version="unknown"),
+                   lambda x: x["value"].update(session_actor="person/fixture"),
+                   lambda x: x["value"].update(transport="http"),
+                   lambda x: x["value"].update(machine_version="0.1.0+fffffff"),
+                   lambda x: x["value"].pop("kind"),
+                   lambda x: x["value"]["capabilities"].append(x["value"]["capabilities"][0]),
+                   lambda x: x["value"]["capabilities"][0].update(version=True),
+                   lambda x: x["value"]["capabilities"].pop()]
+        for change in changes:
+            value = self.snapshot()
+            change(value)
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.support(value)
+        for required in ([{"id": "device-key-proofs", "minimum_version": 1}],
+                         [{"id": "device-key-proofs", "exact_version": 2}],
+                         [{"id": "read-positions", "minimum_version": True}]):
+            with self.subTest(required=required), self.assertRaises(ValueError):
+                self.support(self.snapshot(), required)
+        with self.assertRaises(ValueError):
+            self.support(self.snapshot(), optional=[{"id": "read-positions", "minimum_version": 1}])
+
+    def test_raw_health_shape_and_bounded_unambiguous_json(self):
+        raw = json.dumps({"status": "ready", "node": "daemon-label", "build": {"commit": self.serving}}).encode()
+        self.assertEqual(health_source(raw)["commit"], self.serving)
+        for invalid in (b'[]', b'{"status":"ready","status":"ready"}', b'{}' * 40000,
+                        b'{"n":NaN}', b'{"n":Infinity}', b'{"n":-Infinity}', b'{"n":+Infinity}', b'{"n":1e9999}', b'\xff', b'{',
+                        b'{"n":' + b'[' * 2000 + b'0' + b']' * 2000 + b'}'):
+            with self.subTest(raw=invalid[:50]), self.assertRaises(ValueError):
+                observer_json(invalid)
+        self.assertEqual(observer_json(json.dumps({"quoted": "[" * 80 + '\"' + "]" * 80}).encode())["quoted"], "[" * 80 + '\"' + "]" * 80)
+        for encoding in ("utf-16", "utf-16-le", "utf-32", "utf-32-le", "utf-8-sig"):
+            with self.subTest(encoding=encoding), self.assertRaises(ValueError):
+                observer_json('{"node":"fixture"}'.encode(encoding))
+        self.assertEqual(observer_json('{"node":"é"}'.encode("utf-8")), {"node": "é"})
+        for change in ({"status": "starting"}, {"build": {"commit": "b80aee9"}},
+                       {"build": {"commit": self.serving, "dirty": True}}):
+            value = json.loads(raw)
+            value.update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                health_source(json.dumps(value).encode())
+
+    def test_selects_newest_compatible_main_region_and_refuses_unknown_or_disagreeing_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            def git(*args):
+                return subprocess.run(["git", "-C", str(repo), *args], check=True, text=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
+            git("init", "--initial-branch=main")
+            git("config", "user.email", "fixture@example.invalid")
+            git("config", "user.name", "Fixture")
+            git("config", "commit.gpgsign", "false")
+            def commit(name, closure=None):
+                for relative in CLIENT_CONTRACT_PATHS:
+                    path = repo / relative if relative.endswith(".ts") else repo / relative / "contract.txt"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    if closure is not None:
+                        path.write_text(closure)
+                (repo / "unrelated.txt").write_text(name)
+                git("add", ".")
+                git("commit", "-m", name)
+                return git("rev-parse", "HEAD")
+            first = commit("first", "A")
+            newest_a = commit("unrelated")
+            b = commit("contract changed", "B")
+            main = commit("newest unrelated")
+            self.assertEqual(newest_compatible_main(repo, main, [first], first), newest_a)
+            self.assertEqual(newest_compatible_main(repo, main, [b], first), main)
+            self.assertEqual(newest_compatible_main(repo, main, [first, newest_a], first), newest_a)
+            for members, anchor in (([], first), ([first, b], first), ([first], b), ([first], "f" * 40)):
+                with self.subTest(members=members, anchor=anchor), self.assertRaises(ValueError):
+                    newest_compatible_main(repo, main, members, anchor)
+            git("checkout", "-b", "side", first)
+            side = commit("side contract", "C")
+            with self.assertRaises(ValueError):
+                newest_compatible_main(repo, main, [side], first)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add unconnected read-only support metadata and Git contract selection helpers for normal iOS updates.",
+  "replay": {
+    "status": "none",
+    "detail": "No event replay change; no active delivery caller is added."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database or active policy format changes; the helpers accept explicit arguments only."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, approval or fleet coordination rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client or wire behavior changes. Source closure equality and support-only parsing do not assert device compatibility or authorization."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service or device changes; network observation and effect wiring remain absent."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required. Activation provenance and live serving identity integration remain separate work."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No active recovery change; malformed metadata returns a validation error and no updater path is changed."
+  }
+}
