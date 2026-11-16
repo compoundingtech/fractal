@@ -1,4 +1,4 @@
-import { baseTsconfigCompilerOptions, domLib, reactJsx, tsconfigJson } from '../../../genie/repo.ts'
+import { baseTsconfigCompilerOptions, domLib, reactJsx, tsconfigJson } from '../../../../repos/effect-utils/genie/external.ts'
 
 export default tsconfigJson({
   compilerOptions: {
@@ -12,7 +12,6 @@ export default tsconfigJson({
     outDir: 'dist',
     types: ['node', 'vite/client'],
   },
-  // `.storybook/**` is excluded from tsc as in otto-tray/design: `main.ts` imports the effect-utils
-  // source of `@overeng/utils-storybook/config`; the Storybook build validates it.
+  // Storybook loads its configuration separately; this project checks the gallery sources.
   include: ['src/**/*'],
 })

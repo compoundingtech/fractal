@@ -290,7 +290,7 @@ const GuidelinesView = () => (
 )
 
 const meta = {
-  title: 'AttentionTray/Guidelines',
+  title: 'Fractal/Guidelines',
   component: GuidelinesView,
   parameters: {
     docs: {

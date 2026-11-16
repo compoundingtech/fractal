@@ -1,5 +1,5 @@
 /**
- * Typed access to the TrayGallery output in `../renders/`. Four sets, each with its own manifest,
+ * Typed access to the FractalMacGallery output in `../renders/`. Four sets, each with its own manifest,
  * all globbed rather than imported so a checkout without them still builds (consumers get
  * `undefined` and show a placeholder):
  *
@@ -22,7 +22,7 @@ export type Appearance = 'light' | 'dark'
 /** Appearances in display order: light first, as in the gallery. */
 export const appearances: readonly Appearance[] = ['light', 'dark']
 
-/** Scenario ids TrayGallery renders, in gallery order. The manifest supplies titles and descriptions. */
+/** Scenario ids FractalMacGallery renders, in gallery order. The manifest supplies titles and descriptions. */
 export const scenarioIds = [
   'busy',
   'answering',
@@ -54,7 +54,7 @@ export const scenarioIds = [
 /** One of the gallery scenarios. */
 export type ScenarioId = (typeof scenarioIds)[number]
 
-/** Manifest scenario or state: id plus the title and one-sentence description TrayGallery declares. */
+/** Manifest scenario or state: id plus the title and one-sentence description FractalMacGallery declares. */
 export interface RenderScenario {
   readonly id: string
   readonly title: string
@@ -90,7 +90,7 @@ export interface PanelHeight {
   readonly full: number
 }
 
-/** Shape of `renders/manifest.json` as written by TrayGallery. */
+/** Shape of `renders/manifest.json` as written by FractalMacGallery. */
 export interface RenderManifest {
   readonly generator: string
   readonly command: string
@@ -211,7 +211,7 @@ const pngUrls: Record<string, string> = {
   }),
 }
 
-/** The committed fallback manifest, or `undefined` when TrayGallery has not written one yet. */
+/** The committed fallback manifest, or `undefined` when FractalMacGallery has not written one yet. */
 export const manifest: RenderManifest | undefined = manifestModules['../renders/manifest.json']
 
 /** The real-capture manifest (`--capture`). */
@@ -357,13 +357,13 @@ export const menuBarStates: readonly RenderScenario[] =
 export const menuBarStateById = (id: string): RenderScenario | undefined =>
   menuBarStates.find((state) => state.id === id)
 
-/** The command that regenerates a set. */
+/** Current regeneration commands, independent of the historical manifests' provenance. */
 export const regenerateCommand = (source: ImageSource): string => {
   switch (source) {
     case 'capture':
-      return captureManifest?.command ?? 'devenv tasks run attention-tray:gallery-capture-vm'
+      return 'bash apps/macos/Fractal/scripts/capture-vm.sh'
     case 'fallback':
-      return manifest?.command ?? 'devenv tasks run attention-tray:gallery'
+      return 'swift run --package-path apps/macos/Fractal FractalMacGallery apps/macos/Fractal/design/renders'
     case 'history-v3':
       return 'not regenerated: V3’s views are gone (git history has them)'
     case 'history':

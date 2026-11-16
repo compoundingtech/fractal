@@ -1,7 +1,7 @@
 /**
- * Attention tray V4: the native round (n0–n4). A Control Center module: tiles, one-line inbox
+ * Fractal V4: the native round (n0–n4). A Control Center module: tiles, one-line inbox
  * rows, and every ask drilled into within the same panel. Every image is the real SwiftUI panel
- * from TrayGallery fixtures: a window-server capture where one exists, else the flat render.
+ * from FractalMacGallery fixtures: a window-server capture where one exists, else the flat render.
  */
 import type { Meta, StoryObj } from '@storybook/react'
 
@@ -232,13 +232,13 @@ const Scenarios = ({ ids }: { ids: readonly string[] }) => (
 const stateIds = menuBarStates.length > 0 ? menuBarStates.map((state) => state.id) : menuBarStateIds
 
 const meta = {
-  title: 'AttentionTray/V4',
+  title: 'Fractal/V4',
   parameters: {
     controls: { disable: true },
     docs: {
       description: {
         component:
-          'V4, the native round: a Control Center module with tiles, one-line inbox rows and pages drilled into within the panel. AttentionTray/V3 and V2 are history. Appearance follows macOS; override it in the toolbar.',
+          'V4, the native round: a Control Center module with tiles, one-line inbox rows and pages drilled into within the panel. Fractal/V3 and V2 are history. Appearance follows macOS; override it in the toolbar.',
       },
     },
   },

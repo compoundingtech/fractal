@@ -6,7 +6,7 @@ import { appearances, scenarioById } from './renders.ts'
 const noticeScenarios = ['notice-speaking', 'notice-in-call', 'notice-answered'] as const
 
 const meta = {
-  title: 'AttentionTray/Notification content',
+  title: 'Fractal/Notification content',
   component: RenderedPanel,
   args: { scenario: 'notice-speaking', appearance: 'light' },
   argTypes: {
