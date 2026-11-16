@@ -1,5 +1,6 @@
 //! Shell executions use the daemon's finite membership owner, never a local semaphore.
 use super::*;
+use fractal_daemon::cli_println as println;
 use fractal_daemon::store::resource_membership::{Coverage, DiskRequest, IoClass, LaneRequest, Owner, RequestClass};
 use fractal_daemon::store::shell_resources::{self, Execution, PayloadResult};
 
@@ -127,7 +128,7 @@ async fn execute(client: &Client, args: ExecArgs) -> Result<()> {
     let disk = args.disk.map(|bytes| -> Result<DiskRequest> {
         let path = args.disk_path.context("--disk requires --disk-path")?;
         let path = fs::canonicalize(if path.is_absolute() { path } else { cwd.join(path) })?;
-        Ok(DiskRequest { bytes: fractal_runtime::lane::parse_memory(&bytes)?, path: path.to_string_lossy().into_owned() })
+        Ok(DiskRequest { bytes: fractal_runtime::parse_lane_memory(&bytes)?, path: path.to_string_lossy().into_owned() })
     }).transpose()?;
     let lane = LaneRequest { id: format!("shell:{id}"), name: args.lane, host: String::new(), max_members: 1,
         capacity: Some(capacity), class, disk, io: args.io.map(|_| IoClass::Heavy),
