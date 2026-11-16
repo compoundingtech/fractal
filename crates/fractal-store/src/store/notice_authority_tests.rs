@@ -612,7 +612,11 @@ fn discussion_agent(fleet: &Fleet) {
          agent \"example/producer\" {{ workspace \"/work/example\"; command \"true\" }}",
         fleet.alder_key.public(),
     ), "alder").unwrap();
-    fleet.alder.apply_internal(&intent, "notice-discussion-agent").unwrap();
+    let expected = [notice_owner::SUBJECT, "agent/example/producer"].into_iter().map(|subject| {
+        let token = fleet.alder.selected_desired_token(subject).unwrap();
+        (subject.to_owned(), token.into_iter().collect())
+    }).collect();
+    fleet.alder.apply_as(&intent, &expected, "notice-discussion-agent", Some("person/example")).unwrap();
     fleet.alder.configure_thread_write_rollout([]);
 }
 

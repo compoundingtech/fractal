@@ -5048,6 +5048,7 @@ fn client_attention_resources_from_items(
     current: Vec<crate::model::AttentionItemView>,
     mut contexts: BTreeMap<(String, String, String), Vec<serde_json::Map<String, Value>>>,
 ) -> anyhow::Result<Vec<Value>> {
+    use anyhow::Context as _;
     let mut resources = Vec::new();
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
