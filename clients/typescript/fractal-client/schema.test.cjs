@@ -1438,3 +1438,11 @@ test('notice fixtures preserve rich Options, identifiers and lossless timestamps
     // Existing timestamp annotations retain the established DateTime.Utc contract.
     assert.equal(DateTime.toEpochMillis(Rich.decodeUnknownSync(Rich.Timestamp)(wire)), Date.parse(wire));
 });
+
+test('manual-return attention read state is optional and explicit', async () => {
+    const [, Rich] = await modules;
+    const state = { attention_id: 'attention/0123456789abcdef0123456789abcdef', seen_at: null, snoozed_until: null };
+    assert.equal(Rich.decodeUnknownSync(Rich.AttentionControlState, 'strict')(state).snoozed_indefinitely, undefined);
+    assert.equal(Rich.decodeUnknownSync(Rich.AttentionControlState, 'strict')({ ...state, snoozed_indefinitely: true }).snoozed_indefinitely, true);
+    assert.throws(() => Rich.decodeUnknownSync(Rich.AttentionControlState, 'strict')({ ...state, snoozed_indefinitely: null }));
+});

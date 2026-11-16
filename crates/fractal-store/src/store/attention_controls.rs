@@ -6,10 +6,10 @@ use super::*;
 use fractal_schema::attention_controls as schema;
 
 pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h52a7a69b0068 owner=fractal_store::store::attention_controls TODO=chunk-or-reference-variable-columns */ r#"
-CREATE TABLE IF NOT EXISTS person_attention_controls (
+CREATE TABLE IF NOT EXISTS person_attention_controls_v2 (
     person TEXT NOT NULL, attention_id TEXT NOT NULL,
     seen_at_ms INTEGER, seen_key BLOB,
-    snoozed_until_ms INTEGER, snooze_key BLOB,
+    snoozed_until_ms INTEGER, snoozed_indefinitely INTEGER NOT NULL DEFAULT 0, snooze_key BLOB,
     PRIMARY KEY(person,attention_id)
 ) WITHOUT ROWID;
 "#;
@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS person_attention_controls (
 pub struct Controls {
     pub seen_at_ms: Option<u128>,
     pub snoozed_until_ms: Option<u128>,
+    pub snoozed_indefinitely: bool,
 }
 
 /// Projects one appended or replicated control claim. A claim that does not beat the stored
@@ -28,6 +29,8 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     if repaired(transaction, claim)? {
         return Ok(());
     }
+    // A previous binary must replay these claims on downgrade instead of trusting its old table.
+    transaction.execute("DELETE FROM meta WHERE key='person_attention_controls_v1'", [])?;
     let fields = schema_fields_for_body(&claim.kind, &claim.body)?;
     let attention_id = fields
         .get("attention_id")
@@ -37,18 +40,19 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     let at = i64::try_from(claim.accepted_at_unix_ms).unwrap_or(i64::MAX);
     if claim.kind == schema::SEEN_KIND {
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h26df6fe6c2de owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_attention_controls(person,attention_id,seen_at_ms,seen_key) VALUES(?1,?2,?3,?4)
+            /* sqlite-large-value: allow-for-now lv-h26df6fe6c2de owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_attention_controls_v2(person,attention_id,seen_at_ms,seen_key) VALUES(?1,?2,?3,?4)
              ON CONFLICT(person,attention_id) DO UPDATE SET seen_at_ms=excluded.seen_at_ms,seen_key=excluded.seen_key
-             WHERE person_attention_controls.seen_key IS NULL OR excluded.seen_key<person_attention_controls.seen_key",
+             WHERE person_attention_controls_v2.seen_key IS NULL OR excluded.seen_key<person_attention_controls_v2.seen_key",
             params![claim.subject, attention_id, at, key],
         )?;
     } else {
         let until = fields.get("until_unix_ms").and_then(Value::as_u64).map(|until| until as i64);
+        let indefinite = fields.get("indefinite").and_then(Value::as_bool).unwrap_or(false);
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h8d5946d600be owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_attention_controls(person,attention_id,snoozed_until_ms,snooze_key) VALUES(?1,?2,?3,?4)
-             ON CONFLICT(person,attention_id) DO UPDATE SET snoozed_until_ms=excluded.snoozed_until_ms,snooze_key=excluded.snooze_key
-             WHERE person_attention_controls.snooze_key IS NULL OR excluded.snooze_key>person_attention_controls.snooze_key",
-            params![claim.subject, attention_id, until, key],
+            /* sqlite-large-value: allow-for-now lv-h8d5946d600be owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO person_attention_controls_v2(person,attention_id,snoozed_until_ms,snoozed_indefinitely,snooze_key) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(person,attention_id) DO UPDATE SET snoozed_until_ms=excluded.snoozed_until_ms,snoozed_indefinitely=excluded.snoozed_indefinitely,snooze_key=excluded.snooze_key
+             WHERE person_attention_controls_v2.snooze_key IS NULL OR excluded.snooze_key>person_attention_controls_v2.snooze_key",
+            params![claim.subject, attention_id, until, indefinite, key],
         )?;
     }
     Ok(())
@@ -61,15 +65,17 @@ fn repaired(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool> 
     )?)
 }
 
-/// Rebuild once on a store that held these claims before the table existed.
+/// Rebuild this projection namespace from all authoritative controls, including legacy claims
+/// without an indefinite flag. The previous table is not authority and remains untouched.
 pub fn open(transaction: &Transaction<'_>) -> Result<()> {
     let ready: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='person_attention_controls_v1')",
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='person_attention_controls_v2_ready')
+           AND NOT EXISTS(SELECT 1 FROM meta WHERE key='person_attention_controls_v1')",
         [], |row| row.get(0),
     )?;
     if !ready {
         rebuild(transaction)?;
-        transaction.execute(/* sqlite-large-value: allow-for-now lv-h3c52da9f3dc3 owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('person_attention_controls_v1','1')", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h3c52da9f3dc3 owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('person_attention_controls_v2_ready','1')", [])?;
     }
     Ok(())
 }
@@ -77,7 +83,8 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 /// Replays every unrepaired control into an empty table. Each merge is order-free, so claim
 /// order does not matter; a repair that retracts a winner also rebuilds through here.
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf72fe838496c owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM person_attention_controls", [])?;
+    transaction.execute("DELETE FROM meta WHERE key='person_attention_controls_v1'", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf72fe838496c owner=fractal_store::store::attention_controls TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM person_attention_controls_v2", [])?;
     let mut statement = transaction.prepare(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind IN ('person.attention-seen','person.attention-snoozed')",
     )?;
@@ -96,14 +103,14 @@ pub fn controls(connection: &Connection, rows: &[(&str, &str)]) -> Result<HashMa
         return Ok(HashMap::new());
     }
     let mut statement = connection.prepare_cached(
-        "SELECT c.person,c.attention_id,c.seen_at_ms,c.snoozed_until_ms FROM json_each(?1) wanted
-         JOIN person_attention_controls c
+        "SELECT c.person,c.attention_id,c.seen_at_ms,c.snoozed_until_ms,c.snoozed_indefinitely FROM json_each(?1) wanted
+         JOIN person_attention_controls_v2 c
            ON c.person=json_extract(wanted.value,'$[0]') AND c.attention_id=json_extract(wanted.value,'$[1]')",
     )?;
     let found = statement
         .query_map([serde_json::to_string(rows)?], |row| {
             let time = |index| row.get::<_, Option<i64>>(index).map(|at| at.and_then(|at| u128::try_from(at).ok()));
-            Ok(((row.get(0)?, row.get(1)?), Controls { seen_at_ms: time(2)?, snoozed_until_ms: time(3)? }))
+            Ok(((row.get(0)?, row.get(1)?), Controls { seen_at_ms: time(2)?, snoozed_until_ms: time(3)?, snoozed_indefinitely: row.get(4)? }))
         })?
         .collect::<rusqlite::Result<HashMap<_, _>>>()?;
     Ok(found)
@@ -126,6 +133,12 @@ pub fn overlay(connection: &Connection, rows: &mut [Value]) -> Result<()> {
         };
         row["seen_at"] = time(control.seen_at_ms);
         row["snoozed_until"] = time(control.snoozed_until_ms);
+        // Absence means false and preserves the legacy read shape for timed/cleared rows.
+        if control.snoozed_indefinitely {
+            row["snoozed_indefinitely"] = json!(true);
+        } else {
+            row.as_object_mut().expect("attention overlay sets object fields").remove("snoozed_indefinitely");
+        }
     }
     Ok(())
 }
@@ -135,6 +148,7 @@ pub fn overlay(connection: &Connection, rows: &mut [Value]) -> Result<()> {
 pub enum Control {
     Seen,
     Snooze(Option<u128>),
+    SnoozeIndefinitely,
 }
 
 impl Store {
@@ -169,6 +183,9 @@ impl Store {
             Control::Seen if stored()?.seen_at_ms.is_some() => return Ok((None, stored()?)),
             Control::Seen => (schema::SEEN_KIND, BTreeMap::new()),
             Control::Snooze(until) => (schema::SNOOZED_KIND, BTreeMap::from([("until_unix_ms".to_owned(), json!(until))])),
+            Control::SnoozeIndefinitely => (schema::SNOOZED_KIND, BTreeMap::from([
+                ("until_unix_ms".to_owned(), Value::Null), ("indefinite".to_owned(), json!(true)),
+            ])),
         };
         fields.insert("attention_id".into(), json!(attention_id));
         fields.insert("source".into(), json!(source));

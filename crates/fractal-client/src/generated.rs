@@ -774,6 +774,8 @@ pub struct Attention {
     /// deadline does not move.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snoozed_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_indefinitely: Option<bool>,
     #[serde(default)]
     pub targets: Vec<String>,
     #[serde(default)]
@@ -6427,6 +6429,8 @@ pub struct AttentionControlState {
     pub attention_id: String,
     pub seen_at: Option<String>,
     pub snoozed_until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_indefinitely: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

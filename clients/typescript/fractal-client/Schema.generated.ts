@@ -432,6 +432,8 @@ export type ActionRequestEncoded = typeof ActionRequest.Encoded
 export const AttentionControlState = /*#__PURE__*/ (() => Schema.Struct({
   "attention_id": AttentionControlId,
   "seen_at": Schema.OptionFromNullOr(Timestamp),
+  /** True until the person explicitly brings the item back; absent means false. */
+  "snoozed_indefinitely": optionalKey(Schema.Boolean).annotate({ description: "True until the person explicitly brings the item back; absent means false." }),
   "snoozed_until": Schema.OptionFromNullOr(Timestamp)
 }).annotate({ identifier: "AttentionControlState", description: "attention.seen and attention.snooze: the row's controls after the action, whether or not it appended a claim." }))()
 export type AttentionControlState = typeof AttentionControlState.Type
