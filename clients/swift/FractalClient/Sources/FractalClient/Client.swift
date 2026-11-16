@@ -169,6 +169,7 @@ public actor FractalClient {
         case .inbox(let source, let episode): context = ["origin_source": .string(source), "origin_episode": .string(episode)]
         case .mission(let id): context = ["mission_id": .string(id)]
         case .recentlyClosed: context = ["recently_closed": .bool(true)]
+        case .markedUnread: context = ["marked_unread": .bool(true)]
         }
         return threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "thread_context": .object(context), "limit": .number(Double(limit))])
     }
@@ -384,18 +385,20 @@ public actor FractalClient {
         case .inbox(let source, let episode): query = [.init(name: "origin_source", value: source), .init(name: "origin_episode", value: episode)]
         case .mission(let id): query = [.init(name: "mission_id", value: id)]
         case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
+        case .markedUnread: query = [.init(name: "marked_unread", value: "true")]
         }
         if let cursor { query.append(.init(name: "cursor", value: cursor)) }
         if let limit { query.append(.init(name: "limit", value: String(limit))) }
         return try await get("v1/client/threads", query: query)
     }
     public func threadGet(id: String) async throws -> Envelope<ThreadSummary> { try await get("v1/client/threads/\(try Self.routedThreadID(id))") }
-    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadTimelinePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }
+    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil, around: String? = nil) async throws -> Envelope<ThreadTimelinePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let around { query.append(.init(name: "around", value: around)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }
     public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/harness-questions", query: query) }
     public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> { try await get("v1/client/harness-questions/\(Self.routedSessionID(id))") }
     public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
     public func autoResolvedList() async throws -> Envelope<AutoResolvedAsks> { try await get("v1/client/auto-resolved") }
     public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> { try await get("v1/client/availability", query: person.map { [URLQueryItem(name: "person", value: $0)] } ?? []) }
+    public func availabilityHistory(person: String? = nil, from: String, to: String, bucketSeconds: Int) async throws -> Envelope<AvailabilityHistory> { var query = [URLQueryItem(name: "from", value: from), URLQueryItem(name: "to", value: to), URLQueryItem(name: "bucket_seconds", value: String(bucketSeconds))]; if let person { query.append(.init(name: "person", value: person)) }; return try await get("v1/client/availability/history", query: query) }
     public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let kind { query.append(.init(name: "kind", value: kind)) }; if let version { query.append(.init(name: "version", value: String(version))) }; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/custom-subjects", query: query) }
     public func customSubjectsGet(id: String) async throws -> Envelope<Resource> { try await resource("custom-subjects", id: id) }
     public func privateNotesGet(uri: String) async throws -> Envelope<PrivateNotesSubject> { try await get("v1/client/private-notes/\(Self.pathSegment(uri))") }
@@ -539,7 +542,9 @@ public actor FractalClient {
     public func terminalEnd(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalEnd(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func terminalInput(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalInputParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalInput(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func terminalResize(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalResizeParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalResize(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadClearUnread(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadClearUnreadParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadClearUnread(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadClose(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadMarkUnread(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadMarkUnreadParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadMarkUnread(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadRead(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReadParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadRead(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadRename(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadReopen(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
@@ -705,9 +710,11 @@ public actor FractalClient {
         applyTraceContext(to: &request)
         let (data, status) = try await perform(request)
         if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
-        let relatedRuns = path.hasPrefix("v1/client/agent-related-runs/")
-        if status == 404 && (relatedRuns || path == "v1/client/schedules") {
-            let operation = relatedRuns ? "agent-related-runs.get" : "schedules.list"
+        // These projections have no missing-item 404; an older router answers one with no envelope.
+        let unsupported: String? = path.hasPrefix("v1/client/agent-related-runs/") ? "agent-related-runs.get"
+            : path == "v1/client/schedules" ? "schedules.list"
+            : path == "v1/client/availability/history" ? "availability.history" : nil
+        if status == 404, let operation = unsupported {
             throw ErrorEnvelope(apiVersion: "st3.client.v0", errorVersion: "st3.client.error.v0", requestID: "",
                 code: .unsupportedCapability, message: "This server does not support " + operation + "; upgrade the server",
                 retryable: false, retryAfterMS: nil, details: [:])

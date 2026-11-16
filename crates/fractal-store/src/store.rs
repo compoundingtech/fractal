@@ -317,6 +317,7 @@ pub mod message_routing;
 pub mod thread_delivery;
 pub mod thread_links;
 pub mod thread_metadata;
+pub mod thread_reading;
 pub mod thread_rollout;
 #[cfg(test)]
 mod claim_commit_context_tests;
@@ -12111,6 +12112,7 @@ fn replicated_work_validation_fields<'a>(
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::read_positions::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::threads::validate_reminder_actor(kind, body.get("fields").unwrap_or(body).get("person").and_then(Value::as_str), actor).map_err(anyhow::Error::new)?;
     fractal_schema::attention_controls::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::availability::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
@@ -16842,6 +16844,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::read_positions::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::threads::validate_reminder_actor(&claim.kind, fields.get("person").and_then(Value::as_str), claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::attention_controls::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
@@ -25099,6 +25103,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::read_positions::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::threads::validate_reminder_actor(&input.kind, input.fields.get("person").and_then(Value::as_str), input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::attention_controls::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;

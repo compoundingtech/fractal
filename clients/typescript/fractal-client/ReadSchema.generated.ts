@@ -1672,6 +1672,76 @@ export const AvailabilityDeadlineClock = /*#__PURE__*/ (() => openEnum(["run","h
 export type AvailabilityDeadlineClock = typeof AvailabilityDeadlineClock.Type
 export type AvailabilityDeadlineClockEncoded = typeof AvailabilityDeadlineClock.Encoded
 
+/** Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words. */
+export const AvailabilityDeadlineClockDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "hold-all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "hold-routine": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "run": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityDeadlineClockDurations", description: "Milliseconds of each deadline-clock mode during a history bucket; the keys are the wire words." }))()
+export type AvailabilityDeadlineClockDurations = typeof AvailabilityDeadlineClockDurations.Type
+export type AvailabilityDeadlineClockDurationsEncoded = typeof AvailabilityDeadlineClockDurations.Encoded
+
+/** Milliseconds of each interruptions setting during a history bucket. */
+export const AvailabilityInterruptionsDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "all": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "none": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "urgent": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityInterruptionsDurations", description: "Milliseconds of each interruptions setting during a history bucket." }))()
+export type AvailabilityInterruptionsDurations = typeof AvailabilityInterruptionsDurations.Type
+export type AvailabilityInterruptionsDurationsEncoded = typeof AvailabilityInterruptionsDurations.Encoded
+
+/** Milliseconds of each derived presence during a history bucket. */
+export const AvailabilityPresenceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "idle": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "locked": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "present": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityPresenceDurations", description: "Milliseconds of each derived presence during a history bucket." }))()
+export type AvailabilityPresenceDurations = typeof AvailabilityPresenceDurations.Type
+export type AvailabilityPresenceDurationsEncoded = typeof AvailabilityPresenceDurations.Encoded
+
+/** Milliseconds spent in each status during a history bucket. */
+export const AvailabilityStatusDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "available": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "away": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusDurations", description: "Milliseconds spent in each status during a history bucket." }))()
+export type AvailabilityStatusDurations = typeof AvailabilityStatusDurations.Type
+export type AvailabilityStatusDurationsEncoded = typeof AvailabilityStatusDurations.Encoded
+
+/** Milliseconds the status came from each source during a history bucket. */
+export const AvailabilityStatusSourceDurations = /*#__PURE__*/ (() => Schema.Struct({
+  "override": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "presence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unreported": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AvailabilityStatusSourceDurations", description: "Milliseconds the status came from each source during a history bucket." }))()
+export type AvailabilityStatusSourceDurations = typeof AvailabilityStatusSourceDurations.Type
+export type AvailabilityStatusSourceDurationsEncoded = typeof AvailabilityStatusSourceDurations.Encoded
+
+/** One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range. */
+export const AvailabilityHistoryBucket = /*#__PURE__*/ (() => Schema.Struct({
+  "covered_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "deadline_clock": AvailabilityDeadlineClockDurations,
+  "interruptions": AvailabilityInterruptionsDurations,
+  /** Null for anyone but the person. */
+  "presence": Schema.OptionFromNullOr(AvailabilityPresenceDurations).annotate({ description: "Null for anyone but the person." }),
+  "start": Timestamp,
+  "status": AvailabilityStatusDurations,
+  "status_source": AvailabilityStatusSourceDurations
+}).annotate({ identifier: "AvailabilityHistoryBucket", description: "One bucket of availability history. Each axis's durations sum to `covered_ms`, the part of the bucket within the answered range." }))()
+export type AvailabilityHistoryBucket = typeof AvailabilityHistoryBucket.Type
+export type AvailabilityHistoryBucketEncoded = typeof AvailabilityHistoryBucket.Encoded
+
+/** A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available). */
+export const AvailabilityHistory = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "buckets": Schema.Array(AvailabilityHistoryBucket).check(Schema.isMaxLength(2016)),
+  "from": Timestamp,
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "to": Timestamp
+}).annotate({ identifier: "AvailabilityHistory", description: "A person's availability over [from, to) in buckets of `bucket_seconds` starting at `from`, folded from the same claims and by the same rules as PersonAvailability at every instant. `to` is the requested end clamped to when the daemon answered: no bucket covers the future, and the last bucket may be short. Before a person's first availability claim they read as unreported (available)." }))()
+export type AvailabilityHistory = typeof AvailabilityHistory.Type
+export type AvailabilityHistoryEncoded = typeof AvailabilityHistory.Encoded
+
 /** Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown. */
 export const AvailabilityInterruptions = /*#__PURE__*/ (() => openEnum(["all","urgent","none"]).annotate({ identifier: "AvailabilityInterruptions", description: "Which attention may interrupt the person: everything, only rows with `urgent` true, or nothing. Readers retain future values as Unknown." }))()
 export type AvailabilityInterruptions = typeof AvailabilityInterruptions.Type
@@ -1763,10 +1833,11 @@ export type ClientConnections = typeof ClientConnections.Type
 export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const ThreadCollectionContext = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "agent_id": AgentId, "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
+  Schema.Struct({ "agent_id": AgentId, "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "marked_unread": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ThreadCollectionContext" }))()
 export type ThreadCollectionContext = typeof ThreadCollectionContext.Type
 export type ThreadCollectionContextEncoded = typeof ThreadCollectionContext.Encoded
@@ -3334,6 +3405,23 @@ export const StreamSync = /*#__PURE__*/ (() => Schema.Union([
 export type StreamSync = typeof StreamSync.Type
 export type StreamSyncEncoded = typeof StreamSync.Encoded
 
+export const ThreadUnreadMark = /*#__PURE__*/ (() => Schema.Struct({
+  "anchor_message_id": Id,
+  /** Opaque stable signed operation ID. Never a claim ID, timestamp, or local retry counter. */
+  "mark_id": Schema.String.annotate({ description: "Opaque stable signed operation ID. Never a claim ID, timestamp, or local retry counter." })
+}).annotate({ identifier: "ThreadUnreadMark" }))()
+export type ThreadUnreadMark = typeof ThreadUnreadMark.Type
+export type ThreadUnreadMarkEncoded = typeof ThreadUnreadMark.Encoded
+
+export const ThreadUnreadReminder = /*#__PURE__*/ (() => Schema.Struct({
+  /** Canonical primary return anchor. */
+  "anchor_message_id": Id,
+  /** All active marks, each with its own return anchor. Clear only captured mark IDs whose own anchor was deliberately viewed on a later visit; the current visit stays sticky. */
+  "marks": Schema.Array(ThreadUnreadMark).annotate({ description: "All active marks, each with its own return anchor. Clear only captured mark IDs whose own anchor was deliberately viewed on a later visit; the current visit stays sticky." })
+}).annotate({ identifier: "ThreadUnreadReminder" }))()
+export type ThreadUnreadReminder = typeof ThreadUnreadReminder.Type
+export type ThreadUnreadReminderEncoded = typeof ThreadUnreadReminder.Encoded
+
 export const ThreadSummary = /*#__PURE__*/ (() => Schema.Struct({
   /** Canonical originating or assigned agent, otherwise the explicitly configured inboxFallbackAgent. Clients must not infer a chief-of-staff or other role as fallback. */
   "agent_id": Id,
@@ -3343,7 +3431,9 @@ export const ThreadSummary = /*#__PURE__*/ (() => Schema.Struct({
   "state": Schema.Literals(["open","closed"]),
   "title": Schema.String,
   "title_revision": Revision,
-  "unread": optionalKey(Schema.Boolean)
+  /** Natural message unread; unaffected by reminders. */
+  "unread": optionalKey(Schema.Boolean).annotate({ description: "Natural message unread; unaffected by reminders." }),
+  "unread_reminder": Schema.OptionFromOptionalNullOr(ThreadUnreadReminder, NULL_NONE)
 }).annotate({ identifier: "ThreadSummary" }))()
 export type ThreadSummary = typeof ThreadSummary.Type
 export type ThreadSummaryEncoded = typeof ThreadSummary.Encoded
@@ -5107,10 +5197,12 @@ export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
 export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
 
 export const ThreadListQuery = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "agent_id": Id, "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
+  Schema.Struct({ "agent_id": Id, "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "marked_unread": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), /** Current person's threads with an active unread reminder, newest operation time first, then thread ID. Operation time is the earliest accepted_at among validated equivalent receipts for the stable operation ID; repaired, invalid and conflicting receipts are excluded. */
+"marked_unread": Schema.Literal(true).annotate({ description: "Current person's threads with an active unread reminder, newest operation time first, then thread ID. Operation time is the earliest accepted_at among validated equivalent receipts for the stable operation ID; repaired, invalid and conflicting receipts are excluded." }), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ThreadListQuery" }))()
 export type ThreadListQuery = typeof ThreadListQuery.Type
 export type ThreadListQueryEncoded = typeof ThreadListQuery.Encoded
@@ -5122,9 +5214,20 @@ export const ThreadSummaryPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ThreadSummaryPage = typeof ThreadSummaryPage.Type
 export type ThreadSummaryPageEncoded = typeof ThreadSummaryPage.Encoded
 
+export const ThreadTimelineAnchor = /*#__PURE__*/ (() => Schema.Struct({
+  "message_id": Id,
+  "state": Schema.Literals(["current","unavailable","pending"])
+}).annotate({ identifier: "ThreadTimelineAnchor" }))()
+export type ThreadTimelineAnchor = typeof ThreadTimelineAnchor.Type
+export type ThreadTimelineAnchorEncoded = typeof ThreadTimelineAnchor.Encoded
+
 export const ThreadTimelinePage = /*#__PURE__*/ (() => Schema.Struct({
+  /** Present only for around reads. Unavailable requires retained signed routing proof for the same owner and thread. Pending requires an authenticated signed Mark intent of the same owner and thread whose observed-mark dependencies are all validated and resolved, and whose anchor is the only missing proof. Unknown observed references keep the operation inert and return thread-unavailable until dependencies arrive. Pending exposes no body, grants no new read authority and activates no badge before membership is known. Around never acknowledges anything. */
+  "anchor": optionalKey(ThreadTimelineAnchor),
   "items": Schema.Array(ThreadTimelineEvent),
-  "next_cursor": Schema.OptionFromNullOr(Schema.String)
+  "next_cursor": Schema.OptionFromNullOr(Schema.String),
+  /** Opaque cursor for newer items; absent when nothing is newer. Pages remain newest first. */
+  "previous_cursor": optionalKey(Schema.String).annotate({ description: "Opaque cursor for newer items; absent when nothing is newer. Pages remain newest first." })
 }).annotate({ identifier: "ThreadTimelinePage" }))()
 export type ThreadTimelinePage = typeof ThreadTimelinePage.Type
 export type ThreadTimelinePageEncoded = typeof ThreadTimelinePage.Encoded

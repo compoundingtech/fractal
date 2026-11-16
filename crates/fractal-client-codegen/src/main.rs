@@ -277,6 +277,7 @@ fn rust_operation_methods(
             ThreadListScope::Inbox {{ source, episode }} => format!("origin_source={{}}&origin_episode={{}}", percent_encode(source), percent_encode(episode)),
             ThreadListScope::Mission(id) => format!("mission_id={{}}", percent_encode(id)),
             ThreadListScope::RecentlyClosed => "recently_closed=true".into(),
+            ThreadListScope::MarkedUnread => "marked_unread=true".into(),
         }};
         let mut path = format!("/v1/client/threads?{{selection}}");
         if let Some(cursor) = cursor {{ path.push_str(&format!("&cursor={{}}", percent_encode(cursor))); }}
@@ -291,6 +292,7 @@ fn rust_operation_methods(
         }
         if id == "thread.timeline" {
             writeln!(out, r#"    pub async fn thread_timeline(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
+            writeln!(out, r#"    pub async fn thread_timeline_around(&self, id: &str, message_id: &str, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline?around={{}}", thread_path_segment(id)?, percent_encode(message_id)); if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }} self.get(&path).await }}"#)?;
             continue;
         }
         if id == "arrangements.memberships" {
@@ -353,6 +355,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn auto_resolved_list(&self) -> Result<Envelope<AutoResolvedAsks>, ClientError> {{ self.get(\"/v1/client/auto-resolved\").await }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    pub async fn availability_list(&self, person: Option<&str>) -> Result<Envelope<PersonAvailabilities>, ClientError> {{ match person {{ Some(person) => self.get(&format!(\"/v1/client/availability?person={{}}\", percent_encode(person))).await, None => self.get(\"/v1/client/availability\").await }} }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    pub async fn availability_history(&self, person: Option<&str>, from: &str, to: &str, bucket_seconds: u64) -> Result<Envelope<AvailabilityHistory>, ClientError> {{ let person = person.map(|person| format!(\"&person={{}}\", percent_encode(person))).unwrap_or_default(); self.get(&format!(\"/v1/client/availability/history?from={{}}&to={{}}&bucket_seconds={{bucket_seconds}}{{person}}\", percent_encode(from), percent_encode(to))).await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -551,6 +555,7 @@ fn swift_operation_methods(
         case .inbox(let source, let episode): query = [.init(name: "origin_source", value: source), .init(name: "origin_episode", value: episode)]
         case .mission(let id): query = [.init(name: "mission_id", value: id)]
         case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
+        case .markedUnread: query = [.init(name: "marked_unread", value: "true")]
         }}
         if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}
         if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}
@@ -563,7 +568,7 @@ fn swift_operation_methods(
             continue;
         }
         if id == "thread.timeline" {
-            writeln!(out, r#"    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadTimelinePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }}"#)?;
+            writeln!(out, r#"    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil, around: String? = nil) async throws -> Envelope<ThreadTimelinePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let around {{ query.append(.init(name: "around", value: around)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }}"#)?;
             continue;
         }
         if id == "arrangements.memberships" {
@@ -627,6 +632,8 @@ fn swift_operation_methods(
             writeln!(out, "    public func autoResolvedList() async throws -> Envelope<AutoResolvedAsks> {{ try await get(\"v1/client/auto-resolved\") }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    public func availabilityList(person: String? = nil) async throws -> Envelope<PersonAvailabilities> {{ try await get(\"v1/client/availability\", query: person.map {{ [URLQueryItem(name: \"person\", value: $0)] }} ?? []) }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    public func availabilityHistory(person: String? = nil, from: String, to: String, bucketSeconds: Int) async throws -> Envelope<AvailabilityHistory> {{ var query = [URLQueryItem(name: \"from\", value: from), URLQueryItem(name: \"to\", value: to), URLQueryItem(name: \"bucket_seconds\", value: String(bucketSeconds))]; if let person {{ query.append(.init(name: \"person\", value: person)) }}; return try await get(\"v1/client/availability/history\", query: query) }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -789,7 +796,9 @@ fn rust_field(name: &str) -> String {
         "loop" => "loop_spec".into(),
         "ref" => "reference".into(),
         "kdlLines" => "kdl_lines".into(),
-        other => other.into(),
+        "override" => "r#override".into(),
+        // A wire word used as a key, such as `hold-routine`.
+        other => other.replace('-', "_"),
     }
 }
 
@@ -958,6 +967,13 @@ fn validate_surfaces(
         "AvailabilitySet",
         "PresenceReport",
         "PresenceReportResult",
+        "AvailabilityHistory",
+        "AvailabilityHistoryBucket",
+        "AvailabilityStatusDurations",
+        "AvailabilityStatusSourceDurations",
+        "AvailabilityPresenceDurations",
+        "AvailabilityInterruptionsDurations",
+        "AvailabilityDeadlineClockDurations",
         "DirectiveNoteSet",
         "DirectiveNoteSetResult",
         "ResourceObservation",
@@ -979,7 +995,12 @@ fn validate_surfaces(
         "MessageBody",
         "AgentDeclaration",
         "ThreadSummary",
+        "ThreadUnreadMark",
+        "ThreadUnreadReminder",
+        "ThreadMarkUnreadParameters",
+        "ThreadClearUnreadParameters",
         "ThreadSummaryPage",
+        "ThreadTimelineAnchor",
         "ThreadTimelinePage",
         "ThreadTargetParameters",
         "ThreadRenameParameters",
@@ -1614,6 +1635,7 @@ fn ts_object(value: &Value) -> Result<String> {
             } else {
                 "?"
             };
+            // A wire word used as a key, such as `hold-routine`, is no identifier: quote it.
             let identifier = name.chars().enumerate().all(|(index, character)| {
                 character.is_ascii_alphabetic() || matches!(character, '_' | '$')
                     || (index > 0 && character.is_ascii_digit())
@@ -1855,7 +1877,7 @@ fn typescript_operation_methods(
             continue;
         }
         if id == "thread.timeline" {
-            writeln!(out, "    async threadTimeline(id: string, options: {{ cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadTimelinePage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/timeline` + query(options), undefined, requestOptions); }}")?;
+            writeln!(out, "    async threadTimeline(id: string, options: {{ cursor?: string; around?: never; limit?: number }} | {{ around: string; cursor?: never; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadTimelinePage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/timeline` + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "arrangements.memberships" {
@@ -1898,6 +1920,8 @@ fn typescript_operation_methods(
             writeln!(out, "    async autoResolvedList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AutoResolvedAsks>> {{ return this.get('/v1/client/auto-resolved', undefined, requestOptions); }}")?;
         } else if id == "availability.list" {
             writeln!(out, "    async availabilityList(person?: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PersonAvailabilities>> {{ return this.get('/v1/client/availability' + query({{ person }}), undefined, requestOptions); }}")?;
+        } else if id == "availability.history" {
+            writeln!(out, "    async availabilityHistory(options: {{ from: string; to: string; bucket_seconds: number; person?: string }}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<AvailabilityHistory>> {{ return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,

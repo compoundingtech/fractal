@@ -77,6 +77,8 @@ pub(super) fn capabilities(state: &AppState, session: &ClientSession) -> impl It
         ("thread-summary-feed", 1, read),
         ("thread-browser-send", 1, browser_send),
         ("thread.read", 0, read && edit),
+        ("thread.mark-unread", 0, edit),
+        ("thread.clear-unread", 0, edit),
         ("thread.start", 0, edit),
         ("thread.reply", 0, reply),
         ("thread.rename", 0, edit),

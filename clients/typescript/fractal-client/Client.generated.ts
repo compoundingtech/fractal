@@ -8,7 +8,7 @@ import type {
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
     AutoResolvedAsks,
-    AvailabilitySet, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
+    AvailabilitySet, AvailabilityHistory, PersonAvailability, PersonAvailabilities, PresenceReport, PresenceReportResult, DirectiveNoteSet, DirectiveNoteSetResult,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState, ReadPositionPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, UsageHubQuota, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -372,10 +372,13 @@ export class FractalClient {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         // These projections have no missing-item 404, including an old router's empty response.
-        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
-        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
+        const route = path.split('?')[0];
+        const unsupported = path.startsWith('/v1/client/agent-related-runs/') ? 'agent-related-runs.get'
+            : route === '/v1/client/schedules' ? 'schedules.list'
+            : route === '/v1/client/availability/history' ? 'availability.history' : undefined;
+        if (response.status === 404 && unsupported) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${unsupported}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
@@ -741,12 +744,13 @@ export class FractalClient {
 
     async threadList(options: ThreadListQuery, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummaryPage>> { return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }
     async threadGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummary>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}`, undefined, requestOptions); }
-    async threadTimeline(id: string, options: { cursor?: string; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadTimelinePage>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}/timeline` + query(options), undefined, requestOptions); }
+    async threadTimeline(id: string, options: { cursor?: string; around?: never; limit?: number } | { around: string; cursor?: never; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadTimelinePage>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}/timeline` + query(options), undefined, requestOptions); }
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
     async autoResolvedList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AutoResolvedAsks>> { return this.get('/v1/client/auto-resolved', undefined, requestOptions); }
     async availabilityList(person?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PersonAvailabilities>> { return this.get('/v1/client/availability' + query({ person }), undefined, requestOptions); }
+    async availabilityHistory(options: { from: string; to: string; bucket_seconds: number; person?: string }, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AvailabilityHistory>> { return this.get('/v1/client/availability/history' + query(options), undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }
@@ -895,7 +899,9 @@ export class FractalClient {
     async terminalEnd(input: Omit<ActionOf<'terminal.end'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.end' } as ActionOf<'terminal.end'>, requestOptions); }
     async terminalInput(input: Omit<ActionOf<'terminal.input'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.input' } as ActionOf<'terminal.input'>, requestOptions); }
     async terminalResize(input: Omit<ActionOf<'terminal.resize'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.resize' } as ActionOf<'terminal.resize'>, requestOptions); }
+    async threadClearUnread(input: Omit<ActionOf<'thread.clear-unread'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.clear-unread' } as ActionOf<'thread.clear-unread'>, requestOptions); }
     async threadClose(input: Omit<ActionOf<'thread.close'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.close' } as ActionOf<'thread.close'>, requestOptions); }
+    async threadMarkUnread(input: Omit<ActionOf<'thread.mark-unread'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.mark-unread' } as ActionOf<'thread.mark-unread'>, requestOptions); }
     async threadRead(input: Omit<ActionOf<'thread.read'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.read' } as ActionOf<'thread.read'>, requestOptions); }
     async threadRename(input: Omit<ActionOf<'thread.rename'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.rename' } as ActionOf<'thread.rename'>, requestOptions); }
     async threadReopen(input: Omit<ActionOf<'thread.reopen'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.reopen' } as ActionOf<'thread.reopen'>, requestOptions); }

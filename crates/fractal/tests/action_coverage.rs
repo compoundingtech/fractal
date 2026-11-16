@@ -1430,7 +1430,7 @@ async fn topic_thread_actions_survive_stale_fences_and_restarts() {
     let reopened = daemon.client(PERSON).thread_get(thread).await.unwrap().value;
     assert_eq!(reopened.state, fractal_client::ThreadState::Open);
     assert_eq!(reopened.title, "Reviewed worker checks");
-    let timeline = thread_metadata::mixed_timeline(daemon.store(), PERSON, thread, None, 50).unwrap();
+    let timeline = thread_metadata::mixed_timeline(daemon.store(), PERSON, thread, None, None, 50).unwrap();
     let events = serde_json::to_value(timeline).unwrap();
     let items = events["items"].as_array().unwrap();
     let rename = items.iter().find(|event| event["kind"] == "thread.renamed").unwrap();
