@@ -430,6 +430,20 @@
       "behavior": "Real typed client over a private Unix socket: stale fence refuses without writes; accepted action survives full daemon/store restart; exact replay preserves affected IDs and writes once. The shared case also checks Inbox origin, exact old/new rename titles, closed replies, quoted messages and explicit reopen."
     },
     {
+      "action": "thread.mark-unread",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::thread_unread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client with an owned thread and admitted incoming anchor: stale fence refuses without writes; mark survives full daemon/store restart; identical-key replay preserves operation ID and affected IDs without extra store writes. Summary supplies the opaque signed mark ID used to clear; natural unread and message history remain unchanged."
+    },
+    {
+      "action": "thread.clear-unread",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::thread_unread_actions_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "Real typed client clears the opaque mark ID observed from Summary: stale fence refuses without writes; cleared state survives full daemon/store restart; identical-key replay preserves operation ID and affected IDs without extra store writes. Natural unread and message history remain unchanged."
+    },
+    {
       "action": "thread.rename",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::topic_thread_actions_survive_stale_fences_and_restarts"
