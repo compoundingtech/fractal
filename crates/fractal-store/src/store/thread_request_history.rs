@@ -210,8 +210,8 @@ fn read_conn(
          SELECT DISTINCT m.source,m.episode FROM members m JOIN step_runs s ON s.subject=m.source
          WHERE s.assignee=?4 AND m.source LIKE 'step-run/%'
            AND ((EXISTS(SELECT 1 FROM claims asked WHERE asked.subject=m.source AND asked.kind='work.person-asked')
-             AND m.episode=(SELECT asked.id FROM claims asked WHERE asked.subject=m.source
-               AND asked.kind='work.person-asked' ORDER BY CANONICAL_ASC(asked) LIMIT 1))
+             AND m.episode=(SELECT request.id FROM claims request WHERE request.subject=m.source
+               AND request.kind='work.person-asked' ORDER BY CANONICAL_ASC(request) LIMIT 1))
            OR (NOT EXISTS(SELECT 1 FROM claims asked WHERE asked.subject=m.source AND asked.kind='work.person-asked')
              AND m.episode LIKE 'run-generation/'||s.generation_id||':%'))
            AND (?5 IS NULL OR (m.source,m.episode)>(?5,?6))

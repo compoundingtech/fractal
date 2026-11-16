@@ -5,14 +5,14 @@ use serde_json::json;
 
 fn fixture() -> (Store, SourceEpisode) {
     let store = Store::open_memory("authored-history").unwrap();
-    crate::store::tests::publish_mission(&store, r#"version 2
+    let initial = crate::store::tests::publish_mission(&store, r#"version 2
 mission "history" state="ready" {
  goal "Retain questions."
  step "review" { assigned-to "person/test"; title "Original title"; goal "Original question" }
 }"#, "history-definition");
     let run = store.create_mission_run(&MissionRunRequest {
-        mission: "history".into(), revision: None, workspace: "/tmp".into(),
-        requester: Some("person/test".into()), mode: None, inputs: BTreeMap::new(),
+        mission: "history".into(), revision: Some(initial.revision.clone()), workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()), inputs: BTreeMap::new(),
         idempotency_key: "history-run".into(),
     }).unwrap();
     let source = run.steps[0].subject.clone();
@@ -116,6 +116,8 @@ fn old_generation_keeps_its_definition_after_revision_cutover() {
     let run: String = store.readers.get().query_row(
         "SELECT run_id FROM step_runs WHERE subject=?1", [&key.source_id], |row| row.get(0),
     ).unwrap();
+    // The fixture pins an ordinary run to its initial revision. An unpinned default-mode
+    // run may be cancelled by definition publication before explicit adoption can run.
     let replacement = crate::store::tests::publish_mission(&store, r#"version 2
 mission "history" state="ready" {
  goal "Retain questions."
