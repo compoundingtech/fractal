@@ -180,7 +180,7 @@ const sameFeed = <T,>(
   if (a._tag === 'Observed' && b._tag === 'Observed')
     return a.freshness === b.freshness && a.coverage?._tag === b.coverage?._tag && a.error === b.error && equal(a.value, b.value)
   if (a._tag === 'Unavailable' && b._tag === 'Unavailable')
-    return a.reason === b.reason && a.detail === b.detail
+    return a.reason === b.reason && a.detail === b.detail && a.explanation === b.explanation
   return a._tag === 'Waiting' && b._tag === 'Waiting'
 }
 
