@@ -2225,6 +2225,11 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
     predecessors: &[String],
     now: u128,
 ) -> Result<u64> {
+    if matches!(kind, "custom.client.assistant.v1.begun"
+        | assistant_grant_authority::GRANTED | assistant_grant_authority::POLICY | assistant_grant_authority::REVOKED) {
+        assistant_grant_authority::owner_mutation_ready(transaction, subject)
+            .map_err(anyhow::Error::new)?;
+    }
     // Every local write comes through here; rules see each one that names its writer.
     if let Some(actor) = actor {
         principals::rules_gate_tx(transaction, origin, actor, kind, subject)?;
@@ -2256,7 +2261,14 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h52b61956c36c owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
         )?;
-        assistant_grant_authority::refresh_local_append(transaction, id)?;
+        match assistant_grant_authority::refresh_local_append(transaction, id)? {
+            assistant_grant_authority::RefreshOutcome::Complete => {}
+            assistant_grant_authority::RefreshOutcome::Deferred => {
+                return Err(anyhow::Error::new(assistant_grant_authority::authority_not_ready(
+                    "external-grant admission is reconciling prior work; retry after it completes",
+                )));
+            }
+        }
     }
     Ok(store_index)
 }

@@ -162,6 +162,24 @@ absent-principal legacy ChatGPT grants retain their existing meaning.
 Claims persist credential/code digests, never bearer tokens or pairing codes;
 grant projections expose neither credential material nor its digests.
 
+Assistant-grant authority backlog is exported as the `u64` gauge
+`st.assistant_grant.pending_tasks` (unit `{task}`), with exactly two
+`st.assistant_grant.queue` values: `proof_invalidations` and `retractions`.
+These count pending task rows, not subject or grant history. The release backlog
+bound is **1,000 tasks per queue**; queues above that bound must remain visible
+without clamping. The operational owner is **`agent/compoundingtech/st-mcp`**.
+The daemon's existing mailbox metrics refresh samples both queues together off
+the scrape and grant-request paths, with at least 30 seconds between refreshes
+and a weak store reference. Scrapes read only the cached counts, even after the
+store has closed. Before the first successful sample no queue points are emitted;
+refresh failures retain the last complete sample rather than inventing zeros.
+Unsupported authority schemas are refused before querying either queue.
+The focused exporter proof is
+`assistant_grant_queue_gauge_exports_exact_cached_tasks_without_live_store` in
+`crates/fractal/tests/otel_export.rs`; it covers the release bound, unsupported
+schema refusal with absent queues, empty-cache omission, store disposal, exact
+queue attributes, over-bound visibility, and successful zero counts.
+
 Service read admission uses a closed GET/scope registry on both the credential
 gateway and bearer-authenticated native router. `read.claims` admits
 `/v1/client/claims` and `/v1/client/claims/by-id/{id}` with the native readers'

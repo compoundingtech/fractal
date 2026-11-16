@@ -6070,7 +6070,12 @@ fn plain_error(error: &anyhow::Error) -> String {
 }
 
 fn render_client_error(error: &anyhow::Error, mode: ClientMessage) -> String {
-    let full = format!("{error:#}");
+    let mut full = format!("{error:#}");
+    // Keep the operation heading separate from the server's actual rejection
+    // reason without discarding its typed cause or stable error code.
+    if full.starts_with("Couldn't revoke this grant.: ") {
+        full.replace_range("Couldn't revoke this grant.".len().."Couldn't revoke this grant.: ".len(), "\n");
+    }
     let Some(api) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<fractal_client::ClientError>())
@@ -10340,7 +10345,8 @@ async fn run_devices(
             let response = match command {
                 AssistantGrantCommand::Inspect { grant } => client.assistant_grant(&grant).await?,
                 AssistantGrantCommand::Revoke { grant } => {
-                    client.assistant_grant_revoke(&grant).await?
+                    client.assistant_grant_revoke(&grant).await
+                        .context("Couldn't revoke this grant.")?
                 }
                 AssistantGrantCommand::Policy { grant, terms, recipients } => {
                     let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;

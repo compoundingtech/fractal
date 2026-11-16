@@ -204,6 +204,19 @@ key-only authentication cursors, older addition cursors, missing auth-work
 initialization and legacy membership-dirty obligations migrate in a conditional
 savepoint even when the schema marker is current. Completed migrations and
 already-current pending work do not rewrite schema or metadata on reopen.
+
+Authority schema version 2 adds nullable `grant_subject` to the dirty,
+authentication-cursor, recompute and proof-recheck queues, with subject-leading
+indexes. Queue insert/update triggers derive the subject when evidence exists;
+missing evidence stays explicitly unresolved rather than dropping the obligation.
+Conversion captures a fixed rowid high-water mark for each queue and advances one
+row and its durable frontier atomically per charged maintenance unit. Restart
+resumes that frontier. New arrivals are trigger-indexed and cannot continually
+extend the conversion's captured range. Unknown-subject recovery is a separate
+bounded maintenance unit; it must reconcile the obligation, not merely clear its
+readiness fence. No bearer, candidate lookup, read-trust pin, approval-once summary
+or grant-consuming write may bypass global readiness.
+
 The `assistant_grant_*` tables are member-local derived authentication state,
 including effective snapshots: they depend on local verified receipts, arrival
 order and maintenance progress, not only canonical claims. Shared grant, policy
@@ -218,9 +231,15 @@ The authority schema producer's transitional large-value entry is
 version metadata writes, retaining `bound-or-reference-values-and-reclamation`
 review debt rather than claiming value-size proof.
 
-Global not-ready applies only during initial/version backfill. Thereafter dirty
-or pending authentication fences only that grant subject, including a pending
-revoke; established credentials for unrelated subjects remain usable. The last
+Global not-ready applies during initial/version backfill, subject-queue conversion,
+and while any queued obligation has an unknown (`NULL`) grant subject. A newer or
+malformed authority schema marker also fails closed; neither reads nor maintenance
+interpret future-schema tables. These refusals retain
+`assistant-grant-authority-not-ready` (HTTP 503, `retryable=true`), including when a
+cached write authorization reaches its writer transaction. Once conversion and
+unknown-subject recovery finish, dirty or pending authentication fences only its
+grant subject, including a pending revoke; established credentials for unrelated
+subjects remain usable. The last
 authenticated effective snapshot remains a conflict witness until an authenticated
 transition changes it: pending work cannot clear an existing opposite-profile
 conflict. The inherited fleet-generation fold can still aggregate historical
@@ -343,6 +362,17 @@ The configured authoritative owner can inspect the committed result and retry
 immediately without using bearer authorization. Revoke retries preserve the
 original revocation; policy and read-trust retries each append one new revision,
 as before. These routes do not offer keyed replay.
+Before any local owner grant append, `owner_mutation_ready` runs inside the same
+writer transaction. It refuses a future schema, any unknown-subject obligation,
+or preexisting recompute work for that subject. Ordinary known-subject
+authentication and attachment backlog still permits authoritative owner management.
+The internal refresh helper independently defers when the same claim already has
+recompute work; `RefreshOutcome::Deferred` is not completion and must not discharge
+authentication cursors or proof rechecks. An owner append that defers is rolled
+back and returns the typed retryable refusal, never a successful mutation response.
+The revoke CLI displays `Couldn't revoke this grant.` and then the actual rejection
+reason on its own line, preserving the typed server cause and code.
+
 Management selects the newest applicable authenticated transition by an indexed
 seek scoped to subject, kind, origin, actor and immutable grant identity. All
 identity predicates precede the descending store index, so unrelated local
@@ -380,11 +410,28 @@ positions cannot be reused. Earlier projection builds attached authenticated
 claims atomically, so their committed pairs need no replay; unfinished
 authentication/backfill continues through the new bounded tasks.
 
-Subject readiness starts with indexed subject claims and probes the queued
-obligations by their keys; unrelated queue growth does not cause a queue scan.
-It is not constant cost: a subject with many claims or matching proof/range
-obligations costs more. The q39 measurement must include queued retractions for
-the measured subject, not only a clean subject or unrelated queued work.
+Rollback does not rewrite raw grant evidence or remove the additive subject
+columns. A binary that recognizes but cannot interpret a newer authority schema
+must leave it untouched and refuse grant exercise; it must not reset the version
+marker to claim compatibility. Resume recovery with a binary supporting that schema
+and its retained conversion/frontier state. Older binaries predating this fence
+do not provide these authorization guarantees: schema additivity alone is not
+evidence of a safe serving rollback. Never delete queues, restore local-append
+markers by hand, or clear the conversion marker to make authorization appear ready.
+This restriction applies to current-binary authority reads, refresh and maintenance,
+not unrelated source writes. Generic unrelated appends remain allowed: the stored
+future schema owns its persistent trigger contract, and those triggers may maintain
+its queue subjects without the current binary interpreting or reinstalling them.
+Schema-on-open preserves that future authority DDL and metadata.
+
+
+Subject readiness seeks the four queue subject indexes directly, rather than
+starting from currently retained subject claims. An obligation therefore remains a
+fence even if its raw claim has disappeared. Unknown subjects are detected by
+indexed NULL probes before any subject-local admission; unrelated queue growth
+does not introduce a history-wide request scan. Matching proof/range obligations
+can still cost more for one subject. The q39 measurement must include queued
+retractions for the measured subject, not only a clean subject or unrelated work.
 These details remain on trusted-local doctor only: paired clients with
 `read.projections` cannot retrieve the provenance check through either the
 operations collection or operation detail. Clients continue to receive generic

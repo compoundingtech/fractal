@@ -264,9 +264,12 @@ impl Store {
                         | smallclaims::store::assistant_grant_authority::POLICY
                         | smallclaims::store::assistant_grant_authority::REVOKED)
                     {
-                        smallclaims::store::assistant_grant_authority::refresh_claim(
-                            &transaction, &claim.id,
-                        ).map_err(internal)?;
+                        use smallclaims::store::assistant_grant_authority::{self, RefreshOutcome};
+                        match assistant_grant_authority::refresh_claim(&transaction, &claim.id).map_err(internal)? {
+                            // Replication still commits raw evidence. Deferred keeps
+                            // its owning dirty/proof/cursor obligations untouched.
+                            RefreshOutcome::Complete | RefreshOutcome::Deferred => {}
+                        }
                     }
                     let effective = register_operation_tx(&transaction, claim).map_err(internal)?;
                     if effective {

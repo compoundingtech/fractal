@@ -115,6 +115,48 @@ with the public API list by a core unit test, preserving the core-to-smallclaims
 dependency direction while making new public scopes fail visibly until admitted
 by the authority validator.
 
+The schema-2 subject-indexed authority migration reuses existing claim and pending
+identities in nullable `grant_subject` columns on dirty, authentication-cursor,
+recompute and proof-recheck queues. These subjects are bounded assistant
+identifiers, not new unbounded payload values. Subject/NULL partial indexes and
+pending proof seek indexes change access paths, not logical value representation.
+The `smallclaims::store::assistant_grant_authority` producer owns migration DDL,
+subject-copy triggers, conversion-frontier metadata and queue cleanup exceptions;
+its existing body, record, proof and identity representation TODOs remain in force.
+Dynamic queue statements select only the existing fixed queue/table set. Their
+unresolved-sink entries conservatively retain statement/value tracing debt.
+The authorization, conflict, membership, receipt-cost, authority-contract and
+benchmark fixture modules own their inline test writers: fixed synthetic subjects,
+claim/proof identities and copied existing history exercise subject isolation,
+schema recovery and indexed work. Reference conversion must preserve those
+assertions, NULL/orphan handling and exact proof identity. Catalog declarations
+remain conservative (`value_size_proven: false`), including bounded subject keys.
+The reviewed `insert_claim` flow adds the subject readiness fence while preserving
+its existing canonical body/predecessor binds and local-append publication.
+The orphan-drain benchmark additionally owns a temporary identity/subject table
+and synthetic stale authority, effective, witness and attachment copies derived
+from one authenticated baseline. Its 20,000 missing-source identities are fixed
+fixture data, not a production orphan-frequency claim. Its inline record copies
+and dynamic count probes retain the benchmark module's representation/tracing
+TODOs; conversion must preserve committed maintenance-unit and fence-lift measures.
+The future-schema fixture owns its schema/metadata snapshot reader and reversible
+mutations of real signed signature, envelope and record evidence. These retain
+existing wire identities and values while asserting persisted-trigger effects.
+Its SQL-fragment strings used to assert trigger declarations are conservative
+lexical inventory candidates, not additional executed writers. Representation
+changes must preserve the exact future-owned DDL/metadata/queue-column contract.
+The signed cross-version rollback fixture's `lv-hee912ae08c9f` deletes one local
+append marker by existing claim identity, forcing validation against genuine
+sealed fleet evidence instead of the local-append exception. It creates no new
+value representation; keyed cleanup debt remains with the authority test module.
+Recovery reauthentication copies existing pending claim/subject identifiers into
+the dirty queue, clears stale authentication proof references and deletes stale
+cursors by claim identity. These mutations introduce no new payload values;
+the authority module retains its existing exact-wire and keyed-cleanup TODOs.
+Fairness and per-arm VM fixtures use bounded literal proof-invalidation identities
+and existing signed claim identities; their inline queues and proof references
+remain test-module-owned exceptions, not general identifier-size proofs.
+
 ### GitHub event observation fold inventory
 
 `fractal_store::store::resources` owns `lv-h05417f7bc8ab`: the event-list reader binds

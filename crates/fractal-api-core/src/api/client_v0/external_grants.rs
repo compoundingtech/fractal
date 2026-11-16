@@ -257,6 +257,9 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
     } else {
         previous.map(|claim| claim.id.clone())
     };
+    // The store checks owner_mutation_ready inside the append writer transaction.
+    // Management reads above intentionally bypass ordinary backlog; they are not
+    // admission. Preserve the typed readiness refusal through ApiError::bad.
     state.store.append_claim(&ClaimInput {
         subject, kind: kind.into(), actor: Some(actor.into()),
         fields: serde_json::from_value(value).map_err(ApiError::internal)?,

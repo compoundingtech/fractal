@@ -1087,6 +1087,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owner_revocation_retains_the_ordinary_subject_backlog_bypass() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let paired = paired(&state).await;
+        let id = paired["grant"]["id"].as_str().unwrap();
+        let subject = subject(id).unwrap();
+        let granted = latest(&state, &subject, GRANTED).unwrap().unwrap();
+        state.store.connection.write().execute(
+            "INSERT INTO assistant_grant_dirty(claim_id,grant_subject) VALUES(?1,?2)",
+            rusqlite::params![granted.id, subject]).unwrap();
+        assert!(authenticate(&state, &credential_digest(paired["credential"].as_str().unwrap()), "unix")
+            .unwrap().is_none(), "ordinary subject work still fences the bearer");
+        let Json(value) = revoke(State(state.clone()), Extension(ClientSession::local(Some(ISSUER)).unwrap()),
+            AxumPath(id.into())).await.unwrap();
+        assert_eq!(value["revoked"], true);
+        assert!(smallclaims::store::assistant_grant_authority::management_transition(
+            &state.store.readers.get(), &granted, REVOKED).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn owner_routes_reject_unresolved_recompute_and_future_schema_without_appending() {
+        for fence in ["orphan", "recompute", "future-schema"] {
+            for operation in ["policy", "revoke"] {
+                let root = tempfile::tempdir().unwrap();
+                let state = state(root.path());
+                let paired = paired(&state).await;
+                let id = paired["grant"]["id"].as_str().unwrap();
+                let subject = subject(id).unwrap();
+                let granted = latest(&state, &subject, GRANTED).unwrap().unwrap();
+                let head = state.store.latest_claim(&subject, None).unwrap().unwrap().id;
+                {
+                    let connection = state.store.connection.write();
+                    match fence {
+                        "orphan" => connection.execute(
+                            "INSERT INTO assistant_grant_dirty(claim_id,grant_subject) VALUES('orphan',NULL)", []).unwrap(),
+                        "recompute" => connection.execute(
+                            "INSERT INTO assistant_grant_recompute(claim_id,grant_subject) VALUES(?1,?2)",
+                            rusqlite::params![granted.id, subject]).unwrap(),
+                        _ => connection.execute(
+                            "UPDATE meta SET value='999' WHERE key='assistant_grant_authority_schema_version'", []).unwrap(),
+                    };
+                }
+                let app = super::super::super::router_for_transport(
+                    state.clone(), ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+                let body = if operation == "policy" {
+                    json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES,"expires_in_seconds":3600,
+                        "disclosure_consent":true,"consent_evidence":"owner approved","minimal_read_mode":"approval-once"}).to_string()
+                } else { "{}".into() };
+                let mut request = Request::builder().method("POST")
+                    .uri(format!("/v1/client/assistant/grants/{}/{operation}", urlencoding::encode(id)))
+                    .header(LOCAL_PERSON_HEADER, ISSUER).header("content-type","application/json")
+                    .body(Body::from(body)).unwrap();
+                request.extensions_mut().insert(super::super::super::LocalPeer {
+                    pid:8, peer_process:None, ancestor:None,
+                });
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{fence}/{operation}");
+                let body: Value = serde_json::from_slice(
+                    &axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+                assert_eq!(body["code"], "assistant-grant-authority-not-ready", "{body}");
+                assert_eq!(body["retryable"], true);
+                assert_eq!(state.store.latest_claim(&subject, None).unwrap().unwrap().id, head,
+                    "a deferred owner mutation must not append a policy or revocation");
+                if fence == "future-schema" {
+                    for path in ["/v1/client/assistant/summary".to_owned(),
+                        format!("/v1/client/assistant/grants/{}", urlencoding::encode(id))] {
+                        let response = app.clone().oneshot(Request::builder().uri(&path)
+                            .header(AUTHORIZATION, format!("Bearer {}", paired["credential"].as_str().unwrap()))
+                            .body(Body::empty()).unwrap()).await.unwrap();
+                        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+                        let body: Value = serde_json::from_slice(
+                            &axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+                        assert_eq!(body["code"], "assistant-grant-authority-not-ready");
+                        assert_eq!(body["retryable"], true);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn assistant_revocation_and_expiry_survive_restart() {
         let root=tempfile::tempdir().unwrap(); let state1=state(root.path()); let paired1=paired(&state1).await;
         let digest=credential_digest(paired1["credential"].as_str().unwrap());
