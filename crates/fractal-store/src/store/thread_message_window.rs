@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[cfg(test)]
+thread_local! { static WINDOW_BODY_FETCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 #[derive(serde::Serialize)]
 pub struct ThreadMessage {
     pub kind: &'static str,
@@ -25,6 +28,24 @@ pub enum TimelineItem {
 pub struct TimelinePage {
     pub items: Vec<TimelineItem>,
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<TimelineAnchor>,
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineAnchorState {
+    Current,
+    Unavailable,
+    Pending,
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TimelineAnchor {
+    pub message_id: String,
+    pub state: TimelineAnchorState,
 }
 
 /// Count admitted messages and determine whether a person still has an incoming reply to read.
@@ -37,7 +58,11 @@ pub(super) fn message_summary(
     creation: &ClaimRecord,
 ) -> Result<(u64, bool), FractalError> {
     thread_message_activity(
-        connection, person, agent, thread, creation,
+        connection,
+        person,
+        agent,
+        thread,
+        creation,
         "SELECT count(*), coalesce(max(unread), 0) FROM qualified",
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
@@ -53,7 +78,11 @@ pub(super) fn message_unread(
     creation: &ClaimRecord,
 ) -> Result<bool, FractalError> {
     thread_message_activity(
-        connection, person, agent, thread, creation,
+        connection,
+        person,
+        agent,
+        thread,
+        creation,
         "SELECT EXISTS(SELECT 1 FROM qualified WHERE unread)",
         |row| row.get(0),
     )
@@ -127,7 +156,12 @@ pub fn mark_read(
     through: Option<&str>,
     seen: &[String],
 ) -> Result<(Vec<String>, bool), FractalError> {
-    let invalid = || FractalError::new("invalid-thread-read", "expected up to 50 distinct message IDs and their newest anchor");
+    let invalid = || {
+        FractalError::new(
+            "invalid-thread-read",
+            "expected up to 50 distinct message IDs and their newest anchor",
+        )
+    };
     let valid_id = |id: &str| id.starts_with("message/") && (9..=512).contains(&id.len());
     if seen.len() > 50 {
         return Err(invalid());
@@ -212,13 +246,21 @@ pub fn mixed_timeline(
     person: &str,
     thread: &str,
     cursor: Option<&str>,
+    around: Option<&str>,
     limit: usize,
 ) -> Result<TimelinePage, FractalError> {
     store
         .graph
         .read_snapshot(|index| {
-            let connection = store.readers.get();
-            Ok(read(&connection, person, thread, cursor, limit, index))
+            Ok(read(
+                &store.readers.get(),
+                person,
+                thread,
+                cursor,
+                around,
+                limit,
+                index,
+            ))
         })
         .map_err(internal)?
 }
@@ -228,37 +270,46 @@ fn read(
     person: &str,
     thread: &str,
     cursor: Option<&str>,
+    around: Option<&str>,
     limit: usize,
     index: u64,
 ) -> Result<TimelinePage, FractalError> {
-    let creation = owned_creation(connection, thread, person, false)?.ok_or_else(unavailable)?;
-    let agent = creation.body["fields"]["agent"]
-        .as_str()
-        .ok_or_else(unavailable)?;
-    let person = identities::resolve_reference_conn(connection, person)?;
-    let agent = identities::resolve_reference_conn(connection, agent)?;
-    let first = creation.body["fields"]["first_message"].as_str();
-    let scope =
-        canonical_hash(&("thread.mixed-timeline.v1", &person, &agent, thread)).map_err(internal)?;
     let invalid_cursor = || {
         FractalError::new(
             "invalid-thread-cursor",
             "the thread message cursor is unavailable",
         )
     };
-    let (through, anchor) = match cursor {
+    if cursor.is_some() && around.is_some() {
+        return Err(invalid_cursor());
+    }
+    let creation = owned_creation(connection, thread, person, false)?.ok_or_else(unavailable)?;
+    let person = identities::resolve_reference_conn(connection, person)?;
+    let agent = identities::resolve_reference_conn(
+        connection,
+        creation.body["fields"]["agent"]
+            .as_str()
+            .ok_or_else(unavailable)?,
+    )?;
+    let first = creation.body["fields"]["first_message"].as_str();
+    let scope =
+        canonical_hash(&("thread.mixed-timeline.v1", &person, &agent, thread)).map_err(internal)?;
+    let (through, boundary, newer) = match cursor {
         Some(cursor) => {
             let (cursor_scope, suffix) = cursor.split_once(':').ok_or_else(invalid_cursor)?;
-            let (through, anchor) = suffix.split_once(':').ok_or_else(invalid_cursor)?;
+            let (through, marker) = suffix.split_once(':').ok_or_else(invalid_cursor)?;
             let through = through.parse::<u64>().map_err(|_| invalid_cursor())?;
+            let (newer, id) = marker
+                .strip_prefix("newer/")
+                .map_or((false, marker), |id| (true, id));
             if cursor_scope != scope
                 || through > index
                 || through < creation.store_index
-                || anchor.len() > 512
+                || id.len() > 512
             {
                 return Err(invalid_cursor());
             }
-            let anchor = claim_by_id_tx(connection, anchor)
+            let claim = claim_by_id_tx(connection, id)
                 .map_err(internal)?
                 .filter(|claim| {
                     claim.store_index <= through
@@ -266,73 +317,143 @@ fn read(
                             || member(claim, thread, first, &creation.batch_id, through))
                 })
                 .ok_or_else(invalid_cursor)?;
-            (through, Some(anchor))
+            if claim.kind == "message.sent" {
+                message_actor(connection, &claim, &person, &agent).map_err(|_| invalid_cursor())?;
+            }
+            (through, Some(claim), newer)
         }
-        None => (index, None),
+        None => (index, None, false),
     };
-
-    // The explicit membership arm seeks the thread's own message index. The legacy
-    // first-message arm reads exactly the atomic start batch and skips a duplicate.
-    let selection = format!("AND claims.store_index <= ?4 AND {ACTIVE_MESSAGE}");
-    let after = smallclaims::store::canonical::after_sql("anchor", "claims");
-    let cursor_range = format!(
-        "AND (?5 IS NULL OR (length(claims.accepted_at_unix_ms), claims.accepted_at_unix_ms) <= (length(?6), ?6))
-         AND (?5 IS NULL OR EXISTS (SELECT 1 FROM claims anchor WHERE anchor.id=?5 AND {after}))"
-    );
-    let sql = canonical_sql(&format!(
-        "WITH explicit AS (
-            SELECT {CLAIM_COLUMNS}, 'active' AS operation_state
-            FROM claims INDEXED BY claims_thread_message_accepted_index
-            WHERE claims.kind='message.sent' AND json_extract(claims.body, '$.fields.thread_id')=?1
-              AND json_extract(claims.body, '$.fields.thread_id') IS NOT NULL
-              {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
-            ORDER BY CANONICAL_DESC(claims) LIMIT ?7
-         ), legacy AS (
-            SELECT {CLAIM_COLUMNS}, 'active' AS operation_state FROM claims
-            WHERE claims.subject=?2 AND claims.batch_id=?3 AND claims.kind='message.sent'
-              AND json_extract(claims.body, '$.fields.thread_id') IS NULL
-              {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
-         ), lifecycle AS (
-            SELECT {CLAIM_COLUMNS}, operations.state AS operation_state
-            FROM claims INDEXED BY claims_subject_accepted_index
-            JOIN operations ON operations.id=json_extract(claims.body, '$._operation.id')
-            WHERE claims.subject=?1 AND claims.kind IN ('thread.title-set', 'thread.state-set')
-              AND claims.store_index <= ?4
-              AND (operations.state='conflict' OR operations.canonical_claim_id=claims.id)
-              AND {UNREPAIRED_CLAIM} {cursor_range}
-            ORDER BY CANONICAL_DESC(claims) LIMIT ?7
-         )
-         SELECT {CLAIM_COLUMNS}, operation_state
-         FROM (SELECT * FROM explicit UNION ALL SELECT * FROM legacy UNION ALL SELECT * FROM lifecycle) claims
-         ORDER BY CANONICAL_DESC(claims) LIMIT ?7"
-    ));
     let limit = limit.clamp(1, 50);
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he5a2848d26a3 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
-    let rows = statement
-        .query_map(
-            params![
-                thread,
-                first,
-                creation.batch_id,
-                through,
-                anchor.as_ref().map(|claim| &claim.id),
-                anchor
-                    .as_ref()
-                    .map(|claim| claim.accepted_at_unix_ms.to_string()),
-                limit + 1,
-            ],
-            |row| Ok((claim_from_row(row)?, row.get::<_, String>(10)?)),
-        )
-        .map_err(internal)?;
-    let mut items = Vec::new();
-    let mut last = None;
-    let mut has_more = false;
-    for row in rows {
-        let (claim, operation_state) = row.map_err(internal)?;
-        if items.len() == limit {
-            has_more = true;
-            break;
+    let mut anchor_state = None;
+    let mut selected = if let Some(subject) = around {
+        if !subject.starts_with("message/") || subject.len() > 512 {
+            return Err(unavailable());
         }
+        let sql = canonical_sql(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_kind_index
+            WHERE claims.subject=?1 AND claims.kind='message.sent' AND claims.store_index<=?2
+              AND {ACTIVE_MESSAGE} AND {UNREPAIRED_CLAIM} ORDER BY CANONICAL_DESC(claims) LIMIT 1"
+        ));
+        #[cfg(test)]
+        WINDOW_BODY_FETCHES.with(|count| count.set(count.get() + 1));
+        let anchor = connection
+            .query_row(/* sqlite-large-value: allow-for-now lv-hbc0b493bd9e2 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql, params![subject, through], claim_from_row)
+            .optional()
+            .map_err(internal)?
+            .filter(|claim| member(claim, thread, first, &creation.batch_id, through));
+        let anchor = match anchor {
+            Some(anchor) if message_actor(connection, &anchor, &person, &agent).is_ok() => anchor,
+            _ => {
+                if !super::super::thread_reading::private_anchor_intent_conn(
+                    connection, &person, thread, subject,
+                )? {
+                    return Err(unavailable());
+                }
+                let known:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index WHERE subject=?1 AND kind='message.sent')",[subject],|row|row.get(0)).map_err(internal)?;
+                return Ok(TimelinePage {
+                    items: vec![],
+                    next_cursor: None,
+                    previous_cursor: None,
+                    anchor: Some(TimelineAnchor {
+                        message_id: subject.into(),
+                        state: if known {
+                            TimelineAnchorState::Unavailable
+                        } else {
+                            TimelineAnchorState::Pending
+                        },
+                    }),
+                });
+            }
+        };
+        let mut newer = query_window_headers(
+            connection,
+            thread,
+            &creation,
+            through,
+            Some(&anchor),
+            true,
+            limit,
+        )?;
+        let older = query_window_headers(
+            connection,
+            thread,
+            &creation,
+            through,
+            Some(&anchor),
+            false,
+            limit,
+        )?;
+        let mut newer_count = newer.len().min(limit / 2);
+        let older_count = older.len().min(limit - 1 - newer_count);
+        newer_count = newer.len().min(limit - 1 - older_count);
+        newer.truncate(newer_count);
+        newer.reverse();
+        let mut newer = materialize_window(connection, newer)?;
+        newer.push((anchor, "active".into()));
+        newer.extend(materialize_window(
+            connection,
+            older.into_iter().take(older_count).collect(),
+        )?);
+        anchor_state = Some(TimelineAnchor {
+            message_id: subject.into(),
+            state: TimelineAnchorState::Current,
+        });
+        newer
+    } else {
+        let mut selected = query_window(
+            connection,
+            thread,
+            &creation,
+            through,
+            boundary.as_ref(),
+            newer,
+            limit,
+        )?;
+        selected.truncate(limit);
+        if newer {
+            selected.reverse();
+        }
+        selected
+    };
+    let first_claim = selected.first().map(|(claim, _)| claim);
+    let last_claim = selected.last().map(|(claim, _)| claim);
+    let previous_cursor = match first_claim {
+        Some(first)
+            if !query_window_headers(
+                connection,
+                thread,
+                &creation,
+                through,
+                Some(first),
+                true,
+                1,
+            )?
+            .is_empty() =>
+        {
+            Some(format!("{scope}:{through}:newer/{}", first.id))
+        }
+        _ => None,
+    };
+    let next_cursor = match last_claim {
+        Some(last)
+            if !query_window_headers(
+                connection,
+                thread,
+                &creation,
+                through,
+                Some(last),
+                false,
+                1,
+            )?
+            .is_empty() =>
+        {
+            Some(format!("{scope}:{through}:{}", last.id))
+        }
+        _ => None,
+    };
+    let mut items = Vec::with_capacity(selected.len());
+    for (claim, operation_state) in selected.drain(..) {
         if operation_state == "conflict" {
             return Err(FractalError::new(
                 "idempotency-conflict",
@@ -340,7 +461,6 @@ fn read(
             ));
         }
         if lifecycle(&claim, thread) {
-            last = Some(claim.id.clone());
             items.push(TimelineItem::Lifecycle(
                 Event::from_claim(claim).ok_or_else(unavailable)?,
             ));
@@ -352,7 +472,6 @@ fn read(
             connection, &claim, &creation, thread, &person, &agent, through,
         )?
         .map(str::to_owned);
-        last = Some(claim.id.clone());
         items.push(TimelineItem::Message(ThreadMessage {
             kind: "message",
             id: claim.subject,
@@ -363,10 +482,111 @@ fn read(
             claim_id: claim.id,
         }));
     }
-    let next_cursor = last
-        .filter(|_| has_more)
-        .map(|last| format!("{scope}:{through}:{last}"));
-    Ok(TimelinePage { items, next_cursor })
+    Ok(TimelinePage {
+        items,
+        next_cursor,
+        previous_cursor,
+        anchor: anchor_state,
+    })
+}
+
+/// Both directions seek this thread's routing index before decoding only the bounded window.
+fn materialize_window(
+    connection: &Connection,
+    headers: Vec<(String, String)>,
+) -> Result<Vec<(ClaimRecord, String)>, FractalError> {
+    headers
+        .into_iter()
+        .map(|(id, state)| {
+            #[cfg(test)]
+            WINDOW_BODY_FETCHES.with(|count| count.set(count.get() + 1));
+            Ok((
+                claim_by_id_tx(connection, &id)
+                    .map_err(internal)?
+                    .ok_or_else(unavailable)?,
+                state,
+            ))
+        })
+        .collect()
+}
+
+fn query_window(
+    connection: &Connection,
+    thread: &str,
+    creation: &ClaimRecord,
+    through: u64,
+    anchor: Option<&ClaimRecord>,
+    newer: bool,
+    limit: usize,
+) -> Result<Vec<(ClaimRecord, String)>, FractalError> {
+    materialize_window(
+        connection,
+        query_window_headers(connection, thread, creation, through, anchor, newer, limit)?,
+    )
+}
+
+/// Canonical ordering may inspect a tied-time header bucket. Body hydration happens
+/// only after the bounded ID window is selected, never inside that canonical sort.
+fn query_window_headers(
+    connection: &Connection,
+    thread: &str,
+    creation: &ClaimRecord,
+    through: u64,
+    anchor: Option<&ClaimRecord>,
+    newer: bool,
+    limit: usize,
+) -> Result<Vec<(String, String)>, FractalError> {
+    let after = if newer {
+        smallclaims::store::canonical::after_sql("claims", "anchor")
+    } else {
+        smallclaims::store::canonical::after_sql("anchor", "claims")
+    };
+    let direction = if newer { "ASC" } else { "DESC" };
+    let comparison = if newer { ">=" } else { "<=" };
+    // An anchored seek uses an unconditional tuple range. The optional-OR shape
+    // prevents SQLite from using the accepted-time part of the routing index.
+    let range = if anchor.is_some() {
+        format!("AND (length(claims.accepted_at_unix_ms),claims.accepted_at_unix_ms) {comparison} (length(?6),?6)
+        AND EXISTS(SELECT 1 FROM claims anchor WHERE anchor.id=?5 AND {after})")
+    } else {
+        String::new()
+    };
+    let headers = "claims.id,claims.batch_id,claims.store_index,claims.accepted_at_unix_ms";
+    let sql=canonical_sql(&format!("WITH explicit AS (
+        SELECT {headers},'active' AS operation_state FROM claims INDEXED BY claims_thread_message_accepted_index
+        JOIN operations active_operation ON active_operation.canonical_claim_id=claims.id AND active_operation.state='active'
+        WHERE claims.kind='message.sent' AND json_extract(claims.body,'$.fields.thread_id')=?1
+          AND json_extract(claims.body,'$.fields.thread_id') IS NOT NULL AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} {range}
+        ORDER BY CANONICAL_{direction}(claims) LIMIT ?7
+    ), legacy AS (
+        SELECT {headers},'active' AS operation_state FROM claims
+        JOIN operations active_operation ON active_operation.canonical_claim_id=claims.id AND active_operation.state='active'
+        WHERE claims.subject=?2 AND claims.batch_id=?3 AND claims.kind='message.sent'
+          AND json_extract(claims.body,'$.fields.thread_id') IS NULL AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} {range}
+    ), lifecycle AS (
+        SELECT {headers},operations.state AS operation_state FROM claims INDEXED BY claims_subject_accepted_index
+        JOIN operations ON operations.id=json_extract(claims.body,'$._operation.id')
+        WHERE claims.subject=?1 AND claims.kind IN ('thread.title-set','thread.state-set') AND claims.store_index<=?4
+          AND (operations.state='conflict' OR operations.canonical_claim_id=claims.id) AND {UNREPAIRED_CLAIM} {range}
+        ORDER BY CANONICAL_{direction}(claims) LIMIT ?7
+    ) SELECT claims.id,operation_state FROM (SELECT * FROM explicit UNION ALL SELECT * FROM legacy UNION ALL SELECT * FROM lifecycle) claims
+      ORDER BY CANONICAL_{direction}(claims) LIMIT ?7"));
+    let mut statement=connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he5a2848d26a3 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
+    let rows = statement
+        .query_map(
+            params![
+                thread,
+                creation.body["fields"]["first_message"].as_str(),
+                creation.batch_id,
+                through,
+                anchor.map(|claim| &claim.id),
+                anchor.map(|claim| claim.accepted_at_unix_ms.to_string()),
+                limit + 1
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(internal)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)
 }
 
 /// Resolve the same canonical admitted message from a previously issued content handle.
@@ -520,11 +740,21 @@ mod read_progress_tests {
         let owner = "person/example";
         let agent = "agent/example";
         let thread = "thread/read-test";
-        let (_created, _) = apply(&left, owner, thread, "create-read-test", Edit::Create {
-            agent, title: "Review",
-        }).unwrap();
+        let (_created, _) = apply(
+            &left,
+            owner,
+            thread,
+            "create-read-test",
+            Edit::Create {
+                agent,
+                title: "Review",
+            },
+        )
+        .unwrap();
         let replicate = |source: &Store, target: &Store| {
-            target.import_replication(source.origin(), &source.export_replication(0).unwrap()).unwrap();
+            target
+                .import_replication(source.origin(), &source.export_replication(0).unwrap())
+                .unwrap();
         };
         replicate(&left, &right);
         let message = |store: &Store, id: &str| {
@@ -539,18 +769,84 @@ mod read_progress_tests {
         std::thread::sleep(std::time::Duration::from_millis(3));
         let anchor = message(&left, "message/shown-anchor");
         assert!(late.accepted_at_unix_ms < anchor.accepted_at_unix_ms);
-        let (_closed, _) = apply(&left, owner, thread, "close-read-test", Edit::Close {
-            revision: &crate::store::thread_metadata::summary(&left, owner, thread).unwrap().revision,
-        }).unwrap();
+        let (_closed, _) = apply(
+            &left,
+            owner,
+            thread,
+            "close-read-test",
+            Edit::Close {
+                revision: &crate::store::thread_metadata::summary(&left, owner, thread)
+                    .unwrap()
+                    .revision,
+            },
+        )
+        .unwrap();
         let closed_revision = summary(&left, owner, thread).unwrap().revision;
         let seen = vec![anchor.subject.clone()];
-        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, None, &[]).unwrap(), (vec![], false));
-        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, "person/other", thread, None, &[]).unwrap_err().code, "thread-unavailable");
+        assert_eq!(
+            mark_read(
+                &left,
+                PersonAuthority::TrustedLocal,
+                owner,
+                thread,
+                None,
+                &[]
+            )
+            .unwrap(),
+            (vec![], false)
+        );
+        assert_eq!(
+            mark_read(
+                &left,
+                PersonAuthority::TrustedLocal,
+                "person/other",
+                thread,
+                None,
+                &[]
+            )
+            .unwrap_err()
+            .code,
+            "thread-unavailable"
+        );
         let invalid = vec![anchor.subject.clone(), "message/unknown".into()];
-        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, Some(&anchor.subject), &invalid).unwrap_err().code, "thread-unavailable");
+        assert_eq!(
+            mark_read(
+                &left,
+                PersonAuthority::TrustedLocal,
+                owner,
+                thread,
+                Some(&anchor.subject),
+                &invalid
+            )
+            .unwrap_err()
+            .code,
+            "thread-unavailable"
+        );
         assert!(summary(&left, owner, thread).unwrap().unread);
-        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, Some(&anchor.subject), &seen).unwrap(), (seen.clone(), true));
-        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, Some(&anchor.subject), &seen).unwrap(), (seen, false));
+        assert_eq!(
+            mark_read(
+                &left,
+                PersonAuthority::TrustedLocal,
+                owner,
+                thread,
+                Some(&anchor.subject),
+                &seen
+            )
+            .unwrap(),
+            (seen.clone(), true)
+        );
+        assert_eq!(
+            mark_read(
+                &left,
+                PersonAuthority::TrustedLocal,
+                owner,
+                thread,
+                Some(&anchor.subject),
+                &seen
+            )
+            .unwrap(),
+            (seen, false)
+        );
         assert!(!summary(&left, owner, thread).unwrap().unread);
         replicate(&right, &left);
         replicate(&left, &right);
@@ -559,8 +855,129 @@ mod read_progress_tests {
             assert!(summary.unread);
             assert_eq!(summary.state, "closed");
             assert_eq!(summary.revision, closed_revision);
-            assert_eq!(store.claims_for(&anchor.subject, Some("message.read")).unwrap().len(), 1);
-            assert!(store.claims_for(&late.subject, Some("message.read")).unwrap().is_empty());
+            assert_eq!(
+                store
+                    .claims_for(&anchor.subject, Some("message.read"))
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(
+                store
+                    .claims_for(&late.subject, Some("message.read"))
+                    .unwrap()
+                    .is_empty()
+            );
         }
+    }
+
+    #[test]
+    fn read_helpers_anchor_seek_work_is_bounded_as_history_grows() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let store = Store::open_memory("seek-cost").unwrap();
+        store.configure_thread_write_rollout([]);
+        store.append_claim(&ClaimInput{subject:"daemon/seek-cost".into(),kind:"daemon.started".into(),actor:None,
+            fields:serde_json::from_value(json!({"status":"running","features":{"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION}})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
+        let person = "person/example";
+        let agent = "agent/example";
+        let thread = "thread/seek-cost";
+        apply(
+            &store,
+            person,
+            thread,
+            "create",
+            Edit::Create {
+                agent,
+                title: "Seek",
+            },
+        )
+        .unwrap();
+        let base = store
+            .claims_page(None, None, 0, None, false, 100)
+            .unwrap()
+            .claims
+            .iter()
+            .map(|claim| claim.accepted_at_unix_ms)
+            .max()
+            .unwrap()
+            + 100;
+        let send = |n: u64, time: u128| {
+            store.set_write_clock_at(time).unwrap();
+            let receipt=super::super::thread_delivery::append_reply(&store,&ClaimInput{subject:format!("message/cost-{n}"),kind:"message.sent".into(),actor:Some(agent.into()),
+                fields:serde_json::from_value(json!({"from":agent,"to":person,"status":"sent","content":"Bounded body","thread_id":thread})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:Some(format!("cost-{n}"))},PersonAuthority::TrustedLocal,None).unwrap().0;
+            assert_eq!(
+                receipt.accepted_at_unix_ms, time,
+                "fixture must use actual distinct or tied signed times"
+            );
+        };
+        let measure = |anchor: &str| {
+            let connection = store.readers.get();
+            let steps = Arc::new(AtomicUsize::new(0));
+            let count = steps.clone();
+            WINDOW_BODY_FETCHES.with(|count| count.set(0));
+            connection.progress_handler(
+                1,
+                Some(move || {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            );
+            let page = read(
+                &connection,
+                person,
+                thread,
+                None,
+                Some(anchor),
+                1,
+                current_index(&connection).unwrap(),
+            )
+            .unwrap();
+            connection.progress_handler(0, None::<fn() -> bool>);
+            assert_eq!(page.items.len(), 1);
+            (
+                steps.load(Ordering::Relaxed),
+                WINDOW_BODY_FETCHES.with(|count| count.get()),
+            )
+        };
+        for n in 0..64 {
+            send(n, base + u128::from(n) * 10);
+        }
+        let before = measure("message/cost-0");
+        for n in 64..512 {
+            send(n, base + u128::from(n) * 10);
+        }
+        let after = measure("message/cost-0");
+        eprintln!("varied-time seek: VM/body-fetches {before:?} -> {after:?}");
+        assert!(
+            after.0 <= before.0 * 2 + 500,
+            "varied-time seek VM steps {before:?} -> {after:?}"
+        );
+        assert!(
+            before.1 > 0 && after.1 > 0,
+            "body-fetch trace must be active"
+        );
+        assert!(
+            before.1 <= 8 && after.1 <= 8,
+            "bounded bodies plus creator/anchor point reads"
+        );
+        let tied = base + 10_000;
+        for n in 1024..1088 {
+            send(n, tied);
+        }
+        let ties_before = measure("message/cost-1024");
+        for n in 1088..1536 {
+            send(n, tied);
+        }
+        let ties_after = measure("message/cost-1024");
+        eprintln!(
+            "equal-time canonical header bucket: VM/body-fetches {ties_before:?} -> {ties_after:?}"
+        );
+        // Existing canonical tie keys live in batches/claim_positions. Header-only
+        // bucket sorting can grow; no broad canonical projection is invented here.
+        assert!(
+            ties_before.1 <= 8 && ties_after.1 <= 8,
+            "tied buckets must not hydrate history bodies"
+        );
+        assert_eq!(ties_before.1, ties_after.1);
     }
 }
