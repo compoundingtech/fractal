@@ -23,7 +23,7 @@ impl Drop for Looping {
 fn looping() -> Looping {
     assert!(WOKEN_WITHIN.as_millis() < crate::incremental::FULL_PASS_INTERVAL_MS);
     let store = Arc::new(Store::open_memory("node").unwrap());
-    let SeatQueueFixture { store: _, reconciler } = SeatQueueFixture::with_store(store.clone());
+    let SeatQueueFixture { reconciler, .. } = SeatQueueFixture::with_store(store.clone());
     let reconciler = Arc::new(reconciler.skipping_unneeded(true));
     for _ in 0..3 {
         reconciler.reconcile_once().unwrap();
