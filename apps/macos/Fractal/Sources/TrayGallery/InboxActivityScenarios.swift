@@ -7,7 +7,8 @@ let inboxActivityScenarios: [Scenario] = [false, true].flatMap { quiet in
     return Scenario(
       id: "inbox-activity-\(quiet ? "quiet" : "busy")-\(surface)",
       title: "Inbox activity · \(quiet ? "quiet" : "busy") · \(page ? "page" : "home")",
-      description: "Arrivals above, resolutions below; asks and updates in two tones."
+      description: "Arrivals above, resolutions below; asks and updates in two tones.",
+      inboxActivityPeriod: surface == "hours" ? .hours : .days
     ) { now in
       let content = Content(now: now)
       let activities = Dictionary(
