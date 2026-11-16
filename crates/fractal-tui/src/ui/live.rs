@@ -4171,12 +4171,28 @@ mod tests {
         let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
+        let mut requester = world.agents.items()[0].clone();
+        requester.id = "agent/x/requester".into();
+        requester.name = "Atlas\x1b[2J Builder\n".into();
+        let requester_id = requester.id.clone();
+        if let Load::Ready(agents) = &mut world.agents {
+            agents.push(requester);
+        }
         let mut ui = Ui::new(world);
         ui.show_focused();
-        ui.open_requested(Pane::Agent(Some(known)), Place::Right, false, Some("agent/x/bad\x1b[2Jname\n"));
+        ui.open_requested(Pane::Agent(Some(known.clone())), Place::Right, false, Some(&requester_id));
         let (shown, _) = ui.flash.clone().unwrap();
         assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
-        assert!(shown.contains("bad[2Jname"), "{shown:?}");
+        assert_eq!(shown, "Atlas[2J Builder opened Docs Writer");
+
+        let unknown = "agent/x/bad\x1b[2Jname\n";
+        ui.open_requested(Pane::Agent(Some(known)), Place::Right, false, Some(unknown));
+        let (shown, _) = ui.flash.clone().unwrap();
+        assert_eq!(shown, "an agent opened Docs Writer");
+        assert!(!shown.contains(unknown), "{shown:?}");
+        assert!(!shown.contains("agent/x/"), "{shown:?}");
+        assert!(!shown.contains("bad[2Jname"), "{shown:?}");
+        assert!(!shown.chars().any(|c| c.is_control()), "{shown:?}");
     }
 
     #[test]

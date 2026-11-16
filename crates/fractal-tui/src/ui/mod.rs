@@ -8831,6 +8831,12 @@ mod tests {
         // Nathan, 2026-10-05: a request a mission step made lost its mission link.
         let mut world = demo::test_world();
         let mission = "mission/release-proof";
+        let mut declared_mission = world.missions.items()[0].clone();
+        declared_mission.id = mission.into();
+        declared_mission.title = "Release proof".into();
+        if let Load::Ready(missions) = &mut world.missions {
+            missions.push(declared_mission);
+        }
         let item = Attention {
             deadline: None,
             requested_at: None,
@@ -8873,13 +8879,17 @@ mod tests {
         ui.select(at);
         let screen = frame(&ui, 140, 50).join("\n");
         for shown in [
-            "release-proof",
+            "Release proof",
             "waits    tag-proof · Prove the published tag builds.",
             "it continues once you",
             "Go to the mission",
         ] {
             assert!(screen.contains(shown), "{shown}: {screen}");
         }
+        assert!(
+            ui.frame.borrow().hits.iter().any(|(_, hit)| matches!(hit, Hit::Peek(id) if id == mission)),
+            "the rendered mission link keeps the raw navigation id"
+        );
     }
 
     #[test]

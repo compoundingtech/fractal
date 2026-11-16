@@ -10941,6 +10941,12 @@ mod tests {
     fn a_seat_opens_an_agent_in_a_split_and_the_person_follows_it() {
         let mut ui = glass();
         let (one, _) = others(&ui);
+        let mut requester = ui.world.agents.items()[0].clone();
+        requester.id = "agent/st/assistant".into();
+        requester.name = "Atlas Builder".into();
+        if let Load::Ready(agents) = &mut ui.world.agents {
+            agents.push(requester);
+        }
         let before = tabs(&ui);
         let answer = ui.open_requested(
             Pane::Agent(Some(one.clone())),
@@ -10955,7 +10961,7 @@ mod tests {
         assert_eq!(after.0, after.2.len() - 1, "the new split has the focus");
         assert_eq!(ui.focus(), (1, Some(one.clone())));
         assert_eq!(ui.live_conversations()[0], one);
-        assert!(ui.flash.as_ref().unwrap().0.contains("assistant opened"));
+        assert_eq!(ui.flash.as_ref().unwrap().0, "Atlas Builder opened Docs Writer");
     }
 
     #[test]
