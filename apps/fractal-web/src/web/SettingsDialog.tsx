@@ -9,6 +9,7 @@ import { accentVars as accent, borderVars as border, elevationVars as elevation,
 import { AvailabilityPanel } from '../availability/AvailabilityPanel.tsx'
 import { useConnection, useDataSource } from '../data/react.tsx'
 import { devBarAvailable, toggleDevBar, useDevBarVisible } from '../telemetry/devBarPreference.ts'
+import { BrowserPairingControl } from './BrowserPairing.tsx'
 import { deviceAccess, type SettingsBuild } from './settingsModel.ts'
 import { shortcutCaps, shortcutList, type ShortcutDefinition } from './shortcuts.ts'
 import { systemEventsPreference } from './conversationPreferences.ts'
@@ -18,6 +19,7 @@ export type SettingsScheme = 'dark' | 'light' | 'system'
 export interface SettingsControlProps {
   readonly scheme: SettingsScheme
   readonly onSchemeChange: (scheme: SettingsScheme) => void
+  readonly onOpenChange?: ((open: boolean) => void) | undefined
   readonly build?: SettingsBuild | undefined
 }
 
@@ -26,8 +28,10 @@ export interface SettingsControlProps {
  * inside the themed workspace, or inside the phone drawer's focus scope, so the sheet keeps the colour scheme and contains focus.
  * Contents and their reads exist only while open.
  */
-export const SettingsControl = ({ scheme, onSchemeChange, build }: SettingsControlProps) =>
-  <Aria.DialogTrigger>
+export const SettingsControl = ({ scheme, onSchemeChange, build, onOpenChange }: SettingsControlProps) => {
+  // Crossing the drawer breakpoint can unmount this trigger while its dialog is open.
+  React.useLayoutEffect(() => () => { onOpenChange?.(false) }, [onOpenChange])
+  return <Aria.DialogTrigger onOpenChange={onOpenChange}>
     <ChromeControl icon="gear" label="Settings" popup="dialog" edge="trail" />
     <ThemePortal>
       <Aria.ModalOverlay isDismissable {...stylex.props(styles.overlay)}>
@@ -52,6 +56,7 @@ export const SettingsControl = ({ scheme, onSchemeChange, build }: SettingsContr
       </Aria.ModalOverlay>
     </ThemePortal>
   </Aria.DialogTrigger>
+}
 
 const Section = ({ title, children }: { readonly title: string; readonly children: React.ReactNode }) => {
   const id = React.useId()
@@ -120,15 +125,16 @@ const DeviceFacts = ({ build }: { readonly build?: SettingsBuild | undefined }) 
   return <>
     <dl {...stylex.props(styles.facts)}>
       <Fact label="Access">{access.title}{connected ? '' : ' (last known, not connected)'}</Fact>
-      <Fact label="May">{access.allowed.join(', ')}</Fact>
-      {access.refused.length === 0 ? null : <Fact label="May not">{access.refused.join(', ')}</Fact>}
+      {access.allowed.length === 0 ? null : <Fact label="Granted controls">{access.allowed.join(', ')}</Fact>}
+      {access.refused.length === 0 ? null : <Fact label="Unavailable controls">{access.refused.join(', ')}</Fact>}
       <Fact label="Connection">{connected ? 'Connected' : 'Not connected'}</Fact>
       <Fact label="Gateway" mono>{source.gateway ?? 'Not reported'}</Fact>
       <Fact label="Version" mono>{build === undefined ? 'Not reported' : `${build.version}${build.revision === undefined ? '' : ` · ${build.revision.slice(0, 9)}`}${build.dirty === true ? ' · dirty' : ''}`}</Fact>
     </dl>
-    <p {...stylex.props(styles.note)}>
-      Access is set when this device is paired and can't be changed here. Pair it again with <code {...stylex.props(styles.code)}>fractal devices --as &lt;person&gt; pair --full-control</code> or <code {...stylex.props(styles.code)}>--read-only</code>, then give the app's server the new grant through <code {...stylex.props(styles.code)}>WF_ST_AUTHORIZATION_FILE</code>. <code {...stylex.props(styles.code)}>WF_ST_GATEWAY</code> selects the gateway. The version changes when the app is rebuilt.
-    </p>
+    <BrowserPairingControl context="settings" />
+    {source.pairing === undefined ? <p {...stylex.props(styles.note)}>
+      Server access is configured by the operator. Pair the server again with <code {...stylex.props(styles.code)}>fractal devices --as &lt;person&gt; pair --full-control</code> or <code {...stylex.props(styles.code)}>--read-only</code>, then give the app's server the new grant through <code {...stylex.props(styles.code)}>WF_ST_AUTHORIZATION_FILE</code>. <code {...stylex.props(styles.code)}>WF_ST_GATEWAY</code> selects the gateway. The version changes when the app is rebuilt.
+    </p> : null}
   </>
 }
 

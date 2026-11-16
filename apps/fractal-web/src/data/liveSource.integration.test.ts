@@ -677,6 +677,41 @@ describe('connection loss detection', () => {
     })),
   )
 
+  it.live('marks grants unread until capabilities answer, keeps the answer while disconnected and reads again on reconnect', () =>
+    withBrowser((live, gateway) => Effect.gen(function* () {
+      // Before any capabilities answer: the client has no discovery to reuse, so the grants wait on the read.
+      const capabilities = Promise.withResolvers<void>()
+      gateway.capabilityGate = capabilities.promise
+      const releaseGrants = live.registry.mount(live.source.grants)
+      yield* settle
+      // Not read yet is not a refusal: a surface waits instead of calling the device read-only.
+      expect(live.registry.get(live.source.grants)).toMatchObject({ actions: 'ungranted', unread: true })
+      capabilities.resolve()
+      gateway.capabilityGate = undefined
+      yield* settle
+      const release = yield* mountLiveFeeds(live, gateway)
+      expect(live.registry.get(live.source.grants)).toMatchObject({ actions: 'granted' })
+      expect(live.registry.get(live.source.grants)).not.toHaveProperty('unread')
+      gateway.capabilityFailure = true
+      gateway.socket?.onclose?.({ code: 1006, reason: '' })
+      yield* settle
+      expect(live.registry.get(live.source.connection)._tag).not.toBe('Live')
+      expect(live.registry.get(live.source.grants)).toMatchObject({ actions: 'granted' })
+      expect(live.registry.get(live.source.grants)).not.toHaveProperty('unread')
+      gateway.capabilityFailure = false
+      // A changed answer proves the reconnect read the capabilities again.
+      gateway.messageGrant = 'ungranted'
+      live.source.reconnect?.()
+      yield* settle
+      gateway.fleet([agent])
+      gateway.mailEcho()
+      yield* settle
+      expect(live.registry.get(live.source.grants)).toMatchObject({ messageSend: 'ungranted' })
+      releaseGrants()
+      release()
+    })),
+  )
+
   it.live('allows one explicit reachability attempt after a false browser offline hint', () =>
     withBrowser((live, gateway, browser) => Effect.gen(function* () {
       const release = yield* mountLiveFeeds(live, gateway)
@@ -1905,7 +1940,7 @@ describe('optimistic conversation sends', () => {
         gateway.transportFailure = true
         release()
         expect((yield* Effect.promise(() => sending))._tag).toBe('Refused')
-        expect(observed().items[2]).toMatchObject({ id: pendingRow.id, at: sendAt, sendState: { _tag: 'Failed' } })
+        expect(observed().items[2]).toMatchObject({ id: pendingRow.id, at: sendAt, sendState: { _tag: 'Unconfirmed' } })
         const failedPage = observed()
         expect(failedPage.change).toMatchObject({ from: expect.any(Array), index: 2 })
         // Replace/no-op frames must not shuffle the failed row past the reply.
@@ -2017,7 +2052,7 @@ describe('optimistic conversation sends', () => {
           yield* Effect.promise(() => live.source.attachments!.send(request))
           expect(live.registry.get(conversation)).toMatchObject({
             _tag: 'Observed', value: { items: [
-              { _tag: 'Text', role: 'user', text: 'hello', sendState: { _tag: 'Failed', reason: failure } },
+              { _tag: 'Text', role: 'user', text: 'hello', sendState: failure === 'failed' ? { _tag: 'Unconfirmed' } : { _tag: 'Failed', reason: failure } },
             ] },
           })
         }),
