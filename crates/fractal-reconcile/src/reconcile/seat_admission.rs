@@ -15,6 +15,7 @@ pub struct Controller {
     _watcher: Option<notify::RecommendedWatcher>,
     /// What admission by fit reads of this host; none where lanes are off.
     pub lanes: Option<LaneHost>,
+    pub finite_policy: fractal_runtime::host::FinitePolicy,
 }
 
 /// The room a host gives lanes, and how to read unreclaimable host memory outside lanes
@@ -64,6 +65,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.seat_admission = Controller {
             config, status, dirty, checked: Mutex::new(None), outside_observation: Mutex::new(None),
             _watcher: watcher, lanes: self.seat_admission.lanes,
+            finite_policy: self.seat_admission.finite_policy,
         };
         self
     }

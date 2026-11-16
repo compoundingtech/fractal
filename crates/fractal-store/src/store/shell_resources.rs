@@ -1,0 +1,168 @@
+//! Durable local commands handed to the existing host resource writer.
+use super::*;
+use super::resource_membership::{Grant, LaneRequest};
+
+pub const PARENT_ENV: &str = "FRACTAL_RESOURCE_PARENT";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ParentContext {
+    pub grant: Grant,
+    pub request: LaneRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Command {
+    pub id: String,
+    pub lane: LaneRequest,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub environment: BTreeMap<String, String>,
+    pub timeout_ms: Option<u64>,
+    pub parent: Option<Grant>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Execution {
+    pub command: Command,
+    pub state: String,
+    pub reason: String,
+    pub blocked_by: Option<resource_membership::BlockedBy>,
+    pub queued_at: u64,
+    pub revision: u64,
+    pub queue_wait_ms: u64,
+    pub started_at: Option<u64>,
+    pub ended_at: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub exit_signal: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub cancel: bool,
+    pub timed_out: bool,
+    pub head_start: Option<String>,
+    pub clean_start: Option<bool>,
+    pub result: Option<PayloadResult>,
+}
+
+pub(super) fn create_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS shell_resources_v1 (id TEXT PRIMARY KEY, host TEXT NOT NULL, state TEXT NOT NULL, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS shell_resources_host_v1 ON shell_resources_v1(host,state,id);")?;
+    Ok(())
+}
+
+impl Store {
+    pub fn submit_shell_resource(&self, command: Command, now: u64) -> Result<Execution> {
+        anyhow::ensure!(!command.id.is_empty() && !command.argv.is_empty(), "shell execution requires identity and argv");
+        anyhow::ensure!(command.cwd.starts_with('/'), "shell execution cwd must be absolute");
+        let execution = Execution { command, revision: 0, queue_wait_ms: 0, state: "waiting".into(), reason: "waiting for host admission".into(), blocked_by: None,
+            queued_at: now, started_at: None, ended_at: None, exit_code: None, exit_signal: None,
+            stdout: String::new(), stderr: String::new(), cancel: false, timed_out: false, head_start: None, clean_start: None, result: None };
+        self.connection.write().execute("INSERT INTO shell_resources_v1(id,host,state,body) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![execution.command.id,execution.command.lane.host,execution.state,serde_json::to_string(&execution)?])?;
+        self.resource_admission_elapsed(&format!("shell-wait:{}", execution.command.id), now, now);
+        Ok(execution)
+    }
+
+    pub fn shell_resource(&self, id: &str) -> Result<Execution> {
+        let body: String = self.readers.get().query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [id], |row| row.get(0))?;
+        Ok(serde_json::from_str(&body)?)
+    }
+
+    pub fn shell_resources(&self, host: &str, active_only: bool) -> Result<Vec<Execution>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare("SELECT body FROM shell_resources_v1 WHERE host=?1 AND (?2=0 OR state IN ('waiting','admitted','running','retiring','finishing')) ORDER BY id")?;
+        statement.query_map(rusqlite::params![host,active_only], |row| row.get::<_,String>(0))?
+            .map(|body| Ok(serde_json::from_str(&body?)?)).collect()
+    }
+
+    pub fn update_shell_resource(&self, execution: &Execution) -> Result<bool> {
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        let body: String = transaction.query_row("SELECT body FROM shell_resources_v1 WHERE id=?1", [&execution.command.id], |row| row.get(0))?;
+        let previous: Execution = serde_json::from_str(&body)?;
+        let mut next = execution.clone();
+        next.cancel |= previous.cancel;
+        next.revision = previous.revision;
+        if serde_json::to_string(&next)? == body { return Ok(false); }
+        next.revision += 1;
+        transaction.execute("UPDATE shell_resources_v1 SET state=?2,body=?3 WHERE id=?1",
+            rusqlite::params![next.command.id,next.state,serde_json::to_string(&next)?])?;
+        transaction.commit()?;
+        if matches!(next.state.as_str(), "completed" | "refused" | "cancelled") {
+            self.finish_resource_admission_clock(&format!("shell-wait:{}", next.command.id));
+        }
+        Ok(true)
+    }
+
+    pub fn cancel_shell_resource(&self, id: &str) -> Result<()> {
+        self.connection.write().execute("UPDATE shell_resources_v1 SET body=json_set(body,'$.cancel',json('true')) WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn shell_resource_queue_wait_ms(&self, execution: &Execution, now: u64) -> u64 {
+        self.resource_admission_elapsed(&format!("shell-wait:{}", execution.command.id), execution.queued_at, now).0
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadResult {
+    pub head_start: Option<String>,
+    pub head_end: Option<String>,
+    pub clean_start: Option<bool>,
+    pub clean_end: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub exit_signal: Option<i32>,
+    pub wall_duration_ms: u64,
+    pub memory_peak_bytes: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::resource_membership::{Coverage, Owner, RequestClass};
+
+    fn command(id: &str) -> Command {
+        Command { id: id.into(), lane: LaneRequest {
+            id: format!("shell:{id}"), name: "checks".into(), host: "host-a".into(), max_members: 1,
+            capacity: Some(fractal_runtime::Capacity { cores: 1, memory: 1 << 30 }),
+            class: RequestClass::Check, disk: None, io: None, coverage: Coverage::Logical,
+            admission_timeout_ms: None,
+            owner: Owner { run: format!("shell:{id}"), step: format!("shell:{id}"), attempt: 1, invocation: Some(format!("shell:{id}")) },
+        }, argv: vec!["true".into()], cwd: "/work".into(), environment: BTreeMap::new(), timeout_ms: None, parent: None }
+    }
+
+    #[test]
+    fn durable_commands_are_queryable_without_becoming_second_admission_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        {
+            let store = Store::open(&path, "host-a").unwrap();
+            store.submit_shell_resource(command("one"), 10).unwrap();
+            assert!(store.resource_memberships_for_host("host-a").unwrap().is_empty());
+        }
+        let store = Store::open(&path, "host-a").unwrap();
+        assert_eq!(store.shell_resource("one").unwrap().command.argv, ["true"]);
+        assert_eq!(store.shell_resources("host-a", true).unwrap().len(), 1);
+        assert!(store.shell_resources("other-host", false).unwrap().is_empty());
+        let mut execution = store.shell_resource("one").unwrap();
+        execution.state = "completed".into();
+        execution.exit_code = Some(37);
+        assert!(store.update_shell_resource(&execution).unwrap());
+        assert!(!store.update_shell_resource(&execution).unwrap());
+        assert_eq!(store.shell_resource("one").unwrap().exit_code, Some(37));
+        assert!(store.shell_resources("host-a", true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancellation_cannot_be_lost_to_an_in_flight_writer_snapshot() {
+        let store = Store::open_memory("host-a").unwrap();
+        let mut execution = store.submit_shell_resource(command("one"), 10).unwrap();
+        store.cancel_shell_resource("one").unwrap();
+        execution.state = "admitted".into();
+        store.update_shell_resource(&execution).unwrap();
+        assert!(store.shell_resource("one").unwrap().cancel);
+        assert_eq!(store.shell_resource("one").unwrap().revision, 1);
+    }
+}

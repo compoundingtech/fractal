@@ -7,10 +7,10 @@ Ordered [merge lanes](lanes.md), workflow population limits, and resource admiss
 ## Ownership
 
 ```text
-Effect scope / data DSL exec step
+Effect scope / data DSL exec step / shell exec
              |
              v
-execution-host writer: holds + FIFO + shared fit + fenced membership
+execution-host writer: holds + class/FIFO + shared fit + fenced membership
              |
              v
 payload gate -> execution generation -> whole-tree retirement proof
@@ -22,15 +22,40 @@ owns enforcement. Graph observations describe those facts; a replicated grant-sh
 launch a process. No standing lane worker or replicated graph semaphore grants resource capacity.
 
 A named lane policy binds an execution host, `maxMembers`, optional CPU/memory footprint, and
-required coverage. The host refuses a conflicting policy for an existing name. Membership binds
-the lane, authority epoch, owner run/step/attempt/invocation, and execution generation. Independent
-roots consume room once in the host accountant shared with seats and their raises/bursts. A child
-run without an OS process does not reserve fictitious memory.
+required coverage. The host refuses a conflicting policy for an existing name. Every request has
+a class: `landing`, `check` or `agent` (the default). The host serves classes in that order and
+preserves FIFO within a class; a non-fitting higher-class head cannot be bypassed by lower-class
+work. Membership binds the lane, authority epoch, owner run/step/attempt/invocation, and execution
+generation. Independent roots consume room once in the accountant shared with seats and their
+raises/bursts, including CI and shell work. A child run without an OS process reserves no memory.
 
 A durable **host hold** closes admission without occupying a membership. Its authenticated owner,
 revision, reason, affected operations and receipt persist independently of the initiating run.
 Resolving an ask, terminating a run, or restarting a daemon does not clear a hold. Resolution checks
 its owner and expected revision and wakes dependent admissions.
+
+## Shell callers
+
+```sh
+fractal resources exec --lane verification --class check \
+  --cores 4 --memory 24G --disk 15G --disk-path /workspace \
+  --io heavy --admission-timeout 4h --timeout 2h -- run-verification
+```
+
+The CLI uses the local daemon's internal resource path and the same finite membership machinery
+as programs and DSL steps. It does not require a client-v0 route. Memory and disk accept byte
+counts or binary suffixes such as `24G`. Admission and payload timeouts are separate budgets.
+Waiting, admitted and refused diagnostics go to stderr with `blockedBy`; payload stdout is not
+mixed with admission diagnostics, and the payload's exit status is preserved.
+
+Linux execution uses a transient scope beneath `app-lanes.slice` with memory and CPU limits.
+macOS is logical-only and refuses `--coverage enforced`. A nested resource exec validates and
+inherits its parent's membership through an environment marker instead of reserving a second
+footprint. The parent retains custody until every execution root is retired.
+
+`fractal resources ls` lists host holders and waiters; `fractal resources show` exposes membership
+details and blocking reasons. `fractal resources hold` and `fractal resources release` operate on
+the existing durable host holds, including authenticated ownership and revision checks.
 
 ## Program API
 
@@ -43,6 +68,9 @@ const verify = Effect.scoped(Effect.gen(function* () {
     host: 'worker',
     maxMembers: 1,
     capacity: { cores: 4, memory: 8 * 1024 ** 3 },
+    class: 'check',
+    disk: { bytes: 15 * 1024 ** 3, path: '/workspace' },
+    io: 'heavy',
     coverage: 'enforced',
     admissionTimeout: '30m',
   })
@@ -77,7 +105,7 @@ status and linked-child failure.
 ```kdl
 step "verify" timeout="20m" {
   agentless
-  lane "verification" host="worker" max-members=1 coverage="enforced" admission-timeout="30m" {
+  lane "verification" host="worker" max-members=1 class="check" disk="15G" disk-path="/workspace" io="heavy" coverage="enforced" admission-timeout="30m" {
     capacity cores=4 memory="8G"
   }
   exec "verify" {
@@ -105,11 +133,12 @@ and definition hashes unchanged; old history remains readable. A physical indepe
 is not a seat descendant merely because environment variables name that seat. Logical exclusivity
 without a new footprint can coexist with a seat's existing raise.
 
-New lane-bearing revisions are held by the existing fleet reader-capability barrier until every
-current member advertises `mission_resource_lane=1` on its own `daemon.started`. Planning and direct
-publication report `mission-resource-lane-unavailable` while any reader is older; capacity/program
-support alone does not advertise resource-lane support. Plain revisions and already published
-history are unaffected.
+New lane-bearing revisions use the existing fleet reader-capability barrier:
+`mission_resource_lane>=1` is required for ordinary lanes and `>=2` for non-agent classes, disk
+reservations or IO-heavy requests. Each current member advertises its version on its own
+`daemon.started`. Planning and direct publication report `mission-resource-lane-unavailable` while
+any reader is older. The shell CLI requires version 2 from its local daemon before submission.
+Plain revisions and already published history are unaffected.
 
 ## Admission, clocks and cancellation
 
@@ -119,13 +148,13 @@ queued -> admitted -> prepared -> payload released -> execution ended -> retired
 withdraw   cancel       uncertain      cancel tree       descendants remain
 ```
 
-The host evaluates holds, logical occupancy and physical fit in its writer transaction, preserving
-FIFO membership order. Waiters register a host/lane wake dependency before rechecking. Release,
-hold resolution, preparation cleanup and authority changes wake the affected work; there is no
-mission reserve-probe loop. Host-memory observations use the existing admission observation path:
-changed outside bytes invalidate fit and wake waiters, never grant capacity on elapsed time alone.
-Seat FIFO, scoped raises and delayed memory lowering retain their existing meanings; declared
-priority/budget metadata is not activated by this API.
+The host evaluates holds, class/FIFO order, logical occupancy and physical fit in its writer
+transaction. Waiters register a host/lane wake dependency before rechecking. Release, hold
+resolution, preparation cleanup and authority changes wake affected work; there is no mission
+reserve-probe loop. Host-memory observations invalidate fit when outside usage changes, never
+grant capacity on elapsed time alone. A blocked higher-class head retains its place even when a
+lower-class request would fit. Seat starts, scoped raises and finite executions share the native
+host accountant rather than maintaining independent CI or shell budgets.
 
 Seat starts, bursts and finite lanes share one ARC-aware host accountant:
 `reclaimable_arc = max(0, arc.size - arc.c_min)` (zero without ZFS),
@@ -139,9 +168,18 @@ request is not itself a burst-capable seat.
 
 A footprint exceeding host lane room is refused with code `impossible`, never left in FIFO.
 With no admitted members, granted bursts or host hold, the head fits exactly when its footprint
-fits room minus outside (and any reserve required by live seats). Waits expose `blockedBy` as
-`holder`, `hold`, `outside`, `reserve` or `fifo`; outside reasons include measured bytes.
-The existing resource-lane phase telemetry carries the same attribution.
+fits room minus outside (and any reserve required by live seats). Waits expose `blockedBy`,
+including holders, holds, outside consumers, reserves, queue predecessors, disk floors and IO
+policy. The existing resource-lane phase telemetry carries the same attribution.
+
+Optional disk requests reserve their declared peak on the filesystem containing `disk.path`.
+Admission requires available bytes above the host's per-mount floor after outstanding peak
+reservations; a reservation remains charged until confirmed retirement, not merely payload exit.
+`io: 'heavy'` additionally consumes a host-policy slot. Host configuration `finite_resources`
+contains `diskFloorBytes` (default 2 GiB), `diskFloors` (path-to-floor overrides, resolved by
+filesystem), and `heavyIoSlots` (default one; explicit `null` marks an unconstrained host).
+Multiple floor overrides for the same filesystem use the largest floor. These are host policy
+values, not caller semaphores or independent CI limits.
 
 The host persists `queuedAt`, `admittedAt`, `payloadReleasedAt`, `executionEndedAt` and `retiredAt`.
 Admission/preparation, payload execution and retirement are separate intervals. `admissionTimeout`

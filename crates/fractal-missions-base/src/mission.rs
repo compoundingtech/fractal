@@ -1397,7 +1397,7 @@ fn unique_named_child<'a>(
 fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec, FractalError> {
     use crate::model::{ResourceLaneCoverage, ResourceLaneSpec};
     reject_type(node)?;
-    ensure_only_properties(node, &["host", "max-members", "coverage", "admission-timeout"])?;
+    ensure_only_properties(node, &["host", "max-members", "coverage", "admission-timeout", "class", "disk", "disk-path", "io"])?;
     let name = one_string_with_children(node)?;
     validate_id(&name, "resource lane")?;
     let host = property_string(node, "host")?.filter(|host| !host.trim().is_empty())
@@ -1413,6 +1413,29 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
         "enforced" => ResourceLaneCoverage::Enforced,
         _ => return Err(FractalError::new("invalid-step-lane", "coverage must be logical or enforced")),
     };
+    let class = match property_string(node, "class")?.as_deref().unwrap_or("agent") {
+        "landing" => fractal_runtime::RequestClass::Landing,
+        "check" => fractal_runtime::RequestClass::Check,
+        "agent" => fractal_runtime::RequestClass::Agent,
+        _ => return Err(FractalError::new("invalid-step-lane", "class must be landing, check or agent")),
+    };
+    let disk = match (property_string(node, "disk")?, property_string(node, "disk-path")?) {
+        (None, None) => None,
+        (Some(bytes), Some(path)) if !path.trim().is_empty() => {
+            let bytes = fractal_runtime::parse_memory(&bytes)
+                .map_err(|error| FractalError::new("invalid-step-lane", format!("invalid disk footprint: {error}")))?;
+            if bytes == 0 {
+                return Err(FractalError::new("invalid-step-lane", "disk footprint must be positive"));
+            }
+            Some(fractal_runtime::DiskRequest { bytes, path })
+        }
+        _ => return Err(FractalError::new("invalid-step-lane", "disk and nonempty disk-path must be supplied together")),
+    };
+    let io = match property_string(node, "io")?.as_deref() {
+        None => None,
+        Some("heavy") => Some(fractal_runtime::IoClass::Heavy),
+        Some(_) => return Err(FractalError::new("invalid-step-lane", "io must be heavy")),
+    };
     let admission_timeout_ms = property_string(node, "admission-timeout")?
         .map(|value| parse_duration(&value)).transpose()?;
     let mut capacity = None;
@@ -1424,7 +1447,7 @@ fn parse_resource_lane(node: &KdlNode) -> Result<crate::model::ResourceLaneSpec,
             capacity = Some(parse_capacity(child)?);
         }
     }
-    Ok(ResourceLaneSpec { name, host, max_members, capacity, coverage, admission_timeout_ms })
+    Ok(ResourceLaneSpec { name, host, max_members, capacity, coverage, admission_timeout_ms, class, disk, io })
 }
 
 fn parse_step(
