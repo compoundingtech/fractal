@@ -1910,7 +1910,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "peer-too-old",
   "validation-failed",
   "unknown-objective",
-  "invalid-slo-series",
+  "invalid-series",
   "unsupported-objective-series",
   "idempotency-conflict",
   "legacy-action-receipt-untrusted",
@@ -4704,6 +4704,35 @@ export const SchedulesPage = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.S
 export type SchedulesPage = typeof SchedulesPage.Type
 export type SchedulesPageEncoded = typeof SchedulesPage.Encoded
 
+/** Count grouped by the exact JSON field value; a missing field has value null. */
+export const SeriesGroup = /*#__PURE__*/ (() => Schema.Struct({
+  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "value": Schema.Unknown
+}).annotate({ identifier: "SeriesGroup", description: "Count grouped by the exact JSON field value; a missing field has value null." }))()
+export type SeriesGroup = typeof SeriesGroup.Type
+export type SeriesGroupEncoded = typeof SeriesGroup.Encoded
+
+/** Half-open Unix millisecond bucket. groups is present only when group_by was requested and is empty for an empty bucket. */
+export const SeriesBucket = /*#__PURE__*/ (() => Schema.Struct({
+  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "groups": optionalKey(Schema.Array(SeriesGroup)),
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "SeriesBucket", description: "Half-open Unix millisecond bucket. groups is present only when group_by was requested and is empty for an empty bucket." }))()
+export type SeriesBucket = typeof SeriesBucket.Type
+export type SeriesBucketEncoded = typeof SeriesBucket.Encoded
+
+/** Half-open count histogram over selected claims or a declared count/interval objective; no percentiles. At most 31 days and 1000 buckets, with the final bucket clipped to to. */
+export const Series = /*#__PURE__*/ (() => Schema.Struct({
+  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "buckets": Schema.Array(SeriesBucket).check(Schema.isMaxLength(1000)),
+  "from": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "group_by": optionalKey(Schema.String),
+  "to": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "Series", description: "Half-open count histogram over selected claims or a declared count/interval objective; no percentiles. At most 31 days and 1000 buckets, with the final bucket clipped to to." }))()
+export type Series = typeof Series.Type
+export type SeriesEncoded = typeof Series.Encoded
+
 /** What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read. */
 export const SloHistory = /*#__PURE__*/ (() => Schema.Struct({
   "id": Schema.String,
@@ -4752,26 +4781,6 @@ export const SloList = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "SloList" }))()
 export type SloList = typeof SloList.Type
 export type SloListEncoded = typeof SloList.Encoded
-
-/** One half-open [start,end) Unix millisecond bucket; count includes zero for empty buckets. */
-export const SloSeriesBucket = /*#__PURE__*/ (() => Schema.Struct({
-  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "SloSeriesBucket", description: "One half-open [start,end) Unix millisecond bucket; count includes zero for empty buckets." }))()
-export type SloSeriesBucket = typeof SloSeriesBucket.Type
-export type SloSeriesBucketEncoded = typeof SloSeriesBucket.Encoded
-
-/** Declared count-objective events or closed interval samples by completion time, using evaluator selection, deduplication and exclusions; no percentiles. Half-open [from,to), at most 31 days and 1000 buckets, with the final bucket clipped to to. */
-export const SloSeries = /*#__PURE__*/ (() => Schema.Struct({
-  "bucket_seconds": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
-  "buckets": Schema.Array(SloSeriesBucket).check(Schema.isMaxLength(1000)),
-  "from": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "id": Schema.String,
-  "to": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "SloSeries", description: "Declared count-objective events or closed interval samples by completion time, using evaluator selection, deduplication and exclusions; no percentiles. Half-open [from,to), at most 31 days and 1000 buckets, with the final bucket clipped to to." }))()
-export type SloSeries = typeof SloSeries.Type
-export type SloSeriesEncoded = typeof SloSeries.Encoded
 
 /** The UTF-8 text of one source file version, by sha256. Immutable. Requires read.declarations. */
 export const SourceBlob = /*#__PURE__*/ (() => Schema.Struct({

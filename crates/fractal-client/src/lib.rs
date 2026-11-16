@@ -1285,7 +1285,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
         | ErrorCode::UnknownObjective
-        | ErrorCode::InvalidSloSeries
+        | ErrorCode::InvalidSeries
         | ErrorCode::UnsupportedObjectiveSeries
         | ErrorCode::InvalidAnswer
         | ErrorCode::NotAnswerable
@@ -2461,18 +2461,26 @@ impl Client {
         }
         self.get(&path).await
     }
-    pub async fn slo_series(
-        &self,
-        id: &str,
-        from: u64,
-        to: u64,
-        bucket_seconds: u64,
-    ) -> Result<Envelope<SloSeries>, ClientError> {
-        self.get(&format!(
-            "/v1/client/slo/series?id={}&from={from}&to={to}&bucket_seconds={bucket_seconds}",
-            percent_encode(id)
-        ))
-        .await
+    pub async fn series(&self, options: &SeriesQuery) -> Result<Envelope<Series>, ClientError> {
+        let mut query = vec![
+            format!("from={}", options.from),
+            format!("to={}", options.to),
+            format!("bucket_seconds={}", options.bucket_seconds),
+        ];
+        for (name, value) in [
+            ("objective", options.objective.as_deref()),
+            ("subject_prefix", options.subject_prefix.as_deref()),
+            ("group_by", options.group_by.as_deref()),
+        ] {
+            if let Some(value) = value {
+                query.push(format!("{name}={}", percent_encode(value)));
+            }
+        }
+        for kind in &options.kinds {
+            query.push(format!("kind={}", percent_encode(kind)));
+        }
+        self.get(&format!("/v1/client/series?{}", query.join("&")))
+            .await
     }
     pub async fn usage_period(
         &self,
