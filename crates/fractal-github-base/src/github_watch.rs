@@ -1024,8 +1024,10 @@ fn without_html_tags(text: &str) -> String {
             }
             None
         }) else {
-            visible.push_str(tag);
-            return visible;
+            // An unclosed candidate is text, not permission to expose later hidden HTML.
+            visible.push('<');
+            rest = &tag[1..];
+            continue;
         };
         let name = tag[1..end]
             .trim_start_matches('/')
@@ -1909,12 +1911,30 @@ mod tests {
     }
 
     #[test]
+    fn excerpts_resume_filtering_after_unclosed_tag_candidates() {
+        for prose in ["a <b, it's", "a <b, \"quoted", "x<y'", "<b'", "<b"] {
+            assert_eq!(quote(prose).as_deref(), Some(format!("> {prose}").as_str()), "{prose}");
+            for hidden in ["<!-- SECRET -->", "<script>SECRET</script>", "<style>SECRET</style>"] {
+                let source = format!("{prose} {hidden}Visible");
+                let expected = format!("> {prose} Visible");
+                assert_eq!(quote(&source).as_deref(), Some(expected.as_str()), "{source}");
+            }
+            for hidden in ["<!-- SECRET", "<script>SECRET", "<style>SECRET"] {
+                let source = format!("{prose} {hidden}");
+                let expected = format!("> {prose}");
+                assert_eq!(quote(&source).as_deref(), Some(expected.as_str()), "{source}");
+            }
+        }
+    }
+
+    #[test]
     fn excerpts_respect_quoted_html_attribute_boundaries() {
         for source in [
             r#"<img alt="<script>">Visible comment"#,
             "<img alt='<style>'>Visible comment",
             r#"<span title="a > b <script>">Visible comment</span>"#,
             "<span title='a > b <!-- hidden -->'>Visible comment</span>",
+            "<a title='x>y'>Visible comment</a>",
         ] {
             assert_eq!(quote(source).as_deref(), Some("> Visible comment"), "{source}");
         }
