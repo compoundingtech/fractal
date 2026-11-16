@@ -41,13 +41,15 @@ export interface ThreadPanelProps {
   readonly onRetryChange?: () => Promise<ThreadRefusal | undefined>
   readonly onMarkRead?: () => Promise<ThreadRefusal | undefined>
   readonly canMarkRead?: boolean
+  /** The person's unread reminder controls, shown in the sticky heading row beside Mark read while expanded. */
+  readonly unreadControls?: React.ReactNode
   /** Mount the timeline demand and composer only while this presentation is expanded. */
   readonly children: React.ReactNode
 }
 
 /** The same conversation surface works inline in any context or as a standalone pane. */
 export function ThreadPanel({
-  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onActivate, inList = false, age, origin, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, retryPending = false, onRetryChange, onMarkRead, canMarkRead = false, children,
+  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onActivate, inList = false, age, origin, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, retryPending = false, onRetryChange, onMarkRead, canMarkRead = false, unreadControls, children,
 }: ThreadPanelProps): React.ReactNode {
   const narrow = React.useContext(NarrowLayoutContext)
   const [expanded, setExpanded] = React.useState(initiallyExpanded)
@@ -154,14 +156,16 @@ export function ThreadPanel({
     <span {...stylex.props(styles.compactLabel)}>Mark read</span>
   </Button> : null
   const subline = embedded || origin === undefined ? null : <p data-thread-origin="" {...stylex.props(styles.origin)}>{origin}</p>
+  const reminder = open && unreadControls !== undefined ? unreadControls : null
+  const sticky = markRead !== null || reminder !== null
   // A thread in its own tab keeps the Inbox detail's reading measure instead of spanning the pane.
   return <section data-thread-panel="" role="group" aria-label={thread.title}
     onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocus={() => setFocused(true)}
     onBlur={event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setFocused(false) }}
     {...stylex.props(styles.panel, inList && styles.inList, !embedded && styles.dedicated)}>
-    {/* Keep the disclosure's DOM ancestry stable when its read action appears or disappears. */}
-    <div data-thread-read-heading={markRead === null ? undefined : ''} {...stylex.props(markRead !== null && styles.readHeader)}>
-      <div {...stylex.props(markRead !== null && styles.readHeadingRow)}>{heading}{markRead}</div>
+    {/* Keep the disclosure's DOM ancestry stable when its read actions appear or disappear. */}
+    <div data-thread-read-heading={sticky ? '' : undefined} {...stylex.props(sticky && styles.readHeader)}>
+      <div {...stylex.props(sticky && styles.readHeadingRow)}>{heading}{reminder}{markRead}</div>
       {subline}
       {markRead === null ? null : feedback}
     </div>

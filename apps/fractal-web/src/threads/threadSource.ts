@@ -7,6 +7,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { hasConversationCapability } from '../data/conversationPort.ts'
 import { clientReadAuthorization, credentialExpiredMessage, unavailable, waiting, type Feed } from '../data/source.ts'
+import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-port.ts'
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
 
@@ -79,6 +80,8 @@ export interface ThreadSource {
   readonly pendingChange?: (threadId: string) => Atom.Atom<string | undefined>
   readonly retryChange?: (threadId: string) => Promise<ThreadRefusal | undefined>
   readonly markRead?: (thread: ThreadObservation, through: string, seen: readonly string[]) => Promise<ThreadRefusal | undefined>
+  /** Explicit reminder operations are separate from natural thread.read receipts. */
+  readonly unreadActions?: UnreadActionPort
   /** Read every mounted thread projection again, including one refused before. */
   readonly reload?: () => void
 }
@@ -470,6 +473,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   return {
     access,
     titles,
+    unreadActions: gatewayUnreadActions(client),
     reload: () => registry.set(revision, registry.get(revision) + 1),
     pendingStarts: Atom.family((sourceId?: string) => Atom.make(get => {
       get(deliveryRevision)

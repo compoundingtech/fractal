@@ -18,7 +18,12 @@ import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/compositi
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThreadEditor } from './ThreadEditor.tsx'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
-import type { RetainedThreadStart, ThreadObservation, ThreadSource } from './threadSource.ts'
+import type { RetainedThreadStart, ThreadObservation, ThreadSource, ThreadRefusal } from './threadSource.ts'
+import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
+import { useForegroundVisibility } from './useForegroundVisibility.ts'
+import { awayVisit, enterUnreadVisit, holdUnreadVisit, planUnreadView, type UnreadVisit } from './unreadVisit.ts'
+import { UnreadReminderControls } from './UnreadReminderControls.tsx'
+import type { UnreadReminderRead } from './unread-action-port.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
@@ -351,6 +356,7 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
 const noPendingChange = Atom.make<string | undefined>(undefined)
 const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
 const noPendingStarts = Atom.make<readonly RetainedThreadStart[]>([])
+const noReminder = Atom.make<UnreadReminderRead>({ _tag: 'Unavailable', detail: 'Unread reminders are not available on this connection.' })
 
 function LiveThread({ source, thread, embedded = true, inList = false, opensInTab = false, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
@@ -378,8 +384,38 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
   const retryChange = source.retryChange
   const pendingChange = useAtomValue(source.pendingChange?.(thread.id) ?? noPendingChange)
   const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
-  const viewport = useThreadViewport(expanded && markRead !== undefined)
+  const viewport = useThreadViewport(expanded && (markRead !== undefined || source.unreadActions?.canMark === true))
+  const foreground = useForegroundVisibility(expanded && !embedded)
+  const timeline = React.useCallback((node: HTMLDivElement | null) => {
+    viewport.timeline(node)
+    foreground.timeline(node)
+  }, [viewport.timeline, foreground.timeline])
+  const reminderRead = useAtomValue(source.unreadActions?.reminder(thread.id) ?? noReminder)
+  const reminder = reminderRead._tag === 'Known' ? reminderRead.reminder : undefined
+  const visit = React.useRef<UnreadVisit>(awayVisit)
+  const naturallyRead = React.useRef(new Set<string>())
+  const [readFailure, setReadFailure] = React.useState<ThreadRefusal>()
+  React.useLayoutEffect(() => {
+    if (!expanded || embedded) { visit.current = awayVisit; naturallyRead.current.clear(); return }
+    if (visit.current._tag === 'Away') visit.current = enterUnreadVisit(reminder)
+    if (!foreground.foreground || observation === undefined) return
+    if (source.unreadActions?.canMark && reminderRead._tag === 'Known') {
+      const plan = planUnreadView(visit.current, { foreground: true, visibleMessageIds: foreground.visibleMessageIds, currentReminder: reminder })
+      visit.current = plan.visit
+      if (plan.observed_marks.length > 0) void source.unreadActions.clear({ threadId: thread.id, observed_marks: plan.observed_marks }).then(result => {
+        if (result._tag !== 'Sent') setReadFailure({ detail: result.detail })
+      })
+    }
+    const seen = foreground.visibleMessageIds.filter(id => !naturallyRead.current.has(id))
+    const anchor = seen.at(-1)
+    if (markRead === undefined || anchor === undefined) return
+    for (const id of seen) naturallyRead.current.add(id)
+    void markRead(observation, anchor, seen).then(failure => { if (failure !== undefined) setReadFailure(failure) })
+  }, [expanded, embedded, foreground, observation, markRead, reminderRead, reminder, source, thread.id])
   return <ThreadPanel thread={summary} pendingChange={pendingChange}
+    unreadControls={source.unreadActions === undefined ? undefined : <UnreadReminderControls threadId={thread.id}
+      port={source.unreadActions} visibleReplies={viewport.capture} timeline={viewport.container}
+      onBeforeMark={() => { visit.current = holdUnreadVisit(visit.current) }} />}
     {...(retryChange === undefined ? {} : { onRetryChange: () => retryChange(thread.id) })}
     embedded={embedded} inList={inList} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
     {...(opensInTab && onOpenThread !== undefined ? { onActivate: () => onOpenThread(thread.id) } : {})}
@@ -405,7 +441,8 @@ function LiveThread({ source, thread, embedded = true, inList = false, opensInTa
     })}
   >
     {detailStatus ?? <ThreadConversation source={source} thread={summary} agentName={agentName} canReply={actions.has('thread.reply')} observed={observation !== undefined}
-      focusComposer={focusComposer} timelineRef={viewport.timeline} />}
+      focusComposer={focusComposer} timelineRef={timeline} />}
+    {readFailure === undefined ? null : <ThreadRefusalAlert refusal={readFailure} />}
   </ThreadPanel>
 }
 
@@ -471,7 +508,7 @@ function useThreadViewport(enabled: boolean) {
       capture.current = () => []
     }
   }, [enabled, container])
-  return { timeline, canMark, capture: () => capture.current() }
+  return { timeline, container, canMark, capture: () => capture.current() }
 }
 
 function threadViewportBounds(container: HTMLElement) {
