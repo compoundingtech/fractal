@@ -291,3 +291,17 @@ test('occlusion while natural read is in flight releases an unsent automatic cle
   ports.dismissSheet(); await stable(ports);
   assert.deepEqual(edits, [{ kind: 'clear', observed_marks: ['opaque/captured'] }]);
 });
+
+test('native prompt callbacks default missing text while button callbacks retain credential objects', () => {
+  const { ports } = mount();
+  const values = [];
+  ports.prompt(value => values.push(value));
+  ports.dismissAlert(1);
+  assert.deepEqual(values, ['']);
+  assert.equal(ports.ownedPresentations.isOccluded(), false);
+  const credentials = { login: 'avery', password: 'private' };
+  ports.prompt([{ text: 'OK', onPress: value => values.push(value) }]);
+  ports.dismissAlert(0, credentials);
+  assert.equal(values[1], credentials, 'native login/password arguments pass through unchanged');
+  assert.equal(ports.ownedPresentations.isOccluded(), false);
+});

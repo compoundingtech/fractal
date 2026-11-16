@@ -143,7 +143,7 @@ function deliveryStore(thread) {
     }, 502);
     return { value: {
       kind: 'action-result', status: 'completed', action_id: request.id, operation_id: `operation/${member.sends.length}`,
-      snapshot_id: 'snapshot/accepted', affected_ids: [thread.id], metadata_claim_id: 'claim/one',
+      snapshot_id: 'snapshot/accepted', affected_ids: [thread.id],
     } };
   }
   const deliveriesByClient = { current: new WeakMap() };
@@ -381,5 +381,19 @@ test('specific unread action revocation or offline status blocks a retained retr
     assert.equal(harness.member.sends.length, before.length + 1);
     sameRequest(harness.member.sends.at(-1), before[0]);
     assert.equal(harness.ledger().size, 0, 'only a legitimate receipt releases the original slot');
+  }
+});
+
+test('initial mark and clear deliveries settle from the real unread server receipt without a metadata claim', async () => {
+  for (const edit of [
+    { kind: 'mark', anchor_message: 'message/reply', observed_marks: ['mark/one'] },
+    { kind: 'clear', observed_marks: ['mark/one'] },
+  ]) {
+    const thread = unconfirmedThread(), harness = deliveryStore(thread);
+    harness.member.outcome = 'confirmed';
+    const result = await harness.store.unreadClient.forThread(thread).actions.edit(edit);
+    assert.equal(result.how, 'sent', edit.kind);
+    assert.equal(harness.member.sends.length, 1, 'the first real receipt settles without resending');
+    assert.equal(harness.ledger().size, 0, 'no unknown delivery remains after confirmation');
   }
 });

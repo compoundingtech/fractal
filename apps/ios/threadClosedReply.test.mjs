@@ -1145,15 +1145,20 @@ test('Clear reminder in a body sends the observed summary marks for a current or
   }
 });
 
-test('pending and unavailable return messages offer Clear reminder for exactly the observed summary marks, keeping retained retries first', async () => {
-  for (const anchorState of ['pending', 'unavailable']) for (const granted of [true, false]) {
+test('loading, rejected, pending and unavailable seeks offer summary-only Clear reminder, keeping retained retries first', async () => {
+  for (const anchorState of ['loading', 'rejected', 'pending', 'unavailable']) for (const granted of [true, false]) {
     const edits = [], seeks = [];
     const store = {
       unreadEnabled: true, actor: 'person/one', status: 'online', threadDeliveries: new Map(),
       threadActions: new Set(granted ? ['thread.clear-unread'] : []),
       unreadClient: { forThread: () => ({ state: 'ready', actions: {
         read: () => assert.fail('an explicit clear never acknowledges messages'),
-        seek: async id => { seeks.push(id); return { state: anchorState, anchor: { message_id: id, state: anchorState } }; },
+        seek: async id => {
+          seeks.push(id);
+          if (anchorState === 'loading') return new Promise(() => {});
+          if (anchorState === 'rejected') throw new Error('The seek failed.');
+          return { state: anchorState, anchor: { message_id: id, state: anchorState } };
+        },
         edit: async edit => { edits.push(edit); return { how: 'sent' }; },
       } }) },
     };
@@ -1164,7 +1169,7 @@ test('pending and unavailable return messages offer Clear reminder for exactly t
     const state = hooks(), effects = [];
     const body = compile('ReminderThreadBody', 'export function ThreadScreen', {
       ...state, useRef: current => ({ current }), useStore: () => store, useEffect: effect => effects.push(effect),
-      unreadReadIssue: String, ClearReminder: clearReminder, ThreadBody: 'ThreadBody', View: 'View', T: 'T', Button: 'Button',
+      unreadReadIssue: String, ClearReminder: clearReminder, ThreadReadIssue: 'ThreadReadIssue', ThreadBody: 'ThreadBody', View: 'View', T: 'T', Button: 'Button',
     });
     const thread = { id: 'thread/one', title: 'Review', state: 'open', unread: false, unread_reminder: twoMarks('message/anchor') };
     const props = { client: {}, thread, placement: 'context:marked:thread/one', onOpen() {} };
@@ -1173,7 +1178,9 @@ test('pending and unavailable return messages offer Clear reminder for exactly t
     await new Promise(resolve => setImmediate(resolve));
     state.reset();
     const tree = body(props);
-    assert.deepEqual(texts(find(tree, 'T')), [anchorPresentation({ message_id: 'message/anchor', state: anchorState }).notice]);
+    if (anchorState === 'loading') assert.deepEqual(texts(find(tree, 'T')), ['Finding the return message…']);
+    else if (anchorState === 'rejected') assert.ok(find(tree, 'ThreadReadIssue'), 'the seek error stays visible beside clear');
+    else assert.deepEqual(texts(find(tree, 'T')), [anchorPresentation({ message_id: 'message/anchor', state: anchorState }).notice]);
     const control = findBy(tree, node => node.type === clearReminder);
     assert.equal(control.props.thread, thread, 'the control reads the current authoritative summary');
     const rendered = clearReminder(control.props);
