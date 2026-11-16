@@ -41,6 +41,15 @@ thread mutations are enabled or sent. The writable composer, reply and
 lifecycle controls are deliberately not demonstrated: those require the live
 client's mutation receipt driver. Closed history remains readable.
 
+Live threads mark incoming replies read only after meaningful message content is presented in
+the active pane of a focused terminal. Hovering a list, cached history and background tabs do not
+count. **Mark read** (`v`, or `alt+v` where letters type) explicitly reads visible replies.
+**Mark unread** (`u` / `alt+u`) keeps a private reminder and return anchor without undoing natural
+read history. It stays unread during this visit; on a later visit, each captured reminder clears
+only when its own anchor is viewed. Concurrent marks at other anchors remain.
+Read-only connections show neither action. Pending or refused anchor seeks show no message
+body or unread badge; unavailable anchors get a neutral note rather than invented content.
+
 Thread summaries and timeline events share the attention slice's existing
 strict decoding and timestamp-pointer rebasing. No separate runtime world or
 feature-specific renderer is used.

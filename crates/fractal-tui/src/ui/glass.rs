@@ -955,6 +955,13 @@ pub(crate) enum Open {
     Glass,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ThreadReading {
+    host: String,
+    id: String,
+    visible: HashSet<String>,
+}
+
 #[derive(Default)]
 struct Palette {
     query: String,
@@ -969,6 +976,8 @@ struct Palette {
     /// The palette is asking for a glass's name; the query is the name.
     naming: Option<Naming>,
     sidebar: Option<resource_sidebar::PaletteMode>,
+    /// Visible body evidence captured before the palette covers the active pane.
+    thread_reading: Option<ThreadReading>,
 }
 
 /// What a name typed into the palette is for.
@@ -1004,6 +1013,7 @@ enum Action {
     /// Agents open on their terminal, or on their conversation.
     ToggleConversationFirst,
     ToggleTerminalFallback,
+    ThreadReading { target: ThreadReading, unread: bool },
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -1405,6 +1415,17 @@ impl Ui {
             search,
             action,
         };
+        if let Some(target) = self.glasses.palette.as_ref().and_then(|palette| palette.thread_reading.as_ref()) {
+            for (unread, allowed, label, detail) in [
+                (false, self.threads.can_mark_read(&target.id), "Mark read", "mark visible thread replies read"),
+                (true, self.threads.can_mark_unread(&target.id), "Mark unread", "private reminder at a visible thread message"),
+            ] {
+                if allowed {
+                    choices.push(start(label.into(), detail, format!("{label} thread reminder"),
+                        Action::ThreadReading { target: target.clone(), unread }));
+                }
+            }
+        }
         choices.push(start(
             "New mission".into(),
             "describe it; a planner drafts it for you to approve",
@@ -3699,9 +3720,17 @@ impl Ui {
     }
 
     pub(crate) fn open_palette(&mut self, section: Option<usize>, enter: Open) {
+        let thread_reading = self.terminal_foreground.then(|| self.focused_pane()).flatten()
+            .and_then(|pane| {
+                let id = self.threads.reading_target(&pane)?;
+                let host = pane.key();
+                let visible = self.frame.borrow().visible_thread_messages(&host, &id);
+                (!visible.is_empty()).then_some(ThreadReading { host, id, visible })
+            });
         self.glasses.palette = Some(Palette {
             section,
             enter,
+            thread_reading,
             ..Palette::default()
         });
     }
@@ -3742,6 +3771,14 @@ impl Ui {
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleConversationFirst => self.toggle_conversation_first(),
             Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
+            Action::ThreadReading { target, unread } => {
+                let sent = if unread {
+                    self.threads.mark_unread(&target.host, &target.id, &target.visible)
+                } else {
+                    self.threads.mark_visible_read(&target.host, target.id, &target.visible)
+                };
+                if !sent { self.flash_as(Severity::Info, "No visible message to mark"); }
+            }
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);

@@ -65,6 +65,8 @@ pub mod text;
 pub mod theme;
 pub mod thread;
 mod threads_live;
+mod unread_visit;
+mod marked_unread;
 mod objectives;
 mod triage;
 mod usage;
@@ -154,6 +156,8 @@ struct ThreadBodyRow {
     message: String,
     rect: Rect,
     layer: usize,
+    complete: bool,
+    trailing: bool,
 }
 
 #[derive(Default)]
@@ -191,13 +195,28 @@ struct FrameInfo {
 }
 
 impl FrameInfo {
+    fn thread_rows<'a>(&'a self, host: &'a str, thread: &'a str) -> impl Iterator<Item = &'a ThreadBodyRow> {
+        self.thread_body.iter().filter(move |row| {
+            row.host == host && row.thread == thread && row.complete && row.rect.width > 0
+                && (row.rect.x..row.rect.right()).all(|x| !self.covers.iter().skip(row.layer).any(|(cover, _)| {
+                    contains(*cover, x, row.rect.y)
+                }))
+        })
+    }
+
     fn visible_thread_messages(&self, host: &str, thread: &str) -> HashSet<String> {
-        self.thread_body.iter().filter_map(|row| {
-            if row.host != host || row.thread != thread { return None; }
-            let visible = (row.rect.x..row.rect.right()).any(|x| !self.covers.iter().skip(row.layer).any(|(cover, _)| {
-                contains(*cover, x, row.rect.y)
-            }));
-            visible.then(|| row.message.clone())
+        self.thread_rows(host, thread).map(|row| row.message.clone()).collect()
+    }
+
+    fn readable_thread_messages(&self, host: &str, thread: &str) -> HashSet<String> {
+        let mut messages: BTreeMap<&str, (BTreeSet<u16>, bool)> = BTreeMap::new();
+        for row in self.thread_rows(host, thread) {
+            let (lines, trailing) = messages.entry(&row.message).or_default();
+            lines.insert(row.rect.y);
+            *trailing |= row.trailing;
+        }
+        messages.into_iter().filter_map(|(id, (lines, trailing))| {
+            (lines.len() >= 2 && trailing).then(|| id.to_owned())
         }).collect()
     }
 }
@@ -493,6 +512,7 @@ pub struct Ui {
     /// The person's own availability and directive note, as last read.
     availability: availability::Availability,
     threads: threads_live::Threads,
+    terminal_foreground: bool,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -772,7 +792,7 @@ impl Ui {
 
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
-        if self.help
+        if !self.terminal_foreground || self.help
             || self.popover.is_some()
             || self.glasses.palette_open()
         {
@@ -781,13 +801,41 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
+    /// Presentation, not hover or a cached timeline, is evidence of reading.
+    fn read_presented_threads(&mut self) {
+        self.read_presented_threads_at(Instant::now());
+    }
+
+    fn read_presented_threads_at(&mut self, now: Instant) {
+        if !self.terminal_foreground || self.help || self.popover.is_some()
+            || self.glasses.palette_open() || self.confirmation_open() {
+            self.threads.stop_reading();
+            return;
+        }
+        let Some(pane) = self.focused_pane() else {
+            self.threads.leave_view();
+            return;
+        };
+        let host = pane.key();
+        let shown = {
+            let frame = self.frame.borrow();
+            let ids: BTreeSet<_> = self.threads.reading_ids(&pane).into_iter()
+                .chain(frame.thread_body.iter().filter(|row| row.host == host).map(|row| row.thread.clone())).collect();
+            ids.into_iter().map(|id| {
+                let messages = frame.readable_thread_messages(&host, &id);
+                (id, messages)
+            }).collect()
+        };
+        self.threads.presented(&host, &shown, now);
+    }
+
     /// Call only after terminal presentation succeeds. Advance through visible prose entries,
     /// resolving their absolute timestamps from the transcript rather than the newer roster.
     pub(crate) fn read_presented_conversations(
         &mut self,
         timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>,
     ) {
-        if self.help || self.popover.is_some() || self.glasses.palette_open() {
+        if !self.terminal_foreground || self.help || self.popover.is_some() || self.glasses.palette_open() {
             return;
         }
         let shown: Vec<(String, i64)> = {
@@ -946,6 +994,7 @@ impl Ui {
             documents: documents::Documents::default(),
             availability: availability::Availability::default(),
             threads: threads_live::Threads::default(),
+            terminal_foreground: true,
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -1883,6 +1932,7 @@ impl Ui {
                 let mut list = screens::home_list(&self.world, &self.closed, &self.override_pending);
                 self.threads.mark_inbox_unread(&mut list);
                 self.threads.recently_closed(&mut list);
+                self.threads.marked_unread(&mut list);
                 list
             },
             1 if self.tree => screens::agents_tree(&self.world, self.spinner(), width),
@@ -3168,6 +3218,12 @@ impl Ui {
             {
                 state.top = start.saturating_add_signed(anchor.offset);
             }
+            if let Some(message) = self.threads.take_anchor_scroll(key)
+                && let Some((_, line)) = doc.entries.iter().find(|(id, _)| *id == message) {
+                state.follow = false;
+                state.top = line.saturating_sub(height / 3);
+                anchors.remove(key);
+            }
             state.reconcile(total, height);
             // The note about earlier entries stays first while they load above it, so the
             // place is kept by the first entry read instead.
@@ -3275,9 +3331,12 @@ impl Ui {
                 };
                 match &target.hit {
                     Hit::InlineImage(_) => {}
-                    Hit::ThreadBody { host, thread, message } => {
+                    Hit::ThreadBody { host, thread, message, trailing } => {
                         self.frame.borrow_mut().thread_body.push(ThreadBodyRow {
-                            host: host.clone(), thread: thread.clone(), message: message.clone(), rect, layer,
+                            host: host.clone(), thread: thread.clone(), message: message.clone(),
+                            rect: Rect { x: area.x, width: area.width.saturating_sub(1), ..rect }, layer,
+                            complete: target.width <= area.width.saturating_sub(target.column).saturating_sub(1),
+                            trailing: *trailing,
                         });
                     }
                     hit => self.hit(rect, hit.clone()),
@@ -3986,10 +4045,11 @@ impl Ui {
                 ("p", "open the marked thread in its own tab"),
                 ("z", "close the thread, or reopen a closed one"),
                 ("n", "rename the thread"),
-                ("v", "mark the visible replies read"),
+                ("v", "mark visible replies read"),
+                ("u", "mark unread with a private reminder at a visible message"),
                 ("r", "send an action again when its outcome was not confirmed"),
                 (
-                    "alt+p z n v r",
+                    "alt+p z n v u r",
                     "the same in an agent or a thread tab, where a bare letter types",
                 ),
                 (
@@ -4540,6 +4600,8 @@ impl Ui {
             return !self.recent_open() && self.mouse_moved(mouse);
         }
         if event == Event::FocusLost {
+            self.terminal_foreground = false;
+            self.threads.stop_reading();
             self.hover.clear();
             self.threads.hover(None);
             self.hover.pressed.set(false);
@@ -4550,6 +4612,7 @@ impl Ui {
         }
         // Back from another window: what was decided there may have changed availability.
         if event == Event::FocusGained {
+            self.terminal_foreground = true;
             self.availability.refresh();
         }
         let focused = self.input_terminal();
@@ -6856,6 +6919,13 @@ impl Ui {
                     self.flash_as(Severity::Info, "No visible replies to mark read");
                 }
             }
+            Hit::Thread(host, thread::Tap::MarkUnread(id)) => {
+                if self.confirmation_open() { return; }
+                let visible = self.frame.borrow().visible_thread_messages(&host, &id);
+                if !self.threads.mark_unread(&host, &id, &visible) {
+                    self.flash_as(Severity::Info, "No visible message to mark unread");
+                }
+            }
             Hit::Thread(host, tap) => {
                 if matches!(&tap, thread::Tap::Start(_) | thread::Tap::Compose(_) | thread::Tap::Reply { .. }) {
                     self.answering = None;
@@ -7576,6 +7646,8 @@ mod tests {
             message: message.into(),
             rect: Rect::new(4, y, 8, 1),
             layer: 1,
+            complete: true,
+            trailing: true,
         };
         let frame = FrameInfo {
             covers: vec![(Rect::new(0, 0, 20, 4), 0), (Rect::new(4, 2, 8, 1), 0)],
@@ -7592,6 +7664,29 @@ mod tests {
             frame.visible_thread_messages("home:ask", "thread/one"),
             HashSet::from(["message/visible".to_owned()]),
         );
+    }
+
+    #[test]
+    fn thread_auto_read_needs_two_full_width_lines_and_the_trailing_body() {
+        let row = |y, trailing| ThreadBodyRow {
+            host: "thread:one".into(), thread: "thread/one".into(), message: "message/one".into(),
+            rect: Rect::new(4, y, 20, 1), layer: 0, complete: true, trailing,
+        };
+        let mut frame = FrameInfo { thread_body: vec![row(1, false)], ..FrameInfo::default() };
+        assert_eq!(frame.visible_thread_messages("thread:one", "thread/one").len(), 1);
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty());
+        frame.thread_body.push(row(1, true));
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(), "same line twice is not two lines");
+        frame.thread_body[1].rect.y = 2;
+        frame.thread_body[1].trailing = false;
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(), "trailing body must be visible");
+        frame.thread_body[1].trailing = true;
+        assert_eq!(frame.readable_thread_messages("thread:one", "thread/one").len(), 1);
+        frame.covers.push((Rect::new(23, 2, 1, 1), 0));
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(), "even a partial-width cover excludes the line");
+        frame.covers.clear();
+        frame.thread_body[1].complete = false;
+        assert!(frame.readable_thread_messages("thread:one", "thread/one").is_empty(), "horizontally clipped body is not fully visible");
     }
 
     #[test]

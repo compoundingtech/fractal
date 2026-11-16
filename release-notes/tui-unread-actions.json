@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal UI reads only visible foreground thread messages and offers private unread reminders with per-anchor clearing",
+  "replay": { "status": "none", "detail": "The client uses the existing thread read and unread reminder actions; no replay policy changes." },
+  "schema": { "status": "none", "detail": "No additional schema or generated client changes beyond the composed unread API dependency." },
+  "rules": { "status": "none", "detail": "No checkpoint rules, digests or coordination changes." },
+  "compatibility": { "status": "none", "detail": "Uses negotiated thread.read access and the composed thread unread actions and timeline-around read. Read-only connections hide mark actions. Existing natural read history is preserved." },
+  "downtime": { "status": "none", "detail": "No service interruption or startup work." },
+  "manual": { "status": "none", "detail": "Mark read and Mark unread are available in Ctrl+K and the thread panel, with v/u or alt+v/alt+u where letters type. Inbox lists private marked-unread threads." },
+  "recovery": { "status": "none", "detail": "No new local persistent state. Reminders remain authoritative on the member across client restarts." }
+}

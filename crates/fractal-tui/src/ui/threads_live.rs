@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fractal_client::{
-    Client, ClientError, Envelope, Fence, Snapshot, ThreadCollectionRows, ThreadReadParameters,
-    ThreadRenameParameters, ThreadReplyParameters, ThreadStartParameters, ThreadState,
+    Client, ClientError, Envelope, Fence, Snapshot, ThreadClearUnreadParameters,
+    ThreadCollectionRows, ThreadMarkUnreadParameters, ThreadReadParameters, ThreadRenameParameters,
+    ThreadReplyParameters, ThreadStartParameters, ThreadState,
     ThreadSummary, ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
 };
 use fractal_feed::{THREAD_UPDATES_PAUSED, ThreadAccess, ThreadInterest, model::Model};
@@ -68,6 +69,8 @@ impl ActionRefusal {
             Mutation::Reopen => "Couldn't reopen this thread.",
             Mutation::Rename(_) => "Couldn't rename this thread.",
             Mutation::Reply(_) => "Couldn't send your reply.",
+            Mutation::MarkUnread(_) => "Couldn't mark this thread unread.",
+            Mutation::ClearUnread(_) => "Couldn't clear this unread reminder.",
             Mutation::Start(_) | Mutation::MarkRead(_) => return None,
         };
         let reason = match error {
@@ -151,6 +154,8 @@ enum Mutation {
     Reply(ThreadReplyParameters),
     Rename(ThreadRenameParameters),
     MarkRead(ThreadReadParameters),
+    MarkUnread(ThreadMarkUnreadParameters),
+    ClearUnread(ThreadClearUnreadParameters),
     Close,
     Reopen,
 }
@@ -275,6 +280,12 @@ impl Write {
             Mutation::MarkRead(value) => {
                 client.thread_read(&action, key, fence, value.clone()).await
             }
+            Mutation::MarkUnread(value) => {
+                client.thread_mark_unread(&action, key, fence, value.clone()).await
+            }
+            Mutation::ClearUnread(value) => {
+                client.thread_clear_unread(&action, key, fence, value.clone()).await
+            }
             Mutation::Close => client.thread_close(&action, key, fence, target()).await,
             Mutation::Reopen => client.thread_reopen(&action, key, fence, target()).await,
         };
@@ -330,6 +341,9 @@ impl Write {
                 .affected_ids
                 .iter()
                 .all(|id| request.seen_message_ids.contains(id)),
+            Mutation::MarkUnread(_) | Mutation::ClearUnread(_) => {
+                receipt.affected_ids.contains(&self.id)
+            }
             Mutation::Start(_) | Mutation::Reply(_) => {
                 receipt.affected_ids.len() == 2
                     && receipt.affected_ids.contains(&self.id)
@@ -353,7 +367,9 @@ impl Write {
             Mutation::Start(_) => "Send first message",
             Mutation::Reply(_) => "Send reply",
             Mutation::Rename(_) => "Rename thread",
-            Mutation::MarkRead(_) => "Mark visible replies read",
+            Mutation::MarkRead(_) => "Mark read",
+            Mutation::MarkUnread(_) => "Mark unread",
+            Mutation::ClearUnread(_) => "Clear unread reminder",
             Mutation::Close => "Close thread",
             Mutation::Reopen => "Reopen thread",
         }
@@ -426,6 +442,27 @@ impl Earlier {
     }
 }
 
+pub(super) struct Seek {
+    pub id: String,
+    pub key: String,
+    anchor: String,
+}
+
+pub(super) enum SeekFailure {
+    Unavailable,
+    Failed(String),
+}
+
+impl Seek {
+    pub(super) async fn read(&self, client: &Client) -> Result<fractal_client::ThreadTimelinePage, SeekFailure> {
+        client.thread_timeline_around(&self.id, &self.anchor, Some(50))
+            .await.map(|reply| reply.value).map_err(|error| match error {
+                ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => SeekFailure::Unavailable,
+                error => SeekFailure::Failed(thread_read_error(error)),
+            })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Threads {
     available: bool,
@@ -453,6 +490,19 @@ pub(super) struct Threads {
     /// Why the last Enter or Send queued nothing, until the shell says it (`take_refusal`).
     refusal: Option<String>,
     completion_notice: Option<String>,
+    visits: BTreeMap<String, super::unread_visit::Visit>,
+    reading_host: Option<String>,
+    read_dwell: BTreeMap<String, BTreeMap<String, std::time::Instant>>,
+    anchor_scroll: std::cell::RefCell<BTreeMap<String, String>>,
+    seek_pages: BTreeMap<String, fractal_client::ThreadTimelinePage>,
+    seeks: Vec<Seek>,
+    seek_pending: BTreeMap<String, String>,
+    seek_refused: BTreeSet<String>,
+    marked_ids: Option<Vec<String>>,
+    marked_failure: Option<String>,
+    marked_loading: bool,
+    marked_generation: u64,
+    marked_in_home: bool,
 }
 
 impl Threads {
@@ -515,6 +565,10 @@ impl Threads {
     pub(super) fn enable(&mut self, available: bool) {
         self.available = available;
         if !available {
+            self.leave_view();
+            self.seeks.clear();
+            self.invalidate_marked();
+            self.marked_in_home = false;
             self.access = ThreadAccess::default();
             self.lists.clear();
             self.unread_items.clear();
@@ -841,6 +895,9 @@ impl Threads {
             KeyCode::Char('V' | 'v') if self.can_mark_read(id) => {
                 thread::Tap::MarkVisibleRead(id.clone())
             }
+            KeyCode::Char('U' | 'u') if self.can_mark_unread(id) => {
+                thread::Tap::MarkUnread(id.clone())
+            }
             KeyCode::Char('P' | 'p') if !matches!(pane, Pane::Thread(_)) => {
                 thread::Tap::OpenTab(id.clone())
             }
@@ -990,6 +1047,10 @@ impl Threads {
             old.snapshot.host_id == summary.snapshot.host_id
                 && old.snapshot.store_index > summary.snapshot.store_index
         }) {
+            if self.summaries.get(id).map(|old| &old.value.unread_reminder)
+                != Some(&summary.value.unread_reminder) {
+                self.invalidate_marked();
+            }
             self.summaries.insert(id.clone(), summary);
         }
     }
@@ -1160,6 +1221,68 @@ impl Threads {
         if matches!(list.state, super::screens::ListState::Empty(_)) {
             list.state = super::screens::ListState::Ready;
         }
+    }
+
+    pub(super) fn marked_due(&mut self, pane: &Pane) -> Option<u64> {
+        let visible = self.available && matches!(pane, Pane::Home(_));
+        if visible != self.marked_in_home {
+            self.marked_in_home = visible;
+            self.invalidate_marked();
+        }
+        if !visible || self.marked_loading || self.marked_ids.is_some() || self.marked_failure.is_some() {
+            return None;
+        }
+        self.marked_loading = true;
+        Some(self.marked_generation)
+    }
+
+    fn invalidate_marked(&mut self) {
+        self.marked_generation = self.marked_generation.wrapping_add(1);
+        self.marked_loading = false;
+        self.marked_ids = None;
+        self.marked_failure = None;
+    }
+
+    pub(super) fn marked_loaded(&mut self, generation: u64, rows: Result<Vec<Envelope<ThreadSummary>>, super::marked_unread::Failure>) {
+        if generation != self.marked_generation { return; }
+        self.marked_loading = false;
+        match rows {
+            Ok(rows) => {
+                let ids = rows.iter().map(|row| row.value.id.clone()).collect();
+                for row in rows { self.put_summary(row); }
+                self.marked_ids = Some(ids);
+            }
+            Err(error) => self.marked_failure = Some(error.human()),
+        }
+    }
+
+    pub(super) fn marked_unread(&self, list: &mut super::screens::Listing) {
+        if !self.available || !self.marked_in_home { return; }
+        use super::screens::{Item, ListState};
+        list.items.push(Item::Header {
+            title: "Marked unread".into(),
+            count: self.marked_ids.as_ref().map_or(0, Vec::len),
+            color: theme::SAPPHIRE,
+        });
+        if let Some(ids) = &self.marked_ids {
+            if ids.is_empty() {
+                list.items.push(Item::Note(Line::from(Span::styled("No marked threads", theme::dim()))));
+            }
+            for id in ids {
+                let Some(summary) = self.summary(id) else { continue; };
+                let index = list.ids.len();
+                list.ids.push(id.clone());
+                list.items.push(Item::Row {
+                    index, first: vec![Span::styled(text::sanitize(&summary.title).replace('\n', " "), theme::soft())],
+                    right: vec![Span::styled(" · reminder", theme::dim())],
+                    second: Vec::new(), children: Vec::new(),
+                });
+            }
+        } else {
+            let notice = self.marked_failure.as_deref().unwrap_or("Loading marked threads…");
+            list.items.push(Item::Note(Line::from(Span::styled(notice.to_owned(), theme::dim()))));
+        }
+        if matches!(list.state, ListState::Empty(_)) { list.state = ListState::Ready; }
     }
 
     pub(super) fn mount(
@@ -1377,6 +1500,10 @@ impl Threads {
             self.open.remove(&host);
         }
         if collapsed {
+            self.visits.remove(id);
+            self.seek_pages.remove(id);
+            self.seek_pending.remove(id);
+            self.seek_refused.remove(id);
             self.blur_thread(&host, id);
         }
         self.selected.insert(host, id.to_owned());
@@ -1396,7 +1523,7 @@ impl Threads {
         texts: &HashMap<String, String>,
     ) {
         let summary = self.summary(id);
-        let loaded = self.histories.contains_key(id);
+        let loaded = self.histories.contains_key(id) || self.seek_pages.contains_key(id);
         let panel_open = open && loaded;
         let reply_editor_visible = panel_open && self.access.reply;
         let rename_editor_visible =
@@ -1419,11 +1546,13 @@ impl Threads {
             return;
         };
         let source = self.histories.get(id);
-        let history: Vec<_> = source
-            .into_iter()
-            .flat_map(History::rows)
-            .cloned()
-            .collect();
+        let history: Vec<_> = if self.seek_pending.contains_key(id) {
+            Vec::new()
+        } else if let Some(page) = self.seek_pages.get(id) {
+            page.items.clone()
+        } else {
+            source.into_iter().flat_map(History::rows).cloned().collect()
+        };
         let input = Input::Reply(id.into());
         let key = input.key();
         let draft = self.drafts.get(&key);
@@ -1449,7 +1578,7 @@ impl Threads {
             &history,
             &thread::State {
                 open,
-                awaiting_history: !loaded,
+                awaiting_history: !loaded || self.seek_pending.contains_key(id),
                 notice,
                 // Keep the selected destination visible while its composer owns the keys, and
                 // on a collapsed heading Ctrl+↑/↓ focused.
@@ -1460,9 +1589,13 @@ impl Threads {
                 cursor: focus.then(|| cursor.at(&key, draft_text)),
                 reply_to,
                 hovered_message: self.hover.as_deref(),
-                has_earlier: source.is_some_and(History::more),
+                has_earlier: self.seek_pages.get(id).map_or_else(|| source.is_some_and(History::more), |page| page.next_cursor.is_some()),
                 loading_earlier: source.is_some_and(|history| history.loading),
                 can_mark_read: self.can_mark_read(id),
+                can_mark_unread: self.can_mark_unread(id),
+                anchor: self.seek_pages.get(id).and_then(|page| page.anchor.as_ref()),
+                seek_refused: self.seek_refused.contains(id),
+                has_reminder: false,
                 can_reply: self.access.reply,
                 pending_reply: draft
                     .and_then(|draft| draft.delivery.as_ref())
@@ -1658,7 +1791,8 @@ impl Threads {
             | thread::Tap::OpenTab(id)
             | thread::Tap::Earlier(id)
             | thread::Tap::LeaveComposer(id)
-            | thread::Tap::MarkVisibleRead(id) => Some(id.clone()),
+            | thread::Tap::MarkVisibleRead(id)
+            | thread::Tap::MarkUnread(id) => Some(id.clone()),
             thread::Tap::Reply { thread, .. } => Some(thread.clone()),
             thread::Tap::Retry(key) => self
                 .pending_actions
@@ -1751,6 +1885,18 @@ impl Threads {
             thread::Tap::Reopen(id) => self.lifecycle(host, id, Mutation::Reopen),
             thread::Tap::OpenTab(id) => return Some(id),
             thread::Tap::Earlier(id) => {
+                if let Some(page) = self.seek_pages.get(&id) {
+                    let history = self.histories.entry(id.clone()).or_default();
+                    if let Some(cursor) = &page.next_cursor
+                        && !history.loading {
+                        history.loading = true;
+                        self.earlier.push(Earlier {
+                            id, cursor: Some(cursor.clone()),
+                            tail: page.items.last().map(|event| event.id.clone()).unwrap_or_default(),
+                        });
+                    }
+                    return None;
+                }
                 if let Some(history) = self.histories.get_mut(&id)
                     && history.more()
                     && !history.loading
@@ -1764,7 +1910,9 @@ impl Threads {
                     });
                 }
             }
-            thread::Tap::MessageHeader(_) | thread::Tap::MarkVisibleRead(_) => {}
+            thread::Tap::MessageHeader(_)
+            | thread::Tap::MarkVisibleRead(_)
+            | thread::Tap::MarkUnread(_) => {}
         }
         None
     }
@@ -2185,35 +2333,196 @@ impl Threads {
                 .is_some_and(|draft| draft.delivery.is_some())
     }
 
-    fn can_mark_read(&self, id: &str) -> bool {
+    pub(super) fn can_mark_read(&self, id: &str) -> bool {
         self.access.mark_read
             && !self.has_edit(id)
+            && !self.seek_pending.contains_key(id) && !self.seek_refused.contains(id)
             && self
                 .summary(id)
-                .is_some_and(|summary| summary.unread == Some(true))
+                .is_some_and(|summary| summary.unread == Some(true)
+                    || summary.unread_reminder.as_ref().is_some_and(|reminder| !reminder.marks.is_empty()))
+    }
+
+    pub(super) fn can_mark_unread(&self, id: &str) -> bool {
+        self.access.mark_read && !self.has_edit(id) && self.summary(id).is_some()
+            && !self.seek_pending.contains_key(id)
+            && !self.seek_refused.contains(id)
+            && self.seek_pages.get(id).and_then(|page| page.anchor.as_ref())
+                .is_none_or(|anchor| anchor.state != fractal_client::ThreadTimelineAnchorState::Pending)
+    }
+
+    fn message_rows(&self, id: &str) -> impl Iterator<Item = &ThreadTimelineEvent> {
+        let page = self.seek_pages.get(id);
+        page.into_iter().flat_map(|page| &page.items)
+            .chain(self.histories.get(id).filter(|_| page.is_none()).into_iter().flat_map(History::rows))
+    }
+
+    fn queue_reading(&mut self, host: &str, id: &str, mutation: Mutation) -> bool {
+        if !self.access.mark_read || self.has_edit(id) { return false; }
+        let Some(observed) = self.summaries.get(id) else { return false; };
+        let write = Write {
+            key: uuid::Uuid::now_v7().to_string(),
+            id: id.into(), host: host.into(), input: None,
+            fence: Fence { snapshot_id: observed.snapshot.id.clone(), ..Fence::default() },
+            client: None, agent: observed.value.agent_id.clone(), mutation,
+        };
+        self.pending_actions.insert(id.into(), Delivery::new(write.clone()));
+        self.writes.push(write);
+        true
+    }
+
+    pub(super) fn mark_unread(&mut self, host: &str, id: &str, visible: &HashSet<String>) -> bool {
+        if !self.can_mark_unread(id) { return false; }
+        let Some(anchor) = self.message_rows(id).find(|event| {
+            visible.contains(&event.id)
+                && matches!(&event.change, ThreadTimelineChange::Message { content, .. } if !content.trim().is_empty())
+        }).map(|event| event.id.clone()) else { return false; };
+        let observed_marks = self.summary(id).and_then(|summary| summary.unread_reminder.as_ref())
+            .map(|reminder| reminder.marks.iter().map(|mark| mark.mark_id.clone()).collect())
+            .unwrap_or_default();
+        if !self.queue_reading(host, id, Mutation::MarkUnread(ThreadMarkUnreadParameters {
+            target_id: id.into(), anchor_message_id: anchor, observed_marks,
+        })) { return false; }
+        self.reading_host = Some(host.into());
+        self.visits.entry(id.into()).or_default().marked_here(id);
+        true
+    }
+
+    pub(super) fn reading_target(&self, pane: &Pane) -> Option<String> {
+        match pane {
+            Pane::Thread(id) => Some(id.clone()),
+            Pane::Home(Some(id)) if id.starts_with("thread/") => Some(id.clone()),
+            _ => self.selected.get(&pane.key()).cloned(),
+        }
+    }
+
+    pub(super) fn reading_ids(&self, pane: &Pane) -> Vec<String> {
+        match pane {
+            Pane::Thread(id) => vec![id.clone()],
+            Pane::Home(Some(id)) if id.starts_with("thread/") => vec![id.clone()],
+            _ => self.open.get(&pane.key()).into_iter().flatten().cloned().collect(),
+        }
+    }
+
+    /// Only the successfully presented, active foreground mount supplies this evidence.
+    pub(super) fn presented(&mut self, host: &str, shown: &BTreeMap<String, HashSet<String>>, now: std::time::Instant) {
+        if self.reading_host.as_deref() != Some(host) {
+            self.stop_reading();
+            self.reading_host = Some(host.into());
+        }
+        // Moving the same resource between an embedded panel and its tab is still one visit.
+        self.visits.retain(|id, _| shown.contains_key(id));
+        self.seek_pages.retain(|id, _| shown.contains_key(id));
+        self.seek_pending.retain(|id, _| shown.contains_key(id));
+        self.seek_refused.retain(|id| shown.contains_key(id));
+        self.read_dwell.retain(|id, _| shown.contains_key(id));
+        for (id, visible) in shown {
+            if !self.visits.contains_key(id) {
+                let mut visit = super::unread_visit::Visit::default();
+                // Unknown at entry is sticky: a later summary cannot retroactively capture marks.
+                let reminder = self.summary(id).and_then(|summary| summary.unread_reminder.as_ref());
+                visit.begin(id, reminder);
+                let anchor = reminder.map(|reminder| reminder.anchor_message_id.clone());
+                self.visits.insert(id.clone(), visit);
+                if let Some(anchor) = anchor && !visible.contains(&anchor) {
+                    let key = uuid::Uuid::now_v7().to_string();
+                    self.seek_pending.insert(id.clone(), key.clone());
+                    self.seeks.push(Seek { id: id.clone(), anchor, key });
+                }
+            }
+            let dwell = self.read_dwell.entry(id.clone()).or_default();
+            dwell.retain(|message, _| visible.contains(message));
+            let stable: HashSet<_> = visible.iter().filter(|message| {
+                let since = dwell.entry((*message).clone()).or_insert(now);
+                now.saturating_duration_since(*since) >= std::time::Duration::from_millis(500)
+            }).cloned().collect();
+            if self.seek_pending.contains_key(id) || self.seek_refused.contains(id) || self.has_edit(id) { continue; }
+            if self.read_natural(host, id.clone(), &stable) { continue; }
+            if !self.access.mark_read { continue; }
+            let captured = self.visits.get_mut(id).unwrap().viewed(id, &stable);
+            if !captured.is_empty() {
+                self.queue_reading(host, id, Mutation::ClearUnread(ThreadClearUnreadParameters {
+                    target_id: id.clone(), observed_marks: captured,
+                }));
+            }
+        }
+    }
+
+    pub(super) fn stop_reading(&mut self) {
+        self.read_dwell.clear();
+        self.reading_host = None;
+    }
+
+    pub(super) fn leave_view(&mut self) {
+        self.visits.clear();
+        self.stop_reading();
+        self.seek_pages.clear();
+        self.seek_pending.clear();
+        self.seek_refused.clear();
+        self.anchor_scroll.borrow_mut().clear();
+    }
+
+    pub(super) fn take_seeks(&mut self) -> Vec<Seek> { std::mem::take(&mut self.seeks) }
+
+    pub(super) fn seek_loaded(&mut self, id: &str, key: &str, page: Result<fractal_client::ThreadTimelinePage, SeekFailure>) -> Option<String> {
+        if self.seek_pending.get(id).is_none_or(|pending| pending != key) { return None; }
+        self.seek_pending.remove(id);
+        match page {
+            Ok(page) => {
+                if let Some(anchor) = &page.anchor
+                    && anchor.state == fractal_client::ThreadTimelineAnchorState::Current {
+                    self.anchor_scroll.borrow_mut().insert(id.into(), anchor.message_id.clone());
+                }
+                self.seek_pages.insert(id.into(), page);
+                None
+            }
+            Err(SeekFailure::Unavailable) => { self.seek_refused.insert(id.into()); None }
+            Err(SeekFailure::Failed(why)) => Some(why),
+        }
+    }
+
+    pub(super) fn take_anchor_scroll(&self, host: &str) -> Option<String> {
+        let id = host.strip_prefix("thread:")
+            .or_else(|| host.strip_prefix("home:").filter(|id| id.starts_with("thread/")))
+            .or_else(|| self.selected.get(host).map(String::as_str))?;
+        self.anchor_scroll.borrow_mut().remove(id)
     }
 
     pub(super) fn mark_visible_read(
+        &mut self, host: &str, id: String, visible: &HashSet<String>,
+    ) -> bool {
+        if !self.can_mark_read(&id) { return false; }
+        let captured: Vec<_> = self.summary(&id).and_then(|summary| summary.unread_reminder.as_ref())
+            .into_iter().flat_map(|reminder| &reminder.marks)
+            .filter(|mark| visible.contains(&mark.anchor_message_id))
+            .map(|mark| mark.mark_id.clone()).collect();
+        if !captured.is_empty() {
+            return self.queue_reading(host, &id, Mutation::ClearUnread(ThreadClearUnreadParameters {
+                target_id: id.clone(), observed_marks: captured,
+            }));
+        }
+        self.read_natural(host, id, visible)
+    }
+
+    fn read_natural(
         &mut self,
         host: &str,
         id: String,
         visible: &HashSet<String>,
     ) -> bool {
-        if !self.can_mark_read(&id) {
+        if !self.access.mark_read || self.has_edit(&id)
+            || self.summary(&id).is_none_or(|summary| summary.unread != Some(true)) {
             return false;
         }
         let Some(observed) = self.summaries.get(&id) else {
             return false;
         };
         let seen_message_ids: Vec<_> = self
-            .histories
-            .get(&id)
-            .into_iter()
-            .flat_map(History::rows)
+            .message_rows(&id)
             .filter(|event| {
                 visible.contains(&event.id)
                     && event.actor_id == observed.value.agent_id
-                    && matches!(&event.change, ThreadTimelineChange::Message { .. })
+                    && matches!(&event.change, ThreadTimelineChange::Message { content, .. } if !content.trim().is_empty())
             })
             .take(50)
             .map(|event| event.id.clone())
@@ -2288,6 +2597,11 @@ impl Threads {
         history.loading = false;
         match page {
             Ok(page) => {
+                if let Some(around) = self.seek_pages.get_mut(id) {
+                    around.items.extend(page.items);
+                    around.next_cursor = page.next_cursor;
+                    return None;
+                }
                 history.earlier.extend(page.items);
                 history.cursor = page.next_cursor;
                 history.paged = true;
@@ -2405,6 +2719,9 @@ impl Threads {
         if let Some(summary) = summary {
             self.put_summary(summary);
         }
+        if matches!(&write.mutation, Mutation::MarkUnread(_) | Mutation::ClearUnread(_)) {
+            self.invalidate_marked();
+        }
         self.completion_notice = match &write.mutation {
             Mutation::Close => self.summary(&write.id).map(|thread| format!(
                 "Closed “{}” · {} reopens", thread.title,
@@ -2478,9 +2795,12 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
         })
         .collect();
     for (message, body) in doc.messages {
+        let trailing = body.clone().rev().find(|line| {
+            doc.lines[*line].spans.iter().any(|span| !span.content.trim().is_empty())
+        });
         for line in body {
             let width = doc.lines[line].width() as u16;
-            if width > 0 {
+            if width > 0 && doc.lines[line].spans.iter().any(|span| !span.content.trim().is_empty()) {
                 targets.push(super::doc::Target {
                     line,
                     column: 0,
@@ -2489,6 +2809,7 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
                         host: host.into(),
                         thread: thread.into(),
                         message: message.clone(),
+                        trailing: trailing == Some(line),
                     },
                 });
             }
@@ -2506,3 +2827,5 @@ fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
 mod tests;
 #[cfg(test)]
 mod render_tests;
+#[cfg(test)]
+mod unread_actions_tests;

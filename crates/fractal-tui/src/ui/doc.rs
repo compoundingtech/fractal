@@ -108,8 +108,8 @@ pub enum Hit {
     /// An Availability pane button: pressing its key.
     Availability(char),
     Thread(String, super::thread::Tap),
-    /// Rendered body text, tracked for an explicit thread read action.
-    ThreadBody { host: String, thread: String, message: String },
+    /// Meaningful rendered body text; trailing marks the last nonblank body line.
+    ThreadBody { host: String, thread: String, message: String, trailing: bool },
 }
 
 pub type Target = SharedTarget<Hit>;
