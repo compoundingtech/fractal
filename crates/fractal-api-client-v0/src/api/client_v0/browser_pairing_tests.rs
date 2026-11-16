@@ -514,7 +514,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     replica.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
     replica.store.import_replication(state.store.origin(), &envelopes).unwrap();
     let replica_page = crate::store::thread_metadata::mixed_timeline(
-        &replica.store, person, thread, None, 40,
+        &replica.store, person, thread, None, None, 40,
     ).unwrap();
     let replica_items = serde_json::to_value(replica_page.items).unwrap();
     assert!(replica_items.as_array().unwrap().iter()

@@ -596,6 +596,7 @@ impl CollectionStream {
             ThreadListScope::Inbox { source, episode } => json!({"origin_source":source, "origin_episode":episode}),
             ThreadListScope::Mission(id) => json!({"mission_id":id}),
             ThreadListScope::RecentlyClosed => json!({"recently_closed":true}),
+            ThreadListScope::MarkedUnread => json!({"marked_unread":true}),
         };
         self.send(&json!({"kind":"subscribe", "id":id, "collection":"threads", "thread_context":context, "limit":limit})).await
     }

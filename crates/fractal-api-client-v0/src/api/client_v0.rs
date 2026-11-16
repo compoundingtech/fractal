@@ -9754,6 +9754,9 @@ async fn action_inner(
     if request.action_type == "thread.read" {
         return threads::read_action(state, session, request).await;
     }
+    if matches!(request.action_type.as_str(), "thread.mark-unread" | "thread.clear-unread") {
+        return threads::unread_action(state, session, request).await;
+    }
     if request.action_type == "thread.link-ask" {
         return threads::link_ask_action(state, session, request).await;
     }

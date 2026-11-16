@@ -277,6 +277,7 @@ fn rust_operation_methods(
             ThreadListScope::Inbox {{ source, episode }} => format!("origin_source={{}}&origin_episode={{}}", percent_encode(source), percent_encode(episode)),
             ThreadListScope::Mission(id) => format!("mission_id={{}}", percent_encode(id)),
             ThreadListScope::RecentlyClosed => "recently_closed=true".into(),
+            ThreadListScope::MarkedUnread => "marked_unread=true".into(),
         }};
         let mut path = format!("/v1/client/threads?{{selection}}");
         if let Some(cursor) = cursor {{ path.push_str(&format!("&cursor={{}}", percent_encode(cursor))); }}
@@ -291,6 +292,7 @@ fn rust_operation_methods(
         }
         if id == "thread.timeline" {
             writeln!(out, r#"    pub async fn thread_timeline(&self, id: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline", thread_path_segment(id)?); let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!("cursor={{}}", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!("limit={{limit}}")); }} if !query.is_empty() {{ path.push('?'); path.push_str(&query.join("&")); }} self.get(&path).await }}"#)?;
+            writeln!(out, r#"    pub async fn thread_timeline_around(&self, id: &str, message_id: &str, limit: Option<usize>) -> Result<Envelope<ThreadTimelinePage>, ClientError> {{ let mut path = format!("/v1/client/threads/{{}}/timeline?around={{}}", thread_path_segment(id)?, percent_encode(message_id)); if let Some(limit) = limit {{ path.push_str(&format!("&limit={{limit}}")); }} self.get(&path).await }}"#)?;
             continue;
         }
         if id == "arrangements.memberships" {
@@ -551,6 +553,7 @@ fn swift_operation_methods(
         case .inbox(let source, let episode): query = [.init(name: "origin_source", value: source), .init(name: "origin_episode", value: episode)]
         case .mission(let id): query = [.init(name: "mission_id", value: id)]
         case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
+        case .markedUnread: query = [.init(name: "marked_unread", value: "true")]
         }}
         if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}
         if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}
@@ -563,7 +566,7 @@ fn swift_operation_methods(
             continue;
         }
         if id == "thread.timeline" {
-            writeln!(out, r#"    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ThreadTimelinePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }}"#)?;
+            writeln!(out, r#"    public func threadTimeline(id: String, cursor: String? = nil, limit: Int? = nil, around: String? = nil) async throws -> Envelope<ThreadTimelinePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: "cursor", value: cursor)) }}; if let around {{ query.append(.init(name: "around", value: around)) }}; if let limit {{ query.append(.init(name: "limit", value: String(limit))) }}; return try await get("v1/client/threads/\(try Self.routedThreadID(id))/timeline", query: query) }}"#)?;
             continue;
         }
         if id == "arrangements.memberships" {
@@ -979,7 +982,12 @@ fn validate_surfaces(
         "MessageBody",
         "AgentDeclaration",
         "ThreadSummary",
+        "ThreadUnreadMark",
+        "ThreadUnreadReminder",
+        "ThreadMarkUnreadParameters",
+        "ThreadClearUnreadParameters",
         "ThreadSummaryPage",
+        "ThreadTimelineAnchor",
         "ThreadTimelinePage",
         "ThreadTargetParameters",
         "ThreadRenameParameters",
@@ -1855,7 +1863,7 @@ fn typescript_operation_methods(
             continue;
         }
         if id == "thread.timeline" {
-            writeln!(out, "    async threadTimeline(id: string, options: {{ cursor?: string; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadTimelinePage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/timeline` + query(options), undefined, requestOptions); }}")?;
+            writeln!(out, "    async threadTimeline(id: string, options: {{ cursor?: string; around?: never; limit?: number }} | {{ around: string; cursor?: never; limit?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ThreadTimelinePage>> {{ return this.get(`/v1/client/threads/${{threadPathSegment(id)}}/timeline` + query(options), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "arrangements.memberships" {

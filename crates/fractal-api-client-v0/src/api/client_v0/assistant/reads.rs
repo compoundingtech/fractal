@@ -147,7 +147,7 @@ async fn thread_read(
                         } else {
                             let mut page_limit = limit;
                             loop {
-                                let mut page = thread_metadata::mixed_timeline(&state.store, &person, id, cursor.as_deref(), page_limit)
+                                let mut page = thread_metadata::mixed_timeline(&state.store, &person, id, cursor.as_deref(), None, page_limit)
                                     .map_err(store_error)?;
                                 let next = bind(page.next_cursor.as_deref())?;
                                 let value = json!({"items":page.items,"next_cursor":next});
