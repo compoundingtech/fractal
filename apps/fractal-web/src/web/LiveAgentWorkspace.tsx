@@ -997,7 +997,7 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focus
       ) : null}
       {view._tag === 'TopicThread' ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading thread" /></div>}>
-          <TopicThreadPane key={view.ref} threadId={view.ref} />
+          <TopicThreadPane key={view.ref} threadId={view.ref} active={!hidden} />
         </React.Suspense>
       ) : null}
       {view._tag === 'Document' && onOpenDocument !== undefined ? (

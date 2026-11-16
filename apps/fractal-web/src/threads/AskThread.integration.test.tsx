@@ -26,13 +26,13 @@ const Inbox = ({ onOpen }: { readonly onOpen: (ref: string) => void }) => {
 }
 
 it.each([
-  { connection: 'local browser', local: true, browserGrant: false, canStart: true, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 2, episode: 'claim/episode' },
-  { connection: 'approved paired browser', local: false, browserGrant: true, canStart: true, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 2, episode: 'claim/episode' },
-  { connection: 'legacy paired device', local: false, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 2, episode: 'claim/episode' },
-  { connection: 'custom Inbox source', local: true, browserGrant: false, canStart: true, kind: 'custom.garden.review', sourceId: 'custom/garden/review/origin', responsible: true, protocol: 2, episode: 'claim/episode' },
-  { connection: 'unassigned Inbox source', local: true, browserGrant: false, canStart: false, kind: 'custom.garden.review', sourceId: 'custom/garden/review/origin', responsible: false, protocol: 2, episode: 'claim/episode' },
+  { connection: 'local browser', local: true, browserGrant: false, canStart: true, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: 'claim/episode' },
+  { connection: 'approved paired browser', local: false, browserGrant: true, canStart: true, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: 'claim/episode' },
+  { connection: 'legacy paired device', local: false, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: 'claim/episode' },
+  { connection: 'custom Inbox source', local: true, browserGrant: false, canStart: true, kind: 'custom.garden.review', sourceId: 'custom/garden/review/origin', responsible: true, protocol: 3, episode: 'claim/episode' },
+  { connection: 'unassigned Inbox source', local: true, browserGrant: false, canStart: false, kind: 'custom.garden.review', sourceId: 'custom/garden/review/origin', responsible: false, protocol: 3, episode: 'claim/episode' },
   { connection: 'old thread protocol', local: true, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 1, episode: 'claim/episode' },
-  { connection: 'cached row without an episode', local: true, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 2, episode: undefined },
+  { connection: 'cached row without an episode', local: true, browserGrant: false, canStart: false, kind: 'agent-request', sourceId: 'step-run/review', responsible: true, protocol: 3, episode: undefined },
 ])('offers an inline Inbox composer only when $connection supports unsigned sends', async ({ local, browserGrant, canStart, kind, sourceId, responsible, protocol, episode }) => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
@@ -103,7 +103,7 @@ it.each([
     expect(row?.getAttribute('aria-label')).toContain('unread thread replies')
     expect(host.querySelectorAll('[data-alert-id]')).toHaveLength(1)
     await act(async () => row?.click())
-    if (episode !== undefined && protocol >= 2) {
+    if (episode !== undefined && protocol >= 3) {
       await vi.waitFor(() => expect(requests.some(url =>
         url.searchParams.get('origin_source') === sourceId && url.searchParams.get('origin_episode') === episode)).toBe(true))
     } else {
