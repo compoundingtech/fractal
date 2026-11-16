@@ -18,7 +18,7 @@ import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/compositi
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ThreadEditor } from './ThreadEditor.tsx'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
-import type { RetainedThreadStart, ThreadObservation, ThreadSource, ThreadRefusal } from './threadSource.ts'
+import { upgradeThreadEndpoint, type RetainedThreadStart, type ThreadObservation, type ThreadSource, type ThreadRefusal } from './threadSource.ts'
 import { ThreadRefusalAlert } from './ThreadRefusalAlert.tsx'
 import { useForegroundVisibility } from './useForegroundVisibility.ts'
 import { awayVisit, enterUnreadVisit, holdUnreadVisit, planUnreadView, type UnreadVisit } from './unreadVisit.ts'
@@ -27,7 +27,6 @@ import type { UnreadReminderRead } from './unread-action-port.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
-const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. Your browser pairing is kept.'
 /** The same words the alert answer box uses for a device without control access. */
 const readOnlyThread = 'Read-only on this device. Reply from a device with control access.'
 

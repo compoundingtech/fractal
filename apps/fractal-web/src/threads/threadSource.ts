@@ -11,6 +11,9 @@ import { gatewayUnreadActions, type UnreadActionPort } from './unread-action-por
 
 export type ThreadObservation = { readonly summary: ThreadSummary; readonly snapshotId: string }
 
+export const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. Your browser pairing is kept.'
+const threadProtocolVersion = 3
+
 export type ThreadDraft = {
   readonly content: string
   readonly quote?: { readonly id: string; readonly sender: string; readonly excerpt: string }
@@ -142,8 +145,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     get.addFinalizer(() => abort.abort())
     void client.capabilities({ signal: abort.signal }).then(({ value }) => {
       const caps = Native.decodeUnknownSync(Native.Capabilities)(value)
-      const upgradeRequired = ([['threads-v1', 2], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
-      const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= 2 && capability.state === 'granted')
+      const upgradeRequired = ([['threads-v1', threadProtocolVersion], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
+      const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= threadProtocolVersion && capability.state === 'granted')
       const read = inboxOrigins && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')
       if (!abort.signal.aborted) {
         if (!read && registry.get(titles).size > 0) registry.set(titles, new Map())

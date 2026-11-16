@@ -33,7 +33,7 @@ it('keeps delayed marks sticky in two already-open placements; a deliberate late
   const client = new FractalClient({ baseUrl: 'http://gateway.test', fetchImpl: async input => {
     const url = new URL(String(input))
     if (url.pathname.endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, transport: 'local-web', capabilities: [...base.value.capabilities,
-      { id: 'threads-v1', version: 2, state: 'granted' }, { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'threads-v1', version: 3, state: 'granted' }, { id: 'thread-summary-feed', version: 1, state: 'granted' },
     ] } })
     if (url.pathname.endsWith('/threads')) return Response.json({ ...base, value: { items: [summary], next_cursor: null } })
     if (url.pathname.endsWith('/timeline')) return Response.json({ ...base, value: { items: [{ kind: 'message', id: 'message/anchor', actor_id: agentId, content: 'Read this meaningful body', accepted_at_unix_ms: 1, thread_quote_id: null }], next_cursor: null } })

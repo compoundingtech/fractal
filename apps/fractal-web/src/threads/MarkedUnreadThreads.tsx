@@ -9,7 +9,7 @@ import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/c
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { useDataSource } from '../data/react.tsx'
 import { markedUnreadErrorMessage, readMarkedUnreadPages, type MarkedUnreadRead } from './markedUnreadPages.ts'
-import type { ThreadSource } from './threadSource.ts'
+import { upgradeThreadEndpoint, type ThreadSource } from './threadSource.ts'
 import type { UnreadSeekResult } from './unread-action-port.ts'
 
 export type MarkedUnreadSource = Pick<ThreadSource, 'list' | 'unreadActions' | 'reload'>
@@ -17,7 +17,14 @@ export type MarkedUnreadSource = Pick<ThreadSource, 'list' | 'unreadActions' | '
 /** The Inbox reads the actor-scoped canonical collection, including closed threads. */
 export const LiveMarkedUnreadThreads = ({ onOpenThread }: { readonly onOpenThread: (id: string) => void }): React.ReactNode => {
   const source = useDataSource().threads
-  return source === undefined ? null : <MarkedUnreadThreads source={source} onOpenThread={onOpenThread} />
+  return source === undefined ? null : <LiveMarkedUnreadSource source={source} onOpenThread={onOpenThread} />
+}
+
+const LiveMarkedUnreadSource = ({ source, onOpenThread }: { readonly source: ThreadSource; readonly onOpenThread: (id: string) => void }) => {
+  const access = useAtomValue(source.access)
+  return access.upgradeRequired
+    ? <SystemNotice kind="empty" scope="inline" title={upgradeThreadEndpoint} />
+    : <MarkedUnreadThreads source={source} onOpenThread={onOpenThread} />
 }
 
 export const MarkedUnreadThreads = ({ source, onOpenThread }: {

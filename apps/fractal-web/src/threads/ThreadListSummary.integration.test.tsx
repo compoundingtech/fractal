@@ -31,7 +31,7 @@ const mountOlderPage = async ({ get, follow = false }: {
     const url = new URL(String(input))
     if (url.pathname.endsWith('/capabilities')) return Response.json({ ...base, value: {
       ...base.value, transport: 'local-web', capabilities: [...base.value.capabilities,
-        { id: 'threads-v1', version: 2, state: 'granted' },
+        { id: 'threads-v1', version: 3, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.reply', version: 0, state: 'granted' },
       ],

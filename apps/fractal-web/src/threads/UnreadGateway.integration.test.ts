@@ -15,7 +15,7 @@ it('sends frozen observed-remove actions through bound delivery and hydrates onl
     const url = new URL(String(input)); urls.push(url)
     if (url.pathname.endsWith('/capabilities')) return Response.json({ ...base, value: {
       ...base.value, transport: 'local-web', capabilities: [...base.value.capabilities,
-        { id: 'threads-v1', version: 2, state: 'granted' },
+        { id: 'threads-v1', version: 3, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.mark-unread', version: 0, state: 'granted' },
         { id: 'thread.clear-unread', version: 0, state: 'granted' },
