@@ -3907,6 +3907,12 @@ mod tests {
         report_control_effects(false).await;
     }
 
+    // Admission controls compare the reported reason, not the assessment's elapsed-time suffix.
+    fn delivery_report_reason_is(subject: &str, expected: &str) -> bool {
+        delivery_presence::assess_current(subject, "omp", Some("current")).reason
+            .is_some_and(|reason| reason.split_once("; channel non-ready for ").is_some_and(|(reported, _)| reported == expected))
+    }
+
     #[cfg(all(feature = "test-support", target_os = "linux"))]
     async fn report_control_effects(native: bool) {
         use crate::store::owned_sets::{Options, Source};
@@ -3966,7 +3972,7 @@ mod tests {
         stream.socket.send(Message::Text(baseline.to_string().into())).await.unwrap();
         stream.socket.send(Message::Ping(vec![0].into())).await.unwrap();
         expect_pong(&mut stream.socket, &[0]).await;
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        assert!(delivery_report_reason_is(&subject, "baseline"));
         let tap_count = || std::env::var_os("ST3_TEST_ADMITTED_REPORTS").map(|path| {
             std::fs::read_to_string(path).unwrap_or_default().lines().filter(|line|
                 serde_json::from_str::<Value>(line).is_ok_and(|value| value["subject"] == subject)).count()
@@ -3995,7 +4001,7 @@ mod tests {
                 expect_pong(&mut stream.socket, &barrier).await;
                 assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_none(), "{refusal}");
                 assert_eq!(state.store.index().unwrap(), index, "no drain/recovery claim: {refusal}");
-                assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+                assert!(delivery_report_reason_is(&subject, "baseline"));
                 assert_eq!(tap_count(), initial_taps, "no admitted tap: {refusal}");
                 harness_events::write_snapshot(&agent_dir, "harness-state", &raw).unwrap();
             }
@@ -4009,7 +4015,7 @@ mod tests {
         stream.socket.send(Message::Ping(vec![4].into())).await.unwrap();
         expect_pong(&mut stream.socket, &[4]).await;
         assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_some());
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        assert!(delivery_report_reason_is(&subject, "baseline"));
         assert_eq!(tap_count(), initial_taps);
         let mut accepted = report("later-admissible");
         accepted["mailbox_replay_ack"] = json!(true);
@@ -4017,7 +4023,7 @@ mod tests {
         stream.socket.send(Message::Ping(vec![5].into())).await.unwrap();
         if native { assert!(matches!(next(&mut stream.socket).await, Frame::Replay { .. })); }
         expect_pong(&mut stream.socket, &[5]).await;
-        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("later-admissible"));
+        assert!(delivery_report_reason_is(&subject, "later-admissible"));
         assert_eq!(tap_count(), initial_taps.map(|count| count + 1));
     }
 
@@ -4129,7 +4135,7 @@ mod tests {
             let report = |reason: &str| Message::Text(json!({"transport":"omp-channel","pid":37,"ready":false,"reason":reason}).to_string().into());
             stream.socket.send(report(&original)).await.unwrap();
             let deadline = tokio::time::Instant::now()+Duration::from_secs(2);
-            while delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref()!=Some(&original) {
+            while !delivery_report_reason_is(&subject, &original) {
                 assert!(tokio::time::Instant::now()<deadline,"unchanged argv report was not admitted");
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -4170,7 +4176,7 @@ mod tests {
             stream.socket.send(Message::Ping(vec![1].into())).await.unwrap();
             expect_pong(&mut stream.socket, &[1]).await;
             assert_eq!(stream.reads.load(SeqCst), reads, "dirty snapshot processing must remain held");
-            assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(),Some(original.as_str()));
+            assert!(delivery_report_reason_is(&subject, &original));
             assert!(state.store.mailbox_lease_authority(&fence).unwrap().is_none());
         }
     }

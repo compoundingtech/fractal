@@ -1692,7 +1692,7 @@ mod tests {
             if age + Duration::from_secs(30) < POLL_STALE_AFTER {
                 assert_eq!(
                     assessment.reason.as_deref(),
-                    Some("claude-channel-unattached: mail held"),
+                    Some("claude-channel-unattached: mail held; channel non-ready for 0s"),
                     "{age:?}"
                 );
             }
