@@ -57,6 +57,7 @@ const styles = stylex.create({
   comparison: { display: 'flex', flexWrap: 'wrap', gap: 16, backgroundColor: surface.canvas },
 })
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Details Resources',
   component: Workbench,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Production DetailsPane mounted in Workbench. Cases preserve inherited chart, resource, scope and geometry gates without the former ExploreDetails or DetailsWorkbench harness. Host counters observe Details callbacks only; terminal drawers, split-tree wiring and sidebar selection are intentionally not rendered.' } } },
@@ -80,6 +81,21 @@ const meta = {
   },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'CappedResourceStates:contract-fixture',
+  'CardResourceStates:contract-fixture',
+  'DenseResourceStates:contract-fixture',
+  'E3ChartMatrix:contract-fixture',
+  'Interactions:contract-fixture',
+  'OrientationAnchor:contract-fixture',
+  'PresentationMatrix:contract-fixture',
+  'ResourceGeometry:contract-fixture',
+  'SharedResourceActionNames:contract-fixture',
+  'SpendScope:contract-fixture',
+  'TraceContracts:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 function requireContract(value: unknown, reason: string): asserts value { if (!value) throw new Error(reason) }
 async function rejectsControl(reason: string, assertion: () => void | Promise<void>) {
@@ -178,7 +194,15 @@ function assertCraft(pane: HTMLElement, item: Case) {
   }
   if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-not-reported="group"]`), 'Unknown source omits its single not-reported line')
   const history = pane.querySelector('section[aria-label$="History"]')
-  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:/^Session · /}).length>0, 'Known trace history is absent')
+  if (item.state === 'busy' || item.state === 'idle') {
+    requireContract(history, 'Known trace history is absent')
+    // Sessions have nothing to open: dense rows are static list items; card forms keep their card's open row.
+    const sessions = item.variants.resources === 'R2'
+      ? within(history as HTMLElement).queryAllByRole('listitem').filter(row => row.hasAttribute('data-details-resource-static') && row.querySelector('[data-details-resource-title]')?.textContent?.startsWith('Session · '))
+      : within(history as HTMLElement).queryAllByRole('button', { name: /^Session · / })
+    requireContract(sessions.length > 0, 'Known trace history is absent')
+    if (item.variants.resources === 'R2') requireContract(sessions.every(row => !row.matches('[tabindex]') && !row.querySelector('button,a[href],[tabindex],[role="button"]')), 'Unopenable session history row is interactive')
+  }
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
   // Compactions paint context occupancy: 897,170 → 132,952 of a 1M window, excluding the straddling bucket.
   if (changes) requireContract(/90% → 13%/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')

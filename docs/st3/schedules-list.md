@@ -1,14 +1,14 @@
 # Listing schedule declarations
 
-`st schedules ls` (also `fractal schedules ls`) reads one bounded page of schedule declarations
+`fractal schedules ls` (also `fractal schedules ls`) reads one bounded page of schedule declarations
 already applied on the selected local member. It includes declarations from other hosts that
 this member has received through replication. It never contacts those hosts to answer the list.
 
 ```sh
-st schedules ls --as person/operator
-st schedules ls --limit 20 --json --as person/operator
-st schedules ls --cursor 'TOKEN' --as person/operator
-st schedules ls --unheard-after 10m --as person/operator
+fractal schedules ls --as person/operator
+fractal schedules ls --limit 20 --json --as person/operator
+fractal schedules ls --cursor 'TOKEN' --as person/operator
+fractal schedules ls --unheard-after 10m --as person/operator
 ```
 
 The CLI uses `--as`, the seat's `ST_AGENT` (including the current Fractal alias), or the configured

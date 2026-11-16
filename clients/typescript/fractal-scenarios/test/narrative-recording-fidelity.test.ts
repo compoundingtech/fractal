@@ -33,7 +33,8 @@ for (const name of NARRATIVE_RECORDING_NAMES) {
     const oracle = decodeRecording(oracleBytes)
 
     it('reconstructs every historical/future socket frame and full HTTP exchange', async () => {
-      expect(SLICE_KINDS.map((kind) => proof.world.slices[kind].source._tag)).toEqual(SLICE_KINDS.map(() => 'recorded'))
+      // Recordings carry no objectives read; the world serves the synthetic empty one.
+      expect(SLICE_KINDS.map((kind) => proof.world.slices[kind].source._tag)).toEqual(SLICE_KINDS.map((kind) => kind === 'objectives' ? 'synthetic' : 'recorded'))
       expect(proof.world.recording?.socket_ids?.length).toBeGreaterThan(0)
       expect(oracle.some((row) => row.kind === 'frame' && row.receive_ms < 0)).toBe(true)
       await assertRecordingFidelity(proof, oracle)
@@ -44,7 +45,8 @@ for (const name of NARRATIVE_RECORDING_NAMES) {
       const raw = decodeRecording(readFileSync(new URL(name + '.recording.jsonl', RECORDINGS_DIR), 'utf8'))
       const expected = importRecording(proof.script, normalizeRecording(proof.script, raw, now))
       expect(importNormalizedRecording(proof.script, oracle, now)).toEqual(expected)
-      expect(rebaseImportedSlices(proof.world.slices, now)).toEqual(expected.slices)
+      const { objectives: _synthetic, ...recorded } = proof.world.slices
+      expect(rebaseImportedSlices(recorded, now)).toEqual(expected.slices)
     }, 30_000)
 
     for (const mutation of ['drop', 'reorder', 'alter', 'frame-reorder', 'http-status'] as const) {

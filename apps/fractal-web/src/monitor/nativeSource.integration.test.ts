@@ -25,7 +25,7 @@ const gateway = Effect.acquireRelease(
     })
     const address = server.address()
     if (address === null || typeof address === 'string') throw new Error('Missing loopback address')
-    return { server, requests, source: nativeUsageSource({ label: 'Native st usage',
+    return { server, requests, source: nativeUsageSource({ label: 'Native Fractal usage',
       prefix: `http://127.0.0.1:${address.port}/v1/client/usage` }),
       setStatus: (next: number) => { status = next },
       setLimits: (next: unknown) => { limits = next },
@@ -41,7 +41,7 @@ describe('canonical native quota source', () => {
       sourceSchema: 'st3.client.v0/usage.period', accounts: [],
     } })
     expect(yield* Effect.result(source.history('account/ada/claude-1'))).toMatchObject({
-      _tag: 'Failure', failure: { kind: 'unavailable' },
+      _tag: 'Failure', failure: { kind: 'unavailable', reason: 'Native Fractal usage does not publish ledger account history.' },
     })
     expect(requests).toEqual(['/v1/client/usage'])
   }))

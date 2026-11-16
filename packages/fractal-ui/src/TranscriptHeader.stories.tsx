@@ -22,8 +22,19 @@ const HeaderSurface = ({ scheme = 'dark', narrow = false }: { scheme?: Scheme; n
     <Transcript title="Row projection" turns={[]} showHeader={showHeader} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} />
   </EmbraceRuntimeProvider>
 </section>)}</main>
-const meta = { title: 'Fractal UI/Transcript header ownership', component: HeaderSurface, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', narrow: false } } satisfies Meta<typeof HeaderSurface>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Transcript header ownership', component: HeaderSurface, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', narrow: false } } satisfies Meta<typeof HeaderSurface>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:primitive',
+  'Dark1440:primitive',
+  'Dark440:primitive',
+  'HostedStatus:contract-fixture',
+  'HostedStatusLight:contract-fixture',
+  'Light1440:primitive',
+  'Light440:primitive',
+]
 type Story = StoryObj<typeof meta>
 export const Dark1440: Story = { parameters: { scenario: { _tag: 'primitive', reason: 'Empty transcripts compare header ownership, menus and narrow geometry without domain content.' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)

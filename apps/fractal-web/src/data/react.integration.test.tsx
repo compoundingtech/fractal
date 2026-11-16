@@ -6,7 +6,7 @@ import {
   decodeUnknownSync,
   type AgentEncoded,
 } from '@fractal/client/schema'
-import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
@@ -16,7 +16,7 @@ import { expect, it, vi } from 'vitest'
 // Node tests stub only the CSS runtime; render identity and feed equality are under test.
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
-import { sameFolderFleet } from '../shell/AgentFolders.tsx'
+import { sameFolderFleet } from '../shell/sameFolderFleet.ts'
 import { useAgentAttentionCounts } from '../shell/AgentAttention.tsx'
 import { WorkbenchContextProvider, useOpen, type SubjectSummary } from '../shell/context.tsx'
 import { defaultFilters } from '../shell/sidebar/state.ts'

@@ -1,10 +1,10 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { Alert, Linking, Pressable, ScrollView, SectionList, View } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
-import { alertsHeading, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@fractal/views';
+import { alertsHeading, detailRow, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@fractal/views';
 import type { RootParams } from '../navigation';
 import { agentName } from '../agentsView';
 import { alertsEmptyText } from '../alertsEmpty';
@@ -13,17 +13,25 @@ import { missionTitle } from '../missionsView';
 import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
+import { AvailabilitySection } from './Availability';
+import { AutoResolvedSection, useAutoResolvedRows, useOverride } from './AutoResolved';
+import { closedOverride, OVERRIDE_TITLE } from '../autoResolved';
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
-// Now: what needs the person, as stui's Home lists it.
+// Now: what needs the person, as the Fractal terminal UI's Home lists it.
 export function NowScreen() {
-  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
+  const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions, readAvailability, readAutoResolved } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
   useDebugScroll(list as never);
-  const refresh = useRefresh();
+  const readExtra = useCallback(() => Promise.all([readAvailability(), readAutoResolved()]).then(() => {}), [readAvailability, readAutoResolved]);
+  const refresh = useRefresh([], readExtra);
+  // Auto-resolved asks are a read, not a collection: read again each time Now comes into view.
+  useFocusEffect(useCallback(() => { void readAutoResolved(); }, [readAutoResolved]));
+  const override = useOverride();
+  const autoRows = useAutoResolvedRows();
   const agentOf = (row: HomeRow) => [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
   const rows = useMemo(() => homeRows(data.attention, caps?.session_actor), [data.attention, caps?.session_actor]);
   const requesterOf = (row: HomeRow) => {
@@ -31,7 +39,7 @@ export function NowScreen() {
     const agent = data.agents.find(candidate => candidate.id === id);
     return agent ? agentName(agent) : id.replace(/^agent\//, '');
   };
-  // Start something, as stui's launcher does: a shell or a mission.
+  // Start something, as the Fractal terminal UI's launcher does: a shell or a mission.
   useLayoutEffect(() => {
     navigation.setOptions({
       unstable_headerRightItems: () => [{
@@ -46,7 +54,7 @@ export function NowScreen() {
   // The count of what waits on the person, as the other clients print it: nothing at zero.
   const heading = alertsHeading(openAlerts(data.attention, caps?.session_actor).length);
   const sections = useMemo(() => homeSections(rows).map(section => ({ ...section, data: section.rows })), [rows]);
-  // Dismiss, as stui's x: a request is closed with word to its asker that there is nothing for
+  // Dismiss, as the Fractal terminal UI's x: a request is closed with word to its asker that there is nothing for
   // the person to do (after a confirm), an update or a message is read. A decision has none.
   const dismiss = (row: HomeRow): (() => void) | undefined => {
     const item = row.item;
@@ -78,6 +86,8 @@ export function NowScreen() {
         ...(row.item.mission_id ? [{ id: 'mission', title: 'Open the mission', symbol: 'point.3.connected.trianglepath.dotted', run: () => navigation.navigate('Mission', { id: row.item.mission_id! }) }] : []),
         ...(row.item.actions.includes('work.done') && !row.item.update && !busy && status === 'online' ? [{ id: 'done', title: 'Complete step', symbol: 'checkmark.circle', run: () => Alert.prompt('Complete step', row.title, summary => { if (summary.trim()) void actions.done(row.item, summary); }) }] : []),
         ...(dismiss(row) && !busy && status === 'online' ? [{ id: 'dismiss', title: row.item.closedElsewhere ? 'Clear from Now' : row.item.update ? 'Mark read' : 'Dismiss', symbol: 'xmark.circle', run: dismiss(row)! }] : []),
+        // A closed ask Fractal resolved by its deadline may still take the person's own answer.
+        ...(closedOverride(row.item, autoRows) && !busy && status === 'online' ? [{ id: 'override', title: OVERRIDE_TITLE, symbol: 'arrow.uturn.backward.circle', run: () => override(closedOverride(row.item, autoRows)!) }] : []),
       ]}>
         <GroupedRow
           title={row.title}
@@ -85,11 +95,12 @@ export function NowScreen() {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />
       </ContextMenu>}
-      ListHeaderComponent={<View><StatusLine />{heading ? <T bold style={{ paddingHorizontal: 32, paddingTop: 16 }}>{heading}</T> : null}</View>}
+      ListHeaderComponent={<View><StatusLine /><AvailabilitySection />{heading ? <T bold style={{ paddingHorizontal: 32, paddingTop: 16 }}>{heading}</T> : null}</View>}
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
-        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `st now` lists them all.</Note> : null}
+        <AutoResolvedSection rows={autoRows} />
+        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
       </View>}
       style={{ flex: 1 }}
     />
@@ -98,21 +109,25 @@ export function NowScreen() {
 
 // One attention item: what it asks, who raised it, and what can be done here.
 export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) {
-  const { data, busy, status, actions, hasSynced, loadErrors } = useStore();
+  const { data, busy, status, actions, hasSynced, loadErrors, overridePending } = useStore();
   useMissionsOnFocus();
+  const autoRows = useAutoResolvedRows();
+  const override = useOverride();
   const found = data.attention.find(candidate => candidate.id === route.params.id);
   // Nothing leaves Now by itself: an update is read when the person says so, never by opening it.
   const kept = useRef(found);
   if (found) kept.current = found;
   const item = found ?? kept.current;
   if (!item) return <Screen><Banners /><Empty text={loadErrors.attention ? 'This alert could not be loaded.' : !hasSynced ? 'Checking for this alert…' : status !== 'online' ? 'This alert is not in the offline snapshot. Reconnect to check it.' : 'This item is no longer open.'} /></Screen>;
-  const [row] = homeRows([item], undefined);
+  const row = detailRow(item);
   const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const mission = item.mission_id ? data.missions.find(candidate => candidate.id === item.mission_id) : undefined;
   const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
-  // Closed elsewhere, so nothing here can be answered; it stays until the person clears it.
+  // Closed elsewhere, so nothing here can be answered; it stays until the person clears it. One Fractal
+  // resolved by its deadline may still take the person's own answer instead of the default.
   if (item.closedElsewhere && !item.update) {
+    const overridable = closedOverride(item, autoRows);
     return <Screen>
       <Banners />
       <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
@@ -120,6 +135,10 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
+        {overridable ? <>
+          <T dim>Fractal resolved it by its deadline{overridable.ask.default_answer ? ` with the default “${overridable.ask.default_answer.label}”` : ''}.</T>
+          <Button label={OVERRIDE_TITLE} disabled={busy || status !== 'online' || overridePending.has(overridable.ask.episode)} onPress={() => override(overridable)} />
+        </> : null}
         <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
       </ScrollView>
@@ -175,7 +194,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       <T bold selectable>{row.title}</T>
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'
         // A prompt is allowed from its conversation, where the call it asks about is shown.
-        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} calls={null} seats={[]} />
+        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} seats={[]} />
         : item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
       {item.because ? <T soft>because {item.because}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}

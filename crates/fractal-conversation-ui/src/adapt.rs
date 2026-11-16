@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Why a conversation cannot be shown whole, when st could not read the harness's transcript.
-/// st then sends only the Small Talk around it, which reads as a conversation with the agent's
+/// st then sends only the Fractal around it, which reads as a conversation with the agent's
 /// side missing; Nathan's rule (2026-10-01) is to show neither half then, and say why, with the
 /// transcript's path so it can be reported.
 pub fn unreadable_transcript(timeline: &[TimelineEntry]) -> Option<String> {
@@ -38,8 +38,8 @@ fn not_yet(error: &fractal_client::TimelineErrorBody) -> bool {
     error.details.get("not_yet").and_then(Value::as_bool) == Some(true)
 }
 
-/// One conversation: the harness transcript and Small Talk messages, in time order.
-/// Draw one conversation as st joined it: the harness's turns and the agent's Small Talk, in
+/// One conversation: the harness transcript and Fractal messages, in time order.
+/// Draw one conversation as st joined it: the harness's turns and the agent's Fractal, in
 /// the order st sent them.
 /// How a message's signature reads beside its sender: the device that signed it and whether
 /// that checks ("✓ example phone (secure enclave)"). A message st holds no signature for is usually
@@ -67,7 +67,7 @@ pub fn signature_mark(provenance: &fractal_client::MessageProvenance) -> Option<
 
 /// Said once at the start of a conversation st read only the newest part of.
 const NATIVE_PREFIX_NOTE: &str =
-    "Earlier history is not shown: st reads only the newest part of this agent's transcript";
+    "Earlier history is not shown: Fractal reads only the newest part of this agent's transcript";
 
 pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
     conversation_with_filters(timeline, names, crate::DEFAULT_FILTERS)
@@ -111,7 +111,7 @@ fn conversation_with_output_mode(
     let timeline = &displayed;
     let name = |id: &str| -> String {
         names.get(id).cloned().unwrap_or_else(|| match id {
-            "daemon/runtime" => "st".into(),
+            "daemon/runtime" => "Fractal".into(),
             id if id.starts_with("person/") => id.trim_start_matches("person/").to_owned(),
             id => short(id),
         })
@@ -125,9 +125,9 @@ fn conversation_with_output_mode(
     let mut delivery: BTreeMap<String, bool> = BTreeMap::new();
     // Graph messages the agent's harness received, from its own transcript.
     let mut delivered: BTreeSet<String> = BTreeSet::new();
-    // A Small Talk message is two entries: who wrote to whom, then what they wrote. A
+    // A Fractal message is two entries: who wrote to whom, then what they wrote. A
     // harness transcript heads its own turns with message entries too; only a graph message,
-    // `message/…`, is Small Talk.
+    // `message/…`, is Fractal.
     let mut mail: Option<(&TimelineEntry, &fractal_client::TimelineMessageBody)> = None;
     // A harness that wraps a delivery in its own prompt repeats mail the stream may already show.
     let shown = timeline
@@ -223,14 +223,21 @@ fn conversation_with_output_mode(
                     body.push('\n');
                 }
                 body.push_str(&format!(
-                    "[the start of a {} message · `st conversations read {}` shows all of it]",
+                    "[the start of a {} message · `fractal conversations read {}` shows all of it]",
                     size_text(bytes),
                     message.message_id
                 ));
             }
-            let from = message.from.as_deref().unwrap_or_default();
-            let body = if from == "daemon/runtime" {
-                // Step-ready pings are graph events, not conversation.
+            // The writer: `author` (conversation-message-participants.v1) before the legacy
+            // `from`. A daemon's wake has author `daemon/runtime` and never a `from`; a read
+            // without participants drops both, leaving a recipient and no writer: Fractal too.
+            let from = message
+                .author
+                .as_deref()
+                .or(message.from.as_deref())
+                .unwrap_or_default();
+            let body = if from.starts_with("daemon/") || (from.is_empty() && message.to.is_some()) {
+                // Step-ready pings and restart handoffs are graph events, not conversation.
                 Body::Event(
                     message
                         .title
@@ -473,7 +480,7 @@ fn conversation_with_output_mode(
                 "native-delivery-degraded" => {
                     delivery.insert(entry.id.clone(), false);
                     Body::Event(if error.message.contains("unreachable") {
-                        "delivery paused · st unreachable".into()
+                        "delivery paused · Fractal unreachable".into()
                     } else {
                         "delivery failing · retrying".into()
                     })
@@ -1228,6 +1235,7 @@ fn ping_id(line: &str) -> Option<&str> {
 /// person, and that a message was dictated. The earlier sentence stays recognized for agents that
 /// still carry it in their history.
 const ST_DELIVERY_NOTES: &[&str] = &[
+    "Reply to the person in this conversation; any new question or decision for the person goes through a native work ask.",
     "Answer the person in this conversation; people have no inbox, so do not reply with st.",
     "The person reads replies in st, not in the agent's session.",
     "(dictated by voice; it may contain transcription mistakes)",
@@ -2075,7 +2083,7 @@ fn tool_output(content: &Value, full: bool) -> (Vec<String>, bool) {
         ));
     }
     if cut {
-        lines.push("… st kept only the start of this output".into());
+        lines.push("… Fractal kept only the start of this output".into());
     }
     (lines, failed)
 }

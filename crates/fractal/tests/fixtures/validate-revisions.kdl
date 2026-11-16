@@ -1,0 +1,32 @@
+version 2
+
+agent "docs/editor" {
+  workspace "."
+  command "true"
+}
+
+agent "docs/writer" {
+  workspace "."
+  under "agent/docs/editor" reason="The editor reviews the writer's work."
+  command "true"
+}
+
+mission "docs/daily-review" state="ready" report-to="agent/docs/editor" {
+  goal "Review the documentation each day."
+  completion { when "all-steps-exhausted" }
+  step "review" {
+    assigned-to "agent/docs/writer"
+    goal "Review the documentation and report corrections."
+  }
+}
+
+schedule "docs/daily-review" {
+  host "local"
+  every "1d"
+  anchor "2026-01-01T09:00:00Z"
+  catch-up "latest"
+  work {
+    mission "mission/docs/daily-review@b283ff12e887f06fbeb2da3094b10f8fd2b9b7840f7af8031445b124829f25f7"
+    workspace "."
+  }
+}

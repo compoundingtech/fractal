@@ -1,4 +1,4 @@
-//! Gate-on-demand test that serves the API; it lives in st3-daemon because the API does.
+//! Gate-on-demand test that serves the API; it lives in fractal-daemon because the API does.
 
 #![allow(unused_imports, dead_code)]
 
@@ -235,11 +235,14 @@ let gate = format!("agent/{}/gate", fixture.round.id);
 use tower::ServiceExt;
 let root = tempfile::tempdir().unwrap();
 let state = crate::api::AppState {
+    browser_pairing_login: None,
+    seat_admission: Default::default(),
     owning_person: None,
     store: fixture.store.clone(),
     notify: Arc::new(Notify::new()),
     event_notify: tokio::sync::watch::channel(0_u64).0,
     node: "node".into(),
+    api_socket: root.path().join("api.sock"),
     state_dir: root.path().into(),
     pty_root: root.path().join("pty"),
     pty_binary: "pty".into(),
@@ -248,6 +251,9 @@ let state = crate::api::AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
 };
 let response = crate::api::router(state)
     .oneshot(
@@ -257,14 +263,15 @@ let response = crate::api::router(state)
             .header("content-type", "application/json")
             .body(axum::body::Body::from(
                 serde_json::to_vec(&crate::model::MessageSendRequest {
-                    idempotency_key: "garden-handoff".into(),
-                    from: format!("agent/{}/builder", fixture.round.id),
-                    to: gate.clone(),
-                    content: "Review the garden.".into(),
-                    title: None,
-                    in_reply_to: None,
-                    tags: Vec::new(),
-                    attachments: Vec::new(),
+                owner: None,
+                idempotency_key: "garden-handoff".into(),
+                from: format!("agent/{}/builder", fixture.round.id),
+                to: gate.clone(),
+                content: "Review the garden.".into(),
+                title: None,
+                in_reply_to: None,
+                tags: Vec::new(),
+                attachments: Vec::new(),
                 })
                 .unwrap(),
             ))

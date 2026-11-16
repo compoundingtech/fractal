@@ -53,19 +53,11 @@
                 "integration_id": 15368
               },
               {
-                "context": "isolation-vm",
-                "integration_id": 15368
-              },
-              {
                 "context": "genie-freshness",
                 "integration_id": 15368
               },
               {
                 "context": "typescript-client",
-                "integration_id": 15368
-              },
-              {
-                "context": "mail-redelivery-canaries",
                 "integration_id": 15368
               },
               {
@@ -80,7 +72,7 @@
           "parameters": {
             "merge_method": "MERGE",
             "grouping_strategy": "HEADGREEN",
-            "max_entries_to_build": 3,
+            "max_entries_to_build": 5,
             "max_entries_to_merge": 6,
             "min_entries_to_merge": 1,
             "min_entries_to_merge_wait_minutes": 1,
@@ -101,9 +93,6 @@
         }
       },
       "rules": [
-        {
-          "type": "deletion"
-        },
         {
           "type": "update"
         },

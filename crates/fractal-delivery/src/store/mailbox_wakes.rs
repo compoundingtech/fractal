@@ -1,4 +1,4 @@
-//! The part of `store::mailbox_wakes` that moved up from st3-store.
+//! The part of `store::mailbox_wakes` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::DeliveryStore;
 use super::*;
@@ -7,14 +7,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch;
 pub use fractal_store::store::mailbox_wakes::*;
 pub use fractal_store::store::mailbox_wakes::{Dependency, Registry, Subscription, Wakes};
+use fractal_store::store::messages_shard::mailbox_reads;
 
 const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The dispatcher's position: the graph's claims, its local observations, the messages shard,
+/// whose items and local lifecycle are not graph claims, and this member's mark events
+/// (message_marks.rs).
+pub type WakeCursor = (u64, u64, mailbox_reads::StreamPosition, u64);
 
 async fn dispatch(
     store: std::sync::Weak<Store>,
     wakes: Arc<Wakes>,
     mut events: watch::Receiver<u64>,
-    mut cursor: Option<(u64, u64)>,
+    mut cursor: Option<WakeCursor>,
 ) {
     let mut retrying = cursor.is_none();
     let mut retry = tokio::time::interval_at(tokio::time::Instant::now() + RETRY, RETRY);
@@ -95,11 +101,11 @@ pub trait MailboxWakesStore {
         ) -> Subscription;
     /// Local telemetry uses the existing doctor check shape; never claims or replicated state.
     fn mailbox_wake_health(&self) -> DoctorCheck;
-    fn mailbox_wake_cursor(&self) -> Result<(u64, u64)>;
+    fn mailbox_wake_cursor(&self) -> Result<WakeCursor>;
     fn mailbox_wake_batch(
             &self,
-            cursor: (u64, u64),
-        ) -> Result<((u64, u64), HashSet<Dependency>, bool)>;
+            cursor: WakeCursor,
+        ) -> Result<(WakeCursor, HashSet<Dependency>, bool)>;
 }
 
 impl MailboxWakesStore for Store {
@@ -111,7 +117,7 @@ impl MailboxWakesStore for Store {
         ) -> Subscription {
         // Subscribe to the post-commit feed before establishing the dispatcher's cursor, and
         // register this stream before its first durable read. No replay-to-live gap.
-        let wakes = self.smalltalk.mailbox_wakes.get_or_init(|| {
+        let wakes = self.fractal.mailbox_wakes.get_or_init(|| {
             let events = events.subscribe();
             let cursor = self.mailbox_wake_cursor();
             let weak = Arc::downgrade(self);
@@ -133,8 +139,7 @@ impl MailboxWakesStore for Store {
     }
 
     fn mailbox_wake_health(&self) -> DoctorCheck {
-        let (failures, degraded) = self
-            .smalltalk
+        let (failures, degraded) = self.fractal
             .mailbox_wakes
             .get()
             .map_or((0, false), |wakes| {
@@ -157,20 +162,21 @@ impl MailboxWakesStore for Store {
         }
     }
 
-    fn mailbox_wake_cursor(&self) -> Result<(u64, u64)> {
+    fn mailbox_wake_cursor(&self) -> Result<WakeCursor> {
         let connection = self.readers.get();
-        Ok(connection
+        let (index, local) = connection
             .prepare_cached(
                 "SELECT COALESCE((SELECT MAX(store_index) FROM claims),0),
                     COALESCE((SELECT MAX(id) FROM local_observations),0)",
             )?
-            .query_row(/* sqlite-large-value: allow-for-now lv-hb895da732cc2 owner=fractal_delivery::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?)
+            .query_row(/* sqlite-large-value: allow-for-now lv-hb895da732cc2 owner=fractal_delivery::store::mailbox_wakes TODO=trace-statement-and-value-representation */ [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok((index, local, mailbox_reads::position(self)?, fractal_store::store::message_marks::event_position(&connection)?))
     }
 
     fn mailbox_wake_batch(
             &self,
-            cursor: (u64, u64),
-        ) -> Result<((u64, u64), HashSet<Dependency>, bool)> {
+            cursor: WakeCursor,
+        ) -> Result<(WakeCursor, HashSet<Dependency>, bool)> {
         let connection = self.readers.get();
         let mut dependencies = HashSet::new();
         let mut next = cursor;
@@ -196,7 +202,8 @@ impl MailboxWakesStore for Store {
                 "SELECT json_extract(body,'$.fields.to') FROM claims WHERE subject=?1 AND kind='message.sent'
                  UNION SELECT json_extract(child.value,'$.arguments[0]')
                  FROM desired,json_each(desired.body,'$.children') child
-                 WHERE desired.subject=?1 AND desired.kind='message' AND json_extract(child.value,'$.name')='to'"
+                 WHERE desired.subject=?1 AND desired.kind='message' AND json_extract(child.value,'$.name')='to'
+                 UNION SELECT json_extract(fields,'$.to') FROM local_stream_sent WHERE subject=?1"
             )?.query_map([&subject], |r| r.get::<_, Option<String>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for recipient in recipients.into_iter().flatten() {
@@ -216,7 +223,24 @@ impl MailboxWakesStore for Store {
             next.1 = id;
             dependencies.insert(Dependency::Subject(subject));
         }
-        Ok((next, dependencies, graph_full || local_full))
+        // A stream item's arrival or local receipt wakes its recipient and its subject.
+        let (stream, changed, stream_full) = mailbox_reads::wake_batch(self, cursor.2, 1024)?;
+        next.2 = stream;
+        for (subject, recipient) in changed {
+            if !recipient.is_empty() {
+                dependencies.insert(Dependency::Recipient(normalize_message_party(&recipient)));
+            }
+            dependencies.insert(Dependency::Subject(subject));
+        }
+        // A seat's mark wakes its mailbox and the message, as its lifecycle claim would.
+        let marks = fractal_store::store::message_marks::events_after(&connection, cursor.3, 1024)?;
+        let marks_full = marks.len() == 1024;
+        for (id, subject, consumer) in marks {
+            next.3 = id;
+            dependencies.insert(Dependency::Recipient(normalize_message_party(&consumer)));
+            dependencies.insert(Dependency::Subject(subject));
+        }
+        Ok((next, dependencies, graph_full || local_full || stream_full || marks_full))
     }
 }
 
@@ -386,8 +410,17 @@ mod tests {
                 idempotency_key: None,
             })
             .unwrap();
-        let (_, deps, _) = store.mailbox_wake_batch(next).unwrap();
+        let (next, deps, _) = store.mailbox_wake_batch(next).unwrap();
         assert!(deps.contains(&Dependency::Subject("agent/quartz".into())));
+        // A seat's mark wakes its mailbox and the message, as its lifecycle claim does.
+        fractal_store::store::message_marks::record(&store, "message/declared", "message.read", "agent/quartz").unwrap();
+        let (after, deps, full) = store.mailbox_wake_batch(next).unwrap();
+        assert_eq!(after.3, next.3 + 1);
+        assert!(!full);
+        assert!(deps.contains(&Dependency::Subject("message/declared".into())));
+        assert!(deps.contains(&Dependency::Recipient("agent/quartz".into())));
+        let (_, deps, _) = store.mailbox_wake_batch(after).unwrap();
+        assert!(deps.is_empty(), "{deps:?}");
     }
 
     #[test]

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A delegated dismissal retried while the first one is still being written now gets the recorded answer, as a later retry already did, instead of a stale-fence error",
+  "replay": {"status": "none", "detail": "No replay or recovery behavior changes; the same claims are written."},
+  "schema": {"status": "none", "detail": "No schema or persistent data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},
+  "compatibility": {"status": "none", "detail": "No protocol or API change: a caller that sent an identical dismissal gets the answer it would have got a moment later, instead of a stale-fence error."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new swap-back restrictions; reverting the commit restores the earlier error."}
+}

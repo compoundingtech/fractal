@@ -1,4 +1,4 @@
-//! The part of `store::agent_messages` that moved up from st3-store.
+//! The part of `store::agent_messages` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use serde::Deserialize;
@@ -10,6 +10,7 @@ pub struct DailyUsage {
     pub until: u64,
     pub cost: u64,
     pub unpriced: u64,
+    pub unpriced_responses: u64,
 }
 
 const ALLOWANCES: &str = "doc/usage/agent-message-allowances";
@@ -137,6 +138,7 @@ impl AgentMessagesStore for Store {
             until,
             cost,
             unpriced,
+            unpriced_responses,
         } in days
         {
             let day = since / DAY_MS * DAY_MS;
@@ -187,6 +189,7 @@ impl AgentMessagesStore for Store {
                 "messages": messages, "calibrated_messages": calibrated,
                 "low_microusd": low, "high_microusd": high,
                 "usage_cost_microusd": cost, "unpriced_tokens": unpriced,
+                "unpriced_responses": unpriced_responses,
                 "low_percent": (cost > 0).then(|| low as f64 * 100.0 / cost as f64),
                 "high_percent": (cost > 0).then(|| high as f64 * 100.0 / cost as f64),
             }));
@@ -217,6 +220,7 @@ mod tests {
                 until,
                 cost,
                 unpriced,
+                unpriced_responses: 0,
             })
             .collect::<Vec<_>>();
         store.agent_message_estimate(&days)

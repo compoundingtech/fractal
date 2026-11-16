@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Incremental projection no longer registers an operation from a claim a repair replaced, so its operations rows match a full replay's after a replicated repair of a claim the node already held",
+  "replay": {"status": "none", "detail": "No replay at upgrade. A store whose incremental pass already re-registered such a row keeps it until its next full replay or a repair touching that operation, which drops it."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest rule change. The operations rows feed graph_digest; this removes a cause of graph-digest disagreement between members holding the same claims."},
+  "compatibility": {"status": "none", "detail": "No client, wire or CLI change."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

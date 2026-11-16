@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Identify the operation manifest commands as a list.",
+  "replay": {
+    "status": "none",
+    "detail": "Corrects one documentation term to match the existing JSON command list. No behavior, wire format or stored data changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Corrects one documentation term to match the existing JSON command list. No behavior, wire format or stored data changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Corrects one documentation term to match the existing JSON command list. No behavior, wire format or stored data changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Corrects one documentation term to match the existing JSON command list. No behavior, wire format or stored data changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Corrects one documentation term to match the existing JSON command list. No behavior, wire format or stored data changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Corrects one documentation term to match the existing JSON command list. No behavior, wire format or stored data changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Corrects one documentation term to match the existing JSON command list. No behavior, wire format or stored data changes."
+  }
+}

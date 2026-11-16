@@ -153,6 +153,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let agent = &subject.subject;
         let old = &operation.old_member;
+        let same_provider = subject.member.as_ref().is_some_and(|member| member.driver == old.driver);
         let phase = |operation: &Operation,
                      state: &str,
                      reason: Option<&str>,
@@ -537,6 +538,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .member
                     .clone()
                     .context("rollout replacement has no launch")?;
+                if !same_provider {
+                    phase(
+                        &operation,
+                        "blocked",
+                        Some("rollout cannot resume a native conversation across harness providers"),
+                        &["native-harness-mismatch".into()],
+                    )?;
+                    return Ok(true);
+                }
                 member.environment.insert(
                     crate::suspension::RESUME_ENV.into(),
                     operation
@@ -556,11 +566,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .environment
                         .insert(rollout::RESUME_PATH_ENV.into(), path.clone());
                 }
-                operation.desired_token = self
-                    .store
-                    .selected_desired_token(agent)?
-                    .context("replacement has no desired token")?;
-                phase(&operation, "start-attempted", None, &[])?;
                 if !current()? {
                     return Ok(true);
                 }
@@ -608,7 +613,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let account_mismatch = binding.is_some()
                     && rollout::bound_account(&self.store, agent, replacement)?
                         != operation.native_account;
-                let mismatch = binding.as_ref().is_some_and(|(harness, session, _)| {
+                let mismatch = !same_provider || binding.as_ref().is_some_and(|(harness, session, _)| {
                     Some(harness.as_str()) != old.driver.as_deref()
                         || Some(session.as_str()) != operation.native_session_id.as_deref()
                 });

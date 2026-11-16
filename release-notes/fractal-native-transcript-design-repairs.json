@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Clarify native transcript response facts and job outcomes: label footer facts as the last response, show them only on finished turns, trim cost padding, preserve retryability on viewless errors, and render mixed job groups with severity-ordered counts and consistent outcome icons. Add a real ConversationPane native-wire contract story in both schemes.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule or digest changes." },
+  "compatibility": { "status": "changed", "detail": "Multi-job native views retain typed group outcomes through the app and UI kit. Only failed outcomes use alert treatment; cancelled outcomes are neutral and completed outcomes share a check icon. Footer facts are explicitly last-response facts, never synthesized turn totals." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

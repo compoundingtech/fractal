@@ -9,13 +9,118 @@
     "seed": 5
   },
   "state": {
+    "launch_variants": [],
+    "launches": [],
     "missions": [
       {
         "active_runs": 1,
         "id": "mission/example/harbor/cache-policy",
         "kind": "mission",
         "mission_revision": "sha256:harbor-mission-1",
+        "presentation": {
+          "actions": [],
+          "card": null,
+          "last_progress": null,
+          "progress": {
+            "done": 0,
+            "total": 2
+          },
+          "queued_behind": null,
+          "settled_at": null,
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/harbor/cache-policy/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/harbor/builder",
+                "kind": "agent",
+                "label": "Harbor Builder"
+              },
+              "path": "step-1",
+              "title": "Increase the cache TTL",
+              "word": "pending"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/harbor/cache-policy/1/step-2",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/harbor/reviewer",
+                "kind": "agent",
+                "label": "Harbor Reviewer"
+              },
+              "path": "step-2",
+              "title": "Allow stale cache reads",
+              "word": "pending"
+            }
+          ],
+          "stuck": null,
+          "system": false,
+          "who": {
+            "kind": "nobody"
+          },
+          "word": "idle"
+        },
         "revision": "mr-2",
+        "run_details": [
+          {
+            "current_steps": [],
+            "generation_id": "run-generation/example/harbor/cache-policy/1/g1",
+            "id": "mission-run/example/harbor/cache-policy/1",
+            "must_act": "you",
+            "phase": "normal",
+            "progress": {
+              "done": 0,
+              "total": 2
+            },
+            "requester": "person/ada",
+            "state_since": "2030-01-01T11:59:55.000Z",
+            "status": "running",
+            "steps": [
+              {
+                "assignee": "agent/example/harbor/builder",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/harbor/builder",
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "TTL is 300 seconds"
+                ],
+                "id": "step-run/example/harbor/cache-policy/1/step-1",
+                "path": "step-1",
+                "since": "2030-01-01T11:59:55.000Z",
+                "state": "waiting-person",
+                "title": "Increase the cache TTL"
+              },
+              {
+                "assignee": "agent/example/harbor/reviewer",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/harbor/reviewer",
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "Stale reads are allowed"
+                ],
+                "id": "step-run/example/harbor/cache-policy/1/step-2",
+                "path": "step-2",
+                "since": "2030-01-01T11:59:55.000Z",
+                "state": "waiting-person",
+                "title": "Allow stale cache reads"
+              }
+            ]
+          }
+        ],
         "run_generations": {
           "mission-run/example/harbor/cache-policy/1": "run-generation/example/harbor/cache-policy/1/g1"
         },
@@ -89,23 +194,6 @@
       "store": 10,
       "upserts": [
         {
-          "active_runs": 0,
-          "id": "mission/example/harbor/cache-policy",
-          "kind": "mission",
-          "mission_revision": "sha256:harbor-mission-1",
-          "revision": "mr-2",
-          "run_generations": {
-            "mission-run/example/harbor/cache-policy/1": "run-generation/example/harbor/cache-policy/1/g1"
-          },
-          "runs": [
-            "mission-run/example/harbor/cache-policy/1"
-          ],
-          "state": "completed",
-          "title": "Improve the cache policy",
-          "total_runs": 1,
-          "updated_at": "2030-01-01T12:00:18.000Z"
-        },
-        {
           "attempt": 1,
           "blocked_reason": null,
           "blockers": [],
@@ -154,6 +242,126 @@
           "state": "completed",
           "title": "Allow stale cache reads",
           "updated_at": "2030-01-01T12:00:18.000Z"
+        },
+        {
+          "active_runs": 0,
+          "id": "mission/example/harbor/cache-policy",
+          "kind": "mission",
+          "mission_revision": "sha256:harbor-mission-1",
+          "presentation": {
+            "actions": [],
+            "card": null,
+            "last_progress": null,
+            "progress": {
+              "done": 2,
+              "total": 2
+            },
+            "queued_behind": null,
+            "settled_at": "2030-01-01T12:00:18.000Z",
+            "steps": [
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/harbor/cache-policy/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/harbor/builder",
+                  "kind": "agent",
+                  "label": "Harbor Builder"
+                },
+                "path": "step-1",
+                "title": "Increase the cache TTL",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/harbor/cache-policy/1/step-2",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/harbor/reviewer",
+                  "kind": "agent",
+                  "label": "Harbor Reviewer"
+                },
+                "path": "step-2",
+                "title": "Allow stale cache reads",
+                "word": "done"
+              }
+            ],
+            "stuck": null,
+            "system": false,
+            "who": {
+              "kind": "nobody"
+            },
+            "word": "done"
+          },
+          "revision": "mr-2",
+          "run_details": [
+            {
+              "current_steps": [],
+              "generation_id": "run-generation/example/harbor/cache-policy/1/g1",
+              "id": "mission-run/example/harbor/cache-policy/1",
+              "must_act": "nobody",
+              "phase": "terminal",
+              "progress": {
+                "done": 2,
+                "total": 2
+              },
+              "requester": "person/ada",
+              "state_since": "2030-01-01T12:00:18.000Z",
+              "status": "completed",
+              "steps": [
+                {
+                  "assignee": "agent/example/harbor/builder",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/harbor/builder",
+                  "constraints": [
+                    "Keep the public API stable until the docs land"
+                  ],
+                  "goals": [
+                    "TTL is 300 seconds"
+                  ],
+                  "id": "step-run/example/harbor/cache-policy/1/step-1",
+                  "path": "step-1",
+                  "since": "2030-01-01T12:00:18.000Z",
+                  "state": "completed",
+                  "title": "Increase the cache TTL"
+                },
+                {
+                  "assignee": "agent/example/harbor/reviewer",
+                  "attempt": 1,
+                  "blocked_reason": null,
+                  "blockers": [],
+                  "claimant": "agent/example/harbor/reviewer",
+                  "constraints": [
+                    "Keep the public API stable until the docs land"
+                  ],
+                  "goals": [
+                    "Stale reads are allowed"
+                  ],
+                  "id": "step-run/example/harbor/cache-policy/1/step-2",
+                  "path": "step-2",
+                  "since": "2030-01-01T12:00:18.000Z",
+                  "state": "completed",
+                  "title": "Allow stale cache reads"
+                }
+              ]
+            }
+          ],
+          "run_generations": {
+            "mission-run/example/harbor/cache-policy/1": "run-generation/example/harbor/cache-policy/1/g1"
+          },
+          "runs": [
+            "mission-run/example/harbor/cache-policy/1"
+          ],
+          "state": "completed",
+          "title": "Improve the cache policy",
+          "total_runs": 1,
+          "updated_at": "2030-01-01T12:00:18.000Z"
         }
       ]
     }
@@ -162,6 +370,18 @@
     {
       "codec": "timestamp",
       "pointer": "/state/missions/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/1/since"
     },
     {
       "codec": "timestamp",
@@ -182,6 +402,22 @@
     {
       "codec": "timestamp",
       "pointer": "/timeline/0/upserts/2/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/run_details/0/steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/0/upserts/2/presentation/settled_at"
     }
   ],
   "variant": "default",

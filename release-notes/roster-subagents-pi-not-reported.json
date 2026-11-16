@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep Pi roster subagents unreported because the Pi channel does not forward subagent observations.",
+  "replay": { "status": "none", "detail": "No claim replay changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet coordination changes." },
+  "compatibility": { "status": "changed", "detail": "Pi joins OpenCode and other non-observing drivers in omitting the optional roster subagents field. Only Claude, Codex, and OMP report an empty list when no subagents are running. The Pi channel currently ignores subagent frames; its shared channel implementation does not imply OMP's observation capability." },
+  "downtime": { "status": "none", "detail": "No additional service interruption beyond the normal daemon upgrade." },
+  "manual": { "status": "none", "detail": "No manual steps required." },
+  "recovery": { "status": "none", "detail": "Normal rollback is supported; an older daemon may again report a false empty subagent list for Pi." }
+}

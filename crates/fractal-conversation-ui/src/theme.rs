@@ -24,7 +24,7 @@ pub struct Theme {
     pub lavender: Color,
 }
 
-/// stui's palette (Catppuccin Mocha), for an embedder that has none of its own, such as the
+/// Fractal TUI's palette (Catppuccin Mocha), for an embedder that has none of its own, such as the
 /// `st` CLI.
 impl Default for Theme {
     fn default() -> Self {

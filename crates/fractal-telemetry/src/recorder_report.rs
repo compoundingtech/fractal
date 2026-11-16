@@ -11,6 +11,12 @@ use serde::{Deserialize, Serialize};
 
 const SCHEMA: &str = "st3.recorder.command.v1";
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+fn accepts_schema(schema: &str) -> bool {
+    matches!(schema, SCHEMA | "fractal.recorder.command.v1")
+}
+// LIVE-MIGRATION END
+
 #[derive(Debug, Deserialize)]
 struct Call {
     schema: String,
@@ -104,7 +110,7 @@ pub fn summarize(
                 skipped_lines += 1;
                 continue;
             };
-            if call.schema != SCHEMA || call.time < since || call.time > until {
+            if !accepts_schema(&call.schema) || call.time < since || call.time > until {
                 continue;
             }
             calls += 1;
@@ -326,6 +332,48 @@ pub fn render(report: &Report) -> String {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn summarizes_both_command_schemas_and_ignores_unknown_schemas() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("commands.jsonl");
+        let mut file = File::create(&path).unwrap();
+        for schema in [
+            SCHEMA,
+            "fractal.recorder.command.v1",
+            "unknown.recorder.command.v1",
+        ] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "schema": schema,
+                    "time": "2026-09-28T01:00:00Z",
+                    "host": "test-host",
+                    "actor": "builder",
+                    "program": "git",
+                    "args": ["status"],
+                    "exit_code": 0,
+                    "signal": null,
+                    "duration_ms": 1.0
+                })
+            )
+            .unwrap();
+        }
+        // A malformed record remains skipped, not reinterpreted as another schema.
+        writeln!(file, "{{\"schema\":\"fractal.recorder.command.v1\"}}").unwrap();
+        let report = summarize(
+            vec![path],
+            "2026-09-28T00:00:00Z".parse().unwrap(),
+            "2026-09-29T00:00:00Z".parse().unwrap(),
+            10,
+        )
+        .unwrap();
+        assert_eq!(report.calls, 2);
+        assert_eq!(report.skipped_lines, 1);
+        assert_eq!(report.by_agent_command.len(), 1);
+        assert_eq!(report.by_agent_command[0].calls, 2);
+    }
 
     #[test]
     fn combines_hosts_filters_the_period_and_summarizes_failures_and_api_candidates() {

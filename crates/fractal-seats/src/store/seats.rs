@@ -1,4 +1,4 @@
-//! The part of `store::seats` that moved up from st3-store.
+//! The part of `store::seats` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AgentMessagesStore;
 use crate::MissionsStore;
@@ -11,6 +11,10 @@ pub use fractal_missions::store::seats::{EndedDeclaration};
 #[cfg(test)]
 #[path = "identity_boundary_tests.rs"]
 mod identity_boundary_tests;
+
+#[cfg(test)]
+#[path = "harness_ready_tests.rs"]
+mod harness_ready_tests;
 
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
@@ -64,8 +68,8 @@ fn pricing_period_delta(latest: Vec<Value>, baseline: &[Value]) -> Vec<Value> {
                     );
                 }
             }
-            // A zero-token response may still have a reported cost.
-            (entry["total_tokens"] != 0 || entry["cost_microusd"] != 0).then_some(entry)
+            // Missing token totals must not hide an unpriced contribution.
+            USAGE_BUCKETS.iter().any(|name| entry[*name].as_u64().unwrap_or(0) > 0).then_some(entry)
         })
         .collect()
 }
@@ -92,6 +96,10 @@ pub trait SeatsStore {
     /// An allow-list for shallow refs, narrower than card-local invalidation: runtime status
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
     fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool>;
+    /// Whether this node committed a claim an agent card reads after store index `after`, through
+    /// `through`. Claims other nodes wrote, and local claims about any other subject, are false:
+    /// the roster's check for the local-commit scanner.
+    fn local_agent_card_input_after(&self, after: u64, through: u64) -> Result<bool>;
     /// The last claim that can change an agent's status: one about an agent, or about the run
     /// or generation that owns it, whose row decides the agent's projection layer. Steps,
     /// gates, subscriptions and diagnostics commit far more often and change no agent status.
@@ -269,13 +277,13 @@ pub trait SeatsStore {
             intent: &NormalizedIntent,
             key: &str,
             declared_agents: &BTreeSet<String>,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
     /// Append a native driver's observation, as `POST /v1/harness-events` does once it has
     /// bound the caller to its seat. The daemon tests call it directly, without a driver.
     fn append_harness_event(
             &self,
             publication: &crate::harness_events::Publication,
-        ) -> Result<(ClaimRecord, bool), St3Error>;
+        ) -> Result<(ClaimRecord, bool), FractalError>;
     /// A replicated snapshot of the local response totals affected by one timeline entry.
     /// The response itself stays in the local observation log.
     fn usage_rollup_for_timeline(
@@ -312,7 +320,7 @@ pub trait SeatsStore {
             subject: &str,
             name: Option<&str>,
             idempotency_key: &str,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
     /// Observers, subscriptions, and schedules whose owner run is terminal or whose owner
     /// generation is no longer current. They must not observe, deliver, or start work.
     fn retired_owned_intake_subjects(&self) -> Result<BTreeSet<String>>;
@@ -336,7 +344,7 @@ pub trait SeatsStore {
             operation: &str,
             host: &str,
             actor: &str,
-        ) -> Result<ClaimRecord, St3Error>;
+        ) -> Result<ClaimRecord, FractalError>;
     /// Record facts and deliveries atomically. Scheduler completions provide a predicate checked
     /// inside the writer transaction before work and before releasing its savepoint; direct
     /// consumers pass `None`. The predicate must release its scheduler lock before returning.
@@ -352,7 +360,7 @@ pub trait SeatsStore {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<ResourceObservationOutcome, St3Error>;
+        ) -> Result<ResourceObservationOutcome, FractalError>;
     /// The observation response and whether this transaction wrote durable state, through
     /// the same preparation fence, retries and canonical fallback. An idempotency hit or an
     /// unchanged observation writes nothing. Keep this scheduler-only flag out of the stored
@@ -369,7 +377,24 @@ pub trait SeatsStore {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<(ResourceObservationOutcome, bool), St3Error>;
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError>;
+    /// [`Self::record_resource_observation_outcome`] for a GitHub repository whose poller has a
+    /// filled plugin mirror: each item is compared and merged with the mirror's facts, and in
+    /// compact mode its change is recorded as `vcs.item.state` alone.
+    #[allow(clippy::too_many_arguments)]
+    fn record_resource_observation_mirrored(
+            &self,
+            observer: &str,
+            desired_revision: &str,
+            attempt: Option<&str>,
+            resource: &str,
+            cursor: Option<&str>,
+            facts: &Value,
+            next_check_unix_ms: u128,
+            subscriptions: &[(String, SubscriptionSpec)],
+            current: Option<&(dyn Fn() -> bool + Sync)>,
+            mirrored: Option<&crate::model::MirroredPrior>,
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError>;
     /// Period spend from replicated cumulative snapshots. The snapshot immediately before the
     /// start is the baseline, so a long-lived incarnation only contributes spend in the period.
     /// Each row is one agent incarnation's spend on one model and account for one mission run
@@ -388,10 +413,9 @@ pub trait SeatsStore {
             since_ms: u64,
             until_ms: u64,
         ) -> Result<(Vec<Value>, Vec<agent_messages::DailyUsage>)>;
-    /// Resolve a terminal capability and its current-head fence with two indexed seeks, in
-    /// one SQLite snapshot. Unrelated fleet history cannot hide an unexpired capability. Both
-    /// the attachment and its head are chosen in canonical claim order, so a store that admits
-    /// an attachment after the claim that consumed or detached it never revives it.
+    /// Resolve a capability from admitted attachments and issuer-bound lifecycle records.
+    /// Canonical ordering is applied after admission, so retained unrelated records cannot
+    /// displace a current attachment and out-of-order replication cannot revive consumption.
     fn terminal_attachment_for_capability_hash(
             &self,
             digest: &str,
@@ -432,15 +456,24 @@ impl SeatsStore for Store {
                 row.get::<_, Option<String>>(2)?))
         })? {
             let (subject, kind, actor) = row?;
+            // Memberless agent cards reduce their currently declared exec/pty children.
+            // Match the previous root too: a removed child's declaration has no live tag.
+            if subject.starts_with("exec/") || subject.starts_with("pty/") {
+                let suffix = subject.split_once('/').map_or("", |(_, suffix)| suffix);
+                delta.subjects.extend(previous.iter().filter_map(|card| {
+                    let agent = card["id"].as_str()?;
+                    let root = agent.strip_prefix("agent/")?;
+                    suffix.strip_prefix(root)?.starts_with('/').then(|| agent.to_owned())
+                }));
+                continue;
+            }
             // A card reads claims about its agent, the runs, generations and steps that own or
             // queue agents, and messages; work activity is read by actor on step claims. A
             // claim about any other subject, of any kind, changes no card.
-            if !["agent/", "mission-run/", "run-generation/", "step-run/", "message/"]
-                .iter().any(|prefix| subject.starts_with(prefix))
-            {
+            if !agent_card_input_subject(&subject) {
                 continue;
             }
-            if self.smalltalk.claim_registry().claim(&kind).is_none() {
+            if self.fractal.claim_registry().claim(&kind).is_none() {
                 return Ok(AgentResourcesChange::Invalidated {
                     reason: "unknown_kind", detail: format!("unregistered {kind}"),
                 });
@@ -463,7 +496,7 @@ impl SeatsStore for Store {
             let step = subject.starts_with("step-run/") && matches!(kind.as_str(),
                 "step-run.state" | "step-run.retried" | "step-run.carried"
                 | "work.claimed" | "work.renewed" | "work.progress" | "work.submitted"
-                | "work.failed" | "work.released" | "work.extended"
+                | "work.failed" | "work.released" | "work.handoff-returned" | "work.extended"
                 | "work.person-asked" | "work.person-done" | "work.person-cancelled");
             // Any other kind on a run, generation or step (a fault, a nudge): a card sees these
             // subjects only through its owner and its queue, so refold the agents they own or
@@ -532,6 +565,21 @@ impl SeatsStore for Store {
         Ok(AgentResourcesChange::Delta(delta))
     }
 
+    fn local_agent_card_input_after(&self, after: u64, through: u64) -> Result<bool> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject FROM claims WHERE store_index>?1 AND store_index<=?2 AND origin=?3",
+        )?;
+        for subject in statement.query_map(params![after as i64, through as i64, self.origin()],
+            |row| row.get::<_, String>(0))?
+        {
+            if agent_card_input_subject(&subject?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
@@ -577,19 +625,19 @@ impl SeatsStore for Store {
     }
 
     fn begin_agent_roster_fault_retries(&self, history: bool) {
-        let mut retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let mut retries = self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         let mut pending = std::mem::take(&mut retries.pending[mode]);
         retries.due[mode].append(&mut pending);
     }
 
     fn agent_roster_fault_retries(&self, history: bool) -> BTreeSet<String> {
-        self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned")
+        self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned")
             .due[usize::from(history)].clone()
     }
 
     fn agent_roster_faults_pending(&self, history: bool) -> bool {
-        let retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let retries = self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         !retries.due[mode].is_empty() || !retries.pending[mode].is_empty()
     }
@@ -598,7 +646,7 @@ impl SeatsStore for Store {
             &self, history: bool, subjects: &[String], deadline: bool,
             selected: Option<&BTreeSet<String>>,
         ) {
-        let mut retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let mut retries = self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         let answered = |subject: &String| selected.is_none_or(|selected| selected.contains(subject));
         // Even a deadline answers this attempt: retry only on the next refresh, otherwise
@@ -612,14 +660,14 @@ impl SeatsStore for Store {
     }
 
     fn agent_roster_refresh_failed(&self) -> bool {
-        self.smalltalk.agent_roster_attempt.load(std::sync::atomic::Ordering::Acquire) == 2
+        self.fractal.agent_roster_attempt.load(std::sync::atomic::Ordering::Acquire) == 2
     }
 
     fn previous_agent_faults(
             &self, index: u64, history: bool, subjects: &[String],
         ) -> BTreeMap<String, Value> {
         let subjects = subjects.iter().map(String::as_str).collect::<HashSet<_>>();
-        let cache = self.smalltalk.agent_resources_cache.lock().expect("agent resources cache poisoned");
+        let cache = self.fractal.agent_resources_cache.lock().expect("agent resources cache poisoned");
         let mut faults = BTreeMap::new();
         for entry in cache.iter().rev().filter(|entry| entry.index <= index && entry.history == history) {
             for card in entry.items.iter() {
@@ -636,12 +684,12 @@ impl SeatsStore for Store {
 
     fn agent_roster_valid_until(&self, index: u64, agent: Option<&str>) -> Option<u128> {
         let Some(agent) = agent else {
-            return self.smalltalk.agent_resources_cache.lock()
+            return self.fractal.agent_resources_cache.lock()
                 .expect("agent resources cache poisoned").iter().rev()
                 .find(|entry| entry.index == index && !entry.history)
                 .and_then(|entry| entry.valid_until_unix_ms);
         };
-        self.smalltalk.exact_agent_resources_cache.lock()
+        self.fractal.exact_agent_resources_cache.lock()
             .expect("exact agent resources cache poisoned").iter().rev()
             .find(|entry| entry.index == index && !entry.history && exact_agent_entry(entry, agent))
             .and_then(|entry| entry.valid_until_unix_ms)
@@ -649,7 +697,7 @@ impl SeatsStore for Store {
 
     fn start_agent_roster_refresher(&self) -> Option<Arc<tokio::sync::Notify>> {
         let wake = Arc::new(tokio::sync::Notify::new());
-        self.smalltalk.agent_roster_refresh.set(Arc::clone(&wake)).ok()?;
+        self.fractal.agent_roster_refresh.set(Arc::clone(&wake)).ok()?;
         Some(wake)
     }
 
@@ -659,7 +707,7 @@ impl SeatsStore for Store {
             history: bool,
             bound: usize,
         ) -> Result<Option<String>> {
-        let previous = self.smalltalk.agent_resources_cache.lock()
+        let previous = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter()
             .filter(|entry| entry.history == history && entry.index <= index)
             .max_by_key(|entry| (entry.index, entry.local)).cloned();
@@ -685,7 +733,7 @@ impl SeatsStore for Store {
             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
         let names = if history { names } else {
-            self.current_view_candidates(&connection, names, index, true)?
+            self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
         };
         drop(connection);
         let folded = previous.iter().flat_map(|previous| previous.items.iter())
@@ -698,19 +746,19 @@ impl SeatsStore for Store {
 
     fn note_agent_roster_chunked(&self, reason: &str) {
         crate::performance::record_request("roster/chunked-assembly", None, std::time::Duration::ZERO);
-        *self.smalltalk.agent_roster_chunked.lock().expect("roster counts poisoned")
+        *self.fractal.agent_roster_chunked.lock().expect("roster counts poisoned")
             .entry(reason.to_owned()).or_default() += 1;
     }
 
     fn agent_roster_chunked_assemblies(&self) -> BTreeMap<String, u64> {
-        self.smalltalk.agent_roster_chunked.lock().expect("roster counts poisoned").clone()
+        self.fractal.agent_roster_chunked.lock().expect("roster counts poisoned").clone()
     }
 
     fn agent_roster_current(&self, index: u64, history: bool) -> Result<bool> {
         if self.agent_roster_faults_pending(history) { return Ok(false); }
         let local = roster_local_frontier(&self.readers.get(), index)?;
         let now = now_ms();
-        Ok(self.smalltalk.agent_resources_cache.lock()
+        Ok(self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter()
             .any(|entry| entry.history == history && entry.covered.is_none()
                 && entry.index == index && entry.local == local
@@ -725,7 +773,7 @@ impl SeatsStore for Store {
             published_at: u128,
             cards: &Arc<Vec<Value>>,
         ) -> Result<bool> {
-        if self.smalltalk.agent_roster_refresh.get().is_none()
+        if self.fractal.agent_roster_refresh.get().is_none()
             || self.agent_roster_faults_pending(history)
         {
             return Ok(false);
@@ -734,8 +782,7 @@ impl SeatsStore for Store {
             if cut > through || through > physical {
                 return Ok(false);
             }
-            let Some((local, valid_until)) = self
-                .smalltalk
+            let Some((local, valid_until)) = self.fractal
                 .agent_resources_cache
                 .lock()
                 .expect("agent resources cache poisoned")
@@ -769,29 +816,26 @@ impl SeatsStore for Store {
     }
 
     fn note_agent_roster_read(&self) {
-        self.smalltalk.agent_roster_read_at.store(now_ms() as u64, std::sync::atomic::Ordering::Release);
+        self.fractal.agent_roster_read_at.store(now_ms() as u64, std::sync::atomic::Ordering::Release);
     }
 
     fn request_agent_roster_refresh(&self) {
-        if let Some(wake) = self.smalltalk.agent_roster_refresh.get() {
-            let _ = self.smalltalk.agent_roster_requested_at.compare_exchange(
-                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            wake.notify_one();
-        }
+        // A summary or assistant read requests freshness without necessarily reading the
+        // ordinary agents list. Register demand here so no requesting caller can omit it.
+        self.note_agent_roster_read();
+        self.fractal.wake_read_roster();
     }
 
     fn request_agent_roster_history(&self) {
-        self.smalltalk.agent_roster_history_wanted.store(true, std::sync::atomic::Ordering::Release);
+        self.fractal.agent_roster_history_wanted.store(true, std::sync::atomic::Ordering::Release);
         self.request_agent_roster_refresh();
     }
 
     fn request_fresh_agent_roster(&self, history: bool) {
-        if self.smalltalk.agent_roster_refresh.get().is_none() {
+        if self.fractal.agent_roster_refresh.get().is_none() {
             return;
         }
-        self.smalltalk.agent_roster_fresh_wanted.notify_one();
+        self.fractal.agent_roster_fresh_wanted.notify_one();
         if history {
             self.request_agent_roster_history();
         } else {
@@ -800,18 +844,18 @@ impl SeatsStore for Store {
     }
 
     async fn fresh_agent_roster_wanted(&self) {
-        self.smalltalk.agent_roster_fresh_wanted.notified().await;
+        self.fractal.agent_roster_fresh_wanted.notified().await;
     }
 
     fn take_agent_roster_history_request(&self) -> bool {
-        self.smalltalk.agent_roster_history_wanted.swap(false, std::sync::atomic::Ordering::AcqRel)
+        self.fractal.agent_roster_history_wanted.swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     fn warn_if_agent_roster_overdue(&self) {
-        let requested = self.smalltalk.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire);
+        let requested = self.fractal.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire);
         let waited = (now_ms() as u64).saturating_sub(requested);
         if requested != 0 && waited > AGENT_ROSTER_OVERDUE_MS
-            && !self.smalltalk.agent_roster_overdue_warned.swap(true, std::sync::atomic::Ordering::AcqRel)
+            && !self.fractal.agent_roster_overdue_warned.swap(true, std::sync::atomic::Ordering::AcqRel)
         {
             eprintln!("st3: WARN an agents roster refresh asked for {} s ago is still unanswered; \
                 serving the newest published roster", waited / 1000);
@@ -819,11 +863,11 @@ impl SeatsStore for Store {
     }
 
     fn subscribe_agent_roster(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.smalltalk.agent_roster_published.subscribe()
+        self.fractal.agent_roster_published.subscribe()
     }
 
     fn agent_roster_revision(&self) -> u64 {
-        *self.smalltalk.agent_roster_published.borrow()
+        *self.fractal.agent_roster_published.borrow()
     }
 
     fn agent_queue_valid_until(&self, now: u128, agent: Option<&str>) -> Result<Option<u128>> {
@@ -855,7 +899,7 @@ impl SeatsStore for Store {
         let valid = |entry: &&runtime::AgentResourcesEntry| {
             entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
-        let cache = self.smalltalk.agent_page_refs_cache.lock()
+        let cache = self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned");
         if let Some(entry) = cache.iter().filter(valid).find(|entry| entry.index == index && entry.history == history) {
             let items = Arc::clone(&entry.items);
@@ -871,7 +915,7 @@ impl SeatsStore for Store {
             }
             _ => (Arc::new(build()?), self.agent_queue_valid_until(now, None)?),
         };
-        let mut cache = self.smalltalk.agent_page_refs_cache.lock()
+        let mut cache = self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned");
         cache.push_back(runtime::AgentResourcesEntry {
             index, local: 0, history, covered: None, valid_until_unix_ms, items: Arc::clone(&items),
@@ -965,8 +1009,8 @@ impl SeatsStore for Store {
         }).cloned().collect::<Vec<_>>();
         let fault_retries = self.agent_roster_fault_retries(history);
         let resources = match exact {
-            Some(_) => &self.smalltalk.exact_agent_resources_cache,
-            None => &self.smalltalk.agent_resources_cache,
+            Some(_) => &self.fractal.exact_agent_resources_cache,
+            None => &self.fractal.agent_resources_cache,
         };
         // The exact cache holds one entry per agent: only this agent's entries are its rows.
         let own = |entry: &&runtime::AgentResourcesEntry| exact.is_none_or(|agent| exact_agent_entry(entry, agent));
@@ -1020,7 +1064,7 @@ impl SeatsStore for Store {
                         .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                     let mut names = if history { names } else {
-                        self.current_view_candidates(&connection, names, index, true)?
+                        self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
                     };
                     if let Some(covered) = &previous.covered {
                         names.retain(|name| covered.contains(name));
@@ -1060,7 +1104,7 @@ impl SeatsStore for Store {
                             .query_map(params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
                             .collect::<rusqlite::Result<BTreeSet<_>>>()?;
                         let names = if history { names } else {
-                            self.current_view_candidates(&connection, names, index, true)?
+                            self.current_view_candidates_for_generic_reads(&connection, names, index, true)?
                         };
                         changed.extend(names.difference(covered).cloned());
                         None
@@ -1112,7 +1156,7 @@ impl SeatsStore for Store {
                     });
                 }
                 #[cfg(any(test, feature = "test-support"))]
-                self.smalltalk.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = previous.items.iter()
                     .filter(|item| {
                         let id = item["id"].as_str().unwrap_or_default();
@@ -1138,7 +1182,7 @@ impl SeatsStore for Store {
             None => {
                 let _rebuild = self.start_roster_rebuild(invalidation, index);
                 #[cfg(any(test, feature = "test-support"))]
-                self.smalltalk.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = crate::performance::task("roster/card-projection",
                     || build(selected.map(|names| (names, &[][..]))))?;
                 #[cfg(any(test, feature = "test-support"))]
@@ -1198,7 +1242,7 @@ impl SeatsStore for Store {
         };
         drop(cache);
         if complete {
-            self.smalltalk.agent_roster_published.send_modify(|revision| *revision += 1);
+            self.fractal.agent_roster_published.send_modify(|revision| *revision += 1);
         }
         Ok(select(&items))
     }
@@ -1227,7 +1271,7 @@ impl SeatsStore for Store {
             roster_local_frontier(&self.readers.get(), index)
         })?;
         let selected = BTreeSet::from([agent.to_owned()]);
-        Ok(self.smalltalk.exact_agent_resources_cache.lock()
+        Ok(self.fractal.exact_agent_resources_cache.lock()
             .expect("exact agent resources cache poisoned").iter().rev()
             .find(|entry| exact_agent_entry(entry, agent)
                 && entry.index == index && entry.local == local && entry.history == history)
@@ -1241,7 +1285,7 @@ impl SeatsStore for Store {
             history: bool,
         ) -> Option<Arc<Vec<Value>>> {
         let now = now_ms();
-        self.smalltalk.agent_page_refs_cache.lock()
+        self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned")
             .iter()
             .find(|entry| entry.index == index && entry.history == history
@@ -1347,14 +1391,14 @@ impl SeatsStore for Store {
             intent: &NormalizedIntent,
             key: &str,
             declared_agents: &BTreeSet<String>,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         let source = IntentInput {
             kdl: String::new(),
             source_name: Some("st reconciler".into()),
         };
         let mission = self.mission_at_with_declared_agents(intent, source, None, declared_agents)?;
         if !mission.blockers.is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "internal-mission-blocked",
                 mission.blockers.join("; "),
             ));
@@ -1379,7 +1423,7 @@ impl SeatsStore for Store {
     fn append_harness_event(
             &self,
             publication: &crate::harness_events::Publication,
-        ) -> Result<(ClaimRecord, bool), St3Error> {
+        ) -> Result<(ClaimRecord, bool), FractalError> {
         self.append_harness_event_publication(publication)
             .map(|(record, appended, _)| (record, appended))
     }
@@ -1404,8 +1448,20 @@ impl SeatsStore for Store {
         let owner_step = fields["attribution"]["step_id"].as_str().unwrap_or("");
         let host = fields["host"].as_str().unwrap_or(&self.origin);
         let connection = self.readers.get();
-        let totals = connection
-            .query_row(
+        let execution = fields["attribution"]["execution_id"].as_str();
+        let read_totals = |row: &rusqlite::Row<'_>| {
+            (0..10).map(|index| row.get::<_, u64>(index)).collect::<Result<Vec<_>, _>>()
+        };
+        let totals = if let Some(execution) = execution {
+            connection.query_row(
+                "SELECT input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
+                    cached_tokens, total_tokens, cost_microusd, reported_cost_microusd,
+                    unpriced_tokens, observed_at_unix_ms
+                 FROM local_step_execution_spend WHERE execution_id=?1 AND model=?2 AND account=?3 AND host=?4",
+                params![execution, model, account, host], read_totals,
+            ).optional()?
+        } else {
+            connection.query_row(
                 "SELECT input_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
                     cached_tokens, total_tokens, cost_microusd, reported_cost_microusd,
                     unpriced_tokens, observed_at_unix_ms
@@ -1420,13 +1476,9 @@ impl SeatsStore for Store {
                     owner_step,
                     host
                 ],
-                |row| {
-                    (0..10)
-                        .map(|index| row.get::<_, u64>(index))
-                        .collect::<Result<Vec<_>, _>>()
-                },
-            )
-            .optional()?;
+                read_totals,
+            ).optional()?
+        };
         let Some(totals) = totals else {
             return Ok(None);
         };
@@ -1443,6 +1495,14 @@ impl SeatsStore for Store {
                 Value::String(crate::pricing::PRICING_REVISION.into()),
             ),
         ]);
+        for key in ["invocation_id", "attempt"] {
+            if let Some(value) = observation.body["fields"]["attribution"].get(key).filter(|value| !value.is_null()) {
+                fields.insert(key.into(), value.clone());
+            }
+        }
+        if let Some(execution) = execution {
+            fields.insert("execution_id".into(), Value::String(execution.into()));
+        }
         if !account.is_empty() {
             fields.insert("account".into(), Value::String(account.into()));
         }
@@ -1471,10 +1531,11 @@ impl SeatsStore for Store {
             )
             .optional()?;
         if let Some(provenance) = provenance {
-            fields.insert(
-                "pricing_provenance".into(),
-                serde_json::from_str(&provenance)?,
-            );
+            let provenance: Vec<Value> = serde_json::from_str(&provenance)?;
+            fields.insert("unpriced_responses".into(), json!(provenance.iter()
+                .map(|entry| entry["unpriced_responses"].as_u64().unwrap_or(0))
+                .fold(0_u64, u64::saturating_add)));
+            fields.insert("pricing_provenance".into(), json!(provenance));
         }
         // Never use the seat's current binding for a response from an older incarnation.
         if let Some(binding) = usage_native_session(&connection, &observation.subject, &fields)? {
@@ -1516,6 +1577,7 @@ impl SeatsStore for Store {
         let store_index = current_index(&connection)?;
         let harness = current_harness_at(&connection, subject, None)?;
         Ok(StatusResponse {
+            seat_admission: None,
             store_index,
             subjects: vec![SubjectStatus {
                 subject: subject.to_owned(),
@@ -1560,7 +1622,7 @@ impl SeatsStore for Store {
         // Match the public status reducer's exclusions, including exact-owner reads.
         names.retain(|name| !name.starts_with("glass/") && !name.starts_with("arrangement/"));
         drop(connection);
-        self.agent_card_status_at(Some(&names), index, history)
+        self.agent_card_status_for_generic_reads_at(Some(&names), index, history)
     }
 
     fn agent_declaration(
@@ -1608,11 +1670,11 @@ impl SeatsStore for Store {
             subject: &str,
             name: Option<&str>,
             idempotency_key: &str,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         let subject = fractal_store::store::identities::resolve_reference_conn(&self.readers.get(), subject)?;
         let subject = subject.as_str();
         if name == Some("") {
-            return Err(St3Error::new("invalid-agent-name", "a seat label must be a non-empty string"));
+            return Err(FractalError::new("invalid-agent-name", "a seat label must be a non-empty string"));
         }
         let (mut desired, heads, writer) = {
             let connection = self.readers.get();
@@ -1632,10 +1694,10 @@ impl SeatsStore for Store {
                 )
                 .optional()
                 .map_err(internal)?
-                .ok_or_else(|| St3Error::new("missing-agent", format!("no agent `{subject}`")))?;
+                .ok_or_else(|| FractalError::new("missing-agent", format!("no agent `{subject}`")))?;
             // Republishing a member this build cannot read would erase it for every peer.
             if desired.2.is_some() && desired.0.member.is_none() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unreadable-agent-member",
                     format!("agent `{subject}` has a launch this build cannot read"),
                 ));
@@ -1722,8 +1784,8 @@ impl SeatsStore for Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h67815d20ea1f owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
-             WHERE owner_run IN (
+            /* sqlite-large-value: allow-for-now lv-h738ce7626839 owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
+             WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
             [run_id],
@@ -1734,13 +1796,14 @@ impl SeatsStore for Store {
                  FROM desired
                  JOIN mission_runs
                    ON desired.owner_run='mission-run/' || mission_runs.id
-                 WHERE mission_runs.root_run_id=?1
+                 WHERE mission_runs.root_run_id=?1 AND desired.subject NOT LIKE 'resource/uri/%'
                  ORDER BY desired.subject",
             )?;
             statement
                 .query_map([run_id], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
+        fractal_store::store::ordered_membership::flush(&transaction)?;
         transaction.commit()?;
         Ok(residue)
     }
@@ -1799,27 +1862,27 @@ impl SeatsStore for Store {
             operation: &str,
             host: &str,
             actor: &str,
-        ) -> Result<ClaimRecord, St3Error> {
+        ) -> Result<ClaimRecord, FractalError> {
         self.connection.batched(|transaction| {
             let subject = fractal_store::store::identities::resolve_reference_conn(transaction, subject)?;
             let subject = subject.as_str();
             let actor = fractal_store::store::identities::resolve_reference_conn(transaction, actor)?;
             let actor = actor.as_str();
             let current = current_desired_row_tx(transaction, subject).map_err(internal)?
-                .ok_or_else(|| St3Error::new("stale-fence", "seat declaration disappeared"))?;
+                .ok_or_else(|| FractalError::new("stale-fence", "seat declaration disappeared"))?;
             let current_claim = claim_by_id_tx(transaction, &current.claim_id).map_err(internal)?.unwrap();
             if current_claim.body["evidence"].as_array().is_some_and(|items| items.iter().any(|id| id.as_str() == Some(operation))) {
                 return Ok(current_claim);
             }
-            if current.claim_id != expected { return Err(St3Error::new("stale-fence", "seat declaration changed during transfer")); }
+            if current.claim_id != expected { return Err(FractalError::new("stale-fence", "seat declaration changed during transfer")); }
             let latest: String = transaction.query_row(
                 /* sqlite-large-value: allow-for-now lv-hfb124d1f718d owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action') IN ('suspend','resume') ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                 [subject], |row| row.get(0)).map_err(internal)?;
-            if latest != operation { return Err(St3Error::new("stale-fence", "another suspension request replaced this move")); }
+            if latest != operation { return Err(FractalError::new("stale-fence", "another suspension request replaced this move")); }
             let mut desired: DesiredSubject = serde_json::from_value(current_claim.body.clone()).map_err(internal)?;
-            let member = desired.member.as_mut().ok_or_else(|| St3Error::new("stale-fence", "seat has no member"))?;
+            let member = desired.member.as_mut().ok_or_else(|| FractalError::new("stale-fence", "seat has no member"))?;
             member.host = host.into();
-            let children = desired.desired["children"].as_array_mut().ok_or_else(|| St3Error::new("invalid-agent-declaration", "seat has no body"))?;
+            let children = desired.desired["children"].as_array_mut().ok_or_else(|| FractalError::new("invalid-agent-declaration", "seat has no body"))?;
             if let Some(child) = children.iter_mut().find(|child| child["name"] == "host") {
                 child["arguments"] = json!([host]);
             } else { children.push(json!({"name": "host", "arguments": [host]})); }
@@ -1833,7 +1896,7 @@ impl SeatsStore for Store {
             let claim = append_claim_tx(transaction, &self.origin, subject, "intent.desired", Some(actor), &body, &predecessors, None).map_err(internal)?;
             select_replicated_desired(transaction, &claim, &desired)?;
             Ok(claim)
-        }).map_err(|error| St3Error::new("internal", error))?
+        }).map_err(|error| FractalError::new("internal", error))?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1848,7 +1911,7 @@ impl SeatsStore for Store {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<ResourceObservationOutcome, St3Error> {
+        ) -> Result<ResourceObservationOutcome, FractalError> {
         self.record_resource_observation_outcome(
             observer, desired_revision, attempt, resource, cursor, facts,
             next_check_unix_ms, subscriptions, current,
@@ -1867,11 +1930,31 @@ impl SeatsStore for Store {
             next_check_unix_ms: u128,
             subscriptions: &[(String, SubscriptionSpec)],
             current: Option<&(dyn Fn() -> bool + Sync)>,
-        ) -> Result<(ResourceObservationOutcome, bool), St3Error> {
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError> {
+        self.record_resource_observation_mirrored(
+            observer, desired_revision, attempt, resource, cursor, facts,
+            next_check_unix_ms, subscriptions, current, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_resource_observation_mirrored(
+            &self,
+            observer: &str,
+            desired_revision: &str,
+            attempt: Option<&str>,
+            resource: &str,
+            cursor: Option<&str>,
+            facts: &Value,
+            next_check_unix_ms: u128,
+            subscriptions: &[(String, SubscriptionSpec)],
+            current: Option<&(dyn Fn() -> bool + Sync)>,
+            mirrored: Option<&crate::model::MirroredPrior>,
+        ) -> Result<(ResourceObservationOutcome, bool), FractalError> {
         let fence = resource_preparation::Fence::new(self);
         for pass in 0..2 {
-            let prepared = fence.prepare_with_actuals(self, |connection, serial| {
-                resource_preparation::inputs_with_actuals(
+            let prepared = fence.prepare_with_actuals(self, |connection, _| {
+                resource_preparation::read_inputs(
                     connection,
                     resource_preparation::Observation {
                         observer,
@@ -1880,10 +1963,7 @@ impl SeatsStore for Store {
                         resource,
                         facts: &canonical_json_value(facts),
                         subscriptions,
-                    },
-                    &mut |subject| match serial {
-                        Some(serial) => self.smalltalk.observer_actuals.read(connection, subject, serial),
-                        None => latest_actual(connection, subject),
+                        mirrored,
                     },
                 )
             });
@@ -1902,6 +1982,7 @@ impl SeatsStore for Store {
                 subscriptions,
                 current,
                 Some((&fence, prepared)),
+                mirrored,
             )?;
             if let Some(outcome) = outcome {
                 return Ok(outcome);
@@ -1924,8 +2005,9 @@ impl SeatsStore for Store {
             subscriptions,
             current,
             None,
+            mirrored,
         )?
-        .ok_or_else(|| St3Error::new("internal", "canonical observation returned no outcome"))
+        .ok_or_else(|| FractalError::new("internal", "canonical observation returned no outcome"))
     }
 
     fn usage_period_rows(&self, since_ms: u64, until_ms: u64) -> Result<Vec<Value>> {
@@ -1964,13 +2046,15 @@ impl SeatsStore for Store {
             pricing: String,
             native_session_id: Option<String>,
             provenance: Option<Vec<Value>>,
+            invocation_id: Option<String>,
+            attempt: Option<u32>,
         }
         #[derive(Clone, Copy, Default)]
         struct DailySnapshot {
             at: u64,
             buckets: [u64; USAGE_BUCKETS.len()],
         }
-        type Key = (String, String, String, String, String, String, String);
+        type Key = (String, String, String, String, String, String, String, String);
         let mut days = agent_messages::windows(since_ms, until_ms)
             .into_iter()
             .map(|(since, until)| agent_messages::DailyUsage {
@@ -1978,6 +2062,7 @@ impl SeatsStore for Store {
                 until,
                 cost: 0,
                 unpriced: 0,
+                unpriced_responses: 0,
             })
             .collect::<Vec<_>>();
         #[derive(Default)]
@@ -2009,6 +2094,8 @@ impl SeatsStore for Store {
             if fields.get("cost_microusd").is_none() {
                 snapshot.buckets[8] = snapshot.buckets[0];
             }
+            snapshot.invocation_id = fields["invocation_id"].as_str().map(str::to_owned);
+            snapshot.attempt = fields["attempt"].as_u64().and_then(|n| u32::try_from(n).ok());
             let text = |name| fields[name].as_str().unwrap_or("").to_owned();
             let key = (
                 subject,
@@ -2018,6 +2105,7 @@ impl SeatsStore for Store {
                 text("owner_run"),
                 text("owner_step"),
                 text("host"),
+                text("execution_id"),
             );
             let group = groups.entry(key).or_insert_with(|| Group {
                 days: vec![(None, None); days.len()],
@@ -2045,7 +2133,7 @@ impl SeatsStore for Store {
             }
         }
         let mut result = Vec::new();
-        for ((agent, _incarnation, model, account, mission_run, step, host), group) in groups {
+        for ((agent, _incarnation, model, account, mission_run, step, host, execution), group) in groups {
             for (day, (baseline, latest)) in days.iter_mut().zip(group.days) {
                 let Some(latest) = latest else {
                     continue;
@@ -2053,13 +2141,15 @@ impl SeatsStore for Store {
                 let baseline = baseline
                     .filter(|b| b.buckets[0] <= latest.buckets[0])
                     .unwrap_or_default();
-                if latest.buckets[0] > baseline.buckets[0] {
+                if latest.buckets != baseline.buckets {
                     day.cost = day
                         .cost
                         .saturating_add(latest.buckets[6].saturating_sub(baseline.buckets[6]));
                     day.unpriced = day
                         .unpriced
                         .saturating_add(latest.buckets[8].saturating_sub(baseline.buckets[8]));
+                    day.unpriced_responses = day.unpriced_responses
+                        .saturating_add(latest.buckets[9].saturating_sub(baseline.buckets[9]));
                 }
             }
             let Some(latest) = group.latest else {
@@ -2076,6 +2166,9 @@ impl SeatsStore for Store {
                 "model": model, "account": account, "host": host,
                 "pricing": latest.pricing,
             });
+            if !execution.is_empty() { row["execution_id"] = json!(execution); }
+            if let Some(invocation) = latest.invocation_id { row["invocation_id"] = json!(invocation); }
+            if let Some(attempt) = latest.attempt { row["attempt"] = json!(attempt); }
             if let Some(session) = latest.native_session_id {
                 row["native_session_id"] = json!(session);
             }
@@ -2089,7 +2182,7 @@ impl SeatsStore for Store {
                 row[*name] =
                     Value::from(latest.buckets[index].saturating_sub(baseline.buckets[index]));
             }
-            if row["total_tokens"] == 0 {
+            if USAGE_BUCKETS.iter().all(|name| row[*name] == 0) {
                 continue;
             }
             result.push(row);
@@ -2105,24 +2198,29 @@ impl SeatsStore for Store {
         static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "SELECT id, store_index, batch_id, subject, kind, origin, actor, body,
-                        predecessors, accepted_at_unix_ms,
-                        NOT EXISTS (
-                            SELECT 1 FROM claims AS newer
-                            WHERE newer.subject=claims.subject AND {}
-                        )
+                        predecessors, accepted_at_unix_ms
                  FROM claims
                  WHERE kind='custom.client.terminal-attached'
                    AND json_extract(body, '$.fields.capability_hash')=?1
-                 ORDER BY {} LIMIT 1",
-                smallclaims::store::canonical::after_sql("newer", "claims"),
+                 ORDER BY {}",
                 smallclaims::store::canonical::order_sql("claims", true),
             )
         });
         let connection = self.readers.get();
-        Ok(connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6d7b507123e6 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?
-            .query_row(/* sqlite-large-value: allow-for-now lv-h03924d7d5055 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ [digest], |row| Ok((claim_from_row(row)?, row.get(10)?)))
-            .optional()?)
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6d7b507123e6 owner=fractal_seats::store::seats TODO=trace-statement-and-value-representation */ &QUERY)?;
+        let mut rows = statement.query([digest])?;
+        while let Some(row) = rows.next()? {
+            let attached = claim_from_row(row)?;
+            if !fractal_store::pairing::operation_is_trusted(&connection, &attached.id,
+                &attached.origin, attached.actor.as_deref(), &attached.body["fields"])? {
+                continue;
+            }
+            let current = fractal_store::pairing::terminal_head(
+                &connection, &attached.subject, &attached.origin, attached.actor.as_deref(),
+            )?.is_some_and(|head| head.id == attached.id);
+            return Ok(Some((attached, current)));
+        }
+        Ok(None)
     }
 
     fn cached_placement_fence(
@@ -2130,12 +2228,12 @@ impl SeatsStore for Store {
             token: &str,
             build: impl FnOnce() -> Result<Option<crate::model::PlacementFence>>,
         ) -> Result<Option<Arc<crate::model::PlacementFence>>> {
-        if let Some(fence) = self.smalltalk.placement_cache.lock()
+        if let Some(fence) = self.fractal.placement_cache.lock()
             .unwrap_or_else(PoisonError::into_inner).get(token) {
             return Ok(fence.clone());
         }
         let fence = build()?.map(Arc::new);
-        let mut cache = self.smalltalk.placement_cache.lock()
+        let mut cache = self.fractal.placement_cache.lock()
             .unwrap_or_else(PoisonError::into_inner);
         if cache.len() >= ACTUAL_CACHE_LIMIT { cache.clear(); }
         cache.insert(token.to_owned(), fence.clone());
@@ -2188,12 +2286,17 @@ impl SeatsStore for Store {
         let connection = self.readers.get();
         let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
         let subject = subject.as_str();
+        // Seek to this incarnation's observations rather than read every earlier incarnation's.
+        // A body without fields has no state, so the wider incarnation expression adds no match.
         let found: i64 = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims
-             WHERE subject=?1 AND kind='harness.observed'
-               AND json_extract(body, '$.fields.incarnation_id')=?2
-               AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
-               AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')",
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_harness_incarnation_accepted_index
+                 WHERE subject=?1 AND kind='harness.observed'
+                   AND {INCARNATION_OF_CLAIM}=?2
+                   AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
+                   AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')"
+            )
+            .as_str(),
             params![subject, incarnation],
             |row| row.get(0),
         )?;

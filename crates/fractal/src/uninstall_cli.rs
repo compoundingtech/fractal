@@ -7,7 +7,7 @@ fn directory_is_empty(path: &Path) -> bool {
 }
 
 fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Result<()> {
-    if binary_aliases.contains(&path) && !fractal::owns_alias(path) {
+    if binary_aliases.contains(&path) && !fractal::may_remove(path) {
         return Ok(());
     }
     if path.is_dir() {
@@ -17,7 +17,32 @@ fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Resu
     }
 }
 
-pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
+fn remove_uninstall_paths(
+    paths: &[PathBuf],
+    binary_aliases: &[&Path],
+    state_dir: &Path,
+    deadline: std::time::Instant,
+) -> Result<()> {
+    // A dead leader may leave no socket or startup receipt, while a child still
+    // owns the directory. Do not erase that directory until its lock is released.
+    fractal_daemon::node_identity::wait_for_release(state_dir, deadline)?;
+    for path in paths {
+        // Recheck ownership only for identified canonical executable entries, never state directories.
+        let result = remove_uninstall_path(path, binary_aliases);
+        if let Err(error) = result
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("could not remove {}: {error}", path.display());
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn run_uninstall(
+    endpoint: &Endpoint,
+    args: UninstallArgs,
+    json_output: bool,
+) -> Result<()> {
     fractal_daemon::service::preflight(!args.no_service)?;
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -70,9 +95,15 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         config.socket.clone(),
         config.client_gateway_socket.clone(),
     ];
+    if config.store_dir.is_some() {
+        let directory = fractal_daemon::config::store_dir(&config);
+        paths.extend(fractal_daemon::config::STORE_DATABASE_FILES.map(|name| directory.join(name)));
+    }
     paths.extend(fractal_daemon::startup::paths(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.client_gateway_socket));
+    paths.extend(fractal_daemon::config::legacy_socket_files(&config.socket));
+    paths.extend(fractal_daemon::config::legacy_socket_files(&config.client_gateway_socket));
     if st2_only_hooks {
         paths.push(st2_state);
     }
@@ -82,7 +113,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     // What the default install writes outside its own directories: st's Claude plugin
     // marketplace, and the copies of the st skill that seats install into harness directories.
     let skill_copies = fractal_daemon::skill::untouched_installs();
-    let plugin_files = fractal_drivers::claude_channel::st3_marketplace_root()
+    let plugin_files = fractal_drivers::claude_channel::fractal_marketplace_root()
         .ok()
         .and_then(|root| root.ancestors().nth(2).map(Path::to_path_buf))
         .filter(|root| root.ends_with("st/plugins") && root.exists());
@@ -119,7 +150,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
                 instance.name()
             );
         } else {
-            println!("remove\tthe st3 user services, if installed");
+            println!("remove\tthe Fractal user services, if installed");
             println!("remove\tst's Claude plugin and marketplace registration, if installed");
         }
         if instance.is_none() && manifest.is_none() && !args.keep_binaries {
@@ -131,7 +162,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     }
     anyhow::ensure!(
         args.yes,
-        "st uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
+        "fractal uninstall erases this machine's st3 state, settings, and services; run it again with --yes, or --dry-run to list them"
     );
     let daemon_running = client.get::<Value>("/v1/health").await.is_ok();
     if let Some(file) = fractal_daemon::config::FleetFile::load(&config.state_dir)?
@@ -142,7 +173,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         } else {
             anyhow::ensure!(
                 daemon_running,
-                "start st3 so this machine can leave its fleet first, or pass --offline"
+                "run fractal up so this machine can leave its fleet first, or pass --offline"
             );
             let person = fleet_person(args.actor.clone(), &config)?;
             fleet_leave(&client, &config, &person, false, false, 600).await?;
@@ -151,11 +182,12 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     let local_only = config.fleet_id.is_none()
         && !config.state_dir.join("left-fleet.json").exists()
         && !config.state_dir.join("fleet").exists()
-        && config.state_dir.join("claims.sqlite3").exists();
+        && config.store_path().exists();
     anyhow::ensure!(
         !local_only || args.erase_local_graph,
         "this machine's graph exists nowhere else; pass --erase-local-graph to erase it"
     );
+    let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
     if !args.no_service && services_installed()? {
         fractal_daemon::service::stop_owned_runtimes(&config)?;
         fractal_daemon::service::uninstall()?;
@@ -167,16 +199,20 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
         // is stopped; the default install's daemon is still left for its owner to stop.
         let stopped = instance.is_some() && {
             fractal_daemon::service::stop_owned_runtimes(&config)?;
-            fractal_daemon::service::stop_daemon_at(&config.socket, std::time::Duration::from_secs(20))?
+            fractal_daemon::service::stop_daemon_at(
+                &config.socket,
+                &config.state_dir,
+                std::time::Duration::from_secs(20),
+            )?
         };
         anyhow::ensure!(
             stopped,
-            "stop st3 up and st3 replication-worker, then run st uninstall --yes again"
+            "stop fractal up and fractal replication-worker, then run fractal uninstall --yes again"
         );
         println!("stopped\tthe daemon this instance started without a service");
     }
     if instance.is_none()
-        && let Err(error) = fractal_drivers::claude_channel::remove_st3_channel(true)
+        && let Err(error) = fractal_drivers::claude_channel::remove_fractal_channel(true)
         // No `claude` on this machine means there is no plugin registration to remove.
         && !error.chain().any(|cause| {
             cause
@@ -186,15 +222,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     {
         eprintln!("could not unregister st's Claude plugin: {error:#}");
     }
-    for path in &paths {
-        // Recheck ownership only for identified executable aliases, never state directories.
-        let result = remove_uninstall_path(path, &binary_aliases);
-        if let Err(error) = result
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("could not remove {}: {error}", path.display());
-        }
-    }
+    remove_uninstall_paths(&paths, &binary_aliases, &config.state_dir, stop_deadline)?;
     // The work folder setup created goes only while nothing is in it; `remove_dir` refuses a
     // folder that holds anything.
     if let Some(work) = &work_root {
@@ -223,9 +251,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
     for path in &remaining {
         println!("remains\t{}", path.display());
     }
-    println!(
-        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy"
-    );
+    println!("{}", uninstall_policy_hint(json_output));
     anyhow::ensure!(remaining.is_empty(), "some st3 files remain");
     println!("uninstalled");
     Ok(())
@@ -234,6 +260,39 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> R
 #[cfg(test)]
 mod instance_uninstall_tests {
     use super::*;
+
+    #[test]
+    fn uninstall_preserves_state_while_inherited_lock_is_held() -> Result<()> {
+        use fractal_daemon::node_identity::stop_fixture::{self, RetainedLock};
+        if stop_fixture::run_if_requested()? {
+            return Ok(());
+        }
+        let root = tempfile::tempdir()?;
+        let state = root.path().join("state");
+        let mut fixture = RetainedLock::spawn(
+            "uninstall_cli::instance_uninstall_tests::uninstall_preserves_state_while_inherited_lock_is_held",
+            &state,
+            false,
+        )?;
+        // No live leader, socket or service remains to tell uninstall to wait.
+        fixture.leader.kill()?;
+        fixture.leader.wait()?;
+        fs::write(state.join("precious"), "keep")?;
+        let paths = vec![state.clone()];
+        let error = remove_uninstall_paths(
+            &paths,
+            &[],
+            &state,
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+        )
+        .expect_err("uninstall must preserve state while an inherited lock is held");
+        fixture.assert_held_error(&error)?;
+        assert_eq!(fs::read_to_string(state.join("precious"))?, "keep");
+        fixture.release()?;
+        remove_uninstall_paths(&paths, &[], &state, std::time::Instant::now())?;
+        assert!(!state.exists());
+        Ok(())
+    }
 
     fn names(paths: Vec<PathBuf>) -> Vec<String> {
         let mut names = paths
@@ -315,4 +374,65 @@ mod instance_uninstall_tests {
         remove_uninstall_path(&alias, &binary_aliases).unwrap();
         assert!(fs::symlink_metadata(&alias).is_err());
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn canonical_executable_removal_uses_running_image_identity() {
+        const CASE: &str = "FRACTAL_CANONICAL_OWNERSHIP_CASE";
+        if let Some(case) = std::env::var_os(CASE) {
+            let canonical = std::env::current_exe().unwrap();
+            assert_eq!(canonical.file_name().unwrap(), "fractal");
+            assert!(fractal::may_remove(&canonical));
+            if case == "replaced" {
+                // Move the executing inode, then occupy its original pathname
+                // with a byte-identical but different-inode file.
+                let moved = canonical.with_file_name("running-image");
+                fs::rename(&canonical, &moved).unwrap();
+                fs::copy(&moved, &canonical).unwrap();
+                assert!(!fractal::may_remove(&canonical));
+                remove_uninstall_path(&canonical, &[canonical.as_path()]).unwrap();
+                assert!(canonical.is_file(), "the replacement is not the running image");
+            } else {
+                let alias_dir = canonical.parent().unwrap().join("aliases");
+                fs::create_dir(&alias_dir).unwrap();
+                let alias = alias_dir.join("fractal");
+                std::os::unix::fs::symlink(&canonical, &alias).unwrap();
+                assert!(fractal::may_remove(&alias));
+                remove_uninstall_path(&alias, &[alias.as_path()]).unwrap();
+                assert!(fs::symlink_metadata(&alias).is_err());
+                remove_uninstall_path(&canonical, &[canonical.as_path()]).unwrap();
+                assert!(!canonical.exists(), "the actual executing inode is removable");
+            }
+            return;
+        }
+        let running = std::env::current_exe().unwrap();
+        for case in ["owned", "replaced"] {
+            let root = tempfile::tempdir().unwrap();
+            let canonical = root.path().join("fractal");
+            fs::copy(&running, &canonical).unwrap();
+            let output = fractal_daemon::test_support::command(&canonical)
+                .args(["--exact",
+                    "uninstall_cli::instance_uninstall_tests::canonical_executable_removal_uses_running_image_identity",
+                    "--nocapture"])
+                .env(CASE, case)
+                .output().unwrap();
+            assert!(output.status.success(), "{case}: {output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "{output:?}");
+        }
+    }
+}
+
+fn uninstall_policy_hint(json_output: bool) -> &'static str {
+    if json_output {
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy"
+    } else {
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: fractal claude-channel uninstall-policy"
+    }
+}
+
+#[test]
+fn uninstall_policy_advice_preserves_json_stdout() {
+    assert_eq!(uninstall_policy_hint(true),
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy");
+    assert!(uninstall_policy_hint(false).ends_with("fractal claude-channel uninstall-policy"));
 }

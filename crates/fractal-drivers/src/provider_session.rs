@@ -33,6 +33,26 @@ pub fn stop_requested() -> bool {
     STOP.load(Ordering::SeqCst)
 }
 
+/// Set once a driver can no longer serve its provider. Unlike a signal's stop, a wrapper that
+/// installs its handlers afterwards keeps it, so a provider not yet launched is stopped too.
+static DRIVER_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Stop the provider as a stop signal would: its wrapper ends the child, records the end and
+/// returns. A driver that can no longer serve its provider asks for this, possibly before the
+/// wrapper has started.
+pub fn request_stop() {
+    DRIVER_STOP.store(true, Ordering::SeqCst);
+    STOP.store(true, Ordering::SeqCst);
+}
+
+/// The reason on the ended record of a provider its driver stopped.
+pub const DRIVER_STOPPED: &str = "driver-stopped";
+
+/// Whether the driver asked for the stop, so the provider's end is the driver's and not its own.
+pub(crate) fn driver_stop_requested() -> bool {
+    DRIVER_STOP.load(Ordering::SeqCst)
+}
+
 /// Set by a driver that is about to re-execute itself into a replaced st binary. Every wrapper
 /// loop that sees it returns [`Detached`] with what the next image needs to adopt its provider,
 /// and leaves the provider, its terminal, and its observed record exactly as they are.
@@ -185,8 +205,20 @@ extern "C" fn on_stop_signal(_signal: libc::c_int) {
 
 extern "C" fn on_interrupt_signal(_signal: libc::c_int) {}
 
+/// The stop flags are process-global: every test that reads or raises them holds this lock, so
+/// parallel readers never see another test's stop.
+#[cfg(test)]
+pub(crate) fn stop_flag_tests() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(std::sync::Mutex::default);
+    match LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 pub(crate) fn install_signal_handler() {
-    STOP.store(false, Ordering::SeqCst);
+    STOP.store(DRIVER_STOP.load(Ordering::SeqCst), Ordering::SeqCst);
     install_stop_handlers();
 }
 
@@ -243,31 +275,42 @@ impl SessionObserver {
     /// — coalescing, heartbeat eligibility, terminal fencing — is decided by the claim across
     /// all of them. A claim that cannot be written is fatal at construction: acting without
     /// ownership would silently produce a writer every record refuses.
-    pub(crate) fn new(
+    pub(crate) fn new_claude_with_primary_ownership(
         agent_dir: &Path,
         identity: &str,
-        harness: &'static str,
         pty_session: &str,
+        enabled: bool,
     ) -> anyhow::Result<Self> {
-        Self::with_session(
+        Self::with_session_policy(
             agent_dir,
             identity,
-            harness,
+            "claude",
             pty_session,
             harness_state::session_token(),
+            enabled,
         )
     }
 
-    /// Claim an explicitly supplied session incarnation for a host-owned launch attempt.
-    pub(crate) fn with_session(
+    fn with_session_policy(
         agent_dir: &Path,
         identity: &str,
         harness: &'static str,
         pty_session: &str,
         session: String,
+        primary_ownership: bool,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(!session.is_empty(), "provider session incarnation is empty");
-        let seq = harness_state::claim(agent_dir, identity, harness, &session)?;
+        let seq = if harness == "claude" {
+            crate::claude_process::claim_configured(
+                agent_dir,
+                identity,
+                pty_session,
+                &session,
+                primary_ownership,
+            )?
+        } else {
+            harness_state::claim(agent_dir, identity, harness, &session)?
+        };
         Ok(Self {
             seq,
             agent_dir: agent_dir.to_path_buf(),
@@ -547,6 +590,7 @@ pub(crate) fn run_provider_observed_with_env_removals(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     apply_provider_environment(&mut command, env, removed_env);
+    crate::managed_launch::apply_provider_environment(&mut command)?;
     unsafe {
         command.pre_exec(|| {
             libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -561,11 +605,22 @@ pub(crate) fn run_provider_observed_with_env_removals(
         Ok(child) => child,
         Err(error) => {
             if let Some(observed) = observed {
+                if observed.harness == "claude" {
+                    let _ = crate::claude_process::ended(&observed.agent_dir, &observed.session, observed.seq);
+                }
                 observed.launch_error();
             }
             return Err(error).with_context(|| format!("starting {provider} provider {program}"));
         }
     };
+    if let Some(observed) = observed.filter(|observer| observer.harness == "claude")
+        && let Err(error) = crate::claude_process::spawned(
+            &observed.agent_dir, &observed.session, observed.seq, child.id(),
+        )
+    {
+        let _ = crate::claude_process::ended(&observed.agent_dir, &observed.session, observed.seq);
+        tracing::error!("Claude primary process registration refused: {error:#}");
+    }
     supervise_provider(
         provider,
         status_path,
@@ -611,6 +666,20 @@ fn supervise_provider(
     detach: &AtomicBool,
     observed: Option<&SessionObserver>,
 ) -> Result<ProviderOutcome> {
+    struct ClosePrimary<'a> { observer: Option<&'a SessionObserver>, detached: bool }
+    impl Drop for ClosePrimary<'_> {
+        fn drop(&mut self) {
+            if !self.detached
+                && let Some(observer) = self.observer.filter(|o| o.harness == "claude")
+                && let Err(error) = crate::claude_process::ended(
+                    &observer.agent_dir, &observer.session, observer.seq,
+                )
+            {
+                tracing::warn!("closing Claude primary ownership: {error:#}");
+            }
+        }
+    }
+    let mut primary = ClosePrimary { observer: observed, detached: false };
     let mut next_refresh = Instant::now();
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -621,6 +690,7 @@ fn supervise_provider(
             if let Some(exit) = child.try_wait().ok().flatten() {
                 return Ok(ProviderOutcome::Exited(exit));
             }
+            primary.detached = true;
             return Ok(ProviderOutcome::Detached(child.id()));
         }
         match child.try_wait() {
@@ -665,7 +735,7 @@ fn apply_provider_environment(
     }
     for key in removed_env {
         command.env_remove(key);
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         if let Some(new) = crate::contracts::fractal_env_name(key) {
             command.env_remove(new);
         }
@@ -679,7 +749,7 @@ fn apply_provider_environment(
             command.env_remove(legacy);
         }
         command.env(key, value);
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         if let Some(new) = crate::contracts::fractal_env_name(key) {
             command.env(new, value);
         }
@@ -736,9 +806,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_driver_stop_survives_a_wrapper_that_starts_after_it() {
+        // The driver can give up before its provider's wrapper reaches its handler install,
+        // for example when the daemon refuses the mailbox at once.
+        let _stop_exclusive = stop_flag_tests();
+        request_stop();
+        install_signal_handler();
+        assert!(stop_requested());
+        DRIVER_STOP.store(false, Ordering::SeqCst);
+        STOP.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
     fn native_supervision_keeps_observations_without_creating_status() {
         let root = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(root.path(), "h.native", "claude", "native").unwrap();
+        let observer = SessionObserver::new_claude_with_primary_ownership(
+            root.path(),
+            "h.native",
+            "native",
+            false,
+        ).unwrap();
         let stop = AtomicBool::new(false);
         run_provider(
             "native",
@@ -758,16 +845,47 @@ mod tests {
         assert_eq!(record.exit.as_deref(), Some("exit 0"));
     }
 
+    /// The ended record of a provider its driver stopped says so (#4743); a provider's own end
+    /// carries no reason. The stop itself signals this process's group, so the fenced-driver
+    /// test in crates/fractal/tests/terminal_binding drives it end to end.
+    #[test]
+    fn a_provider_its_driver_stops_ends_with_the_drivers_reason() {
+        let _stop_exclusive = stop_flag_tests();
+        let ended = |driver_stopped: bool| {
+            let root = tempfile::tempdir().unwrap();
+            let observer = SessionObserver::new_claude_with_primary_ownership(
+                root.path(),
+                "h.native",
+                "native",
+                false,
+            )
+            .unwrap();
+            if driver_stopped {
+                request_stop();
+            }
+            observer.ended("signal 15");
+            DRIVER_STOP.store(false, Ordering::SeqCst);
+            STOP.store(false, Ordering::SeqCst);
+            harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap()
+        };
+        let own = ended(false);
+        assert_eq!((own.state, own.reason), (harness_state::Activity::Ended, None));
+        let stopped = ended(true);
+        assert_eq!(stopped.state, harness_state::Activity::Ended);
+        assert_eq!(stopped.exit.as_deref(), Some("signal 15"));
+        assert_eq!(stopped.reason.as_deref(), Some(DRIVER_STOPPED));
+    }
+
     /// n6: an unspawnable provider is a terminal outcome — the claim placeholder must not stand.
     #[test]
     fn an_unspawnable_provider_writes_a_real_terminal_record() {
         use crate::harness_state::{self, Activity};
         let tmp = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(
+        let observer = SessionObserver::new_claude_with_primary_ownership(
             tmp.path(),
             "example-linux.worker",
-            "claude",
             "example-linux.worker",
+            false,
         )
         .unwrap();
         let stop = AtomicBool::new(false);
@@ -849,11 +967,11 @@ mod tests {
     #[test]
     fn detaching_releases_a_live_provider_with_its_observed_session() {
         let tmp = tempfile::tempdir().unwrap();
-        let observer = SessionObserver::new(
+        let observer = SessionObserver::new_claude_with_primary_ownership(
             tmp.path(),
             "example-linux.worker",
-            "claude",
             "example-linux.worker",
+            false,
         )
         .unwrap();
         let pid = spawn_sleeper("30");
@@ -959,14 +1077,91 @@ mod tests {
     }
 
     #[test]
+    fn primary_ownership_is_off_until_the_install_opts_a_fresh_generation_in() {
+        use crate::claude_process::{self, Admission, Caller};
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let legacy = SessionObserver::new_claude_with_primary_ownership(
+            dir,
+            "fixture",
+            "runtime",
+            false,
+        ).unwrap();
+        assert!(!claude_process::recorded(dir).unwrap());
+        assert!(!dir.join("claude-primary-process.lock").exists());
+        // An impossible kernel caller still reaches the EXACT old admission callback. Off
+        // does not run a new physical gate, allocate a witness or fabricate primary proof.
+        let old_response = b"unchanged old admission".to_vec();
+        let response = claude_process::with_caller(
+            dir,
+            legacy.session(),
+            legacy.seq(),
+            0,
+            None,
+            Caller::Channel,
+            |admission| {
+                assert_eq!(admission, Admission::Legacy);
+                Ok(old_response.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(response, old_response);
+        claude_process::spawned(dir, legacy.session(), legacy.seq(), 0).unwrap();
+        claude_process::ended(dir, legacy.session(), legacy.seq()).unwrap();
+        assert!(!claude_process::recorded(dir).unwrap());
+        // True is provided by the install-owning native entry, never sampled by hooks.
+        let protected =
+            SessionObserver::new_claude_with_primary_ownership(dir, "fixture", "runtime", true)
+                .unwrap();
+        assert!(claude_process::recorded(dir).unwrap());
+        let bytes = std::fs::read(dir.join("claude-primary-process.json")).unwrap();
+        let _adopted = SessionObserver::adopt(
+            dir,
+            "fixture",
+            "claude",
+            "runtime",
+            protected.session(),
+            protected.seq(),
+        );
+        assert_eq!(
+            std::fs::read(dir.join("claude-primary-process.json")).unwrap(),
+            bytes,
+            "reexec/adoption never samples a toggle or rewrites its generation"
+        );
+        // A subsequent authorized fresh launch with off retires the prior generation's
+        // witness, but never the lock inode. This is NOT a live config-toggle migration.
+        let off =
+            SessionObserver::new_claude_with_primary_ownership(dir, "fixture", "runtime-next", false)
+                .unwrap();
+        assert!(!claude_process::recorded(dir).unwrap());
+        assert!(dir.join("claude-primary-process.lock").exists());
+        assert!(off.seq() > protected.seq());
+        let current =
+            crate::harness_state::read(&crate::harness_state::harness_state_path(dir), None).unwrap();
+        assert_eq!(current.evidence_incarnation.as_deref(), Some(off.session()));
+        let response = claude_process::with_caller(
+            dir,
+            off.session(),
+            off.seq(),
+            0,
+            None,
+            Caller::Channel,
+            |_| Ok(old_response.clone()),
+        )
+        .unwrap();
+        assert_eq!(response, old_response);
+    }
+
+    #[test]
     fn an_explicit_session_incarnation_is_claimed_exactly() {
         let tmp = tempfile::tempdir().unwrap();
-        let _observer = SessionObserver::with_session(
+        let _observer = SessionObserver::with_session_policy(
             tmp.path(),
             "example-linux.worker",
             "claude",
             "example-linux.worker",
             "attempt-exact".into(),
+            false,
         )
         .unwrap();
         let record: serde_json::Value = serde_json::from_slice(
@@ -975,12 +1170,13 @@ mod tests {
         .unwrap();
         assert_eq!(record["incarnation"], "attempt-exact");
 
-        let error = SessionObserver::with_session(
+        let error = SessionObserver::with_session_policy(
             tmp.path(),
             "example-linux.worker",
             "claude",
             "example-linux.worker",
             String::new(),
+            false,
         )
         .err()
         .unwrap();

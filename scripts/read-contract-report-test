@@ -2,6 +2,7 @@
 """Small adversarial fixtures for the fail-closed read diagnostic."""
 
 import importlib.machinery
+import importlib.util
 import hashlib
 import json
 import pathlib
@@ -11,9 +12,12 @@ import unittest
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-report = importlib.machinery.SourceFileLoader(
+loader = importlib.machinery.SourceFileLoader(
     "read_contract_report", str(ROOT / "scripts/read-contract-report")
-).load_module()
+)
+spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+report = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(report)
 HEAD = "a" * 40
 class ReadContractReportTest(unittest.TestCase):
     def setUp(self):

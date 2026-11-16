@@ -15,7 +15,8 @@ describe('narrative recording inputs', () => {
     const { world, script, rows } = loadRecordedWorld(name)
     expect(script.format_version).toBe(2)
     expect(world.id).toBe('recorded-' + name)
-    expect(SLICE_KINDS.map((kind) => world.slices[kind].source._tag)).toEqual(SLICE_KINDS.map(() => 'recorded'))
+    // Recordings carry no objectives read; the world serves the synthetic empty one.
+    expect(SLICE_KINDS.map((kind) => world.slices[kind].source._tag)).toEqual(SLICE_KINDS.map((kind) => kind === 'objectives' ? 'synthetic' : 'recorded'))
     const oracle = decodeRecording(readFileSync(new URL(name + '.normalized.json', RECORDINGS_DIR), 'utf8'))
     expect(rows).toEqual(oracle)
     expect(rows.some((row) => row.kind === 'frame' && row.value.kind === 'conversation')).toBe(true)
@@ -49,7 +50,7 @@ describe('narrative recording inputs', () => {
       (row.receive_ms >= 0 || row.socket_id === baselineSocket))
     const sockets = new Set(replacements.map((row) => row.socket_id))
     expect(sockets.size).toBe(4)
-    expect(catalog).toHaveLength(25)
+    expect(catalog).toHaveLength(26)
   })
 
   it('retains the forty-minute hunt, rejected hypotheses and real older-page walk', () => {

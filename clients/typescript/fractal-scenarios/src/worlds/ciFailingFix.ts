@@ -13,7 +13,7 @@ import { screenAt } from '../kit/screen.ts'
 import type { Slice } from '../kit/slice.ts'
 import { parseTimestamp } from '../kit/time.ts'
 import { liveSync } from '../kit/variants.ts'
-import type { Slices, WorldDefinition } from '../kit/world.ts'
+import type { AuthoredSlices, WorldDefinition } from '../kit/world.ts'
 import { adoptNarrativeRecording } from './narrativeAdoption.ts'
 
 const SEED = 21
@@ -41,7 +41,7 @@ export const syntheticCiFailingFix: WorldDefinition = {
   slices: (ctx) => build(ctx),
 }
 
-const build = (ctx: FactoryContext): Slices => {
+const build = (ctx: FactoryContext): AuthoredSlices => {
   const builder = ctx.cast.agents[0]!
   const person = ctx.cast.people[0]!
   const mission = ctx.cast.missions[0]!
@@ -62,6 +62,7 @@ const build = (ctx: FactoryContext): Slices => {
   const roster: Slice<'roster'> = {
     kind: 'roster', variant: 'default', source, decode: 'strict', loading: false,
     state: {
+      sessions: [], devices: [],
       agents: [initial.agent], runtimes: [initial.runtime!], order: [builder.id],
       machines: [resources.machine(ctx, builder.host, [builder.runtime, builder.terminalRuntime], [mission.steps[1]!.work])],
     },
@@ -80,6 +81,7 @@ const build = (ctx: FactoryContext): Slices => {
   const details: Slice<'details'> = {
     kind: 'details', variant: 'default', source, decode: 'strict', loading: false,
     state: {
+      launches: [], launch_variants: [],
       missions: [resources.mission(ctx, mission, 'running', -30_000)],
       work: [work(0, 'failed', -30_000, 'w-red'), work(1, 'claimed', -25_000, 'w-bisect'), work(2, 'ready', -25_000, 'w-patch-ready'), work(3, 'ready', -25_000, 'w-retry-ready')],
     },

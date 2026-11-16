@@ -1,9 +1,9 @@
 //! A harness borrows a person's terminal. Its invocation fence is independent of the shell.
 use serde_json::Value;
 
-use crate::model::{DesiredSubject, MemberLifecycle, St3Error, TerminalBinding};
+use crate::model::{DesiredSubject, MemberLifecycle, FractalError, TerminalBinding};
 
-pub fn from_desired(desired: &Value) -> Result<Option<TerminalBinding>, St3Error> {
+pub fn from_desired(desired: &Value) -> Result<Option<TerminalBinding>, FractalError> {
     let Some(node) = desired
         .get("children")
         .and_then(Value::as_array)
@@ -17,7 +17,7 @@ pub fn from_desired(desired: &Value) -> Result<Option<TerminalBinding>, St3Error
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "invalid-terminal-binding",
                     "a terminal binding field is missing",
                 )
@@ -33,7 +33,7 @@ pub fn from_desired(desired: &Value) -> Result<Option<TerminalBinding>, St3Error
 pub fn validate_declaration(
     desired: &DesiredSubject,
     actor: Option<&str>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let binding = from_desired(&desired.desired)?;
     let member_binding = desired
         .member
@@ -49,7 +49,7 @@ pub fn validate_declaration(
         return Ok(());
     }
     let binding = binding.ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "invalid-terminal-binding",
             "the declaration must name its bound terminal",
         )
@@ -59,7 +59,7 @@ pub fn validate_declaration(
         "intent.desired",
         actor,
     )
-    .map_err(|e| St3Error::new(e.code, e.message))?;
+    .map_err(|e| FractalError::new(e.code, e.message))?;
     if desired.kind != "agent"
         || desired.owner_run.is_some()
         || member_binding != Some(&binding)
@@ -68,11 +68,11 @@ pub fn validate_declaration(
             .as_ref()
             .is_none_or(|m| m.lifecycle != MemberLifecycle::TerminalBound || !m.terminal)
         || fractal_schema::owned_terminals::owner(&binding.subject)
-            .map_err(|e| St3Error::new(e.code, e.message))?
+            .map_err(|e| FractalError::new(e.code, e.message))?
             .is_none_or(|owner| !owner.starts_with("person/"))
         || uuid::Uuid::parse_str(&binding.id).is_err()
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-terminal-binding",
             "invalid bound terminal member",
         ));
@@ -84,7 +84,7 @@ pub fn validate_claim(
     kind: &str,
     body: &Value,
     actor: Option<&str>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if kind == "intent.desired"
         && (body
             .pointer("/member/terminal_binding")
@@ -93,7 +93,7 @@ pub fn validate_claim(
             || from_desired(&body["desired"])?.is_some())
     {
         let desired = serde_json::from_value(body.clone())
-            .map_err(|e| St3Error::new("invalid-terminal-binding", e.to_string()))?;
+            .map_err(|e| FractalError::new("invalid-terminal-binding", e.to_string()))?;
         validate_declaration(&desired, actor)?;
     }
     Ok(())

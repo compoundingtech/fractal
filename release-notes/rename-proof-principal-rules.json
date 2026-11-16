@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Share deterministic principal authority rules between runtime and offline verification",
+  "replay": {
+    "status": "none",
+    "detail": "Existing signed claims and runtime projections remain unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage schema migration or new claim kind."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Share deterministic principal authority rules between runtime and offline verification. Runtime behavior is preserved."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Existing callers and persisted data remain compatible."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional downtime beyond the normal binary restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator migration required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Binary rollback requires no layer-specific data migration."
+  }
+}

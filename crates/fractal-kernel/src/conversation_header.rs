@@ -542,7 +542,7 @@ mod tests {
         let items = vec![item(
             1,
             "2026-10-06T12:00:00Z",
-            json!({"text": "Plain Small Talk message"}),
+            json!({"text": "Plain Fractal message"}),
         )];
         assert_eq!(merge_register(derive(&items, false), None), None);
         assert_eq!(

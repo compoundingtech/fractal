@@ -1,4 +1,4 @@
-// moves to smalltalk/clients/typescript
+// moves to fractal/clients/typescript
 /**
  * `SubjectEnvelope`: the one typed wrapper client-v0 would serve every subject in (q2).
  *
@@ -8,7 +8,7 @@
  * renderer that claims it, so unknown schemas still decode as a header plus open fact bag.
  *
  * Conventions follow the generated client-v0 Effect schemas so this can be emitted by
- * `st3-client-codegen` later: snake_case wire names verbatim, `Schema.Struct` (never Class),
+ * `fractal-client-codegen` later: snake_case wire names verbatim, `Schema.Struct` (never Class),
  * `optionalKey` for optional, `NullOr` for nullable, `Literals` for enums, ids and timestamps
  * as pattern-checked strings (no brands, no Date decoding). Domain numbers use `Finite`:
  * counts, accounting, dimensions and subscription parameters reject NaN and infinities.
@@ -37,7 +37,9 @@ export const Family = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]*$/u)
   identifier: 'Family',
 })
 
-const schemaIdPattern = /^st3\.([a-z][a-z0-9-]*)(?::([a-z0-9][a-z0-9.-]*))?@([1-9]\d*)$/u
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+const schemaIdPattern = /^(?:st3|fractal)\.([a-z][a-z0-9-]*)(?::([a-z0-9][a-z0-9.-]*))?@([1-9]\d*)$/u
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
 /**
  * Schema id: `st3.<family>[:<kind>]@<major>`. The kind segment exists only for families whose

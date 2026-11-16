@@ -1,5 +1,5 @@
 {
-  "title": "st3 scenario recording script",
+  "title": "Fractal scenario recording script",
   "type": "object",
   "additionalProperties": false,
   "required": ["format_version", "world", "agent", "host", "person", "workspace", "id_map", "turns", "reads"],

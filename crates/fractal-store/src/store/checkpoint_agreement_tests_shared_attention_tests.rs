@@ -31,7 +31,7 @@ pub fn sync(nodes: &[&Store]) {
 pub fn observe(store: &Store, n: usize) {
     for index in 0..n {
         store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: format!("daemon/{}", store.origin),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -78,7 +78,9 @@ pub fn kinds(actions: &[CheckpointAction]) -> Vec<&'static str> {
             CheckpointAction::Trimmed { .. } => "trimmed",
             CheckpointAction::ManifestNeeded { .. } => "manifest-needed",
             CheckpointAction::TrimGraphChanged { .. } => "graph-changed",
+            CheckpointAction::TrimDeferred { .. } => "deferred",
             CheckpointAction::SweptTrimmedClaimRows { .. } => "swept",
+            CheckpointAction::HeldBack { .. } => "held-back",
         })
         .collect()
 }

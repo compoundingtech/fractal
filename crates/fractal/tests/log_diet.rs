@@ -168,11 +168,14 @@ impl Daemon {
         let store = Arc::new(Store::open(&state_dir.join("claims.sqlite3"), NODE).unwrap());
         let notify = Arc::new(Notify::new());
         let state = AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
             notify: notify.clone(),
             event_notify: watch::channel(0_u64).0,
             node: NODE.into(),
+            api_socket: state_dir.join("api.sock"),
             state_dir,
             pty_root: root.join("pty"),
             pty_binary: PathBuf::from("pty"),
@@ -181,6 +184,9 @@ impl Daemon {
             client_relay: None,
             native_session_home: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         let socket = root.join("st3.sock");
         let server_socket = socket.clone();

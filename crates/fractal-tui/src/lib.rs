@@ -4,13 +4,15 @@
 mod ci_test_paths;
 
 mod connection;
+mod environment;
 mod ui;
 mod version;
 mod voice;
 
 pub use ui::screens::{HOME_IDLE_TEXT, HOME_UNKNOWN_TEXT};
 pub use ui::checklist;
-pub use version::{display_version, set_build_stamps};
+pub use ui::playback;
+pub use version::{client_name, display_version, set_build_stamps};
 
 #[cfg(test)]
 use fractal_daemon::EvidenceStore;
@@ -111,8 +113,10 @@ fn person_from_config(path: &std::path::Path) -> Result<Option<String>> {
         .map(str::to_owned))
 }
 fn configured_person() -> Result<Option<String>> {
-    if let Ok(person) = std::env::var("ST3_PERSON") {
-        return Ok(Some(person));
+    if let Some(person) = environment::read("FRACTAL_PERSON", "ST3_PERSON")? {
+        return Ok(Some(person.into_string().map_err(|_| {
+            anyhow::anyhow!("FRACTAL_PERSON or ST3_PERSON must contain valid Unicode")
+        })?));
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -156,7 +160,7 @@ fn terminal_closed(revents: libc::c_short) -> bool {
     false
 }
 /// How many looks, a tenth of a second apart, a terminal must keep looking closed before the
-/// watch below ends stui. A terminal that is really gone stays gone; the macOS test in
+/// watch below ends the TUI. A terminal that is really gone stays gone; the macOS test in
 /// `terminal_closed` (readable with nothing queued) can also hold for an instant while another
 /// thread of this process drains the keys that made it readable.
 const HANGUP_LOOKS: u32 = 10;
@@ -174,16 +178,16 @@ fn hangup_confirmed(run: &mut u32, closed: bool, definite: bool) -> bool {
 }
 fn watch_terminal_hangup() {
     // crossterm can loop inside event::poll (Darwin) or event::read (Linux) on PTY EOF and
-    // never return to the main loop's terminal check; a stui left like that spins at full CPU
+    // never return to the main loop's terminal check; a Fractal TUI left like that spins at full CPU
     // and keeps polling the daemon for hours. A separate poller observes the hangup without
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
     //
-    // Nathan, 2026-10-17: stui on a macOS laptop ended again and again with no panic, no signal and no
+    // Nathan, 2026-10-17: the TUI on a macOS laptop ended again and again with no panic, no signal and no
     // line in exits.log (`silent_exits` in its counters, a draft restored as unclean). This
     // thread was the one place that ends the process without a trace, and on macOS a single
     // look at "readable, nothing queued" was enough. It now needs the look to hold for a
-    // second, and says so in exits.log when it does end stui.
+    // second, and says so in exits.log when it does end the TUI.
     std::thread::spawn(|| {
         let mut run = 0;
         loop {
@@ -210,45 +214,7 @@ fn watch_terminal_hangup() {
     });
 }
 fn agent_label(agent: &fractal_client::Agent) -> String {
-    let slug = agent.name.rsplit('/').next().unwrap_or(&agent.name);
-    // `st agents new NAME` names a seat HOST.NAME; the host shows beside it, so the label is
-    // NAME ("harbor.image-sorter" reads as Image Sorter).
-    let host = agent
-        .host_id
-        .as_deref()
-        .map(|host| host.trim_start_matches("host/"));
-    let slug = host
-        .and_then(|host| {
-            slug.split_once('.')
-                .filter(|(prefix, rest)| prefix.eq_ignore_ascii_case(host) && !rest.is_empty())
-        })
-        .map_or(slug, |(_, rest)| rest);
-    let label = |slug: &str| {
-        slug.split('-')
-            .map(|word| match word.to_ascii_lowercase().as_str() {
-                "st3" => "ST".to_string(),
-                "cos" => "COS".to_string(),
-                "ios" => "iOS".to_string(),
-                "tui" => "TUI".to_string(),
-                "pty" => "PTY".to_string(),
-                "omp" => "OMP".to_string(),
-                _ => {
-                    let mut chars = word.chars();
-                    chars
-                        .next()
-                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                        .unwrap_or_default()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    if slug.eq_ignore_ascii_case("omp") {
-        if let Some(parent) = agent.name.rsplit('/').nth(1) {
-            return format!("{} · OMP", label(parent));
-        }
-    }
-    label(slug)
+    fractal_ui_model::agents::label(&agent.name, agent.host_id.as_deref())
 }
 fn key_input(key: KeyEvent) -> Option<String> {
     match key.code {
@@ -302,8 +268,39 @@ fn terminal_run_style(run: &fractal_client::TerminalRun) -> Style {
     style
 }
 
+/// The capability a Fractal advertises once it takes notes on answers the person did not choose.
+const OPTION_NOTES_CAPABILITY: &str = "person-answer-option-notes";
+
+/// An answer carries notes on other answers, and this Fractal does not take them. Nothing was
+/// sent: sending the answer without them would drop words the person wrote.
+#[derive(Debug)]
+pub(crate) struct OptionNotesUnsupported;
+
+impl std::fmt::Display for OptionNotesUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "This Fractal does not take notes on other answers yet (no `{OPTION_NOTES_CAPABILITY}`), so nothing was sent. Your answer and every note stay here: send again once Fractal is updated, or clear the other notes to send this answer alone."
+        )
+    }
+}
+
+impl std::error::Error for OptionNotesUnsupported {}
+
+/// Whether a Fractal advertising `capabilities` takes notes on answers not chosen.
+fn takes_option_notes(capabilities: &[fractal_client::Capability]) -> bool {
+    capabilities.iter().any(|capability| {
+        capability.id == OPTION_NOTES_CAPABILITY
+            && capability.version >= 1
+            && capability.state == fractal_client::CapabilityState::Granted
+    })
+}
+
 /// Perform one attention action against fresh fences. Shared by the old and new screens.
 /// `seen` is the card as the person saw it, which names its source if st has since closed it.
+/// `option_notes` (answer id, text) go only to a Fractal that says it takes them; otherwise the
+/// action is refused before anything is sent.
+#[allow(clippy::too_many_arguments)]
 async fn attention_action(
     client: &Client,
     actor: &str,
@@ -312,15 +309,22 @@ async fn attention_action(
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
+    option_notes: Vec<(String, String)>,
 ) -> Result<String> {
+    if !option_notes.is_empty()
+        && !takes_option_notes(&client.capabilities().await?.value.capabilities)
+    {
+        return Err(OptionNotesUnsupported.into());
+    }
     let current = client.attention_get(attention_id).await;
-    act_on_attention(client, actor, current, seen, action, reason, answer).await
+    act_on_attention(client, actor, current, seen, action, reason, answer, option_notes).await
 }
 
 /// Act on `current`, a card as st showed it. A review whose card changed (a stale fence) or
 /// closed (not found) before the action arrived was asked again or answered: the action goes
 /// once more to the card st shows now for the same source, if it still asks, and otherwise
 /// says why not. Only once, so a gate st keeps asking again is reported, not chased.
+#[allow(clippy::too_many_arguments)]
 async fn act_on_attention(
     client: &Client,
     actor: &str,
@@ -329,6 +333,7 @@ async fn act_on_attention(
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
+    option_notes: Vec<(String, String)>,
 ) -> Result<String> {
     let mut source = seen.map(|card| (card.source_id.clone(), card.attention_kind.clone()));
     let first = match current {
@@ -343,6 +348,7 @@ async fn act_on_attention(
                 action,
                 reason.clone(),
                 answer.clone(),
+                option_notes.clone(),
             )
             .await
         }
@@ -366,7 +372,7 @@ async fn act_on_attention(
                 "This review changed since you read it; read it again before you answer"
             ))
         }
-        Some(card) => act_on_card(client, actor, card, action, reason, answer).await,
+        Some(card) => act_on_card(client, actor, card, action, reason, answer, option_notes).await,
         // The person reads why, not the stale fence that found it out.
         None => Err(anyhow::anyhow!(no_longer_asked(client, &source).await)),
     }
@@ -436,7 +442,7 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
             format!("This review is no longer asked: the step is {state}")
         }
         Some(state) => format!(
-            "This review is no longer asked: the step is {state}; a new card appears if st asks again"
+            "This review is no longer asked: the step is {state}; a new card appears if Fractal asks again"
         ),
         None => {
             "This review is no longer asked: it was answered, or what it reviewed moved on".into()
@@ -444,24 +450,25 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
     }
 }
 
-/// The typed answer for a person step: the named answer chosen, or the person's own words where
-/// the request takes them. Words alone on a structured request were refused (`answer-required`),
-/// so an answer typed into a custom choice left the item on Home (Nathan, 2026-10-03).
+/// Named answers carry optional notes, and notes on the other named answers go with any answer
+/// as `option_notes`. Words alone answer only feedback or a custom choice; the server validates
+/// required text, including the changes on a request-changes answer, and every option note.
 fn person_answer(
     request: Option<&fractal_client::StructuredRequest>,
     chosen: Option<String>,
     words: &str,
+    option_notes: Vec<(String, String)>,
 ) -> Result<Option<fractal_client::PersonAnswerInput>> {
+    let option_notes = option_notes
+        .into_iter()
+        .map(|(id, text)| fractal_client::PersonOptionNote { id, text })
+        .collect();
     if let Some(id) = chosen {
-        // Requesting changes carries the changes, in the person's words.
-        let changes = request.is_some_and(|request| {
-            request.answers.iter().any(|answer| {
-                answer.id == id && answer.outcome.as_deref() == Some("request_changes")
-            })
-        });
+        let text = words.trim();
         return Ok(Some(fractal_client::PersonAnswerInput {
             id: Some(id),
-            text: changes.then(|| words.trim().to_owned()),
+            text: (!text.is_empty()).then(|| text.to_owned()),
+            option_notes,
         }));
     }
     let Some(request) = request else {
@@ -469,21 +476,33 @@ fn person_answer(
     };
     let text = Some(words.trim().to_owned());
     match request.entry_type.as_str() {
-        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
-        "choice" if request.custom => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
-        // A decision takes words as its request for changes, when it offers one.
-        _ => match request
-            .answers
-            .iter()
-            .find(|answer| answer.outcome.as_deref() == Some("request_changes"))
-        {
-            Some(changes) => Ok(Some(fractal_client::PersonAnswerInput {
-                id: Some(changes.id.clone()),
-                text,
-            })),
-            None => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
-        },
+        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text, option_notes })),
+        "choice" if request.custom => {
+            Ok(Some(fractal_client::PersonAnswerInput { id: None, text, option_notes }))
+        }
+        _ => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
     }
+}
+
+/// The action requires a summary even when a named answer has no optional note.
+fn person_step_response(
+    request: Option<&fractal_client::StructuredRequest>,
+    chosen: Option<String>,
+    note: Option<String>,
+    option_notes: Vec<(String, String)>,
+) -> Result<(String, Option<fractal_client::PersonAnswerInput>)> {
+    let words = note.as_deref().unwrap_or("");
+    let summary = if !words.trim().is_empty() {
+        words.to_owned()
+    } else {
+        chosen.as_ref().and_then(|id| {
+            request.and_then(|request| request.answers.iter().find(|answer| &answer.id == id))
+        }).map(|answer| answer.label.clone())
+            .filter(|label| !label.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("a person step needs a response"))?
+    };
+    let answer = person_answer(request, chosen, words, option_notes)?;
+    Ok((summary, answer))
 }
 
 /// Perform `action` on `current`, a card as st showed it, fenced on that card.
@@ -494,6 +513,7 @@ async fn act_on_card(
     action: &str,
     reason: Option<String>,
     answer: Option<String>,
+    option_notes: Vec<(String, String)>,
 ) -> Result<String> {
     let Resource::Attention(attention) = &current.value else {
         anyhow::bail!("Attention changed; refresh and choose again");
@@ -549,10 +569,8 @@ async fn act_on_card(
             client.custom_reply(id, idem, fence, parameters).await?
         }
         "work.done" => {
-            let summary = reason
-                .filter(|summary| !summary.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("a person step needs a response"))?;
-            let answer = person_answer(attention.request.as_ref(), answer, &summary)?;
+            let (summary, answer) =
+                person_step_response(attention.request.as_ref(), answer, reason, option_notes)?;
             client
                 .work_done(
                     id,
@@ -576,6 +594,7 @@ async fn act_on_card(
                     idem,
                     fence,
                     fractal_client::PromptRespondParameters {
+                        delegation: None,
                         target_id: source,
                         episode: attention.episode.clone(),
                         answer,
@@ -688,6 +707,45 @@ async fn act_on_card(
     };
     Ok(format!("{}: {}", action_label(action), result.value.kind))
 }
+
+/// The action id, idempotency key and parameters of the person's own answer to an ask that
+/// resolved by itself. Both ids are fixed by the episode and the answer, as on every client, so a
+/// retry replays the same action rather than asking twice. `text` is the changes an answer that
+/// requests them carries; st refuses such an answer without them.
+pub(crate) fn override_request(
+    target_id: &str,
+    episode: &str,
+    answer: &str,
+    text: Option<&str>,
+) -> (String, String, fractal_client::PersonOverrideParameters) {
+    let key = format!("person-override:{episode}:{answer}");
+    (
+        format!("action/{key}"),
+        key,
+        fractal_client::PersonOverrideParameters {
+            target_id: target_id.to_owned(),
+            episode: episode.to_owned(),
+            answer: fractal_client::PersonOverrideAnswer { id: answer.to_owned(), text: text.map(str::to_owned) },
+            summary: None,
+        },
+    )
+}
+
+/// Replace the default an ask resolved with by the person's own answer (`work.override`). The
+/// episode is the fence: st refuses an override once the ask's window closed or it was answered.
+pub(crate) async fn override_ask(
+    client: &Client,
+    target_id: &str,
+    episode: &str,
+    answer: &str,
+    text: Option<&str>,
+    label: &str,
+) -> Result<String> {
+    let fence = Fence { snapshot_id: client.capabilities().await?.snapshot.id, ..Fence::default() };
+    let (id, idem, parameters) = override_request(target_id, episode, answer, text);
+    client.work_override(id, idem, fence, parameters).await?;
+    Ok(format!("Answered “{label}” instead of the default"))
+}
 async fn send_terminal_key(
     client: &Client,
     terminal_id: &str,
@@ -733,19 +791,22 @@ pub struct Args {
     endpoint: Option<PathBuf>,
     #[arg(skip)]
     initial_subject: Option<String>,
+    #[arg(skip)]
+    playback: Option<ui::playback::Playback>,
     /// Open a named space instead of the last space used on this device.
-    #[arg(long, alias = "glass", conflicts_with = "classic")]
+    #[arg(long, alias = "glass")]
     pub space: Option<String>,
-    /// Use the layout from before spaces.
-    #[arg(long)]
-    pub classic: bool,
+    /// The layout from before spaces is gone. The flag stays hidden so an old script that
+    /// passes it is told what to run instead of failing to parse.
+    #[arg(long, hide = true)]
+    classic: bool,
     /// Show invented data without connecting to a daemon.
     #[arg(long)]
     pub demo: bool,
     /// Use the local daemon even when a paired-device profile exists.
     #[arg(long, conflicts_with = "client")]
     pub local: bool,
-    /// Require a paired device; pair with `st devices complete` first.
+    /// Require a paired device; pair with `fractal devices complete` first.
     #[arg(long)]
     pub client: bool,
     /// Print this device's recent quality summaries and exit.
@@ -773,19 +834,20 @@ pub struct Args {
 #[derive(clap::Subcommand, Debug)]
 pub enum Action {
     /// Show an agent, a mission or a machine in the person's open terminal interface, in a tab
-    /// or a split. For a seat to use; it opens nothing when no terminal interface is running.
+    /// or a split. For an agent to use; it opens nothing when no terminal interface is running.
     ///
     /// `agent/NAME` opens the conversation. `mission/NAME` and `mission-run/NAME/RUN` open the
-    /// mission view, which stays open and follows the mission from step to step. An item that
+    /// mission view, which stays open and follows the mission from step to step.
+    /// `doc/NAME@HASH`, as `fractal documents put` prints it, shows that document's text. An item that
     /// is already open is shown again, never opened twice. The pane takes the person's focus,
     /// unless they are typing a message or `--keep-focus` says to leave it. The request waits
-    /// for st to know the subject, so an agent made a moment ago can be opened.
+    /// for fractal to know the subject, so an agent made a moment ago can be opened.
     Open(OpenArgs),
 }
 
 #[derive(clap::Args, Debug)]
 pub struct OpenArgs {
-    /// `agent/NAME`, `mission/NAME`, `mission-run/NAME/RUN` or `machine/NAME`.
+    /// `agent/NAME`, `mission/NAME`, `mission-run/NAME/RUN`, `machine/NAME` or `doc/NAME@HASH`.
     pub subject: String,
     /// Open it in a split to the right of the focused one, not in a tab.
     #[arg(long)]
@@ -808,6 +870,12 @@ impl Args {
         self
     }
 
+    /// Play a demo in this interface: `st demo play` hears its advance key and types through it.
+    pub fn with_playback(mut self, playback: ui::playback::Playback) -> Self {
+        self.playback = Some(playback);
+        self
+    }
+
     /// Open this agent's conversation once it appears in the live inventory.
     /// Used by first-run setup; paired-device clients ignore this request.
     pub fn with_initial_subject(mut self, subject: impl Into<String>) -> Self {
@@ -817,9 +885,8 @@ impl Args {
 
     // Keep the renderer's option handling together; the CLI owns validation and help.
     fn render_args(&self) -> Vec<String> {
-        let mut args = vec!["st ui".to_owned()];
+        let mut args = vec!["fractal ui".to_owned()];
         for (enabled, flag) in [
-            (self.classic, "--classic"),
             (self.demo, "--demo"),
             (self.local, "--local"),
             (self.client, "--client"),
@@ -847,6 +914,32 @@ impl Args {
     }
 }
 
+/// What `st ui --classic` says now that spaces are Fractal TUI's only layout.
+const CLASSIC_GONE: &str =
+    "The classic layout is gone: run plain `fractal tui`, or `fractal tui --space NAME` to open a named space";
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+// Match fractal-drivers/src/contracts.rs identity selection without adding a drivers dependency:
+// an empty preferred value masks the legacy value; unequal aliases disclose neither identity.
+fn terminal_ui_request_agent(
+    preferred: Option<String>,
+    legacy: Option<String>,
+    warn: &mut dyn FnMut(&str),
+) -> Option<String> {
+    let Some(preferred) = preferred else {
+        return legacy.filter(|value| !value.is_empty());
+    };
+    if preferred.is_empty() {
+        return None;
+    }
+    if legacy.as_ref().is_some_and(|legacy| legacy != &preferred) {
+        warn("st: conflicting environment variables FRACTAL_AGENT and ST_AGENT; ignoring both identity values");
+        return None;
+    }
+    Some(preferred)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
 fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
@@ -854,14 +947,18 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("st ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config")?;
-    let dir = ui::requests::dir(&person).context("st ui open needs a state directory: set HOME")?;
+        .context("fractal ui open needs FRACTAL_PERSON=person/NAME (ST3_PERSON also works) or person = \"person/NAME\" in the Fractal config")?;
+    let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
         (true, false) => Place::Right,
         (true, true) => Place::Below,
     };
-    let from = std::env::var("ST_AGENT").ok().filter(|from| !from.is_empty());
+    let from = terminal_ui_request_agent(
+        std::env::var("FRACTAL_AGENT").ok(),
+        std::env::var("ST_AGENT").ok(),
+        &mut |message| eprintln!("{message}"),
+    );
     let id = ui::requests::enqueue(&dir, &open.subject, place, open.keep_focus, from)?;
     if open.wait == 0 {
         println!(
@@ -890,11 +987,11 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
             Ok(())
         }
         Some(Answer::NotShown) => anyhow::bail!(
-            "{} was not opened: that terminal interface uses the classic layout, or the person is typing or asked to keep their focus. Ask again without --keep-focus when they are not typing",
+            "{} was not opened: that terminal interface could not show it without moving the person's focus. Ask again without --keep-focus when they are not typing",
             open.subject
         ),
         Some(Answer::NotFound) => anyhow::bail!(
-            "st has no {}: nothing was opened. Check the name with st agents ls or st missions ls",
+            "Fractal has no {}: nothing was opened. Check the name with fractal agents ls or fractal missions ls",
             open.subject
         ),
         None => anyhow::bail!(
@@ -912,15 +1009,17 @@ pub fn run(mut options: Args) -> Result<()> {
     if let Some(Action::Open(open)) = options.action.take() {
         return open_in_terminal_ui(&open);
     }
+    anyhow::ensure!(!options.classic, CLASSIC_GONE);
     let process_started = std::time::Instant::now();
     if options.slo {
         ui::slo::print_history();
         return Ok(());
     }
     let open_timing = ui::open_timing::Trace::from_env(process_started);
+    let _freshness = ui::freshness::install()?;
     fractal_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
-    if let Some(path) = std::env::var_os("STUI_TIMING_LOG") {
+    if let Some(path) = std::env::var_os("FRACTAL_TUI_TIMING_LOG") {
         install_timing_log(path.into());
     }
     let args = options.render_args();
@@ -928,7 +1027,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return ui::run_demo(&args);
     }
     if !io::stdout().is_terminal() {
-        anyhow::bail!("st ui needs an interactive terminal");
+        anyhow::bail!("fractal tui needs an interactive terminal");
     }
     let _quality_session = ui::slo::Session::start();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -951,7 +1050,7 @@ pub fn run(mut options: Args) -> Result<()> {
     };
     anyhow::ensure!(
         !client_only || profile.is_some(),
-        "Run st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256 first"
+        "Run fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256 first"
     );
     let person = match &profile {
         Some(profile) => Some(profile.person()?.to_owned()),
@@ -961,7 +1060,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "st ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config"
+        "fractal ui needs FRACTAL_PERSON=person/NAME (ST3_PERSON also works) or person = \"person/NAME\" in the Fractal config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {
@@ -981,14 +1080,12 @@ pub fn run(mut options: Args) -> Result<()> {
             )
         }
         None => {
-            let path = fractal_client::discover_unix_endpoint(
-                options
-                    .endpoint
-                    .or_else(|| std::env::var_os("ST3_ENDPOINT").map(PathBuf::from)),
-            )?;
+            let endpoint = environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")?.map(PathBuf::from);
+            let identity = fractal_client::discover_unix_identity(options.endpoint.or(endpoint))?;
+            let path = identity.resolve();
             let actor = person.as_deref().unwrap_or_default();
             (
-                vec![Client::unix_as(&path, actor)],
+                vec![Client::discovered_unix_as(identity, actor)],
                 cache::path(&path, actor),
             )
         }
@@ -1007,9 +1104,9 @@ pub fn run(mut options: Args) -> Result<()> {
     runtime.spawn(feed::run_members_with_sidebar(
         clients,
         profile.is_some(),
-        ui::glass_request(&args).is_some(),
+        true,
         false,
-        ui::glass_request(&args).is_some().then(|| person.clone()).flatten(),
+        person.clone(),
         updates,
         command_receiver,
     ));
@@ -1025,11 +1122,12 @@ pub fn run(mut options: Args) -> Result<()> {
         person: person.unwrap_or_default(),
         cache_path,
         cached,
-        glass: ui::glass_request(&args),
+        space: ui::space_request(&args),
         open_timing,
         process_started,
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
         requests,
+        playback: options.playback,
     })
     .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }
@@ -1040,7 +1138,59 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn a_closed_look_that_does_not_hold_never_ends_stui_and_a_hangup_does() {
+    fn terminal_ui_request_agent_prefers_fractal_and_empty_masks_legacy() {
+        for (preferred, legacy, expected) in [
+            (None, None, None),
+            (Some("agent/preferred"), None, Some("agent/preferred")),
+            (None, Some("agent/legacy"), Some("agent/legacy")),
+            (Some("agent/same"), Some("agent/same"), Some("agent/same")),
+            (Some(""), Some("agent/legacy"), None),
+            (Some(""), None, None),
+            (Some(""), Some(""), None),
+            (None, Some(""), None),
+        ] {
+            let actual = terminal_ui_request_agent(
+                preferred.map(str::to_owned),
+                legacy.map(str::to_owned),
+                &mut |_| panic!("non-conflicting aliases must not warn"),
+            );
+            assert_eq!(actual.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn terminal_ui_request_agent_refuses_conflicts_without_disclosing_values() {
+        for legacy in ["agent/private-legacy", ""] {
+            let mut warnings = Vec::new();
+            let actual = terminal_ui_request_agent(
+                Some("agent/private-preferred".to_owned()),
+                Some(legacy.to_owned()),
+                &mut |message| warnings.push(message.to_owned()),
+            );
+            assert_eq!(actual, None);
+            assert_eq!(
+                warnings,
+                ["st: conflicting environment variables FRACTAL_AGENT and ST_AGENT; ignoring both identity values"]
+            );
+        }
+    }
+
+    #[test]
+    fn the_classic_layout_is_refused_with_what_to_run_instead() {
+        let error = run(Args {
+            classic: true,
+            ..Args::default()
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("plain `fractal tui`") && error.contains("`fractal tui --space NAME`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_closed_look_that_does_not_hold_never_ends_tui_and_a_hangup_does() {
         let mut run = 0;
         // Looks that find the terminal closed now and then, with keys arriving between them,
         // never add up.
@@ -1069,48 +1219,20 @@ mod tests {
         assert_eq!(line["epoch_ms"], 1_791_443_946_902_u64);
     }
 
-    #[test]
-    fn words_answer_a_structured_request_the_way_it_takes_them() {
-        let request = |kind: &str,
-                       custom: bool,
-                       answers: serde_json::Value|
-         -> fractal_client::StructuredRequest {
-            serde_json::from_value(serde_json::json!({
-                "version": 1, "type": kind, "question": "Ship it?", "why_person": "You own it.",
-                "custom": custom, "answers": answers
-            }))
-            .unwrap()
-        };
-        let options = serde_json::json!([
-            {"id": "works", "label": "Works", "consequence": "Done."},
-            {"id": "broken", "label": "Broken", "consequence": "Fixed."}
-        ]);
-        // Nathan, 2026-10-03: words on a custom choice were sent as a bare summary and refused.
-        let custom = request("choice", true, options.clone());
-        let answer = person_answer(Some(&custom), None, " found it, works ")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (answer.id, answer.text.as_deref()),
-            (None, Some("found it, works"))
-        );
-        // A chosen answer goes by its id.
-        let chosen = person_answer(Some(&custom), Some("works".into()), "Works")
-            .unwrap()
-            .unwrap();
-        assert_eq!(chosen.id.as_deref(), Some("works"));
-        // Feedback takes words; a free-text ask takes the summary alone.
-        let feedback = request("feedback", false, serde_json::json!([]));
-        assert!(
-            person_answer(Some(&feedback), None, "notes")
-                .unwrap()
-                .unwrap()
-                .text
-                .is_some()
-        );
-        assert!(person_answer(None, None, "notes").unwrap().is_none());
-        // A decision takes words as its request for changes; a fixed choice cannot take words.
-        let decision = request(
+    fn person_request(
+        kind: &str,
+        custom: bool,
+        answers: serde_json::Value,
+    ) -> fractal_client::StructuredRequest {
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "type": kind, "question": "Ship it?", "why_person": "You own it.",
+            "custom": custom, "answers": answers
+        }))
+        .unwrap()
+    }
+
+    fn decision_request() -> fractal_client::StructuredRequest {
+        person_request(
             "decision",
             false,
             serde_json::json!([
@@ -1118,23 +1240,205 @@ mod tests {
                 {"id": "hold", "label": "Hold", "consequence": "Nothing.", "outcome": "decline"},
                 {"id": "change", "label": "Change", "consequence": "Revised.", "outcome": "request_changes"}
             ]),
-        );
-        let chosen = person_answer(Some(&decision), Some("change".into()), "rename it")
+        )
+    }
+
+    #[test]
+    fn work_done_transport_has_a_summary_without_inventing_a_named_note() {
+        let request = decision_request();
+        for (id, label) in [("land", "Land"), ("hold", "Hold")] {
+            for note in [None, Some(String::new()), Some("  ".into())] {
+                let (summary, answer) =
+                    person_step_response(Some(&request), Some(id.into()), note, Vec::new()).unwrap();
+                let parameters = PersonStepParameters {
+                    target_id: "step-run/example".into(),
+                    episode: "episode/example".into(),
+                    summary,
+                    evidence: vec![],
+                    answer,
+                };
+                assert_eq!(parameters.summary, label);
+                let answer = parameters.answer.unwrap();
+                assert_eq!(answer.id.as_deref(), Some(id));
+                assert_eq!(answer.text, None, "the summary is not an answer note");
+            }
+        }
+        let (summary, answer) = person_step_response(
+            Some(&request), Some("land".into()), Some("ship today".into()), Vec::new()
+        ).unwrap();
+        assert_eq!(summary, "ship today");
+        assert_eq!(answer.unwrap().text.as_deref(), Some("ship today"));
+        let (summary, answer) = person_step_response(
+            Some(&request),
+            Some("land".into()),
+            None,
+            vec![("hold".into(), "Wait until Monday.".into())],
+        ).unwrap();
+        assert_eq!(summary, "Land");
+        let answer = answer.unwrap();
+        assert_eq!(answer.text, None);
+        assert_eq!(answer.option_notes[0].id, "hold");
+        assert_eq!(answer.option_notes[0].text, "Wait until Monday.");
+        assert!(person_step_response(None, None, None, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn named_decision_answers_preserve_notes_for_every_outcome() {
+        let request = decision_request();
+        for id in ["land", "hold", "change"] {
+            let answer = person_answer(Some(&request), Some(id.into()), "  Keep the scope small.\n ", Vec::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some(id));
+            assert_eq!(answer.text.as_deref(), Some("Keep the scope small."));
+        }
+    }
+
+    #[test]
+    fn named_choice_answers_preserve_notes_without_enabling_custom_answers() {
+        for custom in [false, true] {
+            let request = person_request(
+                "choice",
+                custom,
+                serde_json::json!([
+                    {"id": "works", "label": "Works", "consequence": "Done."}
+                ]),
+            );
+            let answer = person_answer(Some(&request), Some("works".into()), " found it, works ", Vec::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some("works"));
+            assert_eq!(answer.text.as_deref(), Some("found it, works"));
+        }
+    }
+
+    #[test]
+    fn words_alone_do_not_infer_a_request_changes_answer() {
+        let request = decision_request();
+        assert!(person_answer(Some(&request), None, "rename it", Vec::new()).is_err());
+        assert!(person_answer(Some(&request), None, "", Vec::new()).is_err());
+    }
+
+    #[test]
+    fn blank_named_answer_notes_remain_absent_for_server_validation() {
+        let request = decision_request();
+        for id in ["land", "hold", "change"] {
+            let answer = person_answer(Some(&request), Some(id.into()), " \n\t ", Vec::new())
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some(id));
+            // The server, not the transport, rejects request_changes without text.
+            assert!(answer.text.is_none());
+        }
+    }
+
+    #[test]
+    fn words_alone_answer_only_feedback_or_a_custom_choice() {
+        let options = serde_json::json!([
+            {"id": "works", "label": "Works", "consequence": "Done."}
+        ]);
+        for request in [
+            person_request("choice", true, options.clone()),
+            person_request("feedback", false, serde_json::json!([])),
+        ] {
+            let answer = person_answer(Some(&request), None, " found it, works ", Vec::new())
+                .unwrap()
+                .unwrap();
+            assert!(answer.id.is_none());
+            assert_eq!(answer.text.as_deref(), Some("found it, works"));
+        }
+        let fixed = person_request("choice", false, options);
+        assert!(person_answer(Some(&fixed), None, "words", Vec::new()).is_err());
+        assert!(person_answer(None, None, "notes", Vec::new()).unwrap().is_none());
+    }
+
+    #[test]
+    fn notes_on_other_answers_go_with_the_chosen_or_custom_answer() {
+        let notes = || vec![("hold".to_owned(), "Wait a week.".to_owned())];
+        let answer = person_answer(Some(&decision_request()), Some("land".into()), "Go.", notes())
             .unwrap()
             .unwrap();
-        assert_eq!(chosen.text.as_deref(), Some("rename it"));
-        let changes = person_answer(Some(&decision), None, "rename it")
-            .unwrap()
-            .unwrap();
+        assert_eq!(answer.text.as_deref(), Some("Go."));
         assert_eq!(
-            (changes.id.as_deref(), changes.text.as_deref()),
-            (Some("change"), Some("rename it"))
+            answer.option_notes,
+            [fractal_client::PersonOptionNote { id: "hold".into(), text: "Wait a week.".into() }]
         );
-        assert!(person_answer(Some(&request("choice", false, options)), None, "words").is_err());
+        // The wire shape: the notes inside the answer; an answer without them keeps its old shape.
+        assert_eq!(
+            serde_json::to_value(&answer).unwrap(),
+            serde_json::json!({"id":"land","text":"Go.","option_notes":[{"id":"hold","text":"Wait a week."}]})
+        );
+        let plain = person_answer(Some(&decision_request()), Some("land".into()), "Go.", Vec::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(&plain).unwrap(), serde_json::json!({"id":"land","text":"Go."}));
+        let custom = person_request(
+            "choice",
+            true,
+            serde_json::json!([{"id":"hold","label":"Hold","consequence":"Waits."}]),
+        );
+        let answer = person_answer(Some(&custom), None, "my own way", notes()).unwrap().unwrap();
+        assert!(answer.id.is_none());
+        assert_eq!(answer.option_notes.len(), 1);
+    }
+
+    #[test]
+    fn option_notes_need_the_capability_granted() {
+        let capability = |id: &str, state: &str| -> fractal_client::Capability {
+            serde_json::from_value(serde_json::json!({"id": id, "version": 1, "state": state})).unwrap()
+        };
+        assert!(takes_option_notes(&[capability("person-answer-option-notes", "granted")]));
+        assert!(!takes_option_notes(&[]));
+        assert!(!takes_option_notes(&[capability("person-answer-option-notes", "unavailable")]));
+        assert!(!takes_option_notes(&[capability("phone-commands", "granted")]));
+    }
+
+    /// A Fractal from before notes on other answers: the TUI asks what it takes, refuses the
+    /// answer itself, and sends nothing, rather than sending it with the notes left out.
+    #[tokio::test]
+    async fn an_older_fractal_is_sent_nothing_when_an_answer_carries_other_notes() {
+        use axum::routing;
+        use std::sync::{Arc, Mutex};
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/capabilities.json"
+        ))
+        .unwrap();
+        let reached = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = reached.clone();
+        let router = axum::Router::new()
+            .route(
+                "/v1/client/capabilities",
+                routing::get(move || std::future::ready(axum::Json(capabilities.clone()))),
+            )
+            .fallback(move |uri: axum::http::Uri| {
+                seen.lock().unwrap().push(uri.to_string());
+                std::future::ready(axum::http::StatusCode::NOT_FOUND)
+            });
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let error = attention_action(
+            &client,
+            "person/avery",
+            "attention/ask",
+            None,
+            "work.done",
+            Some("Go.".into()),
+            Some("land".into()),
+            vec![("hold".into(), "Wait a week.".into())],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.downcast_ref::<OptionNotesUnsupported>().is_some(), "{error}");
+        assert!(error.to_string().contains("person-answer-option-notes"), "{error}");
+        assert!(reached.lock().unwrap().is_empty(), "{:?}", reached.lock().unwrap());
+        server.abort();
     }
     #[test]
     fn regression_person_falls_back_to_local_config() {
-        let dir = std::env::temp_dir().join(format!("stui-person-{}", uuid::Uuid::now_v7()));
+        let dir = std::env::temp_dir().join(format!("fractal-tui-person-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(&path, "person = \"person/alex\"\n").unwrap();
@@ -1179,7 +1483,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Read, Write};
         use std::os::unix::net::UnixListener;
 
-        let path = std::env::temp_dir().join(format!("stui-{}.sock", uuid::Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!("fractal-tui-{}.sock", uuid::Uuid::now_v7()));
         let listener = UnixListener::bind(&path).unwrap();
         let client = Client::unix_as(&path, "person/test");
         let server = std::thread::spawn(move || {
@@ -1301,11 +1605,11 @@ mod tests {
     }
 
     /// st in this process, running a release whose one step waits on person/avery's approval.
-    struct WaitingGate {
+    pub(crate) struct WaitingGate {
         _root: tempfile::TempDir,
         store: Arc<fractal_daemon::store::Store>,
         reconciler: fractal_daemon::reconcile::Reconciler<NoRuntime>,
-        client: Client,
+        pub(crate) client: Client,
         step: String,
         server: tokio::task::JoinHandle<()>,
         state: fractal_daemon::api::AppState,
@@ -1313,7 +1617,7 @@ mod tests {
     }
 
     impl WaitingGate {
-        async fn start() -> Self {
+        pub(crate) async fn start() -> Self {
             let gate = Self::serve(
                 r#"version 2
 mission "release" state="ready" {
@@ -1337,7 +1641,7 @@ mission "release" state="ready" {
         /// st serving a run of the `release` mission in `source`, before any reconcile pass.
         async fn serve(source: &str) -> Self {
             let root = tempfile::tempdir().unwrap();
-            let node = "stui-gate";
+            let node = "fractal-tui-gate";
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), node).unwrap());
             let intent = fractal_daemon::graph::parse_intent(source, node).unwrap();
@@ -1365,11 +1669,14 @@ mission "release" state="ready" {
                 })
                 .unwrap();
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
+                seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: node.into(),
+                api_socket: root.path().join("api.sock"),
                 state_dir: root.path().into(),
                 pty_root: root.path().join("pty"),
                 pty_binary: root.path().join("unused-pty"),
@@ -1378,6 +1685,9 @@ mission "release" state="ready" {
                 client_relay: None,
                 native_session_home: None,
                 planner_default: fractal_daemon::model::PlannerSpec::default(),
+                harness_question_sink: None,
+                assistant_receipts: Default::default(),
+                private_notes: Default::default(),
             };
             let socket = root.path().join("st3.sock");
             let server_socket = socket.clone();
@@ -1415,7 +1725,7 @@ mission "release" state="ready" {
             let _ = (&mut self.server).await;
             std::fs::remove_file(&self.socket).unwrap();
             self.store = Arc::new(
-                fractal_daemon::store::Store::open(&self._root.path().join("graph.db"), "stui-gate").unwrap(),
+                fractal_daemon::store::Store::open(&self._root.path().join("graph.db"), "fractal-tui-gate").unwrap(),
             );
             self.state.store = self.store.clone();
             self.state.notify = Arc::new(tokio::sync::Notify::new());
@@ -1423,7 +1733,7 @@ mission "release" state="ready" {
             self.reconciler = fractal_daemon::reconcile::Reconciler::new(
                 self.store.clone(),
                 Arc::new(NoRuntime),
-                "stui-gate".into(),
+                "fractal-tui-gate".into(),
                 self.state.notify.clone(),
             );
             let state = self.state.clone();
@@ -1434,13 +1744,12 @@ mission "release" state="ready" {
                     .unwrap();
             });
             for _ in 0..200 {
-                if self.socket.exists() {
-                    self.client.capabilities().await.unwrap();
+                if self.socket.exists() && self.client.capabilities().await.is_ok() {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            panic!("restarted stui fixture did not listen");
+            panic!("restarted Fractal TUI fixture did not listen");
         }
 
         fn reconcile_until(&self, what: &str, done: impl Fn(&Self) -> bool) {
@@ -1464,8 +1773,8 @@ mission "release" state="ready" {
             self.store.step_run(&self.step).unwrap().unwrap().status
         }
 
-        /// The person's card for the gate, as stui lists it.
-        async fn card(&self) -> Option<fractal_client::Attention> {
+        /// The person's card for the gate, as Fractal TUI lists it.
+        pub(crate) async fn card(&self) -> Option<fractal_client::Attention> {
             self.client
                 .attention_list(None, Some(50), false)
                 .await
@@ -1562,6 +1871,7 @@ mission "release" state="ready" {
                 action,
                 None,
                 None,
+                Vec::new(),
             )
             .await
             .unwrap();
@@ -1596,6 +1906,7 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .expect("the approval did not reach the current card");
@@ -1619,6 +1930,7 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .expect_err("a changed review was answered unread");
@@ -1650,6 +1962,7 @@ mission "release" state="ready" {
             "review.approve",
             Some("ship it".into()),
             None,
+            Vec::new(),
         )
         .await
         .expect("the approval did not reach the current card");
@@ -1665,13 +1978,14 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .expect_err("a spent card takes no answer");
         assert!(error.to_string().contains("no longer asked"), "{error}");
     }
 
-    /// A feedback gate's card offers request-changes, and sending it back from stui gives the
+    /// A feedback gate's card offers request-changes, and sending it back from Fractal TUI gives the
     /// worker a new attempt with the person's notes in its goals.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sending_back_a_feedback_gate_requests_changes() {
@@ -1728,6 +2042,7 @@ mission "release" state="ready" {
             "review.request-changes",
             Some("Add the missing source.".into()),
             None,
+            Vec::new(),
         )
         .await
         .expect("the notes did not go back to the worker");
@@ -1756,6 +2071,7 @@ mission "release" state="ready" {
             "review.approve",
             None,
             None,
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -1769,6 +2085,7 @@ mission "release" state="ready" {
             "review.reject",
             Some("no".into()),
             None,
+            Vec::new(),
         )
         .await
         .expect_err("an answered gate takes no second answer");
@@ -1900,6 +2217,11 @@ fn install_timing_log(path: PathBuf) {
                 "at_ms": at_ms, "type": "request", "method": method, "route": route,
                 "outcome": format!("{outcome:?}"), "status": status,
                 "took_ms": took.as_secs_f64() * 1000.0,
+            }),
+            fractal_client::Observation::Mutation { method, route, attempts, took, retry_wait } => serde_json::json!({
+                "at_ms": at_ms, "type": "mutation", "method": method, "route": route,
+                "attempts": attempts, "took_ms": took.as_secs_f64() * 1000.0,
+                "retry_wait_ms": retry_wait.as_secs_f64() * 1000.0,
             }),
             fractal_client::Observation::Frame { id, kind, bytes, since_subscribe } => serde_json::json!({
                 "at_ms": at_ms, "type": "frame", "id": id, "kind": kind, "bytes": bytes,

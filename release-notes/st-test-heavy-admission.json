@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Heavy script test runs use one host gate-slot admission for the entire run when available.",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No stored data changes."},
+  "rules": {"status": "changed", "detail": "Before pool preparation, checks or evidence signing, heavy st-test runs re-execute through gate-slot --class heavy. All checks share one holder and inherit the host scope's memory limits. Admission refusals propagate without running checks or signing evidence."},
+  "compatibility": {"status": "none", "detail": "No API or wire changes. No optional gate-slot profile is required. Without gate-slot, existing standalone per-check cap selection remains unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No operator step. ST_EVIDENCE_GOVERN=off remains the explicit wrapping opt-out, documented by --help."},
+  "recovery": {"status": "none", "detail": "No data migration is needed to revert."}
+}

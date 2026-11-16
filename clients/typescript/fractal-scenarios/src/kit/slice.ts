@@ -3,16 +3,23 @@ import type {
   Arrangement,
   Attention,
   Capabilities,
+  Device,
   ErrorEnvelope,
   Id,
   Machine,
+  Launch,
+  LaunchVariant,
   Message,
   Mission,
   Resource,
   Runtime,
+  Session,
+  SloHistory,
+  SloList,
   SyncPeer,
   TerminalScreen,
   TimelineEntry,
+  UsagePeriod,
   Work,
 } from '@fractal/client'
 
@@ -35,7 +42,7 @@ export interface UnknownPath {
   readonly known_value?: unknown
 }
 
-export const SLICE_KINDS = ['roster', 'details', 'attention', 'conversation', 'terminal', 'sync'] as const
+export const SLICE_KINDS = ['roster', 'details', 'attention', 'conversation', 'terminal', 'sync', 'objectives'] as const
 export type SliceKind = (typeof SLICE_KINDS)[number]
 
 export interface RosterState {
@@ -43,6 +50,8 @@ export interface RosterState {
   readonly agents: Agent[]
   readonly runtimes: Runtime[]
   readonly machines: Machine[]
+  readonly sessions: Session[]
+  readonly devices: Device[]
   /** Synthetic sidebar inventory; omitted inventories are empty. */
   readonly arrangements?: Arrangement[]
   /** Agent display order. */
@@ -55,6 +64,8 @@ export interface DetailsState {
   readonly resources?: RawResource[]
   readonly missions: Mission[]
   readonly work: Work[]
+  readonly launches: Launch[]
+  readonly launch_variants: LaunchVariant[]
 }
 
 export interface AttentionState {
@@ -136,6 +147,13 @@ export interface SyncState {
   readonly expected: SyncExpectation[]
 }
 
+/** The served objectives read (`GET slo`), its 24-hour histories, and the declared accounts (`GET usage`). No live stream. */
+export interface ObjectivesState {
+  readonly list: SloList
+  readonly histories: SloHistory[]
+  readonly usage: UsagePeriod
+}
+
 export interface SliceStates {
   readonly roster: RosterState
   readonly details: DetailsState
@@ -143,6 +161,7 @@ export interface SliceStates {
   readonly conversation: ConversationState
   readonly terminal: TerminalState
   readonly sync: SyncState
+  readonly objectives: ObjectivesState
 }
 
 /** Names one subscription by collection and filter. */
@@ -232,6 +251,7 @@ export interface SliceEvents {
   readonly conversation: ConversationEvent
   readonly terminal: TerminalEvent
   readonly sync: SyncEvent
+  readonly objectives: never
 }
 
 export type TimelineEvent = SliceEvents[SliceKind]

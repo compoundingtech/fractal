@@ -295,6 +295,56 @@ fn repeated_and_missing_repairs_do_not_rewrite_operations() {
     assert_canonical(&store);
 }
 
+fn repaired(store: &Store) -> BTreeMap<String, String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT record_ref, replacement_claim_id FROM replica_records WHERE state='repaired'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A repair backlog takes one writer hold per page of `REPAIR_CHUNK_CLAIMS`, in repair id order.
+/// A call stopped between pages keeps the pages it committed, and after a restart the next call
+/// applies the rest, leaving what one call would have.
+#[test]
+fn a_repair_backlog_holds_the_writer_one_page_at_a_time_and_resumes_after_a_stop() {
+    use crate::windows::holds::holds_during;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("alder.sqlite3");
+    let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+    // Each record seals its own batch; durability is not what this checks.
+    store.connection.write().pragma_update(None, "synchronous", "OFF").unwrap();
+    let mut repairs = Vec::new();
+    for index in 0..2 * REPAIR_CHUNK_CLAIMS + 7 {
+        let old = operation_claim(&store, &format!("op/old-{index}"), "a", &format!("old-{index}"));
+        let new = operation_claim(&store, &format!("op/new-{index}"), "b", &format!("new-{index}"));
+        let record = record(&store, &old);
+        repairs.push((repair(&store, &record, &new.id, &format!("page-{index}")).id, (record, new.id)));
+    }
+    repairs.sort();
+    let total = repairs.len();
+    STOP_BETWEEN_REPAIR_PAGES.with(|stop| stop.set(true));
+    let (stopped, holds) = holds_during(|| store.apply_replication_repairs());
+    assert!(stopped.is_err());
+    assert_eq!(holds.pages_of("applied repairs"), [REPAIR_CHUNK_CLAIMS]);
+    let first_page = repairs[..REPAIR_CHUNK_CLAIMS].iter().map(|(_, applied)| applied.clone());
+    assert_eq!(repaired(&store), first_page.collect(), "the first page by repair id, and no more");
+    assert_canonical(&store);
+
+    drop(store);
+    let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+    let (changed, holds) = holds_during(|| store.apply_replication_repairs().unwrap());
+    assert_eq!(changed, total - REPAIR_CHUNK_CLAIMS, "a committed page changes nothing again");
+    assert_eq!(holds.pages_of("applied repairs"), [REPAIR_CHUNK_CLAIMS, REPAIR_CHUNK_CLAIMS, 7]);
+    assert_eq!(repaired(&store), repairs.into_iter().map(|(_, applied)| applied).collect());
+    assert_canonical(&store);
+    assert_eq!(store.apply_replication_repairs().unwrap(), 0);
+}
+
 #[test]
 fn repair_work_does_not_grow_with_unrelated_operations_or_checkpoint_receipts() {
     fn sample(unrelated: usize) -> u64 {

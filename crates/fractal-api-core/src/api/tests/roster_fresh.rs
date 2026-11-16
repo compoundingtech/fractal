@@ -1,5 +1,60 @@
 use super::*;
 
+#[test]
+fn harness_cards_use_the_shared_observation_freshness_window() {
+    let store = Store::open_memory("example").unwrap();
+    let observed = 1_000_000_u128;
+    let freshness = HARNESS_OBSERVATION_FRESHNESS.as_millis();
+    for reported in ["idle", "ready"] {
+        for runtime in ["running", "starting"] {
+            for age in [150_000, freshness, 331_000] {
+                let mut cards = vec![json!({
+                    "id":"agent/example.worker", "state":runtime, "harness_state":reported,
+                    "_status_source":{"state":reported, "incarnation_id":"one", "claim":"claim/example",
+                        "since_unix_ms":observed, "observed_at_unix_ms":observed},
+                })];
+                overlay_agent_resources_at(&store, &mut cards, "now", observed + age, Some(Vec::new())).unwrap();
+                let current = age <= freshness;
+                assert_eq!(cards[0]["observation"], if current { "current" } else { "stale" }, "{runtime}/{reported}/{age}");
+                assert_eq!(cards[0]["harness_state"], if current { reported } else { "indeterminate" }, "{runtime}/{reported}/{age}");
+                assert_eq!(cards[0]["state"], if current { "running" } else { "waiting" }, "{runtime}/{reported}/{age}");
+            }
+        }
+    }
+}
+
+fn assert_harnessless_card_stays_missing(mut card: Value) {
+    let store = Store::open_memory("example").unwrap();
+    let state = card["state"].clone();
+    let expected = serde_json::to_value(fractal_ui_model::agents::present(
+        &fractal_ui_model::agents::Facts::deserialize(&card).unwrap(),
+    )).unwrap();
+    overlay_agent_resources_at(&store, std::slice::from_mut(&mut card), "now", 1_000_000, Some(Vec::new())).unwrap();
+    assert_eq!(card["observation"], "missing");
+    assert_eq!(card["state"], state);
+    assert_eq!(card["presentation"], expected);
+    assert!(card["incarnation_id"].is_null());
+    assert!(card["harness_state"].is_null());
+}
+
+#[test]
+fn suspended_card_without_an_incarnation_stays_missing() {
+    assert_harnessless_card_stays_missing(json!({
+        "id":"agent/example.paused", "state":"suspended", "incarnation_id":null,
+        "harness_state":null, "_status_source":null,
+        "suspension":{"action":"suspend", "phase":"suspended"},
+    }));
+}
+
+#[test]
+fn service_card_without_a_harness_stays_missing() {
+    assert_harnessless_card_stays_missing(json!({
+        "id":"agent/example.web-services", "state":"running", "driver":null,
+        "incarnation_id":null, "session":null, "harness":null, "harness_state":null,
+        "_status_source":null,
+    }));
+}
+
 fn fixture() -> (tempfile::TempDir, AppState) {
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
@@ -30,8 +85,16 @@ fn update_card(store: &Store) -> ClaimRecord {
         .unwrap()
 }
 
+/// A seat that has not polled its mailbox is described by the daemon's live uptime. Pages read
+/// on this thread see the same uptime and keep their own state clocks, so two reads of an unchanged
+/// roster are equal.
+fn pinned_uptime() -> crate::delivery_presence::uptime_pin::Pin {
+    crate::delivery_presence::uptime_pin::pin(Duration::from_secs(5))
+}
+
 #[tokio::test]
 async fn unrelated_claims_verify_the_exact_older_response_and_later_wait_target() {
+    let _uptime = pinned_uptime();
     for history in [false, true] {
         let (_root, state) = fixture();
         let store = &state.store;
@@ -82,6 +145,31 @@ async fn unrelated_claims_verify_the_exact_older_response_and_later_wait_target(
             "proof/page never write"
         );
     }
+}
+
+#[tokio::test]
+async fn a_daemon_that_ages_between_reads_changes_only_the_unpolled_delivery_reason() {
+    // The control for the pin above: the same published page read a second later differs, and
+    // only in the live age of a seat that has not polled.
+    let uptime = pinned_uptime();
+    let (_root, state) = fixture();
+    let store = &state.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    refresh_agent_roster(store, false).unwrap();
+    let query = ClientListQuery { fresh: true, ..ClientListQuery::default() };
+    let (cut, _, _) = store.published_agent_roster(store.index().unwrap(), false).unwrap();
+    let read = || client_agents_published_page(&state, &query, cut, None).unwrap().unwrap().1.0.items;
+    let before = read();
+    uptime.set(Duration::from_secs(6));
+    let after = read();
+    assert_ne!(after, before);
+    let reasons = |items: &[Value]| {
+        items.iter().filter_map(|card| card.pointer("/delivery/reason").and_then(Value::as_str).map(str::to_owned)).collect::<Vec<_>>()
+    };
+    assert!(reasons(&before).iter().any(|reason| reason.contains("started 5s ago")), "{before:?}");
+    assert!(reasons(&after).iter().any(|reason| reason.contains("started 6s ago")), "{after:?}");
+    let same_age = |items: Vec<Value>| serde_json::to_string(&items).unwrap().replace("started 6s ago", "started 5s ago");
+    assert_eq!(same_age(after), same_age(before));
 }
 
 #[tokio::test]
@@ -137,6 +225,7 @@ async fn a_card_write_requires_a_new_publication_with_the_new_card() {
 
 #[tokio::test]
 async fn failed_refresh_remains_distinct_from_unchanged_and_keeps_the_old_response() {
+    let _uptime = pinned_uptime();
     for history in [false, true] {
         let (_root, state) = fixture();
         let store = &state.store;

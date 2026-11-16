@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Serve semantic sidebar mission rows for each related agent",
+  "replay": {"status": "none", "detail": "Reads existing run, step, ask and report-to projections; no new claims."},
+  "schema": {"status": "changed", "detail": "Adds the client-v0 agent-related-runs read with status, progress, waits, ETA, urgency and folded history. A singleton-only offer index preserves general seat-read plans."},
+  "rules": {"status": "none", "detail": "Scheduling and execution authority are unchanged."},
+  "compatibility": {"status": "changed", "detail": "The additive endpoint keeps active runs and folds finished runs for 24 hours. Person-held steps replace ETA with waiting-on-you for that authenticated person."},
+  "downtime": {"status": "none", "detail": "Enabled by normal daemon replacement."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reverting removes only the read; additive relationship indexes can remain."}
+}

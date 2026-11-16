@@ -138,7 +138,7 @@ pub async fn run_client_message_selectors_observed(
         changed.borrow_and_update();
         let Some(current) = store.upgrade() else { return; };
         on_turn(true);
-        let result = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || crate::task_cpu::profiled_blocking("maintenance.client_message_selectors", || {
             let _loan = SelectorLoan::enter();
             let pending = current.client_message_selectors_pending()?;
             // The checkpoint-policy probe itself borrows the writer. Keep a clean
@@ -152,7 +152,7 @@ pub async fn run_client_message_selectors_observed(
             let remaining = current.client_message_selectors_pending()?;
             if !remaining { drop(guard.take()); }
             Ok::<_, anyhow::Error>((pending, remaining, more, guard))
-        }).await;
+        })).await;
         let more = match result {
             Ok(Ok((pending, remaining, more, guard))) => {
                 checkpoint_guard = guard;
@@ -179,6 +179,38 @@ pub async fn run_client_message_selectors_observed(
         } else {
             on_turn(false);
             if changed.changed().await.is_err() { break; }
+        }
+    }
+    drop(observer);
+}
+
+/// Hydrate completion-health candidates only after serving starts. Every chunk releases the
+/// writer and rests before another loan; an idle worker owns no Store and performs no SQL.
+pub async fn run_completion_health(store: std::sync::Weak<Store>) {
+    let (source, mut changed) = tokio::sync::watch::channel(());
+    let observer = {
+        let Some(current) = store.upgrade() else { return; };
+        current.observe_commits(move |_| { source.send_replace(()); })
+    };
+    loop {
+        changed.borrow_and_update();
+        let Some(current) = store.upgrade() else { return; };
+        let result = tokio::task::spawn_blocking(move || {
+            crate::task_cpu::profiled_blocking("maintenance.completion_health", || current.maintain_completion_health())
+        }).await;
+        match result {
+            Ok(Ok(true)) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Ok(Ok(false)) => {
+                if changed.changed().await.is_err() { break; }
+            }
+            Ok(Err(error)) => {
+                tracing::error!(error = %error, "completion health hydration stopped");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "completion health hydration task failed");
+                return;
+            }
         }
     }
     drop(observer);

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Allow the issuing Unix person to revoke retained legacy devices without admitting their credentials",
+  "replay": {"status": "changed", "detail": "Revoked legacy devices appear in device history. Unrevoked unadmitted legacy devices remain hidden."},
+  "schema": {"status": "none", "detail": "No storage schema changes. Revocations use existing native operation authorization receipts."},
+  "rules": {"status": "changed", "detail": "An issuing person can withdraw an exact retained completion on its issuing member without an admission receipt or migration allowance. The withdrawal does not authorize the legacy bearer or create an allowance. Existing startup rules reject allowances for revoked completions."},
+  "compatibility": {"status": "changed", "detail": "devices revoke accepts unadmitted legacy device IDs instead of returning not-found. Other people, agents and non-Unix sessions cannot revoke these legacy devices; already revoked legacy devices return a clear error. Admitted pairings retain their existing revocation authority and repeated-revocation behavior, including authorized paired clients over the network."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "none", "detail": "No configuration changes required."},
+  "recovery": {"status": "none", "detail": "No data migration is required."}
+}

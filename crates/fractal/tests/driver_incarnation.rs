@@ -35,11 +35,14 @@ async fn provider_incarnation(
         })
         .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store,
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "orchid".into(),
+        api_socket: root.path().join("api.sock"),
         state_dir: root.path().into(),
         pty_root: root.path().join("pty"),
         pty_binary: PathBuf::from("pty"),
@@ -48,6 +51,9 @@ async fn provider_incarnation(
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let listener_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -73,7 +79,7 @@ async fn provider_incarnation(
     let socket_arg = socket.clone();
     let home = root.path().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
         command
             .env_clear()
             .env("PTY_ROOT", home.join("pty"))

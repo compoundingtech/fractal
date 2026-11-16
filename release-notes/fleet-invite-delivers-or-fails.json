@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fleet invitations either reach the new machine or fail loudly: auto routes around missing Fabric pairing, --send-fabric reports success only on confirmed delivery, and --code-file writes its 0600 file or exits non-zero",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "none", "detail": "Join codes are unchanged. A code made without st-fabric-adapter carries the member's non-Fabric endpoints and no pairing data, which existing joiners already redeem."},
+  "rules": {"status": "changed", "detail": "Without st-fabric-adapter, --via auto leaves Fabric out and uses Tailscale or loopback endpoints; when only Fabric could carry the invitation, every delivery form refuses with the setup it needs before an invite is created. --send-fabric first checks that NAME is a trusted peer in fabric peers. An invite created but not delivered is revoked."},
+  "compatibility": {"status": "changed", "detail": "--send-fabric cannot be combined with --code-file or --code-only; such commands used to skip the Fabric send silently, so a script that passed both now fails instead of reporting an invitation it never sent. join --fabric-inbox now waits up to ten minutes for the code instead of failing at once. Older joiners still join with any code this build issues."},
+  "downtime": {"status": "none", "detail": "No restart or migration is required."},
+  "manual": {"status": "none", "detail": "No manual step. Fabric pairing still needs st-fabric-adapter and Fabric with --runtime-peers; without them, auto invitations go over the member's Tailscale or loopback endpoints, and a member that advertises only Fabric refuses to invite until they are set up."},
+  "recovery": {"status": "none", "detail": "A failed delivery revokes its invite; issue a new one. The code is never printed by --send-fabric or --code-file."}
+}

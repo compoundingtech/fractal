@@ -1,0 +1,28 @@
+{
+  "anchor": "2030-01-01T12:00:00.000Z",
+  "decode": "strict",
+  "format": "st3.scenario.slice.v1",
+  "loading": false,
+  "slice": "objectives",
+  "source": {
+    "_tag": "synthetic",
+    "seed": 4
+  },
+  "state": {
+    "histories": [],
+    "list": {
+      "as_of_unix_ms": 1893499200000,
+      "rows": []
+    },
+    "usage": {
+      "accounts": [],
+      "rows": [],
+      "since_ms": 1893412800000,
+      "until_ms": 1893499200000
+    }
+  },
+  "timeline": [],
+  "times": [],
+  "variant": "default",
+  "world": "first-run-onboarding"
+}

@@ -6,10 +6,27 @@ import { alertsHeading, homeRows, homeSections, keepClosed, openAlerts, personAn
 
 const now = Date.parse('2026-10-14T12:00:00Z');
 const actor = 'person/demo/session/example-phone';
+// What Fractal presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
+// derives nothing, so these rows carry it as Fractal serves them.
+const presented = (attention_kind, extra) => {
+  const card = {
+    'human-gate': { tier: 'stopped', kind: extra.review_mode === 'feedback' ? 'feedback' : 'review' },
+    'person-step': extra.update ? { tier: 'later', kind: 'update' } : { tier: 'stopped', kind: 'request' },
+    'agent-request': { tier: 'stopped', kind: 'request' },
+    'launch-approval': { tier: 'today', kind: 'launch' },
+    'revision-approval': { tier: 'today', kind: 'revision' },
+    'harness-prompt': { tier: 'stopped', kind: 'prompt' },
+    'harness-login': { tier: 'stopped', kind: 'login' },
+    fault: { tier: null, kind: 'fault' },
+  }[attention_kind] ?? { tier: null, kind: null };
+  const step = extra.step_run_id;
+  return { ...card, agent: null, raised_by: null, waiting: step ? { step, path: step.split('/').pop() } : null };
+};
 const attention = (id, attention_kind, extra = {}) => ({
   id: `attention/demo/${id}`, kind: 'attention', attention_kind, title: 'Review the example',
   detail: 'Invented test content.', priority: 'normal', state: 'open', person_id: 'person/demo',
-  requested_at: '2026-10-14T11:00:00Z', source_id: `step-run/demo/${id}`, actions: [], ...extra,
+  requested_at: '2026-10-14T11:00:00Z', source_id: `step-run/demo/${id}`, actions: [],
+  presentation: presented(attention_kind, extra), ...extra,
 });
 const update = attention('update', 'person-step', {
   actions: ['work.done'], update: { version: 1, type: 'update', summary: 'Example completed.', about: 'message/demo' },
@@ -157,12 +174,15 @@ test('Home and detail opt into grouped system presentation without a glyph legen
 test('grouped rows expose readable wrapping button labels and shared buttons expose disabled state', () => {
   const row = namedFunction(uiSource, 'GroupedRow');
   const pressable = elements(row, 'Pressable')[0];
-  assert.equal(prop(pressable, 'accessibilityRole').text, 'button');
+  assert.equal(prop(pressable, 'accessibilityRole').expression.getText(), "onPress ? 'button' : 'text'", 'a row without a destination only reads');
   assert.equal(prop(pressable, 'accessibilityLabel').expression.getText(), '`${title}. ${context}`');
-  assert.equal(prop(pressable, 'accessibilityHint').text, 'Opens alert details');
+  assert.equal(prop(pressable, 'accessibilityHint').expression.getText(), 'onPress ? hint : undefined');
+  assert.match(row.getText(), /hint = 'Opens alert details'/, 'an alert row still says where it goes');
   assert.equal(prop(pressable, 'onPress').expression.getText(), 'onPress', 'taps retain the detail destination');
   assert.equal(prop(pressable, 'onLongPress').expression.getText(), 'onLongPress', 'ContextMenu can inject the existing action sheet');
   assert.ok(elements(row, 'T').every(element => !prop(element, 'numberOfLines')), 'titles and context wrap rather than truncate');
+  assert.equal(prop(pressable, 'disabled'), undefined, 'a read-only row reads as text, not as a dimmed control');
+  assert.equal(prop(pressable, 'accessibilityState'), undefined);
   const header = elements(namedFunction(uiSource, 'GroupedHeader'), 'View')[0];
   assert.equal(prop(header, 'accessibilityRole').text, 'header');
   const button = elements(namedFunction(uiSource, 'Button'), 'Pressable')[0];
@@ -176,4 +196,107 @@ test('the native app permits the device light and dark appearance', () => {
   const config = JSON.parse(readFileSync(new URL('./app.json', import.meta.url), 'utf8'));
   assert.equal(config.expo.userInterfaceStyle, 'automatic');
   assert.equal(config.expo.ios.infoPlist.UIViewControllerBasedStatusBarAppearance, true, 'native stacks own status-bar appearance without an RN screens assertion');
+});
+
+test('Now draws its background, text and native chrome from the live system appearance', () => {
+  const systemScreen = namedFunction(uiSource, 'SystemScreen');
+  assert.equal(calls(systemScreen, 'useSystemColors').length, 1, 'the background re-renders with the appearance');
+  assert.equal(calls(namedFunction(uiSource, 'useSystemColors'), 'useScheme').length, 1);
+  assert.equal(calls(namedFunction(uiSource, 'useTextAppearance'), 'useScheme').length, 1, 'every T reads the appearance itself');
+  assert.equal(calls(namedFunction(uiSource, 'useScheme'), 'useColorScheme').length, 1);
+  const appSource = source('./App.tsx');
+  const stack = namedFunction(appSource, 'TabStack');
+  assert.equal(calls(stack, 'useScheme').length, 1, 'native header options follow the appearance');
+  for (const name of ['NowRoot', 'Attention']) {
+    const screen = elements(stack, 'Stack.Screen').find(element => prop(element, 'name')?.text === name);
+    assert.match(prop(screen, 'options').expression.getText(), /^\{ \.\.\.systemOptions,/, name);
+  }
+  assert.equal(calls(namedFunction(appSource, 'Main'), 'useScheme').length, 1, 'the navigation theme and tab tint follow the appearance');
+});
+
+test('paired availability renders the server person and clears unsupported reconnects', () => {
+  const section = namedFunction(source('./screens/Availability.tsx'), 'AvailabilitySection');
+  assert.equal(nodes(section, node => ts.isIdentifier(node) && node.text === 'actor').length, 0, 'a device session actor is not a concrete person ID');
+  const store = source('./store.tsx');
+  const read = nodes(store, node => ts.isVariableDeclaration(node) && node.name.getText() === 'readAvailability')[0];
+  assert.ok(read);
+  const guard = nodes(read, ts.isIfStatement).find(node => node.expression.getText().includes('!servesAvailability(caps)'));
+  assert.ok(guard);
+  assert.equal(calls(guard.thenStatement, 'setAvailability')[0].arguments[0].getText(), 'NO_AVAILABILITY', 'a daemon without availability must not retain the previous daemon person');
+  assert.equal(calls(read, 'ownAvailability')[0].arguments.length, 2, 'the server resolves the paired person; do not filter by session actor');
+  const publish = nodes(read, ts.isIfStatement).filter(node => calls(node.thenStatement, 'setAvailability').length);
+  assert.ok(publish.filter(node => node !== guard).every(node => node.expression.getText().includes('availabilityRead.current === read')), 'late reads cannot restore availability after reconnect invalidated it');
+});
+
+test('availability writes invalidate old reads, serialize edits and discard old connection replies', async () => {
+  const write = namedFunction(source('./store.tsx'), 'runAvailabilityWrite');
+  const javascript = ts.transpileModule(write.getText(), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const caps = { session_actor: actor };
+  const capsRef = { current: caps }, availabilityRead = { current: 1 }, availabilityWriting = { current: null };
+  let value = { person: { person: 'person/demo', status: 'available' }, note: null, issue: '' };
+  const run = new Function('caps', 'capsRef', 'availabilityRead', 'availabilityWriting', 'setAvailability', 'runAction', 'notApplied', 'writeRefusal',
+    `${javascript}; return runAvailabilityWrite;`)(caps, capsRef, availabilityRead, availabilityWriting, update => { value = update(value); }, async action => { await action(); return true; }, () => false, String);
+  let finish;
+  const pending = run(() => new Promise(resolve => { finish = resolve; }));
+  assert.equal(availabilityRead.current, 2, 'starting a write invalidates a previously issued read');
+  assert.equal(await run(async () => { assert.fail('a second edit must not race'); }), false);
+  finish({ person: { person: 'person/demo', status: 'away' } });
+  assert.equal(await pending, true);
+  assert.equal(value.person.status, 'away');
+  assert.equal(availabilityWriting.current, null);
+  const oldConnection = run(() => new Promise(resolve => { finish = resolve; }));
+  capsRef.current = { session_actor: 'person/other/session/phone' };
+  value = { person: { person: 'person/other', status: 'available' }, note: null, issue: '' };
+  finish({ person: { person: 'person/demo', status: 'away' }, note: { text: 'old connection' } });
+  await oldConnection;
+  assert.equal(value.person.person, 'person/other');
+  assert.equal(value.note, null);
+  capsRef.current = caps;
+  const disconnected = run(() => new Promise(resolve => { finish = resolve; }));
+  ++availabilityRead.current;
+  value = { person: null, note: null, issue: '' };
+  finish({ note: { text: 'old connection' } });
+  await disconnected;
+  assert.equal(value.note, null, 'disconnect invalidation fences a late write even before capabilities change');
+});
+
+test('presence answers apply only between writes at the same read generation on the same connection', async () => {
+  const store = source('./store.tsx');
+  const construction = nodes(store, ts.isNewExpression).find(node => node.expression.getText().includes('PresenceReporter'));
+  const reportProperty = nodes(construction, ts.isPropertyAssignment).find(node => node.name.getText() === 'report');
+  assert.ok(reportProperty, 'the PresenceReporter report callback is found');
+  const javascript = ts.transpileModule(`const report = ${reportProperty.initializer.getText()};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const caps = { session_actor: actor };
+  const capsRef = { current: caps }, availabilityRead = { current: 1 }, availabilityWriting = { current: null };
+  let value = { person: { person: 'person/demo', status: 'available' }, note: null, issue: '' };
+  let finish;
+  const report = new Function('caps', 'capsRef', 'availabilityRead', 'availabilityWriting', 'setAvailability', 'client',
+    `${javascript}; return report;`)(caps, capsRef, availabilityRead, availabilityWriting, update => { value = update(value); },
+    { presenceReport: () => new Promise(resolve => { finish = () => resolve({ value: { availability: { person: 'person/demo', status: 'away' }, report_again_at: null } }); }) });
+  const beforeWrite = report({ state: 'active' });
+  ++availabilityRead.current;
+  finish();
+  await beforeWrite;
+  assert.equal(value.person.status, 'available', 'a write that started while the phone was reporting wins over its answer');
+  availabilityWriting.current = caps;
+  const duringWrite = report({ state: 'active' });
+  finish();
+  await duringWrite;
+  assert.equal(value.person.status, 'available', 'an edit in flight keeps its own answer the last word');
+  const finishesAfterWrite = report({ state: 'active' });
+  availabilityWriting.current = null;
+  finish();
+  await finishesAfterWrite;
+  assert.equal(value.person.status, 'available', 'a report started during a write stays stale even when the write finishes before its reply');
+  const betweenWrites = report({ state: 'active' });
+  finish();
+  await betweenWrites;
+  assert.equal(value.person.status, 'away', 'between writes the answer still refreshes the person');
+  const oldConnection = report({ state: 'active' });
+  capsRef.current = { session_actor: 'person/other/session/phone' };
+  value = { person: { person: 'person/other', status: 'available' }, note: null, issue: '' };
+  finish();
+  await oldConnection;
+  assert.equal(value.person.person, 'person/other', 'a replaced connection cannot repopulate availability');
 });

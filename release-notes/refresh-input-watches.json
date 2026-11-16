@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Wake host-local launch diagnostics from authoritative prompt and executable input dependencies",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "Watch inputs remain host-local and are not persisted in launch receipts."},
+  "rules": {"status": "none", "detail": "Absent candidates, transitive imports, render reads, executable resolution probes and recursive rules trees invalidate incremental capture. Background identity completion wakes reconciliation."},
+  "compatibility": {"status": "none", "detail": "Unresolved executables and failed identity measurements remain diagnostic and unknown, not reconcile-stage faults. Subscription failures use a seat-scoped daemon fault. No refresh controller, admission seal or runtime actuation is enabled."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "none", "detail": "No configuration change or operator read is required to register local watches."},
+  "recovery": {"status": "none", "detail": "Watches are rebuilt from current declarations and dependency paths after restart or invalidation."}
+}

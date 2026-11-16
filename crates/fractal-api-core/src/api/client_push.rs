@@ -13,7 +13,7 @@ pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
 }
 
 fn invalid(message: &'static str) -> ApiError {
-    ApiError::bad(St3Error::new("validation-failed", message))
+    ApiError::bad(FractalError::new("validation-failed", message))
 }
 
 fn unavailable() -> ApiError {
@@ -50,14 +50,24 @@ pub fn authenticate(
         .filter(|value| !value.is_empty())
         .ok_or_else(denied)?;
     let digest = hex::encode(Sha256::digest(credential.as_bytes()));
+    if let Some(session) = super::client_v0::external_grants::authenticate(state, &digest, transport)?
+        && super::client_v0::external_grants::is_service(&session) {
+        super::client_v0::external_grants::authorize_route(&session, request)?;
+        return Ok(Authentication::Session(session));
+    }
     let pairings = state.store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(|_| unavailable())?;
-    let paired = pairings.claims.iter().find(|claim| {
-        claim.origin == state.store.origin()
-            && claim.body.pointer("/fields/credential_hash").and_then(Value::as_str)
-                == Some(digest.as_str())
-    }).ok_or_else(denied)?;
+    let mut paired = None;
+    for claim in &pairings.claims {
+        if claim.origin == state.store.origin()
+            && claim.body.pointer("/fields/credential_hash").and_then(Value::as_str) == Some(digest.as_str())
+            && state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(|_| unavailable())? {
+            paired = Some(claim);
+            break;
+        }
+    }
+    let paired = paired.ok_or_else(denied)?;
     let field = |name: &str| paired.body.get("fields").and_then(|fields| fields.get(name))
         .and_then(Value::as_str).filter(|value| !value.is_empty());
     let person = field("person_id")
@@ -237,4 +247,4 @@ pub fn start_push_registration_cleanup(state: &AppState) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

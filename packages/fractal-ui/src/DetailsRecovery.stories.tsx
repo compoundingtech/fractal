@@ -10,7 +10,7 @@ import { DetailsPane, type DetailsLayoutIntent, type DetailsVariants } from './a
 import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
 import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
-import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
+import type { SyncStatus } from './assistant-ui/sync-presentation/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -23,7 +23,7 @@ const states = ['busy', 'partial', 'new', 'error', 'loading', 'idle'] as const
 const variants: DetailsVariants[] = (['O1', 'O2', 'O3'] as const).flatMap(overview => (['C1', 'C2', 'C3'] as const).flatMap(context => (['S1', 'S2', 'S3'] as const).map(spend => ({ overview, context, spend, resources: 'R2', empty: 'E3' } satisfies DetailsVariants))))
 const representative = variants.filter(variant => ['O1C1S1', 'O2C2S1', 'O2C2S2', 'O3C3S3'].includes(variant.overview + variant.context + variant.spend))
 const defaultVariant = variants.findIndex(variant => variant.overview === 'O2' && variant.context === 'C2' && variant.spend === 'S1')
-const cause = 'st request timed out after 15 s'
+const cause = 'Fractal request timed out after 15 s'
 const live: SyncStatus = { _tag: 'Live', since: 1799999999000 }
 const connecting: SyncStatus = { _tag: 'Connecting', attempt: 1, since: 1799999999000 }
 const failed: SyncStatus = { _tag: 'Failed', cause: { _tag: 'Server', code: 'timeout', message: cause } }
@@ -37,6 +37,7 @@ const styles = stylex.create({
 })
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Details Recovery',
   component: Workbench,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Mounted production Details recovery. Host controls change decoded observations, content variants and actual pane widths. Plays retain the inherited pending geometry, header, keyboard and accessibility batteries; schemes are args and viewports are owned by the canonical browser matrix.' } } },
@@ -59,6 +60,17 @@ const meta = {
   },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'FailureTransitions:contract-fixture',
+  'HeaderFeedback:contract-fixture',
+  'KeyboardRecovery:contract-fixture',
+  'KnownLoadingIdentity:contract-fixture',
+  'NonRetryableFailures:contract-fixture',
+  'PendingFootprints:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 type Play = { canvasElement: HTMLElement }
 
@@ -118,13 +130,16 @@ function assertHeader(pane: HTMLElement) {
     requireContract(rect.left >= clip.left - 0.5 && rect.right <= clip.right + 0.5 && rect.top >= clip.top - 0.5 && rect.bottom <= clip.bottom + 0.5, 'Header control escapes the effective clip')
   }
 }
+/** The loading ring spins unless the viewer asked for reduced motion. */
+const stillRing = () => matchMedia('(prefers-reduced-motion: reduce)').matches
+const ringMotion = (glyph: Element) => (getComputedStyle(glyph.firstElementChild!).animationName === 'none') === stillRing()
 function assertPhase(pane: HTMLElement, phase: 'live' | 'loading' | 'failed') {
   const head = headFor(pane), status = element(head, '[data-pane-sync-status]')
   const word = [...status.querySelectorAll('[data-pane-sync-word],[data-pane-sync-word-trigger]')].find(shown)
   const glyph = status.querySelector('[data-pane-sync-glyph]')
   requireContract(status.dataset.paneSyncPhase === phase, 'Header has the wrong observation phase')
   if (phase === 'live') requireContract(!word && !glyph && [...status.childNodes].filter(node => node instanceof Element && !node.matches('[data-pane-sync-announcer],:has([data-pane-sync-announcer])') && shown(node)).every(node => !node.textContent?.trim()), 'Live header shows a status')
-  if (phase === 'loading') requireContract(!word && shown(glyph) && getComputedStyle(glyph!.firstElementChild!).animationName === 'none' && [...status.childNodes].filter(node => node instanceof Element && !node.matches('[data-pane-sync-announcer],:has([data-pane-sync-announcer])') && shown(node)).every(node => !node.textContent?.trim()), 'Loading is not one still glyph without a word')
+  if (phase === 'loading') requireContract(!word && shown(glyph) && glyph!.firstElementChild!.hasAttribute('data-live-ring') && ringMotion(glyph!) && [...status.childNodes].filter(node => node instanceof Element && !node.matches('[data-pane-sync-announcer],:has([data-pane-sync-announcer])') && shown(node)).every(node => !node.textContent?.trim()), 'Loading is not the one live ring without a word')
   if (phase === 'failed') {
     requireContract(Boolean(word), 'Failure lacks its recovery status')
     const label = word!.querySelector('[data-pane-sync-word-label]'), glyphOnly = Boolean(label && getComputedStyle(label).display === 'none')
@@ -389,7 +404,7 @@ function assertTiming({ samples, settled }: GlyphTiming) {
   const index = samples.findIndex(sample => sample.visible), first = samples[index]?.t
   requireContract(index > 0 && first !== undefined && first >= 290 && first <= settled, 'Loading glyph does not first appear around 300ms')
   requireContract(!samples.some(sample => sample.word), 'Loading shows a status word')
-  requireContract(!samples.some(sample => sample.animation !== null && sample.animation !== 'none'), 'Loading glyph animates')
+  requireContract(!samples.some(sample => sample.animation !== null && (sample.animation === 'none') !== stillRing()), 'Loading ring does not spin, or spins under reduced motion')
   requireContract(!samples.some((sample, index) => index > 0 && samples[index - 1]!.visible && !sample.visible), 'Loading glyph flickers')
 }
 async function sampleGlyph(canvas: HTMLElement, mutate?: (glyph: HTMLElement) => void): Promise<GlyphTiming> {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reduce observation spool writes without weakening crash durability",
+  "replay": {"status": "none", "detail": "Pending events retain ordered durable replay and acknowledgement semantics."},
+  "schema": {"status": "none", "detail": "Observation SQLite schema and storage version are unchanged."},
+  "rules": {"status": "none", "detail": "Ownership fences, FULL synchronization and WAL automatic checkpointing are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Identical snapshot reports do not enqueue redundant events. Timeline physical retention allows 256 rows or 128 KiB of slack before batch pruning; readers retain the 4096-row, 2 MiB window. Short-lived connections defer last-close checkpoints while the existing WAL is below a 1000-page byte budget; at or above it, SQLite's ordinary last-close checkpoint is enabled. Subagent ledger change detection and atomic replacement remain unchanged."},
+  "downtime": {"status": "none", "detail": "Normal binary restart only."},
+  "manual": {"status": "none", "detail": "No configuration or store migration required."},
+  "recovery": {"status": "none", "detail": "Existing binaries can read the unchanged SQLite format."}
+}

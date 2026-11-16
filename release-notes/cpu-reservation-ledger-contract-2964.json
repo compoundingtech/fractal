@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Specify the CPU reservation ledger contract; data only, with no implementation or enforcement.",
+  "replay": {
+    "status": "none",
+    "detail": "Documentation only; no claim, projection or replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Contract only; no ledger storage or database schema is implemented."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Documentation only; no admission, reservation, settlement or checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Documentation only; no CLI, API, protocol or harness behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Documentation only; no service interruption or restart is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Documentation only; no manual upgrade action or enforcement activation."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Documentation only; no state migration or recovery behavior changes."
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "generation": "0123456789abcdef0123456789abcdef",
+  "daemonPid": 12345,
+  "daemonStartToken": "fixture-process-start-token",
+  "command": "sleep",
+  "args": ["300"],
+  "displayCommand": "sleep 300",
+  "cwd": "/tmp",
+  "rows": 24,
+  "cols": 80,
+  "ephemeral": false,
+  "createdAt": "2026-10-12T00:00:00.000Z",
+  "tags": {"st3.subject": "agent/fleet-pty-compat"}
+}

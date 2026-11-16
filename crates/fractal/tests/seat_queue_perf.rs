@@ -1,6 +1,6 @@
 //! Time the seat queue reads against a copy of the performance fixture store.
 //!
-//! Run with a fixture from `scripts/st3-seat-queue-perf/fixture`:
+//! Run with a fixture from `scripts/fractal-seat-queue-perf/fixture`:
 //!
 //! ```sh
 //! ST3_PERF_STORE=/path/to/copy/claims.sqlite3 \

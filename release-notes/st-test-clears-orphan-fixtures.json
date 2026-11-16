@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st-test terminates orphan fixture processes before reusing a locked pool tree",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No stored data changes."},
+  "rules": {"status": "none", "detail": "After acquiring a pool tree's flock, st-test scans same-uid processes, excluding itself and its ancestor chain. Kernel exe or cwd evidence inside the tree authorizes termination; absolute argv operands are resolved with realpath, but argv-only references refuse reuse without signalling. Execution-backed targets remain tracked through pidfds even if their paths change: SIGTERM gets two seconds, then SIGKILL gets two more seconds. Any surviving target, new tree reference or cleanup error refuses reuse."},
+  "compatibility": {"status": "none", "detail": "No API or wire changes. Linux orphan cleanup uses pidfds to avoid signalling reused process identities. Existing test guardian signal cleanup is unchanged."},
+  "downtime": {"status": "none", "detail": "Applies on the next st-test run."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert to restore the previous wait-for-processes behavior."}
+}

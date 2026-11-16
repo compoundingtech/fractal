@@ -14,6 +14,7 @@
 // a slow channel starts the session
 // without restored context rather than hanging it.
 import childProcess from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type {
   ExtensionAPI,
@@ -52,6 +53,7 @@ const SESSION = "ST_OMP_CHANNEL_SESSION";
 const SEQ = "ST_OMP_CHANNEL_SEQ";
 const EXPECTED_NATIVE_SESSION = "ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION";
 const RESUME_GENERATION = "ST_OMP_CHANNEL_RESUME_GENERATION";
+const WEB_ANSWERS = "ST_OMP_WEB_ANSWERS";
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 const PENDING_ASK = "ST3_OMP_PENDING_ASK";
 const PENDING_ASK_TIMEOUT_MS = 120_000;
@@ -81,6 +83,7 @@ type Frame = {
   deliverAs?: "steer" | "followUp";
   meta?: Record<string, unknown>;
   seat?: { subject?: string; desired?: { display_name?: string }; member?: { display_name?: string; tags?: Record<string, string> } };
+  refresh?: { action?: string; incarnation?: string; owner_sequence?: number; epoch?: number; request_id?: string };
 };
 
 /** A message the channel sent that omp has not been handed yet. */
@@ -110,6 +113,10 @@ type Stash = {
   seq?: string;
   expectedNativeSession?: string;
   resumeGeneration?: string;
+  webAnswers?: boolean;
+  questionSession?: string;
+  /** Retain even closed entries: pipe writes are not persistence acknowledgements. */
+  questions?: Map<string, ObservedQuestion>;
   // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
   restoringAsk?: {
     toolCallId: string;
@@ -152,6 +159,8 @@ type Stash = {
   running?: boolean;
   /** Tool calls announced by `tool_call` and not yet answered by `tool_result`. */
   toolCallsInFlight?: Set<string>;
+  /** Synchronous tool fence; never reset by turn boundaries or channel reconnects. */
+  refresh?: { epoch: number; tools: Map<string, { count: number; overlap: boolean }>; mailbox: number; closed: boolean; fault?: boolean; user?: boolean; approvals?: Set<string>; lostPrompt?: boolean };
   /** Messages held during a running turn, oldest first. */
   held?: HeldMessage[];
   /** Releases held messages after HOLD_MAX_MS behind a running tool call. */
@@ -162,6 +171,15 @@ type Stash = {
   subagents?: Map<string, OpenSubagent>;
   /** Reports each busy subagent while any runs, so st ends only one that stopped running. */
   subagentHeartbeat?: NodeJS.Timeout;
+};
+
+type QuestionDescriptor = { id: string; options: number; multi: boolean; required: boolean };
+type QuestionStatus = "answered_elsewhere" | "expired" | "cancelled";
+type ObservedQuestion = {
+  nativeId: string;
+  session: string;
+  questions: QuestionDescriptor[];
+  status?: QuestionStatus;
 };
 
 type OpenSubagent = {
@@ -422,6 +440,7 @@ const stash = (): Stash => {
       seq: readEnv(SEQ, true),
       expectedNativeSession: readEnv(EXPECTED_NATIVE_SESSION, true),
       resumeGeneration: readEnv(RESUME_GENERATION, true),
+      webAnswers: process.env[WEB_ANSWERS] === "1",
     };
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -445,6 +464,7 @@ const stash = (): Stash => {
   removeEnv(SEQ);
   removeEnv(EXPECTED_NATIVE_SESSION);
   removeEnv(RESUME_GENERATION);
+  removeEnv(WEB_ANSWERS);
   return globals.__stOmpChannel;
 };
 
@@ -480,6 +500,46 @@ export default function (pi: ExtensionAPI) {
       } | undefined)?.getAsyncJobSnapshot?.();
       return Array.isArray(snapshot?.running) ? snapshot.running.length : null;
     } catch { return null; }
+  };
+  // JS run-to-completion is the gate lock: none of these operations may await.
+  const gate: NonNullable<Stash["refresh"]> = state.refresh ??= { epoch: 0, tools: new Map(), mailbox: 0, closed: false };
+  const owner = Number(state.seq);
+  const managed = Boolean(state.bin && state.identity && state.session &&
+    state.seq && Number.isSafeInteger(owner) && owner >= 0);
+  const advance = () => {
+    if (!Number.isSafeInteger(gate.epoch + 1)) throw new Error("refresh epoch exhausted");
+    gate.epoch += 1;
+  };
+  const refresh = (request: NonNullable<Frame["refresh"]>, ctx: ExtensionContext) => {
+    let result = "refused";
+    // Read jobs only AFTER checking open tools, in this same synchronous critical section.
+    let tools = gate.mailbox;
+    for (const pending of gate.tools.values()) tools += pending.count;
+    // Native prompts have no durable, exact-call continuation acknowledgement. Never exempt
+    // them as person work or replay a stored approval into a replacement dispatch.
+    let preservationBlocked = Boolean(state.restoringAsk || gate.lostPrompt ||
+      state.pendingAskToolCallId || state.pendingApproval || gate.approvals?.size);
+    for (const key of gate.tools.keys()) if (key.endsWith(":ask")) preservationBlocked = true;
+    const jobs = tools === 0 ? backgroundJobs() : null;
+    if (!managed || gate.fault || gate.user || jobs === null && tools === 0) result = "unsupported";
+    else if (request.action === "activity") result = "activity";
+    else if (request.incarnation === state.session && request.owner_sequence === owner &&
+      request.epoch === gate.epoch) {
+      if (request.action === "close" && !gate.closed && !preservationBlocked &&
+        tools === 0 && jobs === 0 && !state.running && ctx.isIdle()) {
+        advance();
+        gate.closed = true;
+        result = "closed";
+      } else if (request.action === "reopen" && gate.closed) {
+        advance();
+        gate.closed = false;
+        result = "opened";
+      }
+    }
+    return { type: "refresh", request_id: request.request_id, result,
+      blockers: preservationBlocked ? ["unsupported-native-prompt-preservation"] : [],
+      receipt: { incarnation: state.session, owner_sequence: owner, epoch: gate.epoch,
+        open_non_person_tools: tools + (jobs ?? 0), gate: gate.closed ? "closed" : "open" } };
   };
   const applyLabel = async (ctx: ExtensionContext) => {
     if (!state.label) return;
@@ -540,6 +600,7 @@ export default function (pi: ExtensionAPI) {
       );
       return Promise.resolve("");
     }
+    bindQuestionSession(nativeSessionId);
     state.shuttingDown = false;
     if (state.reconnectTimer !== undefined) clearTimeout(state.reconnectTimer);
     state.reconnectTimer = undefined;
@@ -572,6 +633,7 @@ export default function (pi: ExtensionAPI) {
     writeEnv(channelEnv, SEQ, seq);
     writeEnv(channelEnv, EXPECTED_NATIVE_SESSION, expectedNativeSession);
     writeEnv(channelEnv, RESUME_GENERATION, resumeGeneration);
+    if (state.webAnswers) channelEnv[WEB_ANSWERS] = "1";
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     if (state.restoringAsk) writeEnv(channelEnv, PENDING_ASK, state.restoringAsk.toolCallId);
@@ -651,6 +713,11 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         if (state.child !== child) return;
+        if (frame.type === "refresh" && frame.refresh) {
+          try { send(refresh(frame.refresh, ctx)); }
+          catch { gate.fault = true; send({ type: "refresh", request_id: frame.refresh.request_id, result: "unsupported" }); }
+          return;
+        }
         if (frame.type === "settled" && typeof frame.meta?.messageId === "string") {
           // The daemon acknowledged read; the graph can no longer replay this native handoff.
           state.accepted?.delete(frame.meta.messageId);
@@ -685,6 +752,14 @@ export default function (pi: ExtensionAPI) {
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
           send({ type: "ready", ...sessionBinding });
+          // The driver requires ready before accepting observations. Replay before other
+          // producers; each retained close follows its original open with the same identity.
+          if (state.webAnswers) {
+            for (const question of state.questions?.values() ?? []) {
+              send(questionOpenFrame(question));
+              if (question.status) send(questionClosedFrame(question, question.status));
+            }
+          }
           state.todoReady = true;
           observeTodoBranch(ctx, true);
           observeInventory(ctx, true);
@@ -850,6 +925,7 @@ export default function (pi: ExtensionAPI) {
       if (!hydrate) return;
       // A branch hydration binds its observation provenance on the existing channel. It must
       // not restart delivery, discard held mail, or reset ask/approval authority.
+      bindQuestionSession(nativeSession);
       const sessionFile = ctx.sessionManager.getSessionFile?.();
       sendFrame({ type: "session", sessionId: nativeSession,
         ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
@@ -913,24 +989,42 @@ export default function (pi: ExtensionAPI) {
     const usage = message.usage && typeof message.usage === "object"
       ? message.usage as Record<string, unknown>
       : undefined;
-    // Per-response spend: the provider's disjoint token buckets, its model, and the cost the
-    // harness itself computed. Nothing else about the request leaves the harness.
+    // Only observed response metadata and numeric usage leave the harness, never raw requests.
     const cost = usage?.cost && typeof usage.cost === "object"
       ? usage.cost as Record<string, unknown>
       : undefined;
+    const cttl = usage?.cttl && typeof usage.cttl === "object"
+      ? usage.cttl as Record<string, unknown>
+      : undefined;
     return { message: {
       id: boundedTimelineString(message.id, 256),
+      responseId: boundedTimelineString(message.responseId, 256),
       role: boundedTimelineString(message.role, 32),
       content,
       model: boundedTimelineString(message.model, 128),
       provider: boundedTimelineString(message.provider, 64),
+      api: boundedTimelineString(message.api, 128),
+      stopReason: boundedTimelineString(message.stopReason, 64),
+      timestamp: finiteOrNull(message.timestamp),
+      completedAt: finiteOrNull(message.completedAt),
+      duration: finiteOrNull(message.duration),
+      ttft: finiteOrNull(message.ttft),
       usage: usage ? {
         input: finiteOrNull(usage.input ?? usage.inputTokens),
         output: finiteOrNull(usage.output ?? usage.outputTokens),
         cacheRead: finiteOrNull(usage.cacheRead),
         cacheWrite: finiteOrNull(usage.cacheWrite),
         totalTokens: finiteOrNull(usage.totalTokens),
-        cost: cost ? finiteOrNull(cost.total) : null,
+        reasoningTokens: finiteOrNull(usage.reasoningTokens),
+        cttl: cttl ? { ephemeral1h: finiteOrNull(cttl.ephemeral1h) } : undefined,
+        cost: cost ? {
+          input: finiteOrNull(cost.input),
+          output: finiteOrNull(cost.output),
+          cacheRead: finiteOrNull(cost.cacheRead),
+          cacheWrite: finiteOrNull(cost.cacheWrite),
+          total: finiteOrNull(cost.total),
+        } : finiteOrNull(usage.cost),
+        premiumRequests: finiteOrNull(usage.premiumRequests),
       } : undefined,
     } };
   };
@@ -1006,6 +1100,11 @@ export default function (pi: ExtensionAPI) {
   // together reaches omp as one message.
   const handOff = async (messages: HeldMessage[]) => {
     const [first] = messages;
+    if (managed && gate.closed) {
+      for (const message of messages) message.reply({ type: "failed", meta: message.meta, error: "refresh admission closed" });
+      return;
+    }
+    if (managed) { advance(); gate.mailbox += 1; }
     const content = messages.map((message) => message.content).join("\n\n");
     for (const message of messages) {
       const messageId = message.meta?.messageId;
@@ -1037,6 +1136,8 @@ export default function (pi: ExtensionAPI) {
           message.reply({ type: "failed", meta: message.meta, error: String(error) });
         }
       }
+    } finally {
+      if (managed) gate.mailbox -= 1;
     }
   };
 
@@ -1107,6 +1208,7 @@ export default function (pi: ExtensionAPI) {
     if (!pending || pending.timer !== undefined) return;
     pending.timer = setTimeout(() => {
       if (state.restoringAsk !== pending) return;
+      gate.lostPrompt = true; // A timed-out bridge is not proof that the original ask was answered.
       state.restoringAsk = undefined;
       sendFrame({ type: "delivery_ready" });
       sendFrame({
@@ -1332,22 +1434,70 @@ export default function (pi: ExtensionAPI) {
   };
   const register = pi.on.bind(pi) as unknown as (
     event: string,
-    handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
+    handler: (event: unknown, ctx: ExtensionContext) => unknown,
   ) => void;
+  const refusedUser = { result: { output: "refresh admission closed", exitCode: 1, cancelled: true, truncated: false } };
+  for (const event of ["user_bash", "user_python"]) register(event, () => {
+    if (!managed) return;
+    try {
+      if (!gate.closed) { advance(); gate.user = true; return; }
+    } catch { gate.fault = true; }
+    return refusedUser;
+  });
   const onWidened = (
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
-  ) => register(event, (payload, ctx) => {
-    if (isSubagent(ctx)) {
-      try {
-        observeSubagent(event, payload, ctx);
-      } catch {
-        // Observability fails open: a subagent's report never takes its session down.
+  ) => register(event, async (payload, ctx) => {
+    try {
+      // Includes subagent tools: their observational events are filtered below, not admission.
+      if (managed && (event === "tool_approval_requested" || event === "tool_approval_resolved")) {
+        const call = record(payload);
+        if (typeof call?.toolCallId !== "string") gate.fault = true;
+        else {
+          const key = JSON.stringify([ctx.sessionManager.getSessionId(), call.toolCallId, call.toolName]);
+          const approvals = gate.approvals ??= new Set();
+          if (event === "tool_approval_requested") approvals.add(key); else approvals.delete(key);
+        }
       }
-      return;
+      if (managed && (event === "tool_call" || event === "tool_result" || event === "message_end" || event === "tool_approval_resolved")) {
+        const call = record(event === "message_end" ? record(payload)?.message : payload);
+        if (event === "tool_call" && (typeof call?.toolCallId !== "string" || typeof call.toolName !== "string"))
+          throw new Error("missing tool identity");
+        if (typeof call?.toolCallId === "string") {
+          const root = `${JSON.stringify([ctx.sessionManager.getSessionId(), call.toolCallId])}:`;
+          const key = `${root}${call.toolName}`;
+          const pending = gate.tools.get(key);
+          if (event === "message_end" && call.role === "toolResult") {
+            // Terminal fallback is per dispatch, never a root-tree or turn-end blanket clear.
+            // Overlapping same-name dispatches require their own result/explicit denial.
+            if (pending && !pending.overlap) gate.tools.delete(key);
+          } else if (event === "tool_call") {
+            if (gate.closed) return { block: true, reason: "refresh admission closed" };
+            advance();
+            if (pending) { pending.count += 1; pending.overlap = true; }
+            else gate.tools.set(key, { count: 1, overlap: false });
+          } else if ((event === "tool_result" || event === "tool_approval_resolved" && call.approved === false) && pending) {
+            if (pending.count > 1) pending.count -= 1; else gate.tools.delete(key);
+          }
+        }
+      }
+      if (isSubagent(ctx)) {
+        try {
+          observeSubagent(event, payload, ctx);
+        } catch {
+          // Observability fails open: a subagent's report never takes its session down.
+        }
+        return;
+      }
+      jobContext = ctx;
+      return await handler(payload, ctx);
+    } catch (error) {
+      if (managed && event === "tool_call") {
+        gate.fault = true;
+        return { block: true, reason: `refresh admission failed: ${String(error)}` };
+      }
+      throw error;
     }
-    jobContext = ctx;
-    return handler(payload, ctx);
   });
 
   // Registered only now that every helper above is initialized: a use-before-declaration in this
@@ -1365,6 +1515,9 @@ export default function (pi: ExtensionAPI) {
     observeInventory(ctx);
     const end = event as AgentEndFrame;
     if (end.willContinue !== true) {
+      // A definitive native turn end has no remaining foreground ask execution to resolve.
+      // Retried/continuing turns keep their observations open.
+      cancelOpenQuestions();
       state.pendingAskToolCallId = undefined;
       state.pendingApproval = false;
       state.running = false;
@@ -1428,6 +1581,85 @@ export default function (pi: ExtensionAPI) {
     input?: unknown;
   };
   type ToolResultFrame = { toolCallId?: unknown };
+  const questionOpenFrame = (question: ObservedQuestion) => ({
+    type: "question.open",
+    native_id: question.nativeId,
+    session: question.session,
+    questions: question.questions,
+  });
+  const questionClosedFrame = (question: ObservedQuestion, status: QuestionStatus) => ({
+    type: "question.closed",
+    native_id: question.nativeId,
+    session: question.session,
+    status,
+  });
+  const cancelOpenQuestions = () => {
+    if (!state.webAnswers) return;
+    for (const question of state.questions?.values() ?? []) {
+      if (question.status) continue;
+      question.status = "cancelled";
+      sendFrame(questionClosedFrame(question, question.status));
+    }
+  };
+  const bindQuestionSession = (nativeSession: string) => {
+    if (!state.webAnswers || state.questionSession === nativeSession) return;
+    // A new native identity makes the predecessor's asks unresolvable, even when a branch
+    // rebinds provenance without replacing the delivery channel.
+    cancelOpenQuestions();
+    state.questionSession = nativeSession;
+    state.questions = new Map();
+  };
+  const observeQuestion = (raw: unknown, ctx: ExtensionContext) => {
+    if (!state.webAnswers || !state.questionSession || !state.questions ||
+      ctx.sessionManager.getSessionId() !== state.questionSession) return;
+    const event = record(raw);
+    if (event?.toolName !== "ask" || typeof event.toolCallId !== "string" ||
+      !event.toolCallId.trim()) return;
+    const nativeId = `sha256:${createHash("sha256").update(event.toolCallId, "utf8").digest("hex")}`;
+    if (state.questions.has(nativeId) || state.questions.size >= 256) return;
+    // Execution-start args are finalized; tool_call input can still be revised or blocked.
+    const input = record(event.args);
+    if (!Array.isArray(input?.questions) ||
+      input.questions.length < 1 || input.questions.length > 16) return;
+    const questions: QuestionDescriptor[] = [];
+    const ids = new Set<string>();
+    for (const [index, value] of input.questions.entries()) {
+      const question = record(value);
+      if (!question || typeof question.id !== "string" || !question.id.trim() ||
+        ids.has(question.id.replace(/\r+/gu, "\n")) ||
+        typeof question.question !== "string" || !question.question.trim() ||
+        (question.multi !== undefined && typeof question.multi !== "boolean") ||
+        !Array.isArray(question.options) || question.options.length > 64 ||
+        !question.options.every(option => {
+          const value = record(option);
+          return value && typeof value.label === "string" &&
+            (value.description === undefined || typeof value.description === "string") &&
+            (value.preview === undefined || typeof value.preview === "string");
+        })) return;
+      ids.add(question.id.replace(/\r+/gu, "\n"));
+      const multi = question.multi === true;
+      questions.push({ id: `q${index}`, options: question.options.length, multi, required: !multi });
+    }
+    const question: ObservedQuestion = { nativeId, session: state.questionSession, questions };
+    state.questions.set(nativeId, question);
+    if (state.todoReady) sendFrame(questionOpenFrame(question));
+  };
+  const closeQuestion = (raw: unknown, ctx: ExtensionContext) => {
+    if (!state.webAnswers || !state.questions ||
+      ctx.sessionManager.getSessionId() !== state.questionSession) return;
+    const event = record(raw);
+    if (!event || typeof event.toolCallId !== "string") return;
+    const nativeId = `sha256:${createHash("sha256").update(event.toolCallId, "utf8").digest("hex")}`;
+    const question = state.questions.get(nativeId);
+    if (!question || question.status) return;
+    const result = record(event.result);
+    const details = record(event.details) ?? record(result?.details);
+    const timedOut = details?.timedOut === true ||
+      (Array.isArray(details?.results) && details.results.some(value => record(value)?.timedOut === true));
+    question.status = event.isError === true || result?.isError === true
+      ? "cancelled" : timedOut ? "expired" : "answered_elsewhere";
+    if (state.todoReady) sendFrame(questionClosedFrame(question, question.status));
+  };
   const firstAskQuestion = (event: ToolCallFrame): string | undefined => {
     if (
       event.toolName !== "ask" ||
@@ -1473,12 +1705,14 @@ export default function (pi: ExtensionAPI) {
       reason: question,
     });
   });
-  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-  onWidened("tool_execution_start", async (rawEvent) => {
+  onWidened("tool_execution_start", async (rawEvent, ctx) => {
+    observeQuestion(rawEvent, ctx);
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     observePendingAsk(rawEvent as ToolCallFrame);
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
   });
-  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
   onWidened("tool_result", async (rawEvent, ctx) => {
+    closeQuestion(rawEvent, ctx);
     const event = rawEvent as ToolResultFrame;
     sendTimeline("tool_result", rawEvent);
     const answeredAsk = typeof event.toolCallId === "string" &&
@@ -1503,6 +1737,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   onWidened("tool_execution_end", async (rawEvent, ctx) => {
+    closeQuestion(rawEvent, ctx);
     const event = record(rawEvent);
     if (event?.toolName !== "todo") {
       // Eval's native bridge persists successful nested todo calls as user_todo_edit entries.
@@ -1613,6 +1848,7 @@ export default function (pi: ExtensionAPI) {
   // Replacement is a separate session-switch lifecycle and remains handled by `open()` closing
   // the named predecessor.
   onWidened("session_shutdown", async () => {
+    cancelOpenQuestions();
     state.shuttingDown = true;
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     clearTimeout(state.restoringAsk?.timer);

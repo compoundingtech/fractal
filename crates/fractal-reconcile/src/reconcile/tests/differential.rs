@@ -48,7 +48,7 @@ mission "diff/flow" state="ready" timeout="2h" {
     depends-on { step "review" completed }
   }
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     depends-on { step "prepare" completed }
   }
   step "team" {
@@ -242,7 +242,12 @@ fn regex_lite_hex() -> impl Fn(&str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut run = String::new();
         let flush = |run: &mut String, out: &mut String| {
-            if run.len() >= 32 && (!run.contains('-') || uuid::Uuid::parse_str(run).is_ok()) {
+            // W3C traceparent values (and plain hash/uuid runs) vary per launch; only their
+            // presence is equivalent between the incremental and full sides.
+            let hex_run = run.split('-')
+                .all(|part| !part.is_empty()
+                    && part.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+            if run.len() >= 32 && (hex_run || uuid::Uuid::parse_str(run).is_ok()) {
                 out.push_str("<id>");
             } else {
                 out.push_str(run);
@@ -684,10 +689,19 @@ fn run_sequence(seed: u64, events: usize) -> BTreeSet<String> {
 
 #[test]
 fn incremental_passes_write_what_full_passes_write() {
+    // Pull requests run seeds 1..=4, the fewest that reach every kind listed below; the daily run
+    // (ST_TEST_SCALE=full, docs/ci.md) runs 1..=8. If a change stops the four reaching a kind, the
+    // coverage assertion fails, so the smaller set cannot pass by comparing less.
+    // ST3_DIFFERENTIAL_SEEDS overrides both.
+    let default_seeds = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+        8
+    } else {
+        4
+    };
     let seeds = std::env::var("ST3_DIFFERENTIAL_SEEDS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(8);
+        .unwrap_or(default_seeds);
     let mut reached = BTreeSet::new();
     for seed in std::env::var("ST3_DIFFERENTIAL_FIRST")
         .ok()

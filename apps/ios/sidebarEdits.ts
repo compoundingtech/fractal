@@ -1,8 +1,82 @@
-import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementOperation } from '../../clients/typescript/fractal-client';
+import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementBodyV1, type ArrangementOperation } from '../../clients/typescript/fractal-client';
+import { nodeKey, sameNode, spread, type Intent, type NodeRef, type Parent, type ProjectionError, type Tree } from './sidebarPlanning';
+
+export type MoveRefusal =
+  | { _tag: 'NodeMissing' | 'Self'; node: NodeRef }
+  | { _tag: 'ParentNotAllowed'; parent: Parent; cause: 'SubjectParentUnsupported' }
+  | { _tag: 'ParentMissing'; parent: Parent; cause: 'Unknown' | 'FolderDeleted' }
+  | { _tag: 'Cycle'; node: NodeRef; parent: Parent; path: { node: NodeRef; source: 'person' | 'fallback' }[] }
+  | { _tag: 'AnchorMoved'; before: NodeRef; parent: Parent; foundUnder?: Parent }
+  | { _tag: 'NoChange'; node: NodeRef; parent: Parent };
+export type V2Plan = { folders: ArrangementOperation[]; memberships: { op: 'place'; member: string; bucket: string | null; key: string }[] };
+export type PlanningError = { _tag: 'Projection'; error: ProjectionError } | { _tag: 'Move'; refusal: MoveRefusal } | { _tag: 'OrderingUnavailable' } | { _tag: 'TooManyOperations'; count: number } | { _tag: 'TooManyBytes'; bytes: number };
+/** Shared move checks also apply to v1; no-change compares both raw and effective parents. */
+export const validateSidebarMove = (tree: Tree, intent: Intent): MoveRefusal | undefined => {
+  const { node, parent, before } = intent, current = tree.nodes[nodeKey(node)];
+  if (!current) return { _tag: 'NodeMissing', node };
+  if (parent._tag === 'Subject') return { _tag: 'ParentNotAllowed', parent, cause: 'SubjectParentUnsupported' };
+  if (sameNode(node, parent)) return { _tag: 'Self', node };
+  const destination = parent._tag === 'Folder' ? tree.nodes[nodeKey(parent)] : undefined;
+  if (parent._tag === 'Folder' && !destination) return { _tag: 'ParentMissing', parent, cause: tree.deletedFolders.includes(parent.id) ? 'FolderDeleted' : 'Unknown' };
+  if (node._tag === 'Folder') {
+    const path: { node: NodeRef; source: 'person' | 'fallback' }[] = [{ node, source: current.source }];
+    let cursor = destination;
+    while (cursor) {
+      path.push({ node: cursor.node, source: cursor.source });
+      if (sameNode(cursor.node, node)) return { _tag: 'Cycle', node, parent, path };
+      cursor = cursor.shownUnder._tag === 'Folder' ? tree.nodes[nodeKey(cursor.shownUnder)] : undefined;
+    }
+  }
+  if (before) {
+    const anchor = tree.nodes[nodeKey(before)];
+    if (sameNode(before, node) || before._tag !== node._tag || !anchor || !sameNode(anchor.shownUnder, parent))
+      return { _tag: 'AnchorMoved', before, parent, ...(anchor ? { foundUnder: anchor.shownUnder } : {}) };
+  }
+  if (sameNode(current.parent, parent) && sameNode(current.shownUnder, parent)) {
+    const siblings = destination?.children ?? tree.roots, at = siblings.findIndex(sibling => sameNode(sibling, node));
+    const next = siblings.slice(at + 1).find(sibling => sibling._tag === node._tag);
+    if (next ? before && sameNode(next, before) : !before) return { _tag: 'NoChange', node, parent };
+  }
+  return undefined;
+};
+/** Exact Place operations; widen the nearest one-sided gap, preferring forward on a tie. */
+export const planSidebarV2 = (tree: Tree | { error: ProjectionError }, intent: Intent): V2Plan | { error: PlanningError } => {
+  if ('error' in tree) return { error: { _tag: 'Projection', error: tree.error } };
+  const refusal = validateSidebarMove(tree, intent);
+  if (refusal) return { error: { _tag: 'Move', refusal } };
+  const siblings = (intent.parent._tag === 'Folder' ? tree.nodes[nodeKey(intent.parent)].children : tree.roots)
+    .filter(node => node._tag === intent.node._tag && !sameNode(node, intent.node));
+  const index = intent.before ? siblings.findIndex(node => sameNode(node, intent.before!)) : siblings.length;
+  const keys = siblings.map(node => tree.nodes[nodeKey(node)].key!);
+  let chosen: { key: string; rekeys: [number, string][] } | undefined;
+  for (let end = index; end <= keys.length; end++) {
+    const placed = spread(keys[index - 1] ?? null, keys[end] ?? null, end - index + 1);
+    if (placed) { chosen = { key: placed[0], rekeys: placed.slice(1).map((key, at) => [index + at, key]) }; break; }
+  }
+  const forward = chosen?.rekeys.length ?? Infinity;
+  for (let start = index - 1; start >= 0 && index - start < forward; start--) {
+    const placed = spread(keys[start - 1] ?? null, keys[index] ?? null, index - start + 1);
+    if (placed) { chosen = { key: placed.at(-1)!, rekeys: placed.slice(0, -1).map((key, at) => [start + at, key]) }; break; }
+  }
+  if (!chosen) return { error: { _tag: 'OrderingUnavailable' } };
+  const count = 1 + chosen.rekeys.length;
+  if (count > 1024) return { error: { _tag: 'TooManyOperations', count } };
+  const parent = intent.parent._tag === 'Folder' ? intent.parent.id : null, plan: V2Plan = { folders: [], memberships: [] };
+  const changes: [NodeRef, string][] = [[intent.node, chosen.key], ...chosen.rekeys.map(([at, key]): [NodeRef, string] => [siblings[at], key])];
+  for (const [node, key] of changes) {
+    if (node._tag === 'Folder') plan.folders.push({ op: 'folder.move', id: node.id, parent, key });
+    else plan.memberships.push({ op: 'place', member: node.subject, bucket: parent, key });
+  }
+  const bytes = new TextEncoder().encode(JSON.stringify(plan.folders.length ? plan.folders : plan.memberships)).length;
+  return bytes > 1048576 ? { error: { _tag: 'TooManyBytes', bytes } } : plan;
+};
+
+/** The sidebar edits version 1 layouts; version 2 arrangements are folder-only and ordered by membership. */
+export type SidebarArrangement = Arrangement & { body: ArrangementBodyV1 };
 
 /** What a person reads when their Sidebar was removed and no older one exists to edit. */
 export const SIDEBAR_RETIRED = 'This Sidebar was removed; restoring a removed Sidebar is not available yet.';
-/** Whether st refused to create the Sidebar because the person retired it. Retired arrangements
+/** Whether Fractal refused to create the Sidebar because the person retired it. Retired arrangements
  *  leave the window, so this refusal is how the phone learns it. */
 export function sidebarRetired(error: unknown): boolean { return error instanceof ClientError && error.response.code === 'arrangement-retired'; }
 
@@ -11,7 +85,7 @@ export function sidebarSubject(person: string): string { return `arrangement/${p
 
 /** The reserved subject whatever its name, else the oldest live arrangement named "Sidebar",
  *  which clients created before the reserved id. Every client picks the same one. */
-export function sidebarArrangement(arrangements: Arrangement[]): Arrangement | undefined {
+export function sidebarArrangement(arrangements: SidebarArrangement[]): SidebarArrangement | undefined {
   const live = arrangements.filter(a => !a.deleted);
   return live.find(a => a.id.endsWith(`/${SIDEBAR_ARRANGEMENT_UUID}`))
     ?? live.filter(a => a.body.name.value === 'Sidebar').sort((a, b) => compare(a.id, b.id))[0];
@@ -72,7 +146,7 @@ function insertion(keys: string[], index: number): { key: string; rekeys: Array<
     return { key: positioned[index], rekeys: keys.map((_, n) => [n, positioned[n < index ? n : n + 1]]) };
   }
 }
-export const folderLocation = (a: Arrangement | undefined, subject: string): string | null => {
+export const folderLocation = (a: SidebarArrangement | undefined, subject: string): string | null => {
   const resolved = a?.resolved?.folders;
   const folder = resolved && subject in resolved ? resolved[subject] : a?.body.placements[subject]?.value.folder;
   return folder && a?.body.folders[folder] && !a.body.folders[folder].tombstone ? folder : null;
@@ -81,13 +155,13 @@ export function folderName(name: string): string {
   if (!name.trim() || /[\u0000-\u001f\u007f-\u009f]/u.test(name) || [...name.trim()].reduce((n, char) => n + (char.codePointAt(0)! < 128 ? 1 : char.codePointAt(0)! < 2048 ? 2 : char.codePointAt(0)! < 65536 ? 3 : 4), 0) > 256) throw new Error('Use a folder name of at most 256 bytes without control characters.');
   return name.trim();
 }
-export function folderCreate(a: Arrangement | undefined, id: string, name: string): ArrangementOperation[] {
+export function folderCreate(a: SidebarArrangement | undefined, id: string, name: string): ArrangementOperation[] {
   name = folderName(name);
   const siblings = Object.values(a?.body.folders ?? {}).filter(f => !f.tombstone).map(f => f.position.value.key).sort(compare);
   return [{ op: 'folder.create', id, name: name.trim(), parent: null, key: keyBetween(siblings.at(-1) ?? null, null) }];
 }
 /** Place before an anchor or append, including dormant placement keys so they never collide. */
-export function placeResource(a: Arrangement | undefined, subject: string, folder: string | null, before?: string, after?: string): ArrangementOperation[] {
+export function placeResource(a: SidebarArrangement | undefined, subject: string, folder: string | null, before?: string, after?: string): ArrangementOperation[] {
   const siblings = Object.entries(a?.body.placements ?? {}).filter(([id]) => id !== subject && folderLocation(a, id) === folder).sort(([ai, av], [bi, bv]) => compare(av.value.key, bv.value.key) || compare(ai, bi));
   const anchors: ArrangementOperation[] = [];
   const anchor = before ?? after;
@@ -107,7 +181,7 @@ export function placeResource(a: Arrangement | undefined, subject: string, folde
   operations.set(subject, { op: 'subject.place', subject, folder, key: placed.key });
   return [...operations.values()];
 }
-export function moveFolder(a: Arrangement, id: string, before?: string): ArrangementOperation[] {
+export function moveFolder(a: SidebarArrangement, id: string, before?: string): ArrangementOperation[] {
   const siblings = Object.entries(a.body.folders).filter(([key, f]) => key !== id && !f.tombstone).sort(([ai, av], [bi, bv]) => compare(av.position.value.key, bv.position.value.key) || compare(ai, bi));
   const index = before ? siblings.findIndex(([key]) => key === before) : siblings.length;
   if (index < 0) throw new Error('The destination changed; choose it again.');

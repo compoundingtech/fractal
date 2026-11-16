@@ -1,9 +1,9 @@
 use crate::MailboxWakesStore;
 use crate::CoordinationStore;
-use crate::MissionsStore;
 use crate::LimitsStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
+use crate::RuntimeStartsStore;
 use super::*;
 
 pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
@@ -14,13 +14,30 @@ pub async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
     Ok(Json(harnesses))
 }
 
-pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, ApiError> {
+/// Startup observation supplied by the embedded browser listener.
+#[derive(Clone)]
+pub struct LocalWebStatus(pub DoctorCheck);
+
+/// Each step outside the store checks waits at most this long, so the report answers inside
+/// the client's 120 s request limit even when every step is slow.
+const DOCTOR_STEP: Duration = Duration::from_secs(10);
+
+pub async fn doctor(
+    State(state): State<AppState>,
+    web: Option<Extension<LocalWebStatus>>,
+) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
-    let environment = crate::api::read_deadline::spawn_blocking(crate::environment::snapshot)
-        .await
-        .map_err(ApiError::internal)?;
+    let environment = match tokio::time::timeout(
+        DOCTOR_STEP,
+        crate::api::read_deadline::spawn_blocking(crate::environment::snapshot),
+    )
+    .await
+    {
+        Ok(environment) => Some(environment.map_err(ApiError::internal)?),
+        Err(_) => None,
+    };
     // Linking a crate takes seconds, so it runs while the other checks do.
-    let build_tools = environment.as_ref().ok().cloned().map(|environment| {
+    let build_tools = environment.as_ref().and_then(|environment| environment.as_ref().ok()).cloned().map(|environment| {
         crate::api::read_deadline::spawn_blocking(move || crate::environment::check_build_tools(&environment))
     });
     let pty_root = state.pty_root.clone();
@@ -30,27 +47,24 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
             .unwrap_or_default();
         fractal_runtime::priority_report(&observations)
     });
-    let token = crate::resource::github_auth().await;
-    let writer_wait = smallclaims::sqlite::telemetry::current_request();
-    let mut report = crate::api::read_deadline::spawn_blocking(move || {
-        // Sealing this node's batches writes through the store's writer, so the request's
-        // writer accounting must follow the job off the runtime thread.
-        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
-        // This node's claims are signed as their batches are sealed; seal and judge them so
-        // the signature counts cover everything written so far.
-        state.store.replication_snapshot().map_err(ApiError::internal)?;
-        doctor_report(&state)
-    })
+    let token = tokio::time::timeout(DOCTOR_STEP, crate::resource::github_auth()).await;
+    // Doctor reads what is sealed: claims in batches not sealed yet count as unsealed. Sealing
+    // or judging here would take the writer to answer a read-only question.
+    let mut report = crate::api::read_deadline::spawn_blocking(move || doctor_report(&state))
         .await
         .map_err(ApiError::internal)??
         .0;
+    if let Some(Extension(web)) = web {
+        report.checks.push(web.0);
+    }
     if let Some(build_tools) = build_tools {
-        report.checks.push(build_tools_check(
-            &build_tools.await.map_err(ApiError::internal)?,
-        ));
+        report.checks.push(match tokio::time::timeout(DOCTOR_STEP, build_tools).await {
+            Ok(build_tools) => build_tools_check(&build_tools.map_err(ApiError::internal)?),
+            Err(_) => doctor_timeout("build-tools", DOCTOR_STEP),
+        });
     }
     report.checks.push(match environment {
-        Ok(environment) => DoctorCheck {
+        Some(Ok(environment)) => DoctorCheck {
             name: "daemon-environment".into(),
             status: "pass".into(),
             message: format!(
@@ -58,25 +72,30 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
                 environment.get("PATH").map(String::as_str).unwrap_or("")
             ),
         },
-        Err(error) => DoctorCheck {
+        Some(Err(error)) => DoctorCheck {
             name: "daemon-environment".into(),
             status: "fail".into(),
             message: error.to_string(),
         },
+        None => doctor_timeout("daemon-environment", DOCTOR_STEP),
     });
-    let (status, message) = priority.await.map_err(ApiError::internal)?;
-    report.checks.push(DoctorCheck {
-        name: "priority".into(),
-        status: status.into(),
-        message,
+    report.checks.push(match tokio::time::timeout(DOCTOR_STEP, priority).await {
+        Ok(priority) => {
+            let (status, message) = priority.map_err(ApiError::internal)?;
+            DoctorCheck { name: "priority".into(), status: status.into(), message }
+        }
+        Err(_) => doctor_timeout("priority", DOCTOR_STEP),
     });
-    report.checks.push(DoctorCheck {
-        name: "github-observer-auth".into(),
-        status: if token.is_ok() { "pass" } else { "warn" }.into(),
-        message: match token {
-            Ok(_) => "GitHub observers have a credential source; credential values are not displayed".into(),
-            Err(error) => error.to_string(),
+    report.checks.push(match token {
+        Ok(token) => DoctorCheck {
+            name: "github-observer-auth".into(),
+            status: if token.is_ok() { "pass" } else { "warn" }.into(),
+            message: match token {
+                Ok(_) => "GitHub observers have a credential source; credential values are not displayed".into(),
+                Err(error) => error.to_string(),
+            },
         },
+        Err(_) => doctor_timeout("github-observer-auth", DOCTOR_STEP),
     });
     // Request samples are live operational telemetry. Keep them on /v1/doctor,
     // outside the store-index-fenced operation projection built by doctor_report.
@@ -116,6 +135,7 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
         client_now_ms(),
     ));
     report.checks.extend(crate::github_admission::doctor_lines(client_now_ms()));
+    report.checks.extend(crate::github_webhook::doctor_line(client_now_ms()));
     report.checks.push(reader_store.mailbox_wake_health());
     report.checks.push(descriptor_check());
     report.checks.push(reader_memory_check(
@@ -125,14 +145,7 @@ pub async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>,
         smallclaims::sqlite::max_read_workers(),
         crate::memory::service_memory(),
     ));
-    report.status = if report.checks.iter().any(|check| check.status == "fail") {
-        "fail"
-    } else if report.checks.iter().any(|check| check.status == "warn") {
-        "warn"
-    } else {
-        "pass"
-    }
-    .into();
+    report.status = doctor_status(&report.checks).into();
     Ok(Json(report))
 }
 
@@ -198,25 +211,184 @@ fn build_tools_check(tools: &crate::environment::BuildTools) -> DoctorCheck {
     }
 }
 
+#[derive(Default, Deserialize)]
+pub struct OperationalRepairQuery {
+    subjects: Option<String>,
+    classes: Option<String>,
+}
+
+fn repair_filter_values(value: Option<String>) -> Result<Vec<String>, ApiError> {
+    value.map(|value| serde_json::from_str(&value)
+        .map_err(|_| ApiError::bad(FractalError::new("invalid-repair-filter", "repair filters must be JSON string arrays"))))
+        .transpose().map(Option::unwrap_or_default)
+}
+
 pub async fn operational_repair_plan(
     State(state): State<AppState>,
+    Query(query): Query<OperationalRepairQuery>,
 ) -> Result<Json<OperationalRepairPlan>, ApiError> {
-    let store = state.store.clone();
-    blocking_store(move || store.operational_repair_plan())
-        .await
-        .map(Json)
+    let subjects = repair_filter_values(query.subjects)?;
+    let classes = repair_filter_values(query.classes)?;
+    blocking_store(move || owner_operational_repair_plan_with_filter(&state, &subjects, &classes)).await.map(Json)
 }
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
+    bound: Option<BoundActor>,
     Json(request): Json<OperationalRepairApplyRequest>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
-    let store = state.store.clone();
-    let result = blocking_action(move || store.apply_operational_repair(&request.token)).await?;
+    if bound.is_some() || request.actor.is_some() {
+        return Err(ApiError::bad(FractalError::new(
+            "foreign-agent-actor",
+            "the legacy repair route accepts only unbound token-only callers",
+        )));
+    }
+    apply_operational_repair_with_actor(state, request, None).await
+}
+
+/// A separate route makes an older token-only daemon refuse attributed applies
+/// before mutation, even if it would silently ignore an unknown actor field.
+pub async fn apply_attributed_operational_repair(
+    State(state): State<AppState>,
+    bound: Option<BoundActor>,
+    Json(request): Json<OperationalRepairApplyRequest>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
+    let bound = bound.ok_or_else(|| ApiError::bad(FractalError::new(
+        "foreign-agent-actor",
+        "attributed repair apply requires an authenticated harness binding",
+    )))?;
+    apply_operational_repair_with_actor(state, request, Some(bound.actor().to_owned())).await
+}
+
+async fn apply_operational_repair_with_actor(
+    state: AppState,
+    request: OperationalRepairApplyRequest,
+    bound_actor: Option<String>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
+    let effect_state = state.clone();
+    let result = blocking_action(move || {
+        let (subjects, classes) = Store::operational_repair_token_filters(&request.token)?;
+        let (_guards, evidence) = legacy_start_repair_evidence(&effect_state, &subjects, &classes)
+            .map_err(legacy_start_proof_error)?;
+        effect_state.store.apply_operational_repair_with_legacy_starts(
+            &request.token, &evidence, bound_actor.as_deref(),
+        )
+    }).await?;
     if result.applied != 0 {
         signal_changed(&state);
     }
     Ok(Json(result))
+}
+
+pub(super) fn owner_operational_repair_plan(state: &AppState) -> anyhow::Result<OperationalRepairPlan> {
+    owner_operational_repair_plan_with_filter(state, &[], &[])
+}
+
+fn owner_operational_repair_plan_with_filter(
+    state: &AppState, subjects: &[String], classes: &[String],
+) -> anyhow::Result<OperationalRepairPlan> {
+    let (_guards, evidence) = legacy_start_repair_evidence(state, subjects, classes)
+        .map_err(legacy_start_proof_error)?;
+    state.store.operational_repair_plan_with_legacy_starts_and_filter(&evidence, subjects, classes)
+}
+
+fn legacy_start_proof_error(error: anyhow::Error) -> FractalError {
+    let mut refusal = FractalError::new(
+        "legacy-start-proof-unavailable",
+        "could not prove the legacy runtime start is closed",
+    );
+    if let Some(procfs) = error.downcast_ref::<fractal_runtime::ProcfsHidesProcesses>() {
+        tracing::warn!(stage = "procfs-visibility", reason = procfs.detail,
+            mount_options = ?procfs.mount_options, "legacy start closure proof refused");
+        refusal = refusal.with_detail("stage", "procfs-visibility")
+            .with_detail("reason", procfs.detail);
+        if let Some(options) = &procfs.mount_options {
+            refusal = refusal.with_detail("mount_options", options.as_str());
+        }
+        return refusal;
+    }
+    if let Some(process) = error.downcast_ref::<fractal_runtime::LegacyStartProofUnavailable>() {
+        tracing::warn!(stage = process.stage, pid = ?process.pid, unit = ?process.unit,
+            errno = ?process.errno, "legacy start closure proof refused");
+        refusal = refusal.with_detail("stage", process.stage);
+        if let Some(pid) = process.pid { refusal = refusal.with_detail("pid", pid); }
+        if let Some(unit) = &process.unit { refusal = refusal.with_detail("unit", unit.as_str()); }
+        if let Some(errno) = process.errno {
+            refusal = refusal.with_detail("errno", errno);
+        }
+    } else {
+        tracing::warn!(stage = "native-capture", "legacy start closure proof refused");
+        refusal = refusal.with_detail("stage", "native-capture");
+        if let Some(errno) = error.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error) {
+            refusal = refusal.with_detail("errno", errno);
+        }
+    }
+    refusal
+}
+
+pub(super) fn operational_repair_check(
+    result: anyhow::Result<OperationalRepairPlan>,
+) -> Result<DoctorCheck, ApiError> {
+    match result {
+        Ok(plan) if plan.items.is_empty() => Ok(DoctorCheck {
+            name: "operational-repair".into(),
+            status: "pass".into(),
+            message: "the graph has no repairable operational contradictions".into(),
+        }),
+        Ok(plan) => Ok(DoctorCheck {
+            name: "operational-repair".into(),
+            status: "warn".into(),
+            message: format!(
+                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
+                plan.items.len(), plan.token
+            ),
+        }),
+        Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<FractalError>()
+                && refusal.code == "legacy-start-proof-unavailable"
+            {
+                return Err(ApiError::internal(error));
+            }
+            Ok(DoctorCheck {
+                name: "operational-repair".into(),
+                status: "fail".into(),
+                message: format!("could not compute the operational repair plan: {error}"),
+            })
+        }
+    }
+}
+
+/// Physical evidence comes only from this owner daemon, never the repair request.
+/// Keep each native spawn-lock guard alive through the normal writer transaction.
+fn legacy_start_repair_evidence(
+    state: &AppState,
+    subjects: &[String],
+    classes: &[String],
+) -> anyhow::Result<(Vec<fractal_runtime::LegacyStartClosureProof>, Vec<Value>)> {
+    let runtime = daemon_pty(state)?;
+    let mut guards = Vec::new();
+    let mut evidence = Vec::new();
+    if !classes.is_empty() && !classes.iter().any(|class| class == "revoked-legacy-runtime-start") {
+        return Ok((guards, evidence));
+    }
+    for operation in state.store.pending_runtime_starts()? {
+        if !subjects.is_empty() && !subjects.contains(&operation.subject) { continue; }
+        if !operation.finished || !operation.applied || operation.revoked_by.is_none() || operation.cleanup_verified {
+            continue;
+        }
+        let Some(member) = operation.body.get("member") else { continue; };
+        if member["terminal"] != true || member["host"].as_str() != Some(state.node.as_str()) {
+            continue;
+        }
+        let Some(runtime_id) = member["runtime_id"].as_str() else { continue; };
+        if let Some(proof) = runtime.legacy_start_closure(runtime_id, &operation.id)? {
+            let mut value = serde_json::to_value(&proof.evidence)?;
+            value["legacy"] = Value::from(true);
+            evidence.push(value);
+            guards.push(proof);
+        }
+    }
+    Ok((guards, evidence))
 }
 
 mod backup_export;
@@ -251,7 +423,7 @@ pub async fn get_coordination_counts(
     let until = query.until_ms.unwrap_or(client_now_ms() as u64);
     let since = query.since_ms.unwrap_or(until.saturating_sub(86_400_000));
     if since > until {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
@@ -270,22 +442,19 @@ pub async fn get_usage(
         .since_ms
         .unwrap_or(until_ms.saturating_sub(86_400_000));
     if since_ms > until_ms {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
     }
     let store = state.store.clone();
-    let (rows, agent_messages, limits) = blocking_store(move || {
-        let (rows, agent_messages) = store.usage_period_report(since_ms, until_ms)?;
-        Ok((
-            rows,
-            agent_messages,
-            store.account_limits()?,
-        ))
-    })
-    .await?;
-    let mut report = json!({"since_ms": since_ms, "until_ms": until_ms, "rows": rows, "limits": limits, "agent_messages": agent_messages});
+    let crate::store::AttributedUsage {
+        rows,
+        agent_messages,
+        limits,
+        accounts,
+    } = blocking_store(move || store.attributed_usage(since_ms, until_ms)).await?;
+    let mut report = json!({"since_ms": since_ms, "until_ms": until_ms, "rows": rows, "limits": limits, "accounts": accounts, "agent_messages": agent_messages});
     // The policy as the config file says now, so `st usage` shows which accounts it never stops.
     let reloaded = tokio::task::spawn_blocking(crate::config::reload_daemon_limits)
         .await
@@ -309,6 +478,18 @@ pub async fn get_usage(
         row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
     }
     if let Some((config, policy)) = policy {
+        // Entries of `keep` whose seat is no longer declared: they keep nothing. Only reported.
+        let kept = config.keep.clone();
+        let live = blocking_store({
+            let store = state.store.clone();
+            move || store.declared_seats(&kept)
+        })
+        .await?;
+        let retired_keep = config
+            .keep
+            .iter()
+            .filter(|seat| !live.contains(*seat))
+            .collect::<Vec<_>>();
         for (row, limit) in report["limits"]
             .as_array_mut()
             .into_iter()
@@ -321,6 +502,8 @@ pub async fn get_usage(
             "stop_at_weekly_percent": config.stop_at_weekly_percent,
             "exempt_accounts": config.exempt_accounts,
             "exempt_harnesses": config.exempt_harnesses,
+            "keep": config.keep,
+            "keep_retired": retired_keep,
         });
     }
     Ok(Json(report))
@@ -328,8 +511,48 @@ pub async fn get_usage(
 
 pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
-    let rows = blocking_store(move || slo_rows(&store)).await?;
-    Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
+    let state_dir = state.state_dir.clone();
+    let rows = blocking_store(move || current_slo_rows(&store, &state_dir)).await?;
+    let mut body = json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows});
+    if let Some(url) = crate::slo_history::ui_url() {
+        body["otel_ui_url"] = Value::String(url);
+    }
+    Ok(Json(body))
+}
+
+/// Every objective and budget row as `GET /v1/slo` lists it, with forecasts and tones.
+pub fn current_slo_rows(store: &crate::store::Store, state_dir: &std::path::Path) -> anyhow::Result<Vec<Value>> {
+    let mut rows = slo_rows(store)?;
+    rows.extend(crate::readiness_slo::current(store));
+    add_budget_forecasts(&mut rows, &crate::slo_history::dir(state_dir), client_now_ms() as u64);
+    add_tones(&mut rows);
+    Ok(rows)
+}
+
+/// Say on each row how urgent it is, by the one rule the terminal UI colors with, so the phone
+/// and the web app need not decide what is red.
+fn add_tones(rows: &mut [Value]) {
+    for row in rows {
+        let tone = fractal_ui_model::slo::tone(
+            row["kind"].as_str().unwrap_or_default(),
+            row["status"].as_str().unwrap_or_default(),
+            row["remaining_percent"].as_f64(),
+        );
+        row["tone"] = Value::String(tone.word().into());
+    }
+}
+
+/// Say on each budget how much will be used when it resets, at the rate the local history log
+/// shows for its recent past. A log that cannot be read leaves the row without a forecast: the
+/// list is still true, only less far-sighted.
+fn add_budget_forecasts(rows: &mut [Value], dir: &std::path::Path, now_unix_ms: u64) {
+    for row in rows {
+        let Some(basis) = crate::objectives::forecast_basis_ms(row, now_unix_ms) else { continue };
+        let Some(id) = row["id"].as_str().map(str::to_owned) else { continue };
+        if let Ok(readings) = crate::slo_history::read(dir, &id, now_unix_ms.saturating_sub(basis), now_unix_ms) {
+            crate::objectives::add_forecast(row, &readings, now_unix_ms);
+        }
+    }
 }
 
 /// What was left of one objective or budget across a period, from the local history log.
@@ -343,7 +566,7 @@ pub async fn get_slo_history(
         .unwrap_or(until_ms.saturating_sub(crate::slo_history::RETENTION_MS / 7));
     let steps = query.steps.unwrap_or(120);
     if since_ms >= until_ms || until_ms - since_ms > crate::slo_history::RETENTION_MS || !(1..=1_000).contains(&steps) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-slo-period",
             "the period must end after it starts, span at most 7 days, and use 1 to 1000 steps",
         )));
@@ -352,8 +575,8 @@ pub async fn get_slo_history(
     let id = query.id.clone();
     let points = tokio::task::spawn_blocking(move || crate::slo_history::read(&dir, &id, since_ms, until_ms))
         .await
-        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?
-        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?;
+        .map_err(|error| ApiError::bad(FractalError::new("slo-history-unavailable", error.to_string())))?
+        .map_err(|error| ApiError::bad(FractalError::new("slo-history-unavailable", error.to_string())))?;
     Ok(Json(json!({
         "id": query.id, "since_ms": since_ms, "until_ms": until_ms, "samples": points.len(),
         "steps": crate::slo_history::buckets(&points, since_ms, until_ms, steps),
@@ -380,19 +603,19 @@ pub async fn post_harness_diagnostic(
     } else if !request.actor.contains('/') && !request.actor.trim().is_empty() {
         format!("agent/{}", request.actor)
     } else {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-diagnostic-actor",
             "a harness diagnostic requires one concrete agent subject",
         )));
     };
     if !matches!(request.severity.as_str(), "warning" | "error") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-diagnostic-severity",
             "a harness diagnostic severity must be warning or error",
         )));
     }
     if request.code.trim().is_empty() || request.reason.trim().is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-harness-diagnostic",
             "a harness diagnostic requires a nonempty code and reason",
         )));
@@ -434,6 +657,21 @@ pub struct StatusQuery {
     /// Only the subject's current harness; see `Store::status_harness_only`.
     #[serde(default)]
     harness_only: bool,
+    /// For a seat (`agent/`) without `owner_run`: only its declaration, status and incarnation;
+    /// see `Store::status_summary_at`. Any other read, and a daemon older than this, answers with
+    /// the full reduction.
+    #[serde(default)]
+    summary: bool,
+}
+
+pub async fn resource_referrers(
+    State(state): State<AppState>,
+    AxumPath(subject): AxumPath<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.declared_resource_referrers(&subject))
+        .await
+        .map(Json)
 }
 
 /// One subject's desired record. Each Claude seat's status line reads it on every render (every
@@ -452,27 +690,57 @@ pub async fn get_desired(
         .ok_or_else(|| ApiError::not_found(format!("`{subject}` has no desired record")))
 }
 
+/// Bulk comparison read: no status reduction or cold actual-state folds.
+pub async fn desired_batch(
+    State(state): State<AppState>,
+    Query(parameters): Query<Vec<(String, String)>>,
+) -> Result<Json<crate::store::desired_batch::DesiredBatchPage>, ApiError> {
+    let mut request = crate::store::desired_batch::DesiredBatchRequest::default();
+    for (name, value) in parameters {
+        match name.as_str() {
+            "subject" => request.subjects.push(value),
+            "kind" => request.kind = Some(value),
+            "cursor" => request.cursor = Some(value),
+            "limit" => request.limit = Some(value.parse().map_err(|_| ApiError::bad(
+                FractalError::new("desired-page-limit", "limit must be an integer between 1 and 1000"),
+            ))?),
+            _ => {}
+        }
+    }
+    let store = state.store.clone();
+    blocking_store(move || store.desired_batch(&request)).await.map(Json)
+}
+
 pub async fn status(
     State(state): State<AppState>,
     Query(query): Query<StatusQuery>,
 ) -> Result<Json<StatusResponse>, ApiError> {
     let store = state.store.clone();
+    let admission = state.seat_admission.clone();
     blocking_store(move || {
-        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
-            store.status_harness_only(subject)
-        } else if query.history {
-            store.status_history(
-                query.subject.as_deref(),
-                query.owner_run.as_deref(),
-                query.at_index,
-            )
+        let subject = query.subject.as_deref().map(|subject| {
+            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+        }).transpose()?;
+        let mut response = if query.harness_only && !query.history && let Some(subject) = subject.as_deref() {
+            // The harness shortcut reads current state even when a historical cut is supplied.
+            if !store.generic_status_subject_visible_at(subject, store.index()?)? {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
+                ).with_detail("reason", "notices-unavailable")));
+            }
+            store.status_harness_only(subject)?
+        } else if query.summary && !query.history && query.owner_run.is_none()
+            && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
+        {
+            store.status_summary_at(subject, query.at_index)?
         } else {
-            store.status_at(
-                query.subject.as_deref(),
-                query.owner_run.as_deref(),
-                query.at_index,
-            )
-        }?;
+            store.status_for_generic_reads(
+                subject.as_deref(), query.owner_run.as_deref(), query.at_index, query.history,
+            )?
+        };
+        if !query.history && query.at_index.is_none() {
+            response.seat_admission = Some(admission.snapshot(admission_now()));
+        }
         // Exact schedule reads gain an optional local observation. Keep broad/agent reads and
         // primary-only schedules on their existing path; this is never a persisted projection.
         if query.subject.as_deref().is_some_and(|subject| subject.starts_with("schedule/")) {
@@ -504,7 +772,7 @@ pub async fn events(
     // The old array shape has no continuation field. Keep its bounded answer and expose
     // truncation explicitly in headers; owner traversal requires the new page envelope.
     if query.owner_run.is_some() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "event-pagination-required",
             "update the st CLI to this daemon version; owner-filtered traversal uses /v1/events/page",
         )));
@@ -512,7 +780,7 @@ pub async fn events(
     if query.subject.is_some() {
         let store = state.store.clone();
         if blocking_store(move || store.event_payload_migration_pending()).await? {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "event-pagination-required",
                 "update the st CLI to this daemon version; subject-filtered traversal during migration uses /v1/events/page",
             )));
@@ -559,5 +827,147 @@ pub async fn events(
             )
                 .into_response());
         }
+    }
+}
+
+#[cfg(test)]
+mod legacy_proof_refusal_tests {
+    use super::*;
+    #[test]
+    fn hidden_or_unknown_procfs_is_a_typed_422_refusal() {
+        for (reason, options) in [
+            ("procfs-hides-processes", Some("rw;rw,hidepid=invisible".to_owned())),
+            ("mountinfo-unreadable", None),
+            ("mountinfo-invalid", None),
+            ("procfs-mount-not-found", None),
+        ] {
+            let error = legacy_start_proof_error(fractal_runtime::ProcfsHidesProcesses {
+                detail: reason, mount_options: options.clone(),
+            }.into());
+            let error = ApiError::internal(error);
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "legacy-start-proof-unavailable");
+            assert_eq!(error.details.get("stage"), Some(&json!("procfs-visibility")));
+            assert_eq!(error.details.get("reason"), Some(&json!(reason)));
+            assert_eq!(error.details.get("mount_options"), options.as_ref().map(|options| json!(options)).as_ref());
+        }
+    }
+
+
+    fn capture_error() -> FractalError {
+        legacy_start_proof_error(anyhow::Error::new(
+            fractal_runtime::LegacyStartProofUnavailable {
+                stage: "proc-environ",
+                pid: Some(123),
+                unit: None,
+                errno: Some(13), // Linux EACCES; no raw environment or path is exposed.
+            },
+        ).context("PRIVATE_TOKEN=must-not-appear"))
+    }
+
+    #[test]
+    fn unit_query_refusal_identifies_stage_and_unit() {
+        let refusal = legacy_start_proof_error(anyhow::Error::new(
+            fractal_runtime::LegacyStartProofUnavailable {
+                stage: "recorded-scope", pid: None,
+                unit: Some("st3-repo.worker-42-1.scope".into()), errno: None,
+            },
+        ));
+        assert_eq!(refusal.details.get("stage"), Some(&json!("recorded-scope")));
+        assert_eq!(refusal.details.get("unit"), Some(&json!("st3-repo.worker-42-1.scope")));
+    }
+
+    fn assert_refusal(error: ApiError) {
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, "legacy-start-proof-unavailable");
+        assert_eq!(error.details.get("stage"), Some(&json!("proc-environ")));
+        assert_eq!(error.details.get("pid"), Some(&json!(123)));
+        assert_eq!(error.details.get("errno"), Some(&json!(13)));
+        assert!(!error.message.contains("PRIVATE_TOKEN"));
+        assert_eq!(error.details.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn legacy_proof_refusal_is_typed_for_dry_run_apply_and_doctor() {
+        let dry_run = blocking_store(|| {
+            Err::<OperationalRepairPlan, _>(capture_error().into())
+        }).await;
+        assert_refusal(dry_run.err().unwrap());
+        let apply = blocking_action(|| {
+            Err::<OperationalRepairResult, _>(capture_error())
+        }).await;
+        assert_refusal(apply.err().unwrap());
+        assert_refusal(operational_repair_check(Err(capture_error().into())).err().unwrap());
+    }
+
+    #[test]
+    fn legacy_proof_refusal_redacts_unstructured_capture_errors() {
+        let error = legacy_start_proof_error(anyhow::anyhow!("private path and environment"));
+        assert_eq!(error.code, "legacy-start-proof-unavailable");
+        assert_eq!(error.details.get("stage"), Some(&json!("native-capture")));
+        assert!(!error.message.contains("private path"));
+        assert_eq!(error.details.len(), 1);
+        let check = operational_repair_check(Err(anyhow::anyhow!("unrelated graph error"))).unwrap();
+        assert_eq!(check.status, "fail");
+    }
+}
+
+#[cfg(test)]
+mod seat_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fabric_health_does_not_disclose_seat_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        state.seat_admission.state().decision = fractal_runtime::seat_admission::Decision {
+            mode: "enforce".into(), reason: "test pressure".into(),
+            queue: true, observed_at: None,
+        };
+        let queued = "agent/example/private-queued";
+        let replacement = "agent/example/private-replacement";
+        assert!(!state.seat_admission.admit(queued, None, None, false, admission_now()));
+        assert!(state.seat_admission.admit(replacement, None, None, true, admission_now()));
+        assert_eq!(state.seat_admission.snapshot(admission_now())["pendingCount"], 1);
+        let app = crate::api::fabric_router(state);
+        let (status, health) = crate::api::tests::get_request(app, "/v1/health").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{health}");
+        assert!(health.get("seatAdmission").is_none(), "{health}");
+        let encoded = health.to_string();
+        assert!(!encoded.contains(queued), "{health}");
+        assert!(!encoded.contains(replacement), "{health}");
+    }
+
+    #[tokio::test]
+    async fn current_status_reads_live_admission_but_historical_status_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        state.seat_admission.state().decision.queue = true;
+        assert!(!state.seat_admission.admit("agent/example/queued", None, None, false, admission_now()));
+        for (query, live) in [(json!({}), true), (json!({"history":true}), false),
+            (json!({"at_index":0}), false)] {
+            let Json(response) = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            assert_eq!(response.seat_admission.is_some(), live);
+            if let Some(admission) = response.seat_admission {
+                assert_eq!(admission["pendingCount"], 1);
+                assert_eq!(admission["pending"][0]["subject"], "agent/example/queued");
+            }
+        }
+    }
+
+    #[test]
+    fn agent_overlay_uses_live_status_without_persisting_or_overlaying_history() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let before = state.store.index().unwrap();
+        state.seat_admission.state().decision.queue = true;
+        state.seat_admission.admit("agent/example/queued", None, None, false, 100);
+        let mut cards = vec![json!({"id":"agent/example/queued"}), json!({"id":"agent/example/other"})];
+        overlay_seat_admission(&state, &mut cards, true);
+        assert!(cards[0].get("seat_admission").is_none());
+        overlay_seat_admission(&state, &mut cards, false);
+        assert_eq!(cards[0]["seat_admission"]["queuePosition"], 1);
+        assert!(cards[1].get("seat_admission").is_none());
+        assert_eq!(state.store.index().unwrap(), before);
     }
 }

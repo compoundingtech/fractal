@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound the initial transcript mount to six source rows, preserving the newest prompt and complete reasoning runs",
+  "replay": { "status": "none", "detail": "Presentation only; no claim replay or projection rebuild." },
+  "schema": { "status": "none", "detail": "No database, replicated vocabulary or client wire changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or admission rule changes." },
+  "compatibility": { "status": "changed", "detail": "Transcript history initially mounts six source rows rather than two complete turns. The newest prompt remains available and a contiguous reasoning run crossing the boundary remains whole. Existing explicit history controls reveal earlier rows. Current viewport, runtime, retained panes, sidebar and composer ownership remain unchanged." },
+  "downtime": { "status": "none", "detail": "No daemon interruption or startup work." },
+  "manual": { "status": "none", "detail": "No configuration or migration. Use the existing history controls to reveal older rows." },
+  "recovery": { "status": "none", "detail": "No stored state changes. Older builds retain their previous transcript mounting policy." }
+}

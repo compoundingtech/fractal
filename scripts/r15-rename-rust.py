@@ -125,7 +125,7 @@ def source_paths(text):
                             "clients/typescript/fractal-" + stem)
     text = text.replace("clients/swift/St3Client", "clients/swift/FractalClient")
     return text.replace("apps/fractal-web/packages/st3-sdk",
-                        "apps/fractal-web/packages/fractal-sdk")
+                        "packages/fractal-sdk")
 
 
 def manifest(p, data):

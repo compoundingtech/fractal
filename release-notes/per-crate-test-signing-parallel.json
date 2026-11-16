@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test --check rust-tests signs the crates of a run side by side (ST_TEST_SIGN_JOBS, default 8), evaluates the dev shell digest once, and pushes all the records in one push, instead of a serial signature and push per crate",
+  "replay": {"status": "none", "detail": "CI and local tooling only; no product code changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product contract change. Each record's content and signature are as before; only when they are made and pushed changes."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

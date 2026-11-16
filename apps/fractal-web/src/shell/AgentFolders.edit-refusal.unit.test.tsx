@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import type * as FoldersClient from '../folders/client.ts'
 import type { FolderState } from '../folders/client.ts'
-import type { DataSource } from '../data/source.ts'
-import { ActionRefused } from '@fractal/sdk/effect'
+import { credentialExpiredMessage, type DataSource } from '../data/source.ts'
+import { ActionRefused } from '@fractal/sdk/mutations'
 import { Effect } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -46,6 +46,20 @@ class SidebarResizeObserver implements ResizeObserver {
 }
 globalThis.ResizeObserver = SidebarResizeObserver
 Element.prototype.getBoundingClientRect = function (): DOMRect { return DOMRect.fromRect(viewport) }
+
+it('shows the fixed credential notice without refresh or retry for folder reads', () => {
+  const registry = AtomRegistry.make()
+  const source: DataSource = { ...fixtureSource({ world: fixtureProjections }), mode: 'live' }
+  registry.set(editFolders, { doc: { folders: {}, placements: {} }, phase: 'unavailable', reason: 'unauthorized', detail: 'private diagnostic', readOnly: true, edit: () => Promise.reject(new Error('Read-only')), retry: vi.fn(), retryEdit: vi.fn() })
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  try {
+    flushSync(() => root.render(<DataSourceProvider source={source} registry={registry}><AgentFolders workspaces={[]} selection={Atom.make('')} dispatch={() => undefined} /></DataSourceProvider>))
+    expect(container.textContent).toContain(credentialExpiredMessage)
+    expect(container.textContent).not.toMatch(/private diagnostic|Refresh|Retry/)
+  } finally { flushSync(() => root.unmount()); registry.dispose(); container.remove() }
+})
 
 it.each([
   ['', 'arrangement-limit', 'Known', 'The folder layout has reached its limit; reduce the layout before trying again.'],

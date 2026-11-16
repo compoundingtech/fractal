@@ -6,7 +6,7 @@ use rusqlite::{Connection, params};
 use std::sync::{Barrier, Mutex};
 
 
-// Only explicitly tracked fixture stores are counted (st3-api's `note_snapshot_construction`). Other
+// Only explicitly tracked fixture stores are counted (fractal-api-core's `note_snapshot_construction`). Other
 // parallel tests cannot affect this admission-order control, and the registration is removed on drop.
 use crate::api::SNAPSHOT_CONSTRUCTIONS;
 
@@ -275,7 +275,7 @@ async fn detail_router_preserves_ids_kinds_stops_and_actor_scope() {
         let credential = format!("detail-reader-{index}");
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: format!("custom/client/detail-reader-{index}"),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/ada".into()),

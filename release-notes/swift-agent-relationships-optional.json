@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Swift agent resources accept an omitted under relationship list, preserving the distinction between absent and explicitly empty values.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "The existing Agent schema already makes under optional; the Swift template and generated model now match it." },
+  "rules": { "status": "none", "detail": "No coordination changes." },
+  "compatibility": { "status": "none", "detail": "AgentResource.under is now optional. Swift consumers must handle nil when the daemon omits relationship information; an explicit empty list remains an empty list. Fixture assertions select resource IDs rather than depending on fixture ordering. The test capture session explicitly initializes URLSession on Linux." },
+  "downtime": { "status": "none", "detail": "No deployment outage." },
+  "manual": { "status": "none", "detail": "No operator action." },
+  "recovery": { "status": "none", "detail": "No durable state changes." }
+}

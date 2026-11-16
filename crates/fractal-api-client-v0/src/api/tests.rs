@@ -9,11 +9,11 @@ use crate::api::tests_shared::{probe_claim, state};
 use fractal_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, get_request, json_request, materialize_run_agents};
 
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn bound_actor_refusals_decode_as_client_api_errors() {
-    fn own_seat(_pid: u32) -> Option<String> {
-        Some("agent/example-own/worker".into())
+    fn own_seat(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_api_core::api::HarnessAncestry {
+        fractal_api_core::api::HarnessAncestry::Bound("agent/example-own/worker".into())
     }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("api.sock");
@@ -62,7 +62,7 @@ async fn bound_actor_refusals_decode_as_client_api_errors() {
     assert!(message.contains("cannot act as"));
     let value = serde_json::to_value(envelope).unwrap();
     assert_eq!(value["api_version"], CLIENT_API_VERSION);
-    assert_eq!(value["error_version"], "st3.client.error.v0");
+    assert_eq!(value["error_version"], "fractal.client.error.v0");
     assert!(
         value["request_id"]
             .as_str()
@@ -83,9 +83,11 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         "/v1/agents/restart",
         "/v1/agents/rollout",
         "/v1/agents/start",
+        "/v1/fleet/admission-override",
         "/v1/agents/suspend",
         "/v1/agents/resume",
         "/v1/agents/native-session",
+        "/v1/agents/lane/burst",
         "/v1/work/revision/approve/proposal",
         "/v1/work/delegation",
         "/v1/messages/example/claims",
@@ -93,6 +95,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         "/v1/mission-runs/example%2Fdemo%2F1/revision",
         "/v1/missions/example%2Fdemo/retire",
         "/v1/subscription-requests/release/subscription-request%2Fexample",
+        "/v1/persons/rename",
         "/v1/reviews/step-run/example",
         "/v1/schema/registrations",
         "/v1/custom/reply",
@@ -146,6 +149,110 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn admission_override_rejects_foreign_requester() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for requester in ["agent/peer", "person/operator"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/fleet/admission-override")
+            .body(Body::from(json!({"actor": "agent/own", "requester": requester}).to_string()))
+            .unwrap();
+        let error = guard_bound_request(request, Some("agent/own"), &state.store)
+            .await.unwrap_err();
+        assert_eq!(error.code, "foreign-agent-actor", "{requester}");
+    }
+}
+
+#[tokio::test]
+async fn admission_override_preserves_bound_own_and_unbound_person_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (bound, actor) in [
+        (Some("agent/own"), "agent/own"),
+        (None, "person/operator"),
+        (None, "agent/peer"),
+    ] {
+        let payload = json!({
+            "actor": actor,
+            "peers": ["peer"],
+            "reason": "peer unavailable",
+            "idempotency_key": "override-test",
+        }).to_string();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/fleet/admission-override")
+            .body(Body::from(payload.clone()))
+            .unwrap();
+        let request = guard_bound_request(request, bound, &state.store).await.unwrap();
+        let bytes = axum::body::to_bytes(request.into_body(), 16 * 1024).await.unwrap();
+        assert_eq!(bytes.as_ref(), payload.as_bytes());
+    }
+}
+
+#[tokio::test]
+async fn slo_budgets_forecast_their_use_at_the_reset_from_the_local_history() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let now = client_now_ms() as u64;
+    let (status, body) = json_request(
+        app.clone(),
+        "/v1/claims",
+        json!({"subject": "agent/example.live", "kind": "harness.limits", "actor": "agent/example.live",
+            "fields": {"driver": "claude", "account_ref": "ada/claude-1", "weekly_percent": 30.0,
+                "five_hour_percent": 40.0, "measured_at_unix_ms": now - 10_000,
+                "five_hour_resets_at_unix_ms": now + 3 * 3_600_000,
+                "weekly_resets_at_unix_ms": now + 3 * 86_400_000},
+            "evidence": [], "idempotency_key": "slo-forecast-limits"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, before) = get_request(app.clone(), "/v1/client/slo").await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let find = |list: &Value, id: &str| {
+        list["rows"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap_or_else(|| panic!("no {id}")).clone()
+    };
+    // No history yet: the budget is listed as it was, with no forecast.
+    assert!(find(&before, "ada/claude-1/5h").get("forecast_used_percent").is_none(), "{before}");
+    // A quarter hour at one percent a minute: 60% is left, so it lasts an hour, not three.
+    let dir = crate::slo_history::dir(&state.state_dir);
+    for ago in (0..=15u64).rev() {
+        let left = json!({"id": "ada/claude-1/5h", "remaining_percent": 60.0 + ago as f64});
+        crate::slo_history::append(&dir, now - ago * 60_000, &[left]).unwrap();
+    }
+    for path in ["/v1/slo", "/v1/client/slo"] {
+        let (status, list) = get_request(app.clone(), path).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        let five = find(&list, "ada/claude-1/5h");
+        assert_eq!(five["forecast_used_percent"], 100.0, "{path}: {five}");
+        // Forty percent used is within its allowance; the row is green, and every row has a tone.
+        assert_eq!(five["tone"], "green", "{path}: {five}");
+        assert!(list["rows"].as_array().unwrap().iter().all(|row| row["tone"].is_string()), "{path}: {list}");
+        assert!(five["runs_out_at_unix_ms"].as_u64().unwrap() < now + 2 * 3_600_000, "{path}: {five}");
+        assert!(five["explain"].as_str().unwrap().contains("will not last until it resets"), "{path}: {five}");
+        // The weekly budget has no history, so it has no forecast.
+        assert!(find(&list, "ada/claude-1/weekly").get("forecast_used_percent").is_none(), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn slo_points_to_the_otel_ui_only_when_one_is_configured() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(state(root.path()));
+    crate::slo_history::set_ui_url(None);
+    let (status, none) = get_request(app.clone(), "/v1/client/slo").await;
+    assert_eq!(status, StatusCode::OK, "{none}");
+    assert!(none.get("otel_ui_url").is_none(), "{none}");
+    crate::slo_history::set_ui_url(Some("https://otel.example.test/d/slo".into()));
+    let (_, some) = get_request(app.clone(), "/v1/client/slo").await;
+    let (_, cli) = get_request(app, "/v1/slo").await;
+    crate::slo_history::set_ui_url(None);
+    assert_eq!(some["otel_ui_url"], "https://otel.example.test/d/slo", "{some}");
+    assert_eq!(cli["otel_ui_url"], "https://otel.example.test/d/slo", "{cli}");
 }
 
 #[tokio::test]
@@ -662,6 +769,7 @@ version 2
 
   mission "planned/work" state="ready" {
     goal "Publish the planned result."
+    resource "tracker" uri="urn:example:planning"
     step "inspect" { goal "Inspect the source." }
     step "change" {
       goal "Make the approved change."
@@ -792,6 +900,7 @@ version 2
 
   mission "planned/work" state="ready" {
     goal "Publish the planned and verified result."
+    resource "tracker" uri="urn:example:planning"
     step "inspect" { goal "Inspect the source." }
     step "change" {
       goal "Make the approved change."
@@ -908,7 +1017,8 @@ version 2
             .as_array()
             .unwrap()
             .len(),
-        1
+        2,
+        "the mission and its shared URI target are both declared"
     );
 
     let (status, decision) = json_request(
@@ -1027,7 +1137,9 @@ version 2
         approved["published_revision"],
         approved["candidate"]["mission_revision"]
     );
-    assert!(store.mission_spec("planned/work", None).unwrap().is_some());
+    let published = store.mission_spec("planned/work", None).unwrap().unwrap();
+    let uris = store.declared_resource_uris(&published.resources).unwrap();
+    assert_eq!(uris[&published.resources[0].subject], "urn:example:planning");
     // The planner is a durable top-level seat, not a synthetic standing
     // mission. Approval removes that seat directly and leaves no planner
     // mission run behind to clean up.
@@ -1245,6 +1357,108 @@ mission "plain" state="ready" {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(system["mission/observer"], true);
     assert_eq!(system["mission/plain"], false);
+}
+
+#[test]
+fn agents_show_their_declared_resources_until_a_declaration_drops_them() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let workspace = root.path().display().to_string();
+    let publish = |key: &str, resources: &str| {
+        let source = format!(
+            "version 2\nagent \"ada/seat\" {{\n  workspace {workspace:?}\n  command \"true\"\n{resources}}}\n"
+        );
+        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+        let planned = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply(&intent, &planned.subject_tokens, key)
+            .unwrap();
+    };
+    let goal = "urn:example:seat-goal";
+    let worktree = "urn:example:worktree";
+    publish(
+        "declare",
+        &format!(
+            "  resource \"goal\" uri=\"{goal}\" reason=\"seat goal\"\n  resource \"worktree\" uri=\"{worktree}\"\n"
+        ),
+    );
+    let subject = |uri: &str| format!("resource/uri/{}", hex::encode(Sha256::digest(uri)));
+    let read = || {
+        let agents =
+            client_agent_resources(&state.store, false, "now", state.store.index().unwrap())
+                .unwrap();
+        agents
+            .into_iter()
+            .find(|agent| agent["id"] == "agent/ada/seat")
+            .unwrap()
+    };
+    let agent = read();
+    assert_eq!(
+        agent["resources"],
+        json!([
+            { "name": "goal", "subject": subject(goal), "kind": "uri", "resolution": "resolved", "uri": goal, "reason": "seat goal" },
+            { "name": "worktree", "subject": subject(worktree), "kind": "uri", "resolution": "resolved", "uri": worktree, "reason": null },
+        ])
+    );
+    let typed: fractal_client::Resource = serde_json::from_value(agent).unwrap();
+    let fractal_client::Resource::Agent(typed) = typed else {
+        panic!("an agent resource");
+    };
+    assert_eq!(typed.resources[0].uri.as_deref(), Some(goal));
+
+    // The declaration read writes the edges back as the KDL that declared them.
+    let (_, tree) = state
+        .store
+        .agent_declaration("agent/ada/seat", None)
+        .unwrap()
+        .unwrap();
+    let uris = state
+        .store
+        .declared_resource_uris(&crate::graph::declared_resources(&tree))
+        .unwrap();
+    let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).unwrap();
+    let reparsed = crate::graph::parse_test_intent(&kdl, "node").unwrap();
+    assert_eq!(reparsed.subjects["agent/ada/seat"].desired, tree);
+    let unresolved = client_declared_resources(
+        &crate::graph::declared_resources(&tree), &BTreeMap::new(),
+    );
+    assert_eq!(unresolved[0]["kind"], "uri");
+    assert_eq!(unresolved[0]["resolution"], "unresolved");
+    assert_eq!(unresolved[0]["subject"], subject(goal));
+    assert!(unresolved[0].get("uri").is_none());
+
+    publish("subject", "  resource \"tracker\" subject=\"resource/github/example/issue/1\" reason=\"tracking\"\n");
+    assert_eq!(
+        read()["resources"],
+        json!([{"name": "tracker", "subject": "resource/github/example/issue/1", "kind": "subject", "resolution": "not-applicable", "reason": "tracking"}]),
+    );
+
+    publish("drop", &format!("  resource \"goal\" uri=\"{goal}\" reason=\"seat goal\"\n"));
+    assert_eq!(
+        read()["resources"],
+        json!([{ "name": "goal", "subject": subject(goal), "kind": "uri", "resolution": "resolved", "uri": goal, "reason": "seat goal" }])
+    );
+    assert_eq!(
+        state
+            .store
+            .selected_desired_kind(&subject(worktree))
+            .unwrap()
+            .as_deref(),
+        Some("resource"),
+        "omission leaves the resource subject in the graph"
+    );
+    publish("none", "");
+    assert_eq!(read()["resources"], json!([]));
 }
 
 #[test]

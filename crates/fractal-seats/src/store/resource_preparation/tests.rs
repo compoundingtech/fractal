@@ -391,6 +391,7 @@ fn changed_and_attempt_outcomes_match_the_canonical_path_and_retry_receipts() {
                 &[],
                 None,
                 None,
+                None,
             )
             .unwrap()
             .unwrap()
@@ -492,6 +493,7 @@ fn an_invalid_observation_keeps_the_canonical_error_without_partial_claims() {
             &[],
             None,
             None,
+            None,
         )
         .unwrap_err();
     assert_eq!(prepared.code, canonical.code);
@@ -503,7 +505,7 @@ fn an_invalid_observation_keeps_the_canonical_error_without_partial_claims() {
 }
 
 #[test]
-fn no_change_preparation_and_fast_writer_work_do_not_grow_with_resource_history() {
+fn no_change_preparation_fast_and_canonical_writer_work_do_not_grow_with_resource_history() {
     fn measured(width: usize) -> (Counts, Counts) {
         let (_store_directory, store, revision) = fixture();
         observe(&store, &revision, 1);
@@ -542,6 +544,7 @@ fn no_change_preparation_and_fast_writer_work_do_not_grow_with_resource_history(
                 &[],
                 None,
                 None,
+                None,
             )
             .unwrap()
             .unwrap()
@@ -552,14 +555,15 @@ fn no_change_preparation_and_fast_writer_work_do_not_grow_with_resource_history(
         );
         (fast, take_counts())
     }
-    let (small, _) = measured(2);
+    let (small, small_canonical) = measured(2);
     let (large, canonical) = measured(64);
     assert_eq!((small.fast, large.fast), (1, 1));
     assert_eq!((small.fallback, large.fallback), (0, 0));
     assert_eq!(small.writer[0].2.statements, large.writer[0].2.statements);
     assert!(large.preparation[0].1.vm_steps <= small.preparation[0].1.vm_steps + 32);
     assert!(large.writer[0].2.vm_steps <= small.writer[0].2.vm_steps + 32);
-    assert!(canonical.writer[0].2.vm_steps > large.writer[0].2.vm_steps + 64);
+    assert_eq!(small_canonical.writer[0].2.statements, canonical.writer[0].2.statements);
+    assert!(canonical.writer[0].2.vm_steps <= small_canonical.writer[0].2.vm_steps + 32);
     eprintln!(
         "history2 fast={small:?}; history64 fast={large:?}; history64 canonical={canonical:?}"
     );
@@ -834,7 +838,7 @@ subscription "fixture" {
 
 #[test]
 fn shared_memory_observations_keep_canonical_outcomes_and_two_plus_one_progress() {
-    let (store, revision) = fixture_for(Store::open_memory("prepared-fixture").unwrap());
+    let (store, revision) = fixture_for(Store::open_shared_memory("prepared-fixture").unwrap());
     take_counts();
     let first = observe(&store, &revision, 1);
     let baseline = take_counts();
@@ -867,6 +871,7 @@ fn shared_memory_observations_keep_canonical_outcomes_and_two_plus_one_progress(
             &json!({"state":"open"}),
             2,
             &[],
+            None,
             None,
             None,
         )
@@ -928,6 +933,7 @@ fn shared_memory_observations_keep_canonical_outcomes_and_two_plus_one_progress(
             3,
             &[],
             Some(&|| false),
+            None,
             None,
         )
         .unwrap_err();

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-local no longer deletes the log directory of a run that is still going when it keeps only the latest 10 runs' logs. A run that waited hours for build slots on a busy dev box used to lose its directory to ten later runs and then fail writing its stage's exit code, failing the check.",
+  "replay": {
+    "status": "none",
+    "detail": "Dev-box test tooling; no claim, replay or projection change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage or schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, permission or trust change; what a note signs is unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, CLI or client change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing runs differently on installed machines."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit."
+  }
+}

@@ -1,9 +1,37 @@
+import type { MembershipEffect, MembershipEvent, MembershipPage, MembershipToken } from './sidebarMemberships';
 import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import type { InventoryName } from '@fractal/views';
 import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
+import type { SidebarArrangement } from './sidebarEdits';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 import type { ConversationHeader, HeaderField } from '@fractal/views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
+
+/** Unwired membership conversion: epoch must come from the daemon capability, never a snapshot ID. */
+export const sidebarMembershipFrame = (token: MembershipToken, subscription: string, frame: CollectionFrame, epoch?: string): MembershipEvent | undefined => {
+  if ((frame.kind === 'error' || frame.kind === 'resync') && frame.id === subscription) return { type: frame.kind === 'resync' || frame.retryable ? 'Expired' : 'Refused', token };
+  if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'ordered-memberships' || frame.id !== subscription) return undefined;
+  if (!epoch || frame.membership.container !== token.scope.container) return { type: 'Refused', token };
+  if (frame.snapshot.host_id !== token.scope.host || frame.snapshot.projection_version !== token.scope.projection) return { type: 'Expired', token };
+  return { type: 'Metadata', token, frontier: { epoch, changed_index: frame.membership.changed_index, live_count: frame.membership.live_count } };
+};
+
+/** A reset invalidates the whole attempt; transport loss retains a stale last-complete base. */
+export const sidebarMembershipFailure = (token: MembershipToken, error: { status?: number; response?: { code: string } }): MembershipEvent => {
+  const code = error.response?.code;
+  if (error.status === 404 || error.status === 422 && code === 'unsupported-membership-paging-contract') return { type: 'Unsupported', token };
+  if (error.status === 422 && code === 'invalid-membership-cursor') return { type: 'InvalidCursor', token };
+  if (error.status === 500 && code === 'membership-frontier-inconsistent') return { type: 'FrontierInconsistent', token };
+  if (error.status === 409 && (code === 'membership-frontier-reset' || code === 'membership-collection-changed')) return { type: 'Expired', token };
+  return error.status === undefined ? { type: 'Disconnect', token } : { type: 'Refused', token };
+};
+
+/** Unwired transport port: joining the stream must finish before a first-page request. */
+export const readSidebarMemberships = async (effect: Exclude<MembershipEffect, { type: 'PersistBase' }>, subscribe: (token: MembershipToken) => Promise<void>, read: (token: MembershipToken, cursor?: string) => Promise<MembershipPage>): Promise<MembershipEvent> => {
+  if (effect.type === 'SubscribeAndRead') await subscribe(effect.token);
+  const page = await read(effect.token, effect.type === 'Read' ? effect.cursor : undefined);
+  return { type: 'Page', token: effect.token, page };
+};
 
 // The app holds three windows on one collections socket. It needs no work window: missions carry
 // their steps and agents name theirs. Subscription IDs are the window names.
@@ -15,7 +43,9 @@ export const FEED_WINDOWS = {
 export type FeedWindow = keyof typeof FEED_WINDOWS;
 export type FeedLists = { attention: Attention[]; missions: Mission[]; agents: Agent[] };
 const KINDS = { attention: 'attention', missions: 'mission', agents: 'agent' } as const;
-const TERMINAL = 'terminal', CONVERSATION = 'conversation', GLASSES = 'glasses', ARRANGEMENTS = 'arrangements';
+const TERMINAL = 'terminal', CONVERSATION = 'conversation', GLASSES = 'glasses', ARRANGEMENTS = 'arrangements', READ_POSITIONS = 'read-positions';
+/** What the feed asks for again on its own after Fractal stopped sending it. */
+type Retried = FeedWindow | typeof GLASSES | typeof ARRANGEMENTS | typeof READ_POSITIONS;
 export const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 
 export type FeedHandlers = {
@@ -41,15 +71,18 @@ export type GlassesHandlers = {
 };
 
 export type ArrangementsHandlers = {
-  onArrangements: (arrangements: Arrangement[]) => void;
+  onArrangements: (arrangements: SidebarArrangement[]) => void;
   onIssue: (issue: string) => void;
 };
+
+/** The person's read positions changed somewhere: a frame only says so, and the positions are listed again. */
+export type ReadPositionsHandlers = { onChanged: () => void };
 
 export type ConversationFrame = { replace: boolean; items: TimelineEntry[]; hasMore: boolean; sessionId?: string; olderCursor?: string; header?: ConversationHeader };
 export type ConversationHandlers = {
   /** `replace` carries the newest page; otherwise the entries changed since the last frame. */
   onEntries: (frame: ConversationFrame) => void;
-  /** A problem to show; an empty string clears it. `stopped`: st refused for good, so nothing
+  /** A problem to show; an empty string clears it. `stopped`: Fractal refused for good, so nothing
    * asks again until the person follows the conversation again. */
   onIssue: (issue: string, stopped?: boolean) => void;
   /** Typed, content-free refusal for local quality accounting. */
@@ -74,7 +107,7 @@ function errorMessage(error: unknown): string {
   return code ? plainMessage(code, error instanceof Error ? error.message : String(error)) : plainError(error);
 }
 const transient = (code: string | undefined) => code !== undefined && isTransientCode(code);
-/** Whether a refused conversation may load if asked again: all but st's word that it keeps no
+/** Whether a refused conversation may load if asked again: all but Fractal's word that it keeps no
  * start for the transcript (`timeline-history-incomplete`). */
 
 const HEADER_FIELDS: Record<string, true> = { model: true, context: true, cost: true, todos: true, jobs: true, subagents: true, ask: true, working: true };
@@ -110,14 +143,16 @@ export class Feed {
   private live = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stream: CollectionStream | undefined;
+  private cancelOpen: (() => void) | undefined;
   private windows: Partial<Record<FeedWindow, CollectionWindow>> = {};
   private terminal: TerminalFollow | undefined;
   private conversation: { target: string; handlers: ConversationHandlers; failures: number; timer?: ReturnType<typeof setTimeout> } | undefined;
   private glasses: { handlers: GlassesHandlers; window?: CollectionWindow } | undefined;
   private arrangements: { person: string; handlers: ArrangementsHandlers; window?: CollectionWindow } | undefined;
-  /** Windows (and the glasses) st stopped sending: how often they failed, and the timer to ask again. */
-  private retries: Partial<Record<FeedWindow | typeof GLASSES | typeof ARRANGEMENTS, { failures: number; timer?: ReturnType<typeof setTimeout> }>> = {};
-  // A reason st gave for a window it cannot serve yet, said only once it has lasted a moment: a write
+  private readPositions: { person: string; handlers: ReadPositionsHandlers } | undefined;
+  /** Windows (and the glasses, sidebar and read positions) Fractal stopped sending: how often they failed, and the timer to ask again. */
+  private retries: Partial<Record<Retried, { failures: number; timer?: ReturnType<typeof setTimeout> }>> = {};
+  // A reason Fractal gave for a window it cannot serve yet, said only once it has lasted a moment: a write
   // briefly revokes a source's readiness, and that blip is not worth a message.
   private reports: Partial<Record<FeedWindow, ReturnType<typeof setTimeout>>> = {};
   private readonly reportAfterMs: number;
@@ -199,7 +234,7 @@ export class Feed {
     return { close: () => { if (this.conversation !== follow) return; clearTimeout(follow.timer); this.conversation = undefined; this.stream?.unsubscribe(CONVERSATION); } };
   }
 
-  /** Follow the person's glasses (st keeps at most 100 live); a second call replaces the first. */
+  /** Follow the person's glasses (Fractal keeps at most 100 live); a second call replaces the first. */
   followGlasses(handlers: GlassesHandlers): Follow {
     const follow = { handlers };
     this.glasses = follow;
@@ -220,8 +255,23 @@ export class Feed {
     } };
   }
 
+  /** One explicit person's read positions, for gateways that grant `read-positions`; a second call replaces the first. */
+  followReadPositions(person: string, handlers: ReadPositionsHandlers): Follow {
+    const follow = { person, handlers };
+    this.readPositions = follow;
+    this.stream?.subscribeReadPositions(READ_POSITIONS, person);
+    return { close: () => {
+      if (this.readPositions !== follow) return;
+      this.loaded(READ_POSITIONS);
+      this.readPositions = undefined;
+      this.stream?.unsubscribe(READ_POSITIONS);
+    } };
+  }
+
   private suspend(unexpected = false): void {
     this.attempt++;
+    this.cancelOpen?.();
+    this.cancelOpen = undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
     const open = this.stream;
@@ -243,7 +293,7 @@ export class Feed {
   private heard(): void {
     if (!this.socket) return; // Node fakes or Expo Go do not expose protocol control frames.
     clearTimeout(this.heartbeat);
-    this.heartbeat = setTimeout(() => this.dropped(new Error('st stopped answering')), HEARTBEAT_WAIT_MS);
+    this.heartbeat = setTimeout(() => this.dropped(new Error('Fractal stopped answering')), HEARTBEAT_WAIT_MS);
   }
 
   setInventoryGranted(granted: boolean): void { this.inventory.setGranted(granted); }
@@ -257,8 +307,8 @@ export class Feed {
     this.inventory.refresh();
   }
 
-  /** Ask again for a window st stopped sending, after a wait that grows; say so the first time only. */
-  private retryLater(name: FeedWindow | typeof GLASSES | typeof ARRANGEMENTS, again: () => void): boolean {
+  /** Ask again for a window Fractal stopped sending, after a wait that grows; say so the first time only. */
+  private retryLater(name: Retried, again: () => void): boolean {
     const retry = this.retries[name] ?? { failures: 0 };
     clearTimeout(retry.timer);
     const wait = this.retryDelaysMs[Math.min(retry.failures, this.retryDelaysMs.length - 1)];
@@ -270,10 +320,10 @@ export class Feed {
     return retry.failures === 1;
   }
 
-  private loaded(name: FeedWindow | typeof GLASSES | typeof ARRANGEMENTS): void {
+  private loaded(name: Retried): void {
     clearTimeout(this.retries[name]?.timer);
     delete this.retries[name];
-    if (name !== GLASSES && name !== ARRANGEMENTS) { clearTimeout(this.reports[name]); delete this.reports[name]; }
+    if (name !== GLASSES && name !== ARRANGEMENTS && name !== READ_POSITIONS) { clearTimeout(this.reports[name]); delete this.reports[name]; }
   }
 
   private async connect(): Promise<void> {
@@ -283,22 +333,31 @@ export class Feed {
     const stale = () => this.closed || current !== this.attempt;
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
-      let waiting: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_, reject) => { waiting = setTimeout(() => reject(new Error('st did not answer')), OPEN_WAIT_MS); });
+      const { promise: timeout, reject: timedOut } = Promise.withResolvers<never>();
+      const waiting = setTimeout(() => timedOut(new Error('Fractal did not answer')), OPEN_WAIT_MS);
+      const { promise: handshake, resolve: ready, reject: cancel } = Promise.withResolvers<void>();
+      this.cancelOpen = () => cancel(new Error('The collections socket opening was cancelled'));
       const attempt = this.client.collectionStream({
         ...(this.socket ? { socket: (url, protocols, headers) => {
           const socket = this.socket!(url, protocols, headers);
           socket.onping = () => { if (!stale()) this.heard(); };
           return socket;
         } } : {}),
+        onOpen: () => { if (!stale()) ready(); },
         onFrame: frame => { if (!stale()) { const received = performance.now(); this.heard(); this.frame(frame, received); } },
         onEnd: error => { if (!stale()) this.dropped(error ?? new Error('The collections socket closed.')); },
       });
+      const opening = Promise.all([attempt.then(opened => {
+        if (stale()) { opened.close(); return opened; }
+        // Hold the carrier while it handshakes so timeout, backgrounding and reconnect close it.
+        this.stream = opened;
+        return opened;
+      }), handshake]).then(([opened]) => opened);
       let opened: Awaited<typeof attempt>;
-      try { opened = await Promise.race([attempt, timeout]); }
-      // A socket that opens after its try was given up on is closed, never used.
+      try { opened = await Promise.race([opening, timeout]); }
+      // A carrier returned after its try was given up on is closed, never used.
       catch (error) { void attempt.then(late => late.close(), () => {}); throw error; }
-      finally { clearTimeout(waiting); }
+      finally { clearTimeout(waiting); if (!stale()) this.cancelOpen = undefined; }
       if (stale()) { opened.close(); return; }
       this.stream = opened;
       this.heard();
@@ -308,6 +367,7 @@ export class Feed {
       if (this.glasses) { this.glasses.window = undefined; opened.subscribeGlasses(GLASSES); }
       if (this.terminal) void this.terminal.attach();
       if (this.arrangements) { this.arrangements.window = undefined; opened.subscribeArrangements(ARRANGEMENTS, this.arrangements.person); }
+      if (this.readPositions) opened.subscribeReadPositions(READ_POSITIONS, this.readPositions.person);
     } catch (error) { if (!stale()) this.dropped(error); }
   }
 
@@ -361,8 +421,10 @@ export class Feed {
   }
 
   private frame(frame: CollectionFrame, received: number): void {
+    // The app holds no ordered-membership window; its windows hold resources.
     if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
+    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') return;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;
       if (!follow) return;
@@ -371,7 +433,11 @@ export class Feed {
       follow.window = next;
       this.loaded(ARRANGEMENTS);
       follow.handlers.onIssue('');
-      follow.handlers.onArrangements(next.items.filter((item): item is Arrangement => item.kind === 'arrangement' && item.owner === follow.person));
+      follow.handlers.onArrangements(next.items.filter((item): item is SidebarArrangement => item.kind === 'arrangement' && item.body.version === 1 && item.owner === follow.person));
+    } else if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === READ_POSITIONS) {
+      if (!this.readPositions) return;
+      this.loaded(READ_POSITIONS);
+      this.readPositions.handlers.onChanged();
     } else if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === GLASSES) {
       const follow = this.glasses;
       if (!follow) return;
@@ -396,10 +462,11 @@ export class Feed {
       const items = next.items.filter(item => item.kind === KINDS[name]) as FeedLists[typeof name];
       this.handlers.onWindow(name, items, next.hasMore, next.snapshot, received);
     } else if (frame.kind === 'resync') {
-      // st keeps a conversation's subscription and retries it itself; it says why, so the last
+      // Fractal keeps a conversation's subscription and retries it itself; it says why, so the last
       // copy shown can say it is stale (the owner's host is away).
       if (id === CONVERSATION && this.conversation) { this.conversation.handlers.onQualityError?.(frame.code); if (frame.message) this.conversation.handlers.onIssue(`${plainMessage(frame.code, frame.message)} · trying again`); }
       else if (frame.id === ARRANGEMENTS && this.arrangements) { if (!frame.retryable) { this.arrangements.window = undefined; this.stream?.subscribeArrangements(ARRANGEMENTS, this.arrangements.person); } }
+      else if (frame.id === READ_POSITIONS && this.readPositions) { if (!frame.retryable) this.stream?.subscribeReadPositions(READ_POSITIONS, this.readPositions.person); }
       else if (frame.id === GLASSES && this.glasses) { this.glasses.window = undefined; this.stream?.subscribeGlasses(GLASSES); }
       else if (frame.id in FEED_WINDOWS) {
         const name = frame.id as FeedWindow;
@@ -424,15 +491,15 @@ export class Feed {
       else if (id === CONVERSATION && this.conversation) {
         const follow = this.conversation;
         follow.handlers.onQualityError?.(frame.code);
-        // st keeps no start for this transcript: asking again cannot help, so say st's reason
-        // once and stop, as stui does.
+        // Fractal keeps no start for this transcript: asking again cannot help, so say Fractal's reason
+        // once and stop, as the Fractal terminal UI does.
         if (!conversationMayClear(frame.code)) {
           clearTimeout(follow.timer);
           follow.handlers.onIssue(plainMessage(frame.code, frame.message), true);
           return;
         }
         // The subscription ended. Whatever stopped it may clear (a busy store moved under the
-        // page, the agent's host came back): ask again after a backoff, as stui does.
+        // page, the agent's host came back): ask again after a backoff, as the Fractal terminal UI does.
         const delay = this.retryDelaysMs[Math.min(follow.failures, this.retryDelaysMs.length - 1)];
         follow.failures++;
         clearTimeout(follow.timer);
@@ -446,8 +513,13 @@ export class Feed {
         if (!isTransientCode(frame.code)) follow.handlers.onIssue(plain);
         else if (this.retryLater(ARRANGEMENTS, () => { if (this.arrangements === follow) this.stream?.subscribeArrangements(ARRANGEMENTS, follow.person); })) follow.handlers.onIssue(`${plain} · trying again`);
       }
+      else if (id === READ_POSITIONS && this.readPositions) {
+        // Positions stay on this device meanwhile; what may clear is asked for again later.
+        const follow = this.readPositions;
+        if (isTransientCode(frame.code)) this.retryLater(READ_POSITIONS, () => { if (this.readPositions === follow) this.stream?.subscribeReadPositions(READ_POSITIONS, follow.person); });
+      }
       else if (id === GLASSES && this.glasses) {
-        // st stopped sending the glasses; for what may clear, ask again later rather than leave them stale.
+        // Fractal stopped sending the glasses; for what may clear, ask again later rather than leave them stale.
         const plain = plainMessage(frame.code, frame.message);
         if (!isTransientCode(frame.code)) this.glasses.handlers.onIssue(plain);
         else if (this.retryLater(GLASSES, () => { if (this.glasses) { this.glasses.window = undefined; this.stream?.subscribeGlasses(GLASSES); } })) this.glasses.handlers.onIssue(`${plain} · trying again`);
@@ -541,7 +613,7 @@ class TerminalFollow {
 
   failed(code: string | undefined, message: string): void {
     if (this.closed) return;
-    // st also says stale-fence for an owner briefly out of reach or a viewer that idled, not only
+    // Fractal also says stale-fence for an owner briefly out of reach or a viewer that idled, not only
     // a restart: attach again, and the attach itself refuses a terminal that really restarted.
     if (code === 'stale-fence' || transient(code)) this.retry(plainMessage(code, message));
     else this.stop(plainMessage(code, message));

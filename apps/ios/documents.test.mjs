@@ -6,7 +6,7 @@ import { emptyDocumentList, documentListPlaceholder } from '@fractal/views';
 import { changedAt, documentsServed, followDocument, nextDocumentPage, openDocument, referencedDocuments, versionLine, whyUnreadable } from './documents.ts';
 import { inline, markdown } from './markdown.ts';
 
-// The same shared fixture stui and the shared views test: a long document with a table, a code
+// The same shared fixture the Fractal terminal UI and the shared views test: a long document with a table, a code
 // block and nested lists, and a two-document link cycle.
 const fixture = JSON.parse(readFileSync(new URL('../../fixtures/clients/documents-v1.json', import.meta.url), 'utf8'));
 const long = fixture.links[0].text;
@@ -153,7 +153,7 @@ test('a mission names its documents once, with the step that pinned them; a fail
   assert.equal(partial.failed, 'remote-unavailable');
 });
 
-test('an older st that does not serve documents is told apart from one that has not said yet', () => {
+test('an older Fractal that does not serve documents is told apart from one that has not said yet', () => {
   assert.equal(documentsServed(null), null);
   assert.equal(documentsServed({ capabilities: [] }), false);
   assert.equal(documentsServed({ capabilities: [{ id: 'documents', version: 1, state: 'ungranted' }] }), false);

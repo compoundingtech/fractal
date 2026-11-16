@@ -4,15 +4,23 @@
 //! and the probe implementation. Version strings alone never authorize native delivery. Probes
 //! use empty disposable homes and a local model fixture; they never open a managed conversation.
 
+mod attempt;
+#[cfg(test)]
+mod attempt_tests;
+#[cfg(test)]
+mod identity_tests;
 pub(crate) mod fixture;
 mod omp;
+pub use attempt::AttemptDiagnostic;
+use attempt::Capture;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +30,9 @@ use sha2::{Digest, Sha256};
 
 use crate::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage};
 
+// A cold runtime in the isolated HOME inherits the seat background policy. Give its
+// version startup headroom without changing the separately bounded contract probe.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 const SCHEMA: &str = "st.harness-admission.v1";
 const MAX_CAPTURE: u64 = 8 * 1024 * 1024;
@@ -244,6 +255,7 @@ pub struct Admission {
     pub failed: Option<Reason>,
     pub cache_path: Option<PathBuf>,
     pub override_reason: Option<String>,
+    pub attempt: Option<AttemptDiagnostic>,
 }
 
 impl Admission {
@@ -276,7 +288,7 @@ impl Admission {
 
     pub fn publish(&self, publisher: &mut Publisher) {
         if let Some(reason) = self.failed {
-            publisher.publish(
+            publisher.publish_admission(
                 Stage::VersionGate,
                 reason,
                 if reason == Reason::VersionProbeFailed {
@@ -284,6 +296,7 @@ impl Admission {
                 } else {
                     Source::AdmissionProbe
                 },
+                self.attempt.clone().map(Box::new),
             );
         } else {
             publisher.clear(Stage::VersionGate);
@@ -305,26 +318,109 @@ impl Admission {
 /// Admit before taking ownership of the live seat. The cache is shared by this user's seats;
 /// callers retain their different policies: omp refuses launch, OpenCode disables delivery.
 pub fn admit(binary: &str, driver: Driver, adapter: Option<&Path>) -> Admission {
+    admit_recorded(binary, driver, adapter, None)
+}
+
+/// Persist the attempt boundary before its disposable captures disappear. Diagnostic writes
+/// never affect the gate result; the publisher reports persistence failures separately.
+pub fn admit_for_agent(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    agent_dir: &Path,
+) -> Admission {
+    admit_recorded(binary, driver, adapter, Some(agent_dir))
+}
+
+fn admit_recorded(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    agent_dir: Option<&Path>,
+) -> Admission {
     let cache = crate::run::harness_state_root().join("harness-admission");
-    match admit_at(binary, driver, adapter, &cache) {
-        Ok(result) => result,
+    let incarnation = crate::contracts::env("ST3_INCARNATION").unwrap_or_default();
+    observe_at(binary, driver, adapter, &cache, &incarnation, |admission| {
+        if let Some(agent_dir) = agent_dir {
+            let mut publisher = Publisher::new(
+                agent_dir,
+                driver,
+                admission.version.clone(),
+                admission.support(),
+            );
+            admission.publish(&mut publisher);
+        }
+    })
+}
+
+fn observe_at(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    cache: &Path,
+    incarnation: &str,
+    publish: impl FnOnce(&Admission),
+) -> Admission {
+    let mut capture = Capture::new(incarnation);
+    let mut scratch = None;
+    let result = admit_inner(
+        binary,
+        driver,
+        adapter,
+        cache,
+        &mut capture,
+        &mut scratch,
+        Scratch::new,
+    );
+    let mut admission = match result {
+        Ok(admission) => admission,
         Err(error) => {
             tracing::warn!("{} admission indeterminate: {error:#}", driver.as_str());
+            capture.error(&error);
             Admission {
                 version: None,
                 failed: Some(Reason::AdmissionIndeterminate),
                 cache_path: None,
                 override_reason: None,
+                attempt: None,
             }
         }
+    };
+    if admission.failed.is_some() {
+        admission.attempt = Some(capture.finish(scratch.as_ref(), driver));
     }
+    // `scratch` is deliberately owned here, rather than by admit_inner. Publication therefore
+    // runs after child cleanup but before TempDir deletes version/probe stderr.
+    publish(&admission);
+    admission
 }
 
+#[cfg(test)]
 fn admit_at(
     binary: &str,
     driver: Driver,
     adapter: Option<&Path>,
     cache: &Path,
+) -> Result<Admission> {
+    admit_inner(
+        binary,
+        driver,
+        adapter,
+        cache,
+        &mut Capture::new(""),
+        &mut None,
+        Scratch::new,
+    )
+}
+
+fn admit_inner(
+    binary: &str,
+    driver: Driver,
+    adapter: Option<&Path>,
+    cache: &Path,
+    capture: &mut Capture,
+    scratch_owner: &mut Option<Scratch>,
+    create_scratch: fn() -> Result<Scratch>,
 ) -> Result<Admission> {
     let installed = installed_identity(binary, driver, adapter)?;
     let exception_path = override_path(cache, &installed)?;
@@ -351,14 +447,25 @@ fn admit_at(
             failed: None,
             cache_path: Some(exception_path),
             override_reason: Some(record.reason),
+            attempt: None,
         });
     }
     let executable = installed.executable;
-    let scratch = Scratch::new()?;
+    capture.phase("scratch", None);
+    *scratch_owner = Some(create_scratch()?);
+    let scratch = scratch_owner.as_ref().unwrap();
+    capture.phase("version", Some(VERSION_TIMEOUT));
     let mut command = scratch.command(&executable);
     command.arg("--version");
     let mut child = scratch.spawn(&mut command, "version")?;
-    let status = child.wait_until(Instant::now() + Duration::from_secs(5))?;
+    let waited = child.wait_until(Instant::now() + VERSION_TIMEOUT);
+    if waited.is_err()
+        && let Ok(exit) = child.terminate()
+    {
+        capture.exit(exit);
+    }
+    let status = waited?;
+    capture.exit(status);
     drop(child);
     let printed = scratch.capture("version.stdout")?;
     let version = status
@@ -367,11 +474,16 @@ fn admit_at(
         .flatten()
         .map(|(token, _)| token.to_owned());
     let Some(version) = version else {
+        capture.failure(
+            "invalidVersion",
+            "version child failed or did not print a recognized release",
+        );
         return Ok(Admission {
             version: None,
             failed: Some(Reason::VersionProbeFailed),
             cache_path: None,
             override_reason: None,
+            attempt: None,
         });
     };
     let identity = Identity {
@@ -382,6 +494,7 @@ fn admit_at(
         adapter_digest: installed.adapter_digest,
         probe_digest: probe_digest(),
     };
+    capture.phase("cache", Some(Duration::from_secs(60)));
     fs::create_dir_all(cache)?;
     let key = digest(&serde_json::to_vec(&identity)?);
     let path = cache.join(format!("{}-{key}.json", driver.as_str()));
@@ -400,16 +513,22 @@ fn admit_at(
                 )
         });
     let record = match cached {
-        Some(record) => record,
+        Some(record) => {
+            if record.probe_failure.is_some() || record.measurements.iter().any(|m| !m.passed) {
+                capture.failure("cachedFailure", "the matching admission cache records a failed contract; no contract child ran in this attempt");
+            }
+            record
+        }
         None => {
+            capture.phase("contract", Some(PROBE_TIMEOUT));
             let started = Instant::now();
             let probe = match driver {
                 Driver::Omp => omp::probe(
                     &executable,
                     adapter.context("omp needs its shipped extension")?,
-                    &scratch,
+                    scratch,
                 ),
-                Driver::OpenCode => crate::opencode_session::probe_admission(&executable, &scratch)
+                Driver::OpenCode => crate::opencode_session::probe_admission(&executable, scratch)
                     .map(|measurements| {
                         let diagnostic = measurements.iter().find(|m| !m.passed).map(|m| {
                             ProbeDiagnostic {
@@ -453,8 +572,10 @@ fn admit_at(
                 }
             };
             if let Some(diagnostic) = &diagnostic {
+                capture.probe(diagnostic);
                 tracing::warn!(?diagnostic, "{} admission probe failed", driver.as_str());
             }
+            capture.phase("identityRecheck", None);
             // Replacing the binary or adapter while the probe ran cannot produce a pass for
             // either build. Next launch measures the replacement under its own identity.
             anyhow::ensure!(
@@ -475,6 +596,7 @@ fn admit_at(
                 probe_failure,
                 diagnostic,
             };
+            capture.phase("publication", None);
             crate::fsatomic::replace(
                 &path,
                 &serde_json::to_vec_pretty(&record)?,
@@ -498,6 +620,7 @@ fn admit_at(
         }),
         cache_path: Some(path),
         override_reason: None,
+        attempt: None,
     })
 }
 
@@ -549,11 +672,235 @@ pub(crate) fn resolve_executable(binary: &str) -> Result<PathBuf> {
 /// Fingerprint the executable, script runtime and installation metadata without traversing
 /// package assets. Bundled code belongs to the executable; package manifests and lockfiles
 /// identify dependency releases. This is build identity, not an integrity scan of every asset.
-fn executable_identity(path: &Path) -> Result<String> {
-    let mut hash = Sha256::new();
-    // Changing the identity policy invalidates both old measurements and old exceptions.
-    hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
-    hash_identity_file(path, &mut hash)?;
+pub fn executable_identity(path: &Path) -> Result<String> {
+    executable_identity_with(path, &resolve_executable)
+}
+
+/// [`executable_identity`] if it is already measured; otherwise `None`, measuring it off the
+/// caller (see [`executable_identity_ready_with`]).
+pub fn executable_identity_ready(path: &Path) -> Result<Option<String>> {
+    executable_identity_ready_with(path, &resolve_executable)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdentityMetadata {
+    device: u64,
+    inode: u64,
+    size: u64,
+    mode: u32,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl From<fs::Metadata> for IdentityMetadata {
+    fn from(metadata: fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            mode: metadata.mode(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdentityDependency {
+    path: PathBuf,
+    resolved: Option<PathBuf>,
+    link: Option<IdentityMetadata>,
+    target: Option<IdentityMetadata>,
+}
+
+fn identity_dependency(path: &Path) -> Result<IdentityDependency> {
+    fn optional<T>(result: std::io::Result<T>) -> Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    Ok(IdentityDependency {
+        path: path.to_owned(),
+        resolved: optional(fs::canonicalize(path))?,
+        link: optional(fs::symlink_metadata(path))?.map(Into::into),
+        target: optional(fs::metadata(path))?.map(Into::into),
+    })
+}
+
+struct IdentityCacheEntry {
+    dependencies: Vec<IdentityDependency>,
+    identity: String,
+}
+
+// Bound retained paths and identities independently of the number of installed providers.
+static IDENTITY_CACHE: Mutex<Vec<IdentityCacheEntry>> = Mutex::new(Vec::new());
+
+/// Fingerprint with the launch environment's resolver for an `env` shebang.
+/// Unchanged dependencies reuse the admission-compatible identity without streaming bytes.
+pub fn executable_identity_with(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Result<String> {
+    executable_identity_recorded(path, resolve, SystemTime::now)
+}
+
+/// The identity if these exact files are already measured. Otherwise `None`, after starting one
+/// background measurement of them: a request names the identity it has without ever streaming an
+/// executable's bytes, and a later call answers once the measurement settles. A changed file has
+/// new metadata, so it is measured again.
+pub fn executable_identity_ready_with(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+) -> Result<Option<String>> {
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, &|_| Ok(()))
+}
+
+/// Observe resolution dependencies even while identity measurement is pending.
+pub fn executable_identity_ready_observed(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>,
+    input: &dyn Fn(&Path) -> Result<()>,
+) -> Result<Option<String>> {
+    executable_identity_ready_recorded(path, resolve, SystemTime::now, input)
+}
+
+fn executable_identity_ready_recorded(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Result<PathBuf>,
+    recorded_at: fn() -> SystemTime,
+    input: &dyn Fn(&Path) -> Result<()>,
+) -> Result<Option<String>> {
+    let (files, probes) = identity_inputs(path, resolve, input)?;
+    let dependencies = identity_snapshot(&probes)?;
+    if let Some(identity) = cached_identity(&dependencies) {
+        return Ok(Some(identity));
+    }
+    // A completed measurement of these exact files answers even when the racy-git rule kept it
+    // out of the cache, and so does its error. An unsettled result cannot prove the bytes are
+    // unchanged (a same-size rewrite within one timestamp tick keeps the metadata), so every
+    // answer from it also measures again; once its files settle, the identity reaches the cache.
+    let measured = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter().find(|entry| entry.dependencies == dependencies)
+        .map(|entry| (entry.result.clone(), entry.settled));
+    let Some((result, settled)) = measured else {
+        start_measurement(files, probes, dependencies, recorded_at);
+        return Ok(None);
+    };
+    if !settled {
+        start_measurement(files, probes, dependencies, recorded_at);
+    }
+    result.map(Some).map_err(anyhow::Error::msg)
+}
+
+/// Measure these files on a background thread unless that is already happening, and keep the
+/// result (or its error) for the ready path.
+fn start_measurement(
+    files: Vec<(PathBuf, bool)>,
+    probes: Vec<PathBuf>,
+    dependencies: Vec<IdentityDependency>,
+    recorded_at: fn() -> SystemTime,
+) {
+    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if measuring.contains(&dependencies) {
+        return;
+    }
+    measuring.push(dependencies.clone());
+    #[cfg(test)]
+    identity_tests::MEASUREMENTS_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    thread::spawn(move || {
+        let (result, settled) = match recorded_at().duration_since(UNIX_EPOCH) {
+            Ok(now) => {
+                let before = settled_before(now);
+                let settled = dependencies_settled(&dependencies, before);
+                (measure_identity(&files, &probes, dependencies.clone(), before), settled)
+            }
+            Err(error) => (Err(error.into()), false),
+        };
+        if let Err(error) = &result {
+            eprintln!("st3: measuring an executable's identity: {error:#}");
+        }
+        let mut ready = IDENTITY_READY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        ready.retain(|entry| entry.dependencies != dependencies);
+        if ready.len() == 128 {
+            ready.remove(0);
+        }
+        ready.push(ReadyIdentity {
+            dependencies: dependencies.clone(),
+            result: result.map_err(|error| format!("{error:#}")),
+            settled,
+        });
+        drop(ready);
+        let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        measuring.retain(|pending| *pending != dependencies);
+        IDENTITY_MEASURING.1.notify_all();
+        drop(measuring);
+        IDENTITY_WAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|wake| {
+            if let Some(wake) = wake.upgrade() { wake(); true } else { false }
+        });
+    });
+}
+
+/// A background measurement's outcome, for files the cache may have declined to keep.
+struct ReadyIdentity {
+    dependencies: Vec<IdentityDependency>,
+    result: Result<String, String>,
+    settled: bool,
+}
+
+static IDENTITY_READY: Mutex<Vec<ReadyIdentity>> = Mutex::new(Vec::new());
+
+type IdentityWake = dyn Fn() + Send + Sync;
+static IDENTITY_WAKES: Mutex<Vec<std::sync::Weak<IdentityWake>>> = Mutex::new(Vec::new());
+/// Subscribe without retaining the host reconciler after it shuts down.
+pub fn watch_identity_measurements(wake: std::sync::Weak<IdentityWake>) {
+    IDENTITY_WAKES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(wake);
+}
+
+
+/// Whether every dependency's timestamps precede `settled_before` (the racy-git rule).
+fn dependencies_settled(dependencies: &[IdentityDependency], settled_before: i128) -> bool {
+    dependencies.iter().flat_map(|d| [&d.link, &d.target]).flatten().all(|m|
+        [m.modified, m.changed].iter().all(|(s, ns)| i128::from(*s) * 1_000_000_000 + i128::from(*ns) < settled_before))
+}
+
+/// Wait until no background identity measurement is running, so a reader that saw `None` can
+/// expect an answer.
+pub fn identity_measurements_settled() {
+    let mut measuring = IDENTITY_MEASURING.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    while !measuring.is_empty() {
+        measuring = IDENTITY_MEASURING.1.wait(measuring).unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+/// Background measurements in flight, by the dependencies they measure.
+static IDENTITY_MEASURING: (Mutex<Vec<Vec<IdentityDependency>>>, std::sync::Condvar) =
+    (Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+/// Racy-git rule: cache only writes whose timestamps precede measurement start by a full tick.
+fn settled_before(now: Duration) -> i128 {
+    now.as_nanos().saturating_sub(1_000_000_000) as i128
+}
+
+fn executable_identity_recorded(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, recorded_at: impl FnOnce() -> SystemTime) -> Result<String> {
+    let settled_before = settled_before(recorded_at().duration_since(UNIX_EPOCH)?);
+    let (files, probes) = identity_inputs(path, resolve, &|_| Ok(()))?;
+    let dependencies = identity_snapshot(&probes)?;
+    if let Some(identity) = cached_identity(&dependencies) {
+        return Ok(identity);
+    }
+    measure_identity(&files, &probes, dependencies, settled_before)
+}
+
+/// The files an identity hashes (and whether each is optional), and the paths whose metadata
+/// decides whether a cached identity still holds.
+type IdentityInputs = (Vec<(PathBuf, bool)>, Vec<PathBuf>);
+
+/// An identity's inputs. Reads at most 256 bytes.
+fn identity_inputs(path: &Path, resolve: &dyn Fn(&str) -> Result<PathBuf>, input: &dyn Fn(&Path) -> Result<()>) -> Result<IdentityInputs> {
+    let mut files = vec![(path.to_owned(), false)];
+    let mut probes = Vec::new();
+    let mut probe = |path: PathBuf| -> Result<()> { input(&path)?; probes.push(path); Ok(()) };
+    probe(path.to_owned())?;
     let mut prefix = [0_u8; 256];
     let n = File::open(path)?.read(&mut prefix)?;
     if let Some(shebang) = String::from_utf8_lossy(&prefix[..n])
@@ -563,21 +910,24 @@ fn executable_identity(path: &Path) -> Result<String> {
     {
         let parts = shebang.split_whitespace().collect::<Vec<_>>();
         if let Some(interpreter) = parts.first() {
+            probe(PathBuf::from(*interpreter))?;
             let interpreter = if interpreter.ends_with("/env") {
-                parts.get(1).context("missing script interpreter")?
+                resolve(parts.get(1).context("missing script interpreter")?)?
             } else {
-                interpreter
+                resolve_executable(interpreter)?
             };
-            hash_identity_file(&resolve_executable(interpreter)?, &mut hash)?;
+            if interpreter.as_path() != Path::new(parts[0]) { probe(interpreter.clone())?; }
+            files.push((interpreter, false));
         }
     }
-    if let Some(package) = path
-        .ancestors()
-        .skip(1)
-        .take(3)
-        .find(|p| p.join("package.json").is_file())
-    {
-        hash_identity_file(&package.join("package.json"), &mut hash)?;
+    let mut package = None;
+    for parent in path.ancestors().skip(1).take(3) {
+        let manifest = parent.join("package.json");
+        probe(manifest.clone())?;
+        if manifest.is_file() { package = Some(parent); break; }
+    }
+    if let Some(package) = package {
+        files.push((package.join("package.json"), false));
         for name in [
             "package-lock.json",
             "npm-shrinkwrap.json",
@@ -586,17 +936,68 @@ fn executable_identity(path: &Path) -> Result<String> {
             "yarn.lock",
             "pnpm-lock.yaml",
         ] {
-            hash_optional_identity_file(&package.join(name), &mut hash)?;
+            let lock = package.join(name);
+            probe(lock.clone())?;
+            files.push((lock, true));
         }
         // npm's hidden lock lives beside the installed packages, including scoped packages.
         if let Some(modules) = package
             .ancestors()
             .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
         {
-            hash_optional_identity_file(&modules.join(".package-lock.json"), &mut hash)?;
+            let lock = modules.join(".package-lock.json");
+            probe(lock.clone())?;
+            files.push((lock, true));
         }
     }
-    Ok(format!("{hash:x}", hash = hash.finalize()))
+    Ok((files, probes))
+}
+
+fn identity_snapshot(probes: &[PathBuf]) -> Result<Vec<IdentityDependency>> {
+    probes.iter().map(|p| identity_dependency(p)).collect()
+}
+
+fn cached_identity(dependencies: &[IdentityDependency]) -> Option<String> {
+    IDENTITY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|entry| entry.dependencies == dependencies)
+        .map(|entry| entry.identity.clone())
+}
+
+/// Stream every file into the identity, and cache it if nothing changed while it was read.
+fn measure_identity(
+    files: &[(PathBuf, bool)],
+    probes: &[PathBuf],
+    dependencies: Vec<IdentityDependency>,
+    settled_before: i128,
+) -> Result<String> {
+    let mut hash = Sha256::new();
+    // Preserve the identity policy: existing measurements and exceptions remain valid.
+    hash.update(b"st.installed-producer.executable-runtime-metadata.v2");
+    for (file, optional) in files {
+        if *optional {
+            hash_optional_identity_file(file, &mut hash)?;
+        } else {
+            hash_identity_file(file, &mut hash)?;
+        }
+    }
+    let identity = format!("{hash:x}", hash = hash.finalize());
+    // Do not retain a result if any dependency changed while bytes were being read.
+    if dependencies_settled(&dependencies, settled_before) && dependencies == identity_snapshot(probes)? {
+        let mut cache = IDENTITY_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.len() == 128 {
+            cache.remove(0);
+        }
+        cache.push(IdentityCacheEntry {
+            dependencies,
+            identity: identity.clone(),
+        });
+    }
+    Ok(identity)
 }
 
 fn hash_optional_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
@@ -613,6 +1014,8 @@ fn hash_optional_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
 }
 
 fn hash_identity_file(path: &Path, hash: &mut Sha256) -> Result<()> {
+    #[cfg(test)]
+    identity_tests::HASHED_FILES.with(|count| count.set(count.get() + 1));
     let resolved = fs::canonicalize(path)?;
     let mut file = File::open(&resolved)?;
     let metadata = file.metadata()?;
@@ -732,7 +1135,7 @@ impl Scratch {
             .stdin(Stdio::piped())
             .stdout(File::create(self.path(&format!("{name}.stdout")))?)
             .stderr(File::create(self.path(&format!("{name}.stderr")))?);
-        Ok(ProbeProcess(command.spawn()?))
+        Ok(ProbeProcess(command.spawn()?, false))
     }
     fn stderr_tail(&self, name: &str) -> Result<String> {
         use std::io::{Seek, SeekFrom};
@@ -769,7 +1172,7 @@ impl Scratch {
     }
 }
 
-pub(crate) struct ProbeProcess(pub(crate) Child);
+pub(crate) struct ProbeProcess(pub(crate) Child, bool);
 impl ProbeProcess {
     fn wait_until(&mut self, deadline: Instant) -> Result<std::process::ExitStatus> {
         loop {
@@ -781,14 +1184,22 @@ impl ProbeProcess {
         }
     }
 }
-impl Drop for ProbeProcess {
-    fn drop(&mut self) {
-        // The disposable provider may have started its channel/tools. Kill the entire probe
-        // group even if the direct child already exited, and always reap the direct child.
+impl ProbeProcess {
+    fn terminate(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        // Also kill descendants after a direct child exit, as the original Drop boundary did.
         unsafe {
             libc::kill(-(self.0.id() as i32), libc::SIGKILL);
         }
-        let _ = self.0.wait();
+        let exit = self.0.wait()?;
+        self.1 = true;
+        Ok(exit)
+    }
+}
+impl Drop for ProbeProcess {
+    fn drop(&mut self) {
+        if !self.1 {
+            let _ = self.terminate();
+        }
     }
 }
 
@@ -1293,6 +1704,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn identity_watch_surface_includes_missing_probes_and_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("program");
+        fs::write(&binary, "binary").unwrap();
+        fs::write(root.path().join("package.json"), "{}").unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let wake: std::sync::Arc<IdentityWake> = std::sync::Arc::new(move || { let _ = send.send(()); });
+        watch_identity_measurements(std::sync::Arc::downgrade(&wake));
+        let seen = std::cell::RefCell::new(Vec::new());
+        assert!(executable_identity_ready_observed(&binary, &|_| unreachable!(),
+            &|path| { seen.borrow_mut().push(path.to_owned()); Ok(()) }).unwrap().is_none());
+        assert!(seen.borrow().contains(&root.path().join("package-lock.json")));
+        receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        identity_measurements_settled();
+        assert!(executable_identity_ready_with(&binary, &|_| unreachable!()).unwrap().is_some());
+    }
+
+    #[test]
     fn package_manifest_and_lockfile_changes_invalidate_identity() {
         let directory = tempfile::tempdir().unwrap();
         let binary = fake_omp(directory.path());
@@ -1436,3 +1865,6 @@ pub(crate) mod tests {
         assert!(result.iter().all(|m| m.passed), "{result:?}");
     }
 }
+
+#[cfg(test)]
+mod version_tests;

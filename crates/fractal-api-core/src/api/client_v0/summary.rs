@@ -25,7 +25,7 @@ pub fn working(agent: &Value) -> bool {
     agent["state"] == "running"
         && agent["harness_state"] == "working"
         && agent["fault"].is_null()
-        && agent["delivery"]["state"] != "stale"
+        && !matches!(agent["delivery"]["state"].as_str(), Some("stale" | "refused"))
 }
 /// A mission that is really running or about to: stuck, paused and finished runs, and ones that
 /// only wait on a person, are counted elsewhere.
@@ -59,6 +59,7 @@ pub fn shared(
             ],
             false,
             deadline,
+            None,
         ))
     };
     // Mission active membership cannot depend on which agent owns a ready queue: a step that
@@ -355,7 +356,7 @@ pub fn published_machines(
         Some(held) => match store.summary_machines_hold(held.cut, index)? {
             Some(changed) if changed.is_empty() => Some((held.machines, held.runtimes)),
             Some(changed) => {
-                let status = store.status_for_subject_names_at(changed.clone(), index, false, crate::store::ClaimsReduction::Runtime)?;
+                let status = store.status_for_subject_names_for_generic_reads_at(changed.clone(), index, false, crate::store::ClaimsReduction::Runtime)?;
                 let hosts = runtime_resources_from_status(state, snapshot, session, status)?
                     .into_iter()
                     .filter_map(|runtime| {

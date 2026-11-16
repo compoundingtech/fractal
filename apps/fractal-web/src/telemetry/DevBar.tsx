@@ -1,53 +1,34 @@
-import { RegistryContext, useAtomValue } from '@effect/atom-react'
+import { useAtomValue } from '@effect/atom-react'
 import { Devbar } from '@overeng/devbar'
 import type { DevbarPanel, DevbarSegment } from '@overeng/devbar'
-import { BuildIdentitySegment } from '@overeng/devbar/build-identity'
 import { darkDevbarTheme, lightDevbarTheme } from '@overeng/devbar/themes'
 import { makeMeters, makeSeries } from '@overeng/meters'
 import type { FpsValue } from '@overeng/meters'
 import { darkMeterTheme, frameBlock, heapBlock, jankBlock, lightMeterTheme } from '@overeng/meters/canvas'
+import type { CanvasBlockSpec } from '@overeng/meters/canvas'
 import { makeBrowserPlatform } from '@overeng/meters/platform/browser'
-import { MetersProvider, MeterStrip } from '@overeng/meters/react'
+import { MetersProvider, MeterStrip, MeterTile } from '@overeng/meters/react'
 import { frameSource } from '@overeng/meters/sources/frame'
 import { longFramesSource } from '@overeng/meters/sources/long-frames'
 import type { LongFrameValue } from '@overeng/meters/sources/long-frames'
 import { heapSource } from '@overeng/meters/sources/memory'
 import type { HeapMemory } from '@overeng/meters/sources/memory'
 import * as stylex from '@stylexjs/stylex'
-import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 
-import { Changelog, useChangelogUnseen } from '../changelog/Changelog.tsx'
+import { ChangelogContent, useChangelogDisclosure, useChangelogUnseen } from '../changelog/Changelog.tsx'
+import { BuildChangesSegment } from './BuildChangesSegment.tsx'
+import { reserveDevbarSpace } from './devbarSpace.ts'
 import { counters } from './measurement/index.ts'
-import { persistedAtom } from '../state/persistence.ts'
-import { transportSnapshot } from './transport.ts'
+import { setDevBarDefault, toggleDevBar, useDevBarVisible } from './devBarPreference.ts'
+import { RequestDetails, SocketDetails, tileHistoryMs, transportDetailBlocks, transportMeterDescriptions, transportSegments, transportSources } from './transportMeters.tsx'
 
-const preferences = AtomRegistry.make()
-let defaultPreference = import.meta.env?.DEV ?? false
-const visibility = persistedAtom({
-  key: 'devbar.visible',
-  schema: Schema.NullOr(Schema.Boolean),
-  defaultValue: null,
-})
-
-/** Shared command palette and keyboard action through the same persistence boundary. */
-export const toggleDevBar = (): void => {
-  preferences.set(visibility, !(preferences.get(visibility) ?? defaultPreference))
-}
-
-export const DevBar = (props: { readonly defaultVisible?: boolean }) => (
-  <RegistryContext.Provider value={preferences}>
-    <DevBarContent {...props} />
-  </RegistryContext.Provider>
-)
+export const DevBar = (props: { readonly defaultVisible?: boolean }) => <DevBarContent {...props} />
 
 const styles = stylex.create({
   root: { zIndex: 1000 },
-  segment: { whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', fontFamily: 'ui-monospace, monospace' },
-  error: { color: '#f87171' },
   panel: { padding: 12, color: 'inherit', fontFamily: 'ui-monospace, monospace' },
   description: { marginTop: 0, marginBottom: 10, lineHeight: 1.5 },
   counters: { whiteSpace: 'pre-wrap', lineHeight: 1.5, fontVariantNumeric: 'tabular-nums' },
@@ -63,6 +44,7 @@ const meters = makeMeters({
     frameSource({ id: 'frame', series: frames }),
     longFramesSource({ id: 'long-frames', series: longFrames }),
     heapSource({ id: 'memory', series: memory, everyMs: 1000 }),
+    ...transportSources(),
   ],
 })
 const compactBlocks = [
@@ -118,38 +100,6 @@ const CountersPanel = () => {
   )
 }
 
-/** Subscribe only the transport slot that consumes each sampled field. */
-const WebSocketSegment = () => {
-  const live = useAtomValue(transportSnapshot, (snapshot) => snapshot.socketLive)
-  return <span {...stylex.props(styles.segment)}>WS {live ? 'live' : 'offline'}</span>
-}
-const HttpSegment = () => {
-  const requests = useAtomValue(transportSnapshot, (snapshot) => snapshot.requests)
-  const p50Ms = useAtomValue(transportSnapshot, (snapshot) => snapshot.p50Ms)
-  const p95Ms = useAtomValue(transportSnapshot, (snapshot) => snapshot.p95Ms)
-  const errors = useAtomValue(transportSnapshot, (snapshot) => snapshot.errors)
-  return (
-    <span {...stylex.props(styles.segment, errors > 0 && styles.error)} title="Completed fetch latency through response headers, latest 256 requests">
-      HTTP {requests} active · p50 {p50Ms.toFixed(0)} · p95 {p95Ms.toFixed(0)}ms · errors {errors}
-    </span>
-  )
-}
-const SubscriptionsSegment = () => {
-  const subscriptions = useAtomValue(transportSnapshot, (snapshot) => snapshot.subscriptions)
-  const cap = useAtomValue(transportSnapshot, (snapshot) => snapshot.subscriptionCap)
-  return <span {...stylex.props(styles.segment)}>Subs {subscriptions}/{cap}</span>
-}
-const MessageRateSegment = () => {
-  const rate = useAtomValue(transportSnapshot, (snapshot) => snapshot.messagesPerSecond)
-  return <span {...stylex.props(styles.segment)}>{rate.toFixed(1)} msg/s</span>
-}
-const transportSegments: readonly DevbarSegment[] = [
-  { id: 'websocket', render: () => <WebSocketSegment /> },
-  { id: 'http', render: () => <HttpSegment /> },
-  { id: 'subscriptions', render: () => <SubscriptionsSegment /> },
-  { id: 'message-rate', render: () => <MessageRateSegment /> },
-]
-
 const subscribeScheme = (notify: () => void): (() => void) => {
   if (typeof document === 'undefined') return () => {}
   const observer = new MutationObserver(notify)
@@ -164,56 +114,95 @@ const readDarkScheme = (): boolean => {
 }
 const readServerScheme = (): boolean => false
 
-const MeterView = ({ dark, expanded = false, onOpenDetail }: {
+const MeterView = ({ blocks, dark, onOpenDetail }: {
+  readonly blocks?: readonly CanvasBlockSpec[]
   readonly dark: boolean
-  readonly expanded?: boolean
   readonly onOpenDetail: (selection: { readonly id: string }) => void
 }) => {
   const [frozen, setFrozen] = React.useState(false)
-  return <MeterStrip meters={meters} blocks={expanded ? detailBlocks : compactBlocks}
+  return <MeterStrip meters={meters} blocks={blocks ?? detailBlocks}
     theme={dark ? darkMeterTheme : lightMeterTheme} frozen={frozen} onFrozenChange={setFrozen}
-    onOpenDetail={onOpenDetail} heightPx={expanded ? 64 : 28} />
+    onOpenDetail={onOpenDetail} heightPx={64} {...(blocks === undefined ? {} : { historyMs: tileHistoryMs })} />
 }
 
 const meterDescriptions: Readonly<Record<string, string>> = {
   frame: 'Frame rate is observed rAF timing. The kit calibrates skipped-frame evidence separately; pending or unsupported calibration is not treated as a measured zero.',
   'long-frames': 'Long-animation-frame durations use PerformanceObserver, with an explicitly tagged long-task fallback on browsers without LoAF support. NoSamples means no event has been observed, not a measured zero.',
   memory: 'JS heap is an approximate shared-heap measurement from performance.memory, not total app memory. Unsupported capabilities are shown as n/a, not zero.',
+  ...transportMeterDescriptions,
 }
-const MetersPanel = ({ dark }: { readonly dark: boolean }) => {
-  const [detail, setDetail] = React.useState('frame')
+const MetersPanel = ({ dark, detail, setDetail }: {
+  readonly dark: boolean
+  readonly detail: string
+  readonly setDetail: (id: string) => void
+}) => {
   return (
     <div {...stylex.props(styles.panel)}>
-      <p {...stylex.props(styles.description)}>Frame, long-frame, and memory histories share one scoped session. Click a meter for its measurement semantics; freeze each strip independently.</p>
-      <MeterView dark={dark} expanded onOpenDetail={({ id }) => setDetail(id)} />
+      <p {...stylex.props(styles.description)}>Frame, long-frame, memory, and transport histories share one scoped session. Click a meter for its measurement semantics; freeze each strip independently.</p>
+      <MeterView dark={dark} onOpenDetail={({ id }) => setDetail(id)} />
+      <MeterView blocks={transportDetailBlocks} dark={dark} onOpenDetail={({ id }) => setDetail(id)} />
       <p {...stylex.props(styles.description)}>{meterDescriptions[detail]}</p>
+      {detail === 'websocket' && <SocketDetails />}
+      {detail.startsWith('http-') && <RequestDetails />}
     </div>
   )
 }
 
 const DevBarContent = ({ defaultVisible = import.meta.env?.DEV ?? false }: { readonly defaultVisible?: boolean }) => {
-  defaultPreference = defaultVisible
-  const shown = useAtomValue(visibility) ?? defaultVisible
+  setDevBarDefault(defaultVisible)
+  const shown = useDevBarVisible()
   useAtomValue(diagnosticLifetime)
   const dark = React.useSyncExternalStore(subscribeScheme, readDarkScheme, readServerScheme)
   const [openPanel, setOpenPanel] = React.useState<string | undefined>(undefined)
+  const [detail, setDetail] = React.useState('frame')
+  const openDetail = React.useCallback((id: string) => {
+    setDetail(id)
+    setOpenPanel('meters')
+  }, [])
   const panels = React.useMemo<readonly DevbarPanel[]>(() => [
     { id: 'counters', label: 'Counters', render: () => <CountersPanel /> },
-    { id: 'meters', label: 'Meters', render: () => <MetersPanel dark={dark} /> },
-  ], [dark])
+    { id: 'meters', label: 'Meters', render: () => <MetersPanel dark={dark} detail={detail} setDetail={setDetail} /> },
+  ], [dark, detail])
   const hasUnseen = useChangelogUnseen()
+  const changelog = useChangelogDisclosure()
   const segments = React.useMemo<readonly DevbarSegment[]>(() => [
-    { id: 'version', render: () => <BuildIdentitySegment identity={buildIdentity} /> },
-    // Recent changes outlast transport detail; when overflowed, the +N control mirrors the unseen dot.
-    { id: 'changelog', priority: 1, hasAlert: hasUnseen, render: () => <Changelog dark={dark} /> },
-    ...transportSegments,
-  ], [dark, hasUnseen])
+    // Every meter is a segment, so one row flows left to right and one overflow covers them all; freezing lives in the drawer's strips.
+    ...compactBlocks.map((block) => ({
+      id: block.id,
+      label: block.label,
+      priority: 3,
+      render: () => (
+        <div onClick={() => openDetail(block.id)}>
+          <MeterTile meters={meters} block={block} theme={dark ? darkMeterTheme : lightMeterTheme} heightPx={28} />
+        </div>
+      ),
+    })),
+    ...transportSegments({ meters, theme: dark ? darkMeterTheme : lightMeterTheme, onOpenDetail: openDetail }),
+    // One build entry: identity and recent changes outlast transport detail; when overflowed, the +N control mirrors the unseen dot.
+    {
+      id: 'build',
+      priority: 1,
+      hasAlert: hasUnseen,
+      render: () => (
+        <BuildChangesSegment
+          identity={buildIdentity}
+          deploymentId={deploymentId}
+          dark={dark}
+          hasUnseen={hasUnseen}
+          onChangesSeen={changelog.acknowledge}
+          onPrefetch={changelog.prefetch}
+          changes={(firstEntryRef) => <ChangelogContent firstEntryRef={firstEntryRef} />}
+        />
+      ),
+    },
+  ], [changelog, dark, hasUnseen, openDetail])
+  const host = React.useRef<HTMLDivElement>(null)
+  React.useLayoutEffect(() => host.current === null ? undefined : reserveDevbarSpace(host.current), [shown])
   if (!shown) return null
   return (
-    <div data-testid="wf-devbar" {...stylex.props(dark ? darkDevbarTheme : lightDevbarTheme)}>
+    <div ref={host} data-testid="wf-devbar" {...stylex.props(dark ? darkDevbarTheme : lightDevbarTheme)}>
       <MetersProvider meters={meters}>
-        <Devbar panels={panels} segments={segments} openPanel={openPanel} onOpenPanelChange={setOpenPanel}
-          strip={<MeterView dark={dark} onOpenDetail={() => setOpenPanel('meters')} />} style={styles.root} />
+        <Devbar panels={panels} segments={segments} openPanel={openPanel} onOpenPanelChange={setOpenPanel} stripMinWidth={0} style={styles.root} />
       </MetersProvider>
     </div>
   )

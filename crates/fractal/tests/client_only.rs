@@ -1,4 +1,4 @@
-//! The actual stui binary on a daemon-less device, talking only to isolated members.
+//! The actual Fractal TUI binary on a daemon-less device, talking only to isolated members.
 use fractal_daemon::PersonWorkStore;
 use fractal_daemon::SeatsStoreCore;
 use alacritty_terminal::{
@@ -13,7 +13,7 @@ use fractal_daemon::{api::AppState, model::PersonAskRequest, store::Store};
 use fractal_client::{Client, PersonPairingBegin};
 use std::{
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
@@ -45,16 +45,31 @@ struct Tui {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
     screen: Arc<Mutex<String>>,
+    screen_changed: Arc<Notify>,
+    timing_log: Option<PathBuf>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
 }
 impl Drop for Tui {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        if let Some(pid) = self.child.process_id().and_then(|pid| i32::try_from(pid).ok()) {
+            // portable-pty starts a new session, but Child::kill sends catchable SIGHUP.
+            // Force this fixture's child and its process group to exit before reaping.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+        } else {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
 impl Tui {
     fn start(root: &Path) -> Self {
+        Self::start_with(root, None, |_| {})
+    }
+
+    fn start_with(root: &Path, timing_log: Option<&Path>, configure: impl FnOnce(&mut CommandBuilder)) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 32,
@@ -63,9 +78,9 @@ impl Tui {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_st3"));
-        // This proves pairing and control, read off the classic layout's screens.
-        command.args(["ui", "--classic"]);
+        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"));
+        // This proves pairing and control, read off Now, which fills a space with nothing open.
+        command.args(["ui"]);
         command.env_clear();
         command.env("HOME", root);
         command.env("XDG_CONFIG_HOME", root.join("config"));
@@ -73,17 +88,24 @@ impl Tui {
         command.env("XDG_STATE_HOME", root.join("state"));
         command.env("TERM", "xterm-256color");
         // A real restart of st reads "connecting" for a minute; this test only waits 25 s for "offline".
-        command.env("STUI_OFFLINE_GRACE_MS", "0");
+        command.env("FRACTAL_TUI_OFFLINE_GRACE_MS", "0");
+        // A silent link is dropped after the quiet check, the ping and the pong wait: 20 s by
+        // default. Capped at 2 s each, the blackhole phase takes a few seconds.
+        command.env("STUI_FEED_TIMER_CAP_MS", "2000");
         // These deliberately unusable local settings must never select local authority.
         command.env("ST3_ENDPOINT", root.join("absent.sock"));
         command.env("ST3_PERSON", "person/wrong-local-actor");
         command.cwd(root);
+        if let Some(log) = timing_log { command.env("FRACTAL_TUI_TIMING_LOG", log); }
+        configure(&mut command);
         let child = pty.slave.spawn_command(command).unwrap();
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().unwrap();
         let writer = pty.master.take_writer().unwrap();
         let screen = Arc::new(Mutex::new(String::new()));
         let observed = screen.clone();
+        let screen_changed = Arc::new(Notify::new());
+        let changed = screen_changed.clone();
         std::thread::spawn(move || {
             let mut term = Term::new(Config::default(), &Size, Events);
             let mut parser: Processor = Processor::new();
@@ -102,12 +124,15 @@ impl Tui {
                     .collect::<Vec<_>>()
                     .join("\n");
                 *observed.lock().unwrap() = text;
+                changed.notify_one();
             }
         });
         Self {
             child,
             writer,
             screen,
+            screen_changed,
+            timing_log: timing_log.map(Path::to_path_buf),
             _master: pty.master,
         }
     }
@@ -116,18 +141,23 @@ impl Tui {
         self.writer.flush().unwrap();
     }
     async fn wait(&self, label: &str, predicate: impl Fn(&str) -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
-        loop {
-            let screen = self.screen.lock().unwrap().clone();
-            if predicate(&screen) {
-                return;
+        tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                let changed = self.screen_changed.notified();
+                let screen = self.screen.lock().unwrap().clone();
+                if predicate(&screen) {
+                    return;
+                }
+                changed.await;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "{label} did not appear:\n{screen}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let screen = self.screen.lock().unwrap().clone();
+            let rows = self.timing_log.as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
+            panic!("{label} did not appear:\n{screen}\nRecorded requests and frames:\n{rows}");
+        });
     }
 }
 
@@ -141,11 +171,14 @@ fn state(root: &Path, node: &str) -> AppState {
         ))
         .unwrap();
     AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(store),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: node.into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: root.join("unused-pty"),
@@ -154,6 +187,9 @@ fn state(root: &Path, node: &str) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
@@ -169,6 +205,9 @@ fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let step = state
         .store
         .ask_person(&PersonAskRequest {
+            priority: None,
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: title.into(),
@@ -237,7 +276,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
     device_name: "Demo laptop".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -245,7 +284,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
 }
 
 async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::PairingChallenge) {
-    let mut child = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+    let mut child = Command::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"))
         .args([
             "devices",
             "complete",
@@ -278,7 +317,7 @@ async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
+async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
     use fractal_client::{Fence, MessageSendParameters, device::Profile};
     use std::os::unix::fs::PermissionsExt as _;
     let member = tempfile::tempdir().unwrap();
@@ -342,7 +381,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
             },
             MessageSendParameters {
                 to: "agent/alder".into(),
-                content: "Signed after stui pairing".into(),
+                content: "Signed after Fractal TUI pairing".into(),
                 title: None,
                 in_reply_to: None,
                 session_id: None,
@@ -378,7 +417,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: Some(vec!["read.projections".into()]), })
+    scopes: Some(vec!["read.projections".into()]), fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -390,8 +429,22 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     http_server.abort();
 }
 
+/// Every file under `root`, or none when it does not exist.
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .flat_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() { files_under(&path) } else { vec![path] }
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member() {
+async fn daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member() {
     let member = tempfile::tempdir().unwrap();
     let device = tempfile::tempdir().unwrap();
     let state = state(member.path(), "member-cedar");
@@ -425,13 +478,18 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     pair(device.path(), &local, &url).await;
     let online_step = person_ask(&state, "online-proof", "Online proof");
     let mut tui = Tui::start(device.path());
+    // Each ask exists on one member only, so seeing it names the member reached; answering it
+    // as the paired person proves the grant.
     tui.wait("paired live view", |screen| {
-        screen.contains("live") && screen.contains("Online proof") && screen.contains("avery")
+        screen.contains("live") && screen.contains("Online proof")
     })
     .await;
     tui.send("cConfirmed on the remote member\r");
+    // Now advances optimistically: disappearance alone does not prove that the paired
+    // member accepted the action. Every successful-send wait also checks its stored step.
     tui.wait("confirmed remote action", |screen| {
         !screen.contains("Online proof")
+            && state.store.step_run(&online_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -459,9 +517,15 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
         "offline keys must queue no mutation"
     );
     assert!(!device.path().join("absent.sock").exists());
+    // Fractal TUI keeps this device's spaces and preferences under state/st3/stui; nothing else.
+    let kept = device.path().join("state/st3/stui");
+    let others = files_under(&device.path().join("state"))
+        .into_iter()
+        .filter(|path| !path.starts_with(&kept))
+        .collect::<Vec<_>>();
     assert!(
-        !device.path().join("state").exists(),
-        "the device must create no daemon or replica"
+        others.is_empty(),
+        "the device must create no daemon or replica: {others:?}"
     );
     drop(tui);
     let mut tui = Tui::start(device.path());
@@ -491,9 +555,10 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("remote action after recovery", |screen| {
         !screen.contains("Retained proof")
+            && state.store.step_run(&offline_step).unwrap().unwrap().status == "completed"
     })
     .await;
-    let _blackhole_step = person_ask(&state, "blackhole-proof", "Blackhole proof");
+    let blackhole_step = person_ask(&state, "blackhole-proof", "Blackhole proof");
     tui.wait("data before a silent outage", |screen| {
         screen.contains("Blackhole proof")
     })
@@ -513,6 +578,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     tui.send("cConfirmed on the remote member\r");
     tui.wait("remote action after blackhole recovery", |screen| {
         !screen.contains("Blackhole proof")
+            && state.store.step_run(&blackhole_step).unwrap().unwrap().status == "completed"
     })
     .await;
     drop(tui);
@@ -552,14 +618,13 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     let alternate_step = person_ask(&alternate, "alternate-proof", "Alternate proof");
     let mut tui = Tui::start(device.path());
     tui.wait("another reachable member", |screen| {
-        screen.contains("live")
-            && screen.contains("Alternate proof")
-            && screen.contains("member-willow")
+        screen.contains("live") && screen.contains("Alternate proof")
     })
     .await;
     tui.send("cConfirmed on the remote member\r");
     tui.wait("action on alternate", |screen| {
         !screen.contains("Alternate proof")
+            && alternate.store.step_run(&alternate_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -577,14 +642,13 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     alternate_route.abort();
     let _ = alternate_route.await;
     tui.wait("live failover", |screen| {
-        screen.contains("live")
-            && screen.contains("Returned member proof")
-            && screen.contains("member-cedar")
+        screen.contains("live") && screen.contains("Returned member proof")
     })
     .await;
     tui.send("cConfirmed on the remote member\r");
     tui.wait("action after live failover", |screen| {
         !screen.contains("Returned member proof")
+            && state.store.step_run(&return_step).unwrap().unwrap().status == "completed"
     })
     .await;
     assert_eq!(
@@ -608,8 +672,9 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute()
 {
+    // The palette opens the Fleet list as a tab.
     inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
-        "4",
+        "\\x0bfleet\\r",
         "inventory-fleet",
         &["clients", "machines", "devices", "sessions"],
     )
@@ -619,15 +684,16 @@ async fn the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute()
 {
+    // The palette opens Usage over the space.
     inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
-        "5",
+        "\\x0busage\\r",
         "inventory-usage",
         &["usage-24"],
     )
     .await;
 }
 
-/// One screen of the real stui client. The two screens run as two tests, so they idle their
+/// One screen of the real Fractal TUI client. The two screens run as two tests, so they idle their
 /// minute side by side instead of one after the other.
 async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
     key: &str,
@@ -657,11 +723,10 @@ async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_
     let events = device.path().join("events.jsonl");
     let mut command = Command::new("python3");
     command
-        .arg(repo.join("scripts/stui-test-client"))
+        .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
-            test_env!("CARGO_BIN_EXE_st3"),
-            "--classic",
+            test_env!("CARGO_BIN_EXE_fractal-unstamped"),
             "--seconds",
             "72",
             "--label",
@@ -817,39 +882,32 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     .unwrap();
     let device = tempfile::tempdir().unwrap();
     let log = device.path().join("legacy.jsonl");
-    let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut command = Command::new("python3");
-    command
-        .arg(repo.join("scripts/stui-test-client"))
-        .args([
-            "--binary",
-            test_env!("CARGO_BIN_EXE_st3"),
-            "--classic",
-            "--seconds",
-            "4",
-            "--label",
-            "older-inventory",
-            "--keys",
-            "4",
-        ])
-        .arg("--timing")
-        .arg(&log)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap())
-        .env("HOME", device.path())
-        .env("XDG_CONFIG_HOME", device.path().join("config"))
-        .env("XDG_CACHE_HOME", device.path().join("cache"))
-        .env("XDG_STATE_HOME", device.path().join("state"))
-        .env("ST3_ENDPOINT", &socket)
-        .env("ST3_PERSON", "person/avery");
-    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
-        .await
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // Wait for the live view and each palette transition, not a fixed startup delay.
+    // Slow terminal initialization must not consume the keys intended to focus Fleet.
+    let mut tui = Tui::start_with(device.path(), Some(&log), |command| {
+        command.env("ST3_ENDPOINT", &socket);
+        command.env("ST3_PERSON", "person/avery");
+    });
+    tui.wait("live older member", |screen| screen.contains("live")).await;
+    tui.send("\x0b");
+    tui.wait("open palette", |screen| screen.contains("every machine")).await;
+    tui.send("fleet");
+    tui.wait("Fleet palette query", |screen| screen.contains("› fleet")).await;
+    tui.send("\r");
+    let routes = [
+        "/v1/client/clients",
+        "/v1/client/machines",
+        "/v1/client/devices",
+        "/v1/client/sessions",
+    ];
+    tui.wait("Fleet inventory reads", |_| {
+        let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+        routes.iter().all(|route| recorded.lines().any(|line| {
+            serde_json::from_str::<Value>(line).is_ok_and(|row|
+                row["type"] == "request" && row["route"].as_str().is_some_and(|actual| actual.starts_with(route)))
+        }))
+    }).await;
+    drop(tui);
     let rows = std::fs::read_to_string(&log)
         .unwrap()
         .lines()

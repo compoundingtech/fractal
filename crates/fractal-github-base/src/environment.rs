@@ -12,7 +12,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 type Environment = BTreeMap<String, String>;
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 /// Resolve one source layer before overlaying it: empty/conflicted values mask lower layers.
 /// ST3 suffixes are explicit because Fractal folds ST_ and ST3_ into one namespace.
 fn old_alias(name: &str) -> Option<String> {
@@ -223,6 +223,28 @@ pub fn snapshot() -> Result<Environment> {
         .context(
             "capture the daemon login-shell environment; check the account's shell startup files",
         )
+}
+
+/// The captured environment without waiting on a login shell: the last capture, refreshed in
+/// the background once it is older than the refresh interval, or `None` while a capture runs and
+/// nothing has been captured. For reads that must answer at once, such as a diagnostic (#5209).
+pub fn snapshot_ready() -> Option<Result<Environment>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REFRESHING: AtomicBool = AtomicBool::new(false);
+    // A capture holds the lock while the shell starts; never wait behind it.
+    let cache = cache().try_lock().ok()?;
+    let stale = cache.captured.as_ref().is_none_or(|(at, _)| at.elapsed() >= REFRESH_INTERVAL);
+    let captured = cache.captured.as_ref().map(|(_, result)| result.clone().map_err(anyhow::Error::msg));
+    drop(cache);
+    if stale && !REFRESHING.swap(true, Ordering::AcqRel) {
+        std::thread::spawn(|| {
+            if let Err(error) = snapshot() {
+                eprintln!("st3: capturing the daemon environment: {error:#}");
+            }
+            REFRESHING.store(false, Ordering::Release);
+        });
+    }
+    captured
 }
 
 pub const HARNESSES: &[&str] = &["claude", "codex", "opencode", "pi", "omp"];

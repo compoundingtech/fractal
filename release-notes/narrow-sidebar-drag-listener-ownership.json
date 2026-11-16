@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Scope the sidebar drag-unmount story's strict listener assertions to the splitter's own Escape callback.",
+  "replay": { "status": "none", "detail": "Story assertions only; no replay behavior changes." },
+  "schema": { "status": "none", "detail": "No database changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordination changes." },
+  "compatibility": { "status": "none", "detail": "No runtime or protocol changes; the story still requires exactly one splitter listener and verifies removal of that same callback." },
+  "downtime": { "status": "none", "detail": "No service changes or interruption." },
+  "manual": { "status": "none", "detail": "No manual steps required." },
+  "recovery": { "status": "none", "detail": "Test-only change; rollback or roll-forward requires no data recovery." }
+}

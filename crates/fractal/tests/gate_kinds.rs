@@ -22,7 +22,7 @@ fn git(directory: &Path, arguments: &[&str]) {
 
 fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
     std::fs::write(root.join("cargo-mode"), mode).unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env_clear()
         .env("HOME", root)
         .env(
@@ -39,7 +39,7 @@ fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
             "cargo-test",
             "log_diet",
             "--package",
-            "st3",
+            "fractal",
             "--repository",
         ])
         .arg(repository)
@@ -52,6 +52,33 @@ fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
         String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr),
     )
+}
+
+#[test]
+fn cargo_test_attributes_execution_and_rejects_a_foreign_actor_before_execution() {
+    let root = tempfile::tempdir().unwrap();
+    for actor in ["agent/example/caller", "agent/example/peer", "person/operator"] {
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+            .env_clear()
+            .env("HOME", root.path())
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("ST_AGENT", "agent/example/caller")
+            .args(["gate", "cargo-test", "--as", actor, "fixture", "--package", "fixture",
+                "--repository"])
+            .arg(root.path())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        if actor == "agent/example/caller" {
+            assert_eq!(output.status.code(), Some(3));
+            assert!(stderr.contains("Executing gate cargo-test as agent/example/caller"));
+            assert!(String::from_utf8(output.stdout).unwrap().contains("not inside a git repository"));
+        } else {
+            assert!(!output.status.success());
+            assert!(!stderr.contains("Executing gate cargo-test"));
+            assert!(output.stdout.is_empty());
+        }
+    }
 }
 
 #[test]
@@ -85,7 +112,7 @@ mode=$(cat "$CARGO_MODE_FILE")
 case "$*" in
   *--no-run*)
     case "$mode" in
-      missing) echo 'error: no test target named `log_diet` in `st3` package' >&2; exit 101 ;;
+      missing) echo 'error: no test target named `log_diet` in `fractal` package' >&2; exit 101 ;;
       linker) echo 'error: linker `mold` not found' >&2; exit 101 ;;
     esac
     echo 'Finished `test` profile' >&2; exit 0 ;;
@@ -103,7 +130,7 @@ echo 'test result: ok. 2 passed'
     assert_eq!(code, Some(1), "{output}");
     assert!(output.contains("not yet: origin/main"), "{output}");
     assert!(
-        output.contains("has no test target `log_diet` in package `st3` yet"),
+        output.contains("has no test target `log_diet` in package `fractal` yet"),
         "{output}"
     );
 

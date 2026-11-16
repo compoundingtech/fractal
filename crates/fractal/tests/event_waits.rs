@@ -44,10 +44,13 @@ impl Daemon {
             server: None,
         };
         let state = AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
             store: daemon.store.clone(),
             notify: Arc::new(Notify::new()),
             event_notify: daemon.event_notify.clone(),
             node: "wait-node".into(),
+            api_socket: root.join("daemon").join("api.sock"),
             state_dir: root.join("daemon"),
             pty_root: root.join("pty"),
             pty_binary: PathBuf::from("pty"),
@@ -57,6 +60,9 @@ impl Daemon {
             native_session_home: None,
             owning_person: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         let socket = daemon.socket();
         let (stop, stopped) = tokio::sync::oneshot::channel();

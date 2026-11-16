@@ -23,6 +23,8 @@ use serde_json::Value;
 use crate::fleet::{MemberKey, verify_signature};
 use crate::hash::{canonical_hash, canonical_json_value};
 
+pub mod facts;
+
 /// A key delegated to a principal, written on the principal's subject and signed by its issuer.
 pub const KEY_GRANTED: &str = "principal.key-granted";
 /// A delegated key withdrawn, written on the principal's subject.
@@ -37,7 +39,7 @@ const CONTENT_DOMAIN: &str = "smallclaims.claim-content.v1";
 pub enum Role {
     /// A person's own key, from which their device keys descend. A node vouches for it.
     Root,
-    /// One device of a person: a CLI, stui, a phone, a browser. Issued by the person.
+    /// One device of a person: a CLI, Fractal TUI, a phone, a browser. Issued by the person.
     Device,
     /// An agent's key, minted by the node that runs it.
     Agent,

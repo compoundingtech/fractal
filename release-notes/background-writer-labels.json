@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The claim range fold and the operation claim digest backfill name their writer holds: outside any task each page is a profile operation and a writer holder of its own (`maintenance.claim_ranges`, `maintenance.operation_claim_digests`) instead of their thread's name, so they are named with task metrics off; with metrics on, the fold loop is one `maintenance.claim_ranges` operation, as before",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Both jobs read and write exactly as before, page by page. Only the label their work is charged to changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed-version safe: no wire, client or stored-format change. The profile, the writer-hold row of the request-latency report and OTel writer telemetry show two new bounded labels in place of the thread name."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back charges both jobs' writer holds to their thread again."
+  }
+}

@@ -6,11 +6,14 @@ use super::{ApiError, client_v0::validation};
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 // Sunset: 60 days after the first release shipping this bridge. Switch senders only
 // after every fleet member accepts the new names; remove old readers at contraction.
+pub(super) const LOCAL_PERSON_HEADER_ALIAS: &str = "x-fractal-person";
+
 const HEADERS: &[(&str, &str)] = &[
-    ("x-st3-person", "x-fractal-person"),
+    (super::client_v0::LOCAL_PERSON_HEADER, LOCAL_PERSON_HEADER_ALIAS),
     ("x-st3-client", "x-fractal-client"),
     ("x-st3-features", "x-fractal-features"),
     ("x-st3-raw-origin", "x-fractal-raw-origin"),
+    ("x-st3-scg-read-authorization", "x-fractal-scg-read-authorization"),
 ];
 
 pub(super) fn receive_headers(headers: &mut HeaderMap) -> Result<(), ApiError> {
@@ -33,15 +36,15 @@ pub fn api_version(version: &str) -> bool {
     matches!(version, "st3.client.v0" | "fractal.client.v0")
 }
 
-pub(super) fn protocol_matches(value: &str, old: &str) -> bool {
-    value == old || old.strip_prefix("st3.client.").is_some_and(|suffix| {
-        value.strip_prefix("fractal.client.") == Some(suffix)
+pub(super) fn protocol_matches(value: &str, canonical: &str) -> bool {
+    value == canonical || canonical.strip_prefix("fractal.client.").is_some_and(|suffix| {
+        value.strip_prefix("st3.client.") == Some(suffix)
     })
 }
 
-pub fn selected_protocol<'a>(protocols: &[&'a str], old: &str) -> Option<&'a str> {
+pub fn selected_protocol<'a>(protocols: &[&'a str], canonical: &str) -> Option<&'a str> {
     match protocols {
-        [protocol] if protocol_matches(protocol, old) => Some(protocol),
+        [protocol] if protocol_matches(protocol, canonical) => Some(protocol),
         _ => None,
     }
 }
@@ -53,14 +56,14 @@ pub fn capability(protocol: &str) -> Option<&str> {
 }
 
 pub fn terminal_protocol<'a>(
-    protocols: &[&'a str], old: &str, allow_direct: bool,
+    protocols: &[&'a str], canonical: &str, allow_direct: bool,
 ) -> Option<(&'a str, Option<&'a str>)> {
     match protocols {
-        [protocol] if allow_direct && protocol_matches(protocol, old) => Some((protocol, None)),
+        [protocol] if allow_direct && protocol_matches(protocol, canonical) => Some((protocol, None)),
         [first, second] => {
-            if protocol_matches(first, old) {
+            if protocol_matches(first, canonical) {
                 Some((*first, Some(capability(second)?)))
-            } else if protocol_matches(second, old) {
+            } else if protocol_matches(second, canonical) {
                 Some((*second, Some(capability(first)?)))
             } else {
                 None
@@ -103,13 +106,13 @@ mod tests {
             for protocol in [old, new.as_str()] {
                 for prefix in ["st3.cap.", "fractal.cap."] {
                     let cap = format!("{prefix}secret");
-                    assert_eq!(terminal_protocol(&[protocol, &cap], old, false),
+                    assert_eq!(terminal_protocol(&[protocol, &cap], &new, false),
                         Some((protocol, Some("secret"))));
-                    assert_eq!(terminal_protocol(&[protocol], old, true), Some((protocol, None)));
+                    assert_eq!(terminal_protocol(&[protocol], &new, true), Some((protocol, None)));
                 }
-                assert!(terminal_protocol(&[protocol, "st3.cap.a", "fractal.cap.b"], old, false).is_none());
+                assert!(terminal_protocol(&[protocol, "st3.cap.a", "fractal.cap.b"], &new, false).is_none());
             }
-            assert!(terminal_protocol(&[old, &new], old, false).is_none());
+            assert!(terminal_protocol(&[old, &new], &new, false).is_none());
         }
     }
 
@@ -118,9 +121,9 @@ mod tests {
         for suffix in ["terminal.v0", "pty.v0", "conversation.v0", "collections.v0"] {
             let old = format!("st3.client.{suffix}");
             let new = format!("fractal.client.{suffix}");
-            assert_eq!(selected_protocol(&[&old], &old), Some(old.as_str()));
-            assert_eq!(selected_protocol(&[&new], &old), Some(new.as_str()));
-            assert!(selected_protocol(&[&old, &new], &old).is_none());
+            assert_eq!(selected_protocol(&[&old], &new), Some(old.as_str()));
+            assert_eq!(selected_protocol(&[&new], &new), Some(new.as_str()));
+            assert!(selected_protocol(&[&old, &new], &new).is_none());
         }
         for prefix in ["st3.cap.", "fractal.cap."] {
             assert_eq!(capability(&format!("{prefix}secret")), Some("secret"));
@@ -130,5 +133,65 @@ mod tests {
             assert!(api_version(version));
         }
         assert!(!api_version("fractal.client.v1"));
+    }
+
+    #[tokio::test]
+    async fn accepting_release_negotiates_old_and_new_clients_but_rejects_dual_offers() {
+        use axum::extract::{Path, WebSocketUpgrade};
+        use axum::response::{IntoResponse as _, Response};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+        async fn upgrade(
+            Path(surface): Path<String>,
+            websocket: WebSocketUpgrade,
+            headers: HeaderMap,
+        ) -> Response {
+            let canonical = match surface.as_str() {
+                "terminal" => "fractal.client.terminal.v0",
+                "pty" => "fractal.client.pty.v0",
+                "conversation" => "fractal.client.conversation.v0",
+                "collections" => "fractal.client.collections.v0",
+                _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+            };
+            let protocols = headers.get("sec-websocket-protocol").unwrap().to_str().unwrap()
+                .split(',').map(str::trim).collect::<Vec<_>>();
+            let selected = if matches!(surface.as_str(), "terminal" | "pty") {
+                terminal_protocol(&protocols, canonical, surface == "pty").map(|(selected, _)| selected)
+            } else {
+                selected_protocol(&protocols, canonical)
+            };
+            let Some(selected) = selected else {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            };
+            websocket.protocols([selected.to_owned()]).on_upgrade(|_| async {})
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/{surface}", axum::routing::get(upgrade)))
+                .await.unwrap();
+        });
+        for surface in ["terminal", "pty", "conversation", "collections"] {
+            for family in ["st3", "fractal"] {
+                let protocol = format!("{family}.client.{surface}.v0");
+                let offered = if surface == "terminal" {
+                    format!("{protocol}, {family}.cap.secret")
+                } else { protocol.clone() };
+                let mut request = format!("ws://{address}/{surface}").into_client_request().unwrap();
+                request.headers_mut().insert("sec-websocket-protocol", offered.parse().unwrap());
+                // Real handshakes keep tungstenite's unoffered-protocol rejection intact.
+                let (_socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+                assert_eq!(response.headers()["sec-websocket-protocol"].to_str().unwrap(), protocol);
+            }
+            let capability = if surface == "terminal" { ", fractal.cap.secret" } else { "" };
+            let mut request = format!("ws://{address}/{surface}").into_client_request().unwrap();
+            request.headers_mut().insert("sec-websocket-protocol",
+                format!("fractal.client.{surface}.v0, st3.client.{surface}.v0{capability}").parse().unwrap());
+            let error = tokio_tungstenite::connect_async(request).await.unwrap_err();
+            assert!(matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == axum::http::StatusCode::BAD_REQUEST));
+        }
+        server.abort();
     }
 }

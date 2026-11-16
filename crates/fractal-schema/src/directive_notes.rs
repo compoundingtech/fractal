@@ -40,6 +40,10 @@ pub fn validate_fields(fields: &BTreeMap<String, Value>) -> Result<(), Validatio
     if let Some(value) = fields.get("expires_at") {
         expiry(value.as_str().ok_or_else(|| error("invalid-directive-note", "expires_at must be a UTC timestamp string"))?)?;
     }
+    // The daemon-assigned writer: a pairing grant or the local member. Older notes have none.
+    if fields.contains_key("source") && !crate::availability::valid_source(fields.get("source")) {
+        return Err(error("invalid-directive-note", "a source is nonblank and at most 256 bytes"));
+    }
     Ok(())
 }
 

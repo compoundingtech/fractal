@@ -7,6 +7,7 @@ fn report(wait: u128, truncate: u128) -> smallclaims::sqlite::WalCheckpointRepor
         writer_wait_ms: wait,
         truncate_ms: Some(truncate),
         recycled: true,
+        blocked_by: None,
     }
 }
 #[test]

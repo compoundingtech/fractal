@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Distinguish intentional suspension from unhealthy delivery in per-agent metrics",
+  "replay": { "status": "none", "detail": "No graph replay or durable state changes." },
+  "schema": { "status": "none", "detail": "No persisted schema, API or generated-client changes." },
+  "rules": { "status": "none", "detail": "Read-only telemetry uses suspension::current(...).holds_seat(), the same authoritative lifecycle fold as the reconciler, not harness or runtime liveness. Shared locally owned agent membership is unchanged; stopped declarations emit no series." },
+  "compatibility": { "status": "changed", "detail": "The st3 meter's st.delivery.state_age gauge adds bounded attribute st.agent.desired=running|suspended. Suspension includes active suspend/resume holds until resume completes. No stopped or unknown value is exported. Existing state, reason, identity and age semantics remain unchanged; changing desired state does not reset delivery age." },
+  "downtime": { "status": "none", "detail": "Normal daemon rollout; no migration or backfill." },
+  "manual": { "status": "changed", "detail": "Delivery stale alerts should select st.delivery.state=stale AND st.agent.desired=running AND st.delivery.state_age > 600 seconds. Apply the same desired-running filter to refused-delivery alerts if configured." },
+  "recovery": { "status": "none", "detail": "The existing off-scrape cache refreshes desired-state attributes; scrape callbacks do no Store reads." }
+}

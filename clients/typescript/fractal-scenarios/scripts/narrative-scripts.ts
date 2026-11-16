@@ -141,9 +141,11 @@ export const narrativeScript = (id: typeof NARRATIVE_RECORDINGS[number], rows: r
       }
     }
     let next = 0
-    for (const identity of recordingIdentities(script, rows)) {
+    for (const [identity, kind] of recordingIdentities(script, rows)) {
       if (id_map[identity] !== undefined) continue
-      id_map[identity] = `${identity.includes('/') ? identity.split('/')[0] : 'message'}/scenario-${id}/captured-${++next}`
+      // Native headers carry provider IDs, not graph-mail provenance (even if a driver used message/).
+      const namespace = kind === 'native' ? 'native' : identity.includes('/') ? identity.split('/')[0] : 'message'
+      id_map[identity] = `${namespace}/scenario-${id}/captured-${++next}`
     }
   }
   return script

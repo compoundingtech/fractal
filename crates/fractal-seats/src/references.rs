@@ -1,9 +1,9 @@
-//! The part of `references` that moved up from st3-store.
+//! The part of `references` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStoreCore;
 use std::collections::{BTreeMap, BTreeSet};
 use crate::model::{
-    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, St3Error, UsedMissionSpec,
+    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec,
     WorkSelector,
 };
 pub use fractal_missions::references::*;

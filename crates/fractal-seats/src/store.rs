@@ -1,4 +1,4 @@
-//! The part of `store` that moved up from st3-store.
+//! The part of `store` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 pub use fractal_missions::store::identities;
 #[cfg(any(test, feature = "test-support"))]
@@ -33,7 +33,7 @@ use crate::model::{
     PlanningSessionDeclaration, PlanningSessionView, PlanningVariantView, ReplicaBatch,
     ReplicaRepairDeclaration, ResourceObservationOutcome, ResourceRefreshOperation,
     RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView,
-    RuntimeResetOperation, St3Error, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
+    RuntimeResetOperation, FractalError, StatusResponse, StepRunView, SubjectChange, SubjectStatus,
     SubscriptionConditionSpec, SubscriptionRequestDecision, SubscriptionRequestView,
     SubscriptionSpec, UsageSummary, WorkRequest, WorkSelector, WorkWakeView,
 };
@@ -99,7 +99,7 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
-pub use fractal_missions::store::runtime::SmalltalkRuntime;
+pub use fractal_missions::store::runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
@@ -151,6 +151,8 @@ pub mod step_labels;
 pub mod stop_deferral;
 pub mod subagents;
 pub mod trace_principal;
+pub mod usage_accounts;
+pub use usage_accounts::AttributedUsage;
 pub mod usage_period;
 pub mod work_summaries_ivm;
 #[cfg(test)]
@@ -159,6 +161,8 @@ pub mod accountable_tests;
 pub mod agents_window_deadline_tests;
 #[cfg(test)]
 pub mod arrangements_tests;
+#[cfg(test)]
+pub mod ordered_membership_tests;
 #[cfg(test)]
 pub mod checkpoint_tests;
 #[cfg(test)]
@@ -219,6 +223,18 @@ pub fn roster_local_frontier(connection: &Connection, index: u64) -> Result<u64>
     Ok(connection.query_row(/* sqlite-large-value: allow-for-now lv-h6ec3fa9174f4 owner=fractal_seats::store TODO=trace-statement-and-value-representation */ ROSTER_LOCAL_FRONTIER, [index], |row| row.get::<_, u64>(0))?)
 }
 
+/// The subjects whose claims an agent card reads: its agent, the runs, generations and steps that
+/// own or queue agents, messages (activity and delivery blockers), and the exec and pty children
+/// a memberless card reduces. A claim about any other subject, of any kind, changes no card.
+const AGENT_CARD_INPUT_PREFIXES: [&str; 7] =
+    ["agent/", "mission-run/", "run-generation/", "step-run/", "message/", "exec/", "pty/"];
+
+/// Whether a claim about `subject` can change an agent card. The roster's incremental fold reads
+/// only these, so a refresher that waits for one this node writes cannot drift from what it folds.
+pub fn agent_card_input_subject(subject: &str) -> bool {
+    AGENT_CARD_INPUT_PREFIXES.iter().any(|prefix| subject.starts_with(prefix))
+}
+
 #[derive(Default)]
 pub struct AgentResourcesDelta {
     pub subjects: BTreeSet<String>,
@@ -260,7 +276,7 @@ pub trait SeatsStoreCore {
             &self,
             intent: &NormalizedIntent,
             key: &str,
-        ) -> Result<ApplyResponse, St3Error>;
+        ) -> Result<ApplyResponse, FractalError>;
     /// Reduce only subjects whose IDs begin with `prefix`.
     ///
     /// Product projections use this instead of reducing every subject in the graph and filtering
@@ -287,6 +303,12 @@ pub trait SeatsStoreCore {
         ) -> Result<BTreeSet<String>>;
     /// The desired subjects named in `subjects`, by their primary keys.
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>>;
+    /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
+    /// only typed edges; this resolves them through the ordinary desired resource subjects.
+    fn declared_resource_uris<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a crate::model::DeclaredResourceReference>,
+    ) -> Result<BTreeMap<String, String>>;
 }
 
 impl SeatsStoreCore for Store {
@@ -295,7 +317,7 @@ impl SeatsStoreCore for Store {
             &self,
             intent: &NormalizedIntent,
             key: &str,
-        ) -> Result<ApplyResponse, St3Error> {
+        ) -> Result<ApplyResponse, FractalError> {
         self.apply_internal_with_declared_agents(intent, key, &BTreeSet::new())
     }
 
@@ -314,8 +336,7 @@ impl SeatsStoreCore for Store {
             // a snapshot can see a commit a moment before the writer publishes its index.
             let current = current_index(&self.readers.get())?;
             let index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
-            let mut cache = self
-                .smalltalk
+            let mut cache = self.fractal
                 .agent_status_cache
                 .lock()
                 .expect("agent status cache poisoned");
@@ -395,6 +416,29 @@ impl SeatsStoreCore for Store {
             }
         }
         Ok(stopped)
+    }
+
+    /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
+    /// only typed edges; this resolves them through the ordinary desired resource subjects.
+    fn declared_resource_uris<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a crate::model::DeclaredResourceReference>,
+    ) -> Result<BTreeMap<String, String>> {
+        let subjects = references
+            .into_iter()
+            .map(|reference| reference.subject.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(self
+            .desired_subjects_named(&subjects)?
+            .into_iter()
+            .filter(|desired| desired.kind == "resource")
+            .filter_map(|desired| {
+                let uri = fractal_store::graph::declared_uri(&desired.desired)?.to_owned();
+                Some((desired.subject, uri))
+            })
+            .collect())
     }
 
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {

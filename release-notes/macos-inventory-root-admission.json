@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Native file inventory now admits canonical workspace roots against the harness's held-cwd filesystem identity, allowing macOS temporary-directory aliases without following substituted roots or ancestors during enumeration.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph, claim or storage change; canonical roots are recorded in new native inventory observations."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No API or wire shape change. Workspace admission fails closed when the resolved directory does not match the native filesystem identity; enumeration retains component-by-component no-follow checks."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Takes effect with the next daemon build and fresh native inventory observation."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit."
+  }
+}

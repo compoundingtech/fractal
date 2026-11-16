@@ -5,6 +5,8 @@ import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({ tag: 'Waiting' }))
+// One stable empty roster: a fresh map per render would re-project the transcript every frame.
+const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 vi.mock('@effect/atom-react', () => ({ useAtomValue: () => false }))
 vi.mock('../data/react.tsx', () => ({
@@ -12,6 +14,8 @@ vi.mock('../data/react.tsx', () => ({
   useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0, useAttention: () => ({ _tag: 'Waiting' }),
   useNowSnapshot: () => 0,
   useConnection: () => ({ _tag: 'Live' }),
+  // Roster names for mail headers; an empty roster reads refs by their last segment.
+  useFleetSelection: () => noRosterNames,
   usePausedNow: () => undefined,
 }))
 vi.mock('../conversation/todos/AgentTodos.tsx', () => ({ LiveAgentTodos: () => <details aria-label="To-dos"><summary>To-dos · Example phase 1/2</summary></details> }))

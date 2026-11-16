@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Development shells use client-side-capable sccache 0.19.0 and preserve inherited compiler wrappers and cache settings",
+  "replay": {"status": "none", "detail": "Development environment only; no runtime replay behavior changes."},
+  "schema": {"status": "none", "detail": "No database schema or migration changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digests change."},
+  "compatibility": {"status": "none", "detail": "No user-visible runtime, client protocol, pairing, or rolling-upgrade contract changes. The development compiler-cache client supports client-side compilation and inherits host cache routing."},
+  "downtime": {"status": "none", "detail": "No running service is restarted or reconfigured."},
+  "manual": {"status": "none", "detail": "Existing installations require no upgrade steps. Developers receive the updated compiler-cache default on entering the Nix development shell; inherited wrappers, including an empty opt-out, remain unchanged."},
+  "recovery": {"status": "none", "detail": "No runtime state or recovery procedure changes."}
+}

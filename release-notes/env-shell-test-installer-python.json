@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fix the environment shell test's installer fixture to distinguish inline Python preflight from the macOS installation helper",
+  "replay": { "status": "none", "detail": "Test fixture only; no replay or backfill." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "Production installer behavior is unchanged. The test runs inline Python with the real interpreter and validates the install helper's argument contract before copying fixture binaries." },
+  "downtime": { "status": "none", "detail": "No runtime changes." },
+  "manual": { "status": "none", "detail": "No manual steps." },
+  "recovery": { "status": "none", "detail": "Test-only change; no recovery required." }
+}

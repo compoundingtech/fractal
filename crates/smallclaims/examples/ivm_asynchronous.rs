@@ -1,4 +1,4 @@
-//! Run with normal Cargo configuration: cargo run -p smallclaims --example ivm_asynchronous
+//! Run with cargo run -p smallclaims --features test-support --example ivm_asynchronous
 //! Claims-only example, not a production admission/authority adapter.
 use anyhow::{Result, bail};
 use serde_json::json;

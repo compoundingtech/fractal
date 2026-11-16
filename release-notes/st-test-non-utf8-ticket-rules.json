@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Local test queue tickets containing non-UTF-8 bytes are treated as unreadable instead of aborting the run.",
+  "replay": {"status": "none", "detail": "No stored application data changes."},
+  "schema": {"status": "none", "detail": "The queue ticket format is unchanged."},
+  "rules": {"status": "none", "detail": "Ticket rule lookup returns 0 for decoding failures, matching its existing unreadable-ticket contract."},
+  "compatibility": {"status": "none", "detail": "Valid UTF-8 tickets retain their existing behavior."},
+  "downtime": {"status": "none", "detail": "No restart is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reverting restores the decoding exception for malformed tickets; no data recovery is needed."}
+}

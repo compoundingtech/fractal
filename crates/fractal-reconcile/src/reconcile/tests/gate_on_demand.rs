@@ -9,7 +9,7 @@ mission "orchid" state="ready" {
     round {
       completion { when "all-steps-exhausted" }
       agent "builder" { workspace "/tmp"; command "true"; restart "never" }
-      agent "gate" { workspace "/tmp"; command "true"; restart "never" }
+      agent "gate" { workspace "/tmp"; command "true"; restart "never"; resource "review" uri="urn:example:gate-review" }
       agent "helper" { workspace "/tmp"; command "true"; restart "never" }
       step "build" { assigned-to "agent/${ST_MISSION_RUN}/builder" }
       step "gate" {
@@ -26,16 +26,36 @@ mission "orchid" state="ready" {
     runtime: Arc<FakeRuntime>,
     reconciler: Reconciler<FakeRuntime>,
     round: MissionRunView,
+    revisions: BTreeMap<String, MissionSpec>,
 }
 
     impl Fixture {
     fn new(source: &str) -> Self {
+        Self::with_revisions(source, &[])
+    }
+
+    fn with_revisions(source: &str, keys: &[&str]) -> Self {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, source, "publish");
+        let initial = store.mission_spec("orchid", None).unwrap().unwrap();
+        let mut revisions = BTreeMap::new();
+        // These controls adopt generations directly; publish candidates before any run exists.
+        for key in keys {
+            let candidate = source.replace(
+                "      agent \"helper\"",
+                &format!(
+                    "      resource \"{key}\" {{ kind \"custom.test.garden\" }}\n      agent \"helper\""
+                ),
+            );
+            apply_source(&store, &candidate, key);
+            revisions.insert((*key).into(), store
+                .mission_spec("__st3/orchid/loop/refine/round", None)
+                .unwrap().unwrap());
+        }
         let parent = store
             .create_mission_run(&crate::model::MissionRunRequest {
                 mission: "orchid".into(),
-                revision: None,
+                revision: (!keys.is_empty()).then_some(initial.revision),
                 workspace: "/tmp".into(),
                 requester: Some("person/lichen".into()),
                 mode: None,
@@ -62,6 +82,7 @@ mission "orchid" state="ready" {
             runtime,
             reconciler,
             round,
+            revisions,
         };
         fixture.settle();
         fixture
@@ -168,22 +189,11 @@ mission "orchid" state="ready" {
     }
 
     fn revise(&self, key: &str) {
-        let source = SOURCE.replace(
-            "      agent \"helper\"",
-            &format!(
-                "      resource \"{key}\" {{ kind \"custom.test.garden\" }}\n      agent \"helper\""
-            ),
-        );
-        apply_source(&self.store, &source, key);
-        let next = self
-            .store
-            .mission_spec("__st3/orchid/loop/refine/round", None)
-            .unwrap()
-            .unwrap();
+        let next = self.revisions.get(key).unwrap();
         self.store
             .adopt_mission_revision(
                 &self.round.id,
-                &next,
+                next,
                 "person/lichen",
                 "Add garden evidence.",
                 &format!("adopt-{key}"),
@@ -214,6 +224,15 @@ fn gate_on_demand_waits_for_builder_then_starts_once_and_receives_work() {
     assert_eq!(fixture.step("gate").status, "ready");
     assert_eq!(fixture.gate_starts(), 1);
     let gate = format!("agent/{}/gate", fixture.round.id);
+    let (_, desired) = fixture.store.agent_declaration(&gate, None).unwrap().unwrap();
+    let references = crate::graph::declared_resources(&desired);
+    let uris = fixture.store.declared_resource_uris(&references).unwrap();
+    assert_eq!(uris[&references[0].subject], "urn:example:gate-review");
+    let target = fixture.store.desired_subjects_named(&[references[0].subject.clone()])
+        .unwrap().remove(0);
+    assert!(target.owner_run.is_none());
+    assert!(target.owner_generation.is_none());
+    assert!(target.owner_step.is_none());
     let readiness = fixture
         .store
         .claims_for(&fixture.step("gate").subject, Some("step-run.state"))
@@ -253,7 +272,7 @@ fn gate_on_demand_waits_for_builder_then_starts_once_and_receives_work() {
 
     #[test]
 fn gate_on_demand_restart_and_revision_preserve_build_and_gate_admission() {
-    let mut fixture = Fixture::new(SOURCE);
+    let mut fixture = Fixture::with_revisions(SOURCE, &["mid-build", "mid-gate"]);
     fixture.action("build", "claim", "claim-build");
     fixture.restart();
     fixture.revise("mid-build");
@@ -335,7 +354,7 @@ fn gate_on_demand_release_and_failed_retry_keep_the_seat() {
 
     #[test]
 fn gate_on_demand_revision_during_pending_retry_keeps_admitted_seat() {
-    let mut fixture = Fixture::new(SOURCE);
+    let mut fixture = Fixture::with_revisions(SOURCE, &["mid-retry"]);
     fixture.finish_build();
     fixture.action("gate", "claim", "claim-gate");
     fixture.action("gate", "fail", "fail-gate");

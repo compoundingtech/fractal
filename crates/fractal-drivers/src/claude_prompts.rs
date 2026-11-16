@@ -140,7 +140,8 @@ pub(crate) fn concerns_prompts(event: &str, payload: &serde_json::Value, agent_d
     event == "PermissionRequest" || (asker(payload).is_some() && !load(agent_dir).prompts.is_empty())
 }
 
-fn asker(payload: &serde_json::Value) -> Option<String> {
+/// The subagent that sent `payload`, or `None` for the seat's top level.
+pub fn asker(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("agent_id")
         .and_then(serde_json::Value::as_str)

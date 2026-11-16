@@ -133,14 +133,14 @@ pub fn page(
             snapshot: snapshot.clone(), collection: "missions".into(), offset: end, limit,
             history: false, person: query.person.clone(), actor: query.actor.clone(),
             owner_run: query.owner_run.clone(), status: query.status.clone(), owner: None, state: None,
-            native_only: query.native_only, items_digest: digest, before_index: None,
+            native_only: query.native_only, items_digest: digest, before_index: None, before_stream_index: None,
             after_key: None, expires_at_unix_ms: expires,
         })?)
     } else { None };
     Ok((Extension(snapshot), Json(ClientResourcePage {
         kind: "page".into(), collection: "missions".into(), filters: BTreeMap::new(), items,
         page: ClientPageInfo { limit, has_more, next_cursor,
-            cursor_expires_at: has_more.then(|| client_timestamp(expires)) },
+            cursor_expires_at: has_more.then(|| client_timestamp(expires)), omitted_items: None },
         sync: client_sync_notice(state), replicated: None,
     })))
 }

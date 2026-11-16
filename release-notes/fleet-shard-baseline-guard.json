@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep the fleet shard transition test valid when the compatibility baseline already holds the shard",
+  "replay": {
+    "status": "none",
+    "detail": "Only compatibility test expectations change; production claim replay is unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema, index, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No production admission, checkpoint rule or fleet coordination changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The fleet test conditions shard-transition expectations on whether the baseline already opens the shard, while retaining graph sync, history and stream receipt checks. Production contracts are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Test-only expectation changes require no service restart or migration."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual upgrade steps are required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No production state or recovery path changes."
+  }
+}

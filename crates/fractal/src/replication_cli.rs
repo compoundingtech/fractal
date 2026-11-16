@@ -9,6 +9,29 @@ pub(super) async fn run_replication(
     json_output: bool,
 ) -> Result<()> {
     match command {
+        ReplicationCommand::Replay { confirm } => {
+            let mut client = client.clone();
+            // Match planned checkpoint maintenance, rather than the interactive 15-second limit.
+            client.deadlines.request = Duration::from_secs(30 * 60);
+            if confirm {
+                let estimate: Value = client.post("/v1/replication/replay", &json!({"confirm":false})).await?;
+                // Print before the destructive request, including when stdout is JSON.
+                eprintln!("{}", estimate["warning"].as_str().unwrap_or_default());
+            }
+            let report: Value = client.post("/v1/replication/replay", &json!({"confirm":confirm})).await?;
+            if json_output {
+                return print_value(&report, true);
+            }
+            if confirm {
+                println!("replay\t{}\tduration-ms={}", report["result"], report["duration_ms"]);
+            } else {
+                println!("claims\t{}", report["claim_count"]);
+                println!("last-replay-duration-ms\t{}", report["last_replay_duration_ms"].as_u64().map_or_else(|| "unknown".into(), |ms| ms.to_string()));
+                println!("{}", report["warning"].as_str().unwrap_or_default());
+                println!("Estimate only. Run fractal replication replay --confirm to replay.");
+            }
+            Ok(())
+        }
         ReplicationCommand::Status => {
             let status: ReplicationStatus = client.get("/v1/replication/status").await?;
             if json_output {
@@ -27,6 +50,11 @@ pub(super) async fn run_replication(
                 println!("table-digest\t{table}\t{digest}");
             }
             println!("envelopes\t{}", status.received_envelopes);
+            // Records count only admitted envelopes; held ones show only here.
+            println!(
+                "envelopes-waiting\tpending={} unsigned={} fenced={}",
+                status.pending_envelopes, status.unsigned_envelopes, status.fenced_envelopes
+            );
             println!(
                 "records\tvalid={} pending={} waiting={} invalid={} repaired={} checkpointed={}",
                 status.valid_records,
@@ -273,6 +301,23 @@ pub(super) async fn run_replication(
             print!("{}", render_checkpoint_status(&status));
             Ok(())
         }
+        ReplicationCommand::Signatures {
+            command: SignaturesCommand::Resume { reason, actor },
+        } => {
+            let actor = fleet_person(actor, config)?;
+            let request = smallclaims::store::principals::SignatureResumeRequest { reason, actor };
+            let resumed: Value = client.post("/v1/signatures/resume", &request).await?;
+            if json_output {
+                return print_value(&resumed, true);
+            }
+            match resumed.get("cleared").and_then(Value::as_str) {
+                Some(fault) => println!("cleared signature fault: {fault}"),
+                None => println!("no signature fault was persisted"),
+            }
+            let migration = &resumed["migration"];
+            println!("migration phase {}, fault {}", migration["phase"].as_str().unwrap_or("?"), migration["fault"].as_str().unwrap_or("none"));
+            Ok(())
+        }
     }
 }
 
@@ -294,7 +339,7 @@ async fn checkpoint_plan_waiting_for_proof(
                     && started.elapsed() < CHECKPOINT_PLAN_PROOF_WAIT =>
             {
                 if !announced {
-                    eprintln!("st: waiting for the running checkpoint proof to finish");
+                    crate::stderr_message("st", format_args!("waiting for the running checkpoint proof to finish"));
                     announced = true;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -350,4 +395,16 @@ fn render_checkpoint_plan(plan: &fractal_daemon::store::CheckpointPlanView) -> S
     output.push_str(&format!("drop-digest     {}\n", plan.drop_digest));
     output.push_str(&format!("graph-digest    {}\n", proof.graph_digest));
     output
+}
+
+#[test]
+fn replication_replay_requires_explicit_confirm_flag() {
+    for confirm in [false, true] {
+        let mut args = vec!["fractal", "replication", "replay"];
+        if confirm { args.push("--confirm"); }
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(cli.command, Command::Replication {
+            command: ReplicationCommand::Replay { confirm: parsed }
+        } if parsed == confirm));
+    }
 }

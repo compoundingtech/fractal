@@ -51,7 +51,7 @@ impl NativeCut {
 fn temporary_schema_safe(connection: &Connection) -> bool {
     // Compare the actual catalog definitions, not trusted names. SQLite stores the CREATE
     // text beginning at the object name (TEMP / IF NOT EXISTS are not retained); normalize
-    // whitespace only. Only the exact native tables and body-free preparation
+    // whitespace only. Only the exact native tables and body-free native
     // queue notifiers are eligible; changed definitions or other objects are not.
     // https://www.sqlite.org/schematab.html and bundled sqlite3.c sqlite3EndTable.
     let check = || -> rusqlite::Result<bool> {
@@ -80,14 +80,15 @@ fn temporary_schema_safe(connection: &Connection) -> bool {
                     "trigger",
                     /* sqlite-large-value: allow-for-now lv-h7676b0cc0ec9 owner=fractal_store::store::resource_preparation TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER preparation_work_dirty AFTER INSERT ON main.local_resource_preparation_dirty BEGIN SELECT resource_preparation_work_pending(); END",
                 ),
-                _ => return Ok(false),
+                _ => match custom::work_notifier_definitions().get(&name) {
+                    Some(definition) => ("trigger", definition.as_str()),
+                    None => return Ok(false),
+                },
             };
             if kind != expected_kind
-                || sql
-                    .as_deref()
-                    .map(|sql| sql.split_ascii_whitespace().collect::<Vec<_>>().join(" "))
-                    .as_deref()
-                    != Some(expected)
+                || !sql.as_deref().is_some_and(|sql| {
+                    sql.split_ascii_whitespace().eq(expected.split_ascii_whitespace())
+                })
             {
                 return Ok(false);
             }
@@ -179,7 +180,7 @@ impl Fence {
             let work = smallclaims::sqlite::work::SqliteWorkScope::start();
             if connection.is_autocommit() {
                 prepared.cut = NativeCut::read(&connection);
-                actual_serial = store.smalltalk.observer_actuals.seed(
+                actual_serial = store.fractal.observer_actuals.seed(
                     &connection, || connection.reverify_observer_coverage(),
                 ).ok();
             }
@@ -203,6 +204,12 @@ impl Fence {
         }) {
             return prepared;
         }
+        #[cfg(test)]
+        BEFORE_SNAPSHOT.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
         #[cfg(any(test, feature = "test-support"))]
         let read_started = std::time::Instant::now();
         #[cfg(any(test, feature = "test-support"))]
@@ -210,6 +217,11 @@ impl Fence {
         let value = store.read_snapshot(|_| {
             let connection = store.readers.get();
             if connection.path() != prepared.cut.as_ref().map(|cut| cut.file.as_str()) {
+                return Ok(None);
+            }
+            // Check at the same pinned cut as the inputs, not at the earlier writer seed:
+            // another connection can commit raw changes between those two boundaries.
+            if !completion_state::current(&connection)? {
                 return Ok(None);
             }
             let dirty: bool =
@@ -287,6 +299,12 @@ pub struct Counts {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub static COUNTS: std::cell::RefCell<Counts> = std::cell::RefCell::new(Counts::default());
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(any(test, feature = "test-support"))]

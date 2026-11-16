@@ -4,11 +4,32 @@ use crate::model::DelegationProof;
 
 pub const ACTIONS: &[&str] = &["answer-ask", "close-item", "record-go-stop"];
 
-pub fn denied(message: impl Into<String>) -> St3Error {
-    St3Error::new("delegation-refused", message)
+pub fn denied(message: impl Into<String>) -> FractalError {
+    FractalError::new("delegation-refused", message)
 }
 
-pub fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<String>, St3Error> {
+pub fn add_fields(fields: &mut BTreeMap<String, Value>, proof: &DelegationProof) {
+    fields.insert("acted_for".into(), json!(proof.person));
+    fields.insert("delegation".into(), json!(proof));
+}
+
+pub fn add_evidence(
+    connection: &Connection,
+    evidence: &mut Vec<String>,
+    proof: &DelegationProof,
+) -> Result<(), FractalError> {
+    // The instruction is a person's message, which the messages shard refuses: it is always a
+    // graph claim. Only a delegated step's target may be a stream item (`message_sent_in`).
+    let instruction = message_sent(connection, &proof.message)?;
+    for reference in [&instruction.id, &proof.policy] {
+        if !evidence.contains(reference) {
+            evidence.push(reference.clone());
+        }
+    }
+    Ok(())
+}
+
+pub fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<String>, FractalError> {
     let actions: Vec<String> =
         serde_json::from_value(fields.get("actions").cloned().unwrap_or(Value::Null))
             .map_err(|_| denied("a policy needs an actions array"))?;
@@ -25,9 +46,20 @@ pub fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<String>, S
     Ok(actions)
 }
 
-pub fn message_sent(connection: &Connection, subject: &str) -> Result<ClaimRecord, St3Error> {
+pub fn message_sent(connection: &Connection, subject: &str) -> Result<ClaimRecord, FractalError> {
     connection.query_row(/* sqlite-large-value: allow-for-now lv-h7fe028a56733 owner=fractal_store::store::delegation TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='message.sent' ORDER BY CANONICAL_ASC(claims) LIMIT 1"), [subject], claim_from_row)
         .optional().map_err(internal)?.ok_or_else(|| denied("instruction and target messages need an original sent claim"))
+}
+
+/// `message_sent`, or a stream item's sent claim when the graph has none: a stream item's
+/// `message.sent` is in the messages shard, which a graph connection cannot read.
+pub fn message_sent_in(graph: &Store, connection: &Connection, subject: &str) -> Result<ClaimRecord, FractalError> {
+    match message_sent(connection, subject) {
+        Err(error) if error.code == "delegation-refused" => {
+            super::messages_shard::mailbox_reads::sent_claim(graph, subject).map_err(internal)?.ok_or(error)
+        }
+        found => found,
+    }
 }
 
 /// Runs under the writer lock on both specialized and generic local claim paths.
@@ -38,7 +70,38 @@ pub fn validate_write(
     actor: Option<&str>,
     fields: &BTreeMap<String, Value>,
     evidence: &[String],
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
+    validate_write_with(tx, &message_sent, subject, kind, actor, fields, evidence)
+}
+
+/// `validate_write` for a delegated lifecycle step on a stream item. The step is this member's
+/// record in the messages shard, not a graph write, so the same rules read a graph snapshot and
+/// find sent claims in the graph or the shard.
+pub fn validate_stream_write(
+    graph: &Store,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &BTreeMap<String, Value>,
+    evidence: &[String],
+) -> Result<(), FractalError> {
+    let connection = graph.readers.get();
+    let snapshot = connection.unchecked_transaction().map_err(internal)?;
+    let sent = |connection: &Connection, subject: &str| message_sent_in(graph, connection, subject);
+    validate_write_with(&snapshot, &sent, subject, kind, actor, fields, evidence)
+}
+
+type SentLookup<'a> = dyn Fn(&Connection, &str) -> Result<ClaimRecord, FractalError> + 'a;
+
+fn validate_write_with(
+    tx: &Transaction<'_>,
+    message_sent: &SentLookup<'_>,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &BTreeMap<String, Value>,
+    evidence: &[String],
+) -> Result<(), FractalError> {
     if kind == "person.delegation-set" {
         if !subject.starts_with("person/")
             || subject.matches('/').count() != 1
@@ -57,6 +120,9 @@ pub fn validate_write(
     let Some(value) = fields.get("delegation") else {
         if fields.contains_key("acted_for")
             || (kind == "work.person-done"
+                && actor.is_some_and(|actor| actor.starts_with("agent/")))
+            || (kind == "harness.diagnostic"
+                && fields.get("code") == Some(&json!("native-prompt-answered"))
                 && actor.is_some_and(|actor| actor.starts_with("agent/")))
         {
             return Err(denied(
@@ -163,6 +229,12 @@ pub fn validate_write(
             }
             "close-item"
         }
+        "harness.diagnostic" => {
+            super::attention_snapshot::validate_delegated_denial(
+                tx, subject, fields, evidence, &proof,
+            )?;
+            "close-item"
+        }
         _ => {
             return Err(denied(
                 "this operation is outside the allowed delegation list",
@@ -177,6 +249,7 @@ pub fn validate_write(
     let instruction = message_sent(tx, &proof.message)?;
     if instruction.actor.as_deref() != Some(&proof.person)
         || instruction.body["fields"]["from"] != proof.person
+        || (kind == "harness.diagnostic" && instruction.body["fields"]["to"].as_str() != actor)
     {
         return Err(denied(
             "the instruction's recorded sender must be the person acted for",

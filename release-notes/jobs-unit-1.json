@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add the inactive fractal-jobs request, lifecycle and per-field coverage contract; no runtime path uses it.",
+  "replay": {"status": "none", "detail": "No claims or projections change."},
+  "schema": {"status": "none", "detail": "Pure Rust types only; no stored schema changes."},
+  "rules": {"status": "none", "detail": "No admission policy or numeric fleet limits. IO weight is advisory, not an IO limit. Duration estimates and optional hard clocks are distinct."},
+  "compatibility": {"status": "none", "detail": "No existing consumer depends on this crate. Cancellation requires durable cancel-requested state and confirmed whole-tree stop; host loss remains unknown until recovery. Tagged max-hold, holder-lost and outcome-unwritten infrastructure failures are distinct from process exit codes."},
+  "downtime": {"status": "none", "detail": "No runtime wiring."},
+  "manual": {"status": "none", "detail": "No activation or operator action."},
+  "recovery": {"status": "none", "detail": "Removing the unused crate leaves runtime behavior unchanged."}
+}

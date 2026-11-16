@@ -40,7 +40,7 @@ effect needs its own fresh fence; the returned value does not reserve authority.
 Run the working example with normal Cargo configuration:
 
 ```sh
-cargo run --locked -p smallclaims --example ivm_read_after_write
+cargo run --locked -p smallclaims --features test-support --example ivm_read_after_write
 cargo test --locked -p smallclaims --test ivm_after_write
 ```
 

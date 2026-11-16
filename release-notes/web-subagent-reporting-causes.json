@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Distinguish harness and older-daemon causes for absent subagent reports",
+  "replay": {"status": "none", "detail": "Presentation projection only; no replay change."},
+  "schema": {"status": "none", "detail": "Adds a UI-only tagged reason; persisted and wire schemas are unchanged."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Recognizes explicit Claude, Codex and OMP reports and classifies omitted fields without inferring zero."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Revert this presentation change to restore generic absent-report wording."}
+}

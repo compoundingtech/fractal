@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A resource observation seals its latest-state claims (observer.observed, resource.observed and the like) in a batch apart from the messages and subscription claims it writes, so a trim can later delete the observation's envelope whole; a mission request still travels with the discovery it names",
+  "replay": {
+    "status": "none",
+    "detail": "The same claims are written with the same content; only the batch each lands in changes, and an observation that writes only one class still seals one batch. Old batches are untouched."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No claim kind, field, wire or envelope format changes: a batch may already hold any mix of kinds, so older members admit and relay split batches unchanged. Replicated admission does not require cited evidence to arrive first, and a mission request stays in its discovery's batch because the starting host reads that claim when the request arrives."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart beyond the normal upgrade; no migration or backfill."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data recovery is needed. Reverting seals observations in one batch again."
+  }
+}

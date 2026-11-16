@@ -13,7 +13,7 @@ import { screenAt } from '../kit/screen.ts'
 import type { Slice } from '../kit/slice.ts'
 import { parseTimestamp } from '../kit/time.ts'
 import { liveSync } from '../kit/variants.ts'
-import type { Slices, WorldDefinition } from '../kit/world.ts'
+import type { AuthoredSlices, WorldDefinition } from '../kit/world.ts'
 import { adoptNarrativeRecording } from './narrativeAdoption.ts'
 
 const SEED = 22
@@ -65,7 +65,7 @@ export const syntheticLongDebugRabbitHole: WorldDefinition = {
   slices: (ctx) => build(ctx),
 }
 
-const build = (ctx: FactoryContext): Slices => {
+const build = (ctx: FactoryContext): AuthoredSlices => {
   const builder = ctx.cast.agents[0]!
   const person = ctx.cast.people[0]!
   const mission = ctx.cast.missions[0]!
@@ -79,7 +79,7 @@ const build = (ctx: FactoryContext): Slices => {
   const finished = agent(child(ctx, 'builder/finished'), builder, { state: 'waiting', sinceMs: 22_000, harnessState: 'idle', mission })
   const roster: Slice<'roster'> = {
     kind: 'roster', variant: 'default', source, decode: 'strict', loading: false,
-    state: { agents: [initial.agent], runtimes: [initial.runtime!], order: [builder.id],
+    state: { sessions: [], devices: [], agents: [initial.agent], runtimes: [initial.runtime!], order: [builder.id],
       machines: [resources.machine(ctx, builder.host, [builder.runtime, builder.terminalRuntime], [mission.steps[1]!.work])] },
     timeline: [
       { _tag: 'changes', at_ms: 6_000, store: 0, upserts: [verifying.agent, verifying.runtime!], removes: [] },
@@ -92,7 +92,7 @@ const build = (ctx: FactoryContext): Slices => {
   })
   const details: Slice<'details'> = {
     kind: 'details', variant: 'default', source, decode: 'strict', loading: false,
-    state: { missions: [resources.mission(ctx, mission, 'running', -8_000)],
+    state: { launches: [], launch_variants: [], missions: [resources.mission(ctx, mission, 'running', -8_000)],
       work: [work(0, 'completed', -8_000, 'w-hypotheses-rejected'), work(1, 'claimed', -8_000, 'w-fix'), work(2, 'ready', -8_000, 'w-repeat-ready')] },
     timeline: [
       { _tag: 'changes', at_ms: 6_000, store: 0, upserts: [work(1, 'completed', 6_000, 'w-isolated'), work(2, 'verifying', 6_000, 'w-shuffled')], removes: [] },

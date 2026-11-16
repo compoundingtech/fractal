@@ -4,7 +4,7 @@
 //!
 //! Every request and response carries the fleet's HMAC and, on a member, its member key's
 //! signature; [`FleetAuth`] makes and checks both. The worker reaches its store through a
-//! [`Backend`]: a program that holds the store itself uses [`Local`], and smalltalk hands the
+//! [`Backend`]: a program that holds the store itself uses [`Local`], and Fractal hands the
 //! calls to its daemon, the store's only writer.
 
 use std::fs;
@@ -54,6 +54,8 @@ pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 /// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
 /// in. Older builds neither serve nor call it.
 pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
+/// Where a member asks another for its answers per claim kind; see `crate::answers`.
+pub const ANSWERS_PATH: &str = "/v1/peer/answers";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
 pub const MAX_JOIN_BYTES: usize = 4096;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
@@ -428,7 +430,7 @@ fn headers(
     Ok(headers)
 }
 
-/// The envelope of every signed peer answer. Its layout and version are the ones smalltalk's
+/// The envelope of every signed peer answer. Its layout and version are the ones Fractal's
 /// client API answers with, so members on older builds read it unchanged.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PeerResponse<T> {
@@ -441,6 +443,12 @@ pub struct PeerResponse<T> {
 
 /// The version every signed peer answer carries.
 pub const PEER_API_VERSION: &str = "st3.v1";
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+/// Accepted peer envelope labels. Writers still emit `PEER_API_VERSION`;
+/// `st3.v1` remains a permanent read spelling, including after contraction.
+pub const ACCEPTED_PEER_API_VERSIONS: &[&str] = &[PEER_API_VERSION, "fractal.v1"];
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
 impl<T> PeerResponse<T> {
     pub fn new(node: &str, store_index: u64, value: T) -> Self {

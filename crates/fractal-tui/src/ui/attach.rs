@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The largest image stui attaches.
+/// The largest image Fractal TUI attaches.
 const MAX_BYTES: u64 = 10 << 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,7 +27,7 @@ impl Attachment {
     }
 }
 
-/// A terminal that draws images (kitty, Ghostty, WezTerm, iTerm2) and answers stui's query
+/// A terminal that draws images (kitty, Ghostty, WezTerm, iTerm2) and answers Fractal TUI's query
 /// for how.
 pub fn graphics_terminal() -> bool {
     let term = std::env::var("TERM").unwrap_or_default();
@@ -125,7 +125,7 @@ pub fn from_path(text: &str) -> Option<Attachment> {
     describe(&kept(&path, dir.as_deref()))
 }
 
-/// A copy of a pasted or dropped image in stui's own folder, named for its bytes. macOS hands
+/// A copy of a pasted or dropped image in Fractal TUI's own folder, named for its bytes. macOS hands
 /// screenshots over from a temporary folder that it soon empties and that its privacy protection
 /// guards from other programs, so an agent could not read the original even on this machine
 /// (cos, 2026-10-02). Where no copy can be made, the original.
@@ -198,8 +198,8 @@ pub fn from_clipboard() -> Result<Attachment, String> {
     describe(&path).ok_or_else(|| "the clipboard image could not be read".into())
 }
 
-/// Whether the terminal stui draws in is kitty, which can hand over the person's clipboard
-/// through the terminal itself (OSC 5522), wherever stui runs.
+/// Whether the terminal Fractal TUI draws in is kitty, which can hand over the person's clipboard
+/// through the terminal itself (OSC 5522), wherever Fractal TUI runs.
 pub fn terminal_clipboard() -> bool {
     std::env::var("TERM").is_ok_and(|term| term.contains("kitty"))
         || std::env::var_os("KITTY_WINDOW_ID").is_some()
@@ -266,7 +266,7 @@ pub fn from_terminal() -> Result<Attachment, String> {
     let encoded = osc_payload(&String::from_utf8_lossy(&received));
     let bytes = base64
         .decode(encoded.as_bytes())
-        .map_err(|_| "the terminal sent an image stui could not read".to_owned())?;
+        .map_err(|_| "the terminal sent an image Fractal TUI could not read".to_owned())?;
     if !is_png(&bytes) {
         return Err("the clipboard holds no image".into());
     }
@@ -344,11 +344,14 @@ pub fn received(
     Ok(path)
 }
 
-/// Where the person keeps downloads: `ST3_DOWNLOADS`, else their XDG download directory
+/// Where the person keeps downloads: `FRACTAL_DOWNLOADS` (or `ST3_DOWNLOADS`), else their XDG download directory
 /// (`XDG_DOWNLOAD_DIR`, or `~/.config/user-dirs.dirs`), else `~/Downloads`.
-pub fn downloads() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let configured = std::env::var_os("ST3_DOWNLOADS")
+pub fn downloads() -> anyhow::Result<Option<PathBuf>> {
+    let downloads = crate::environment::read("FRACTAL_DOWNLOADS", "ST3_DOWNLOADS")?;
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let configured = downloads
         .or_else(|| std::env::var_os("XDG_DOWNLOAD_DIR"))
         .map(PathBuf::from)
         .or_else(|| {
@@ -367,11 +370,11 @@ pub fn downloads() -> Option<PathBuf> {
                     }
                 })
         });
-    Some(
+    Ok(Some(
         configured
             .filter(|dir| dir.is_absolute())
             .unwrap_or_else(|| home.join("Downloads")),
-    )
+    ))
 }
 
 /// Save an image a person opened where they keep downloads, under the name it was sent with
@@ -518,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_image_is_kept_in_stuis_own_folder_by_its_bytes() {
+    fn a_pasted_image_is_kept_in_tuis_own_folder_by_its_bytes() {
         let from = tempfile::tempdir().unwrap();
         let keep = tempfile::tempdir().unwrap();
         let shot = from.path().join("Screenshot 2026-10-02 at 22.20.50.png");

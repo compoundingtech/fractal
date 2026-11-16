@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add the private TypeScript authoring package `fractal` (packages/fractal): agents, missions and schedules as path-named modules rendered to native KDL; the user guide's TS samples use it",
+  "replay": {"status": "none", "detail": "No receipt, replay or historical interpretation changes; the package only renders KDL that the existing parser reads."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, migrations or claim kinds change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "No daemon, client, wire, CLI or KDL contract change. The package is a private workspace member, not published to npm. Its rendered KDL parses to the same declarations and mission revisions as the hand-written forms it replaces in the docs; documented mission samples now name a report-to agent, which the package requires."},
+  "downtime": {"status": "none", "detail": "No deployment, restart or migration."},
+  "manual": {"status": "none", "detail": "No manual step. Consumers of genie-fractal can switch imports to fractal, fractal/tree and fractal/testing when they choose."},
+  "recovery": {"status": "none", "detail": "No persistent state; reverting the package and docs needs no recovery action."}
+}

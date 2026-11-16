@@ -69,8 +69,8 @@ async fn future_standby_skip_tick_is_local_until_due_and_eligible() {
     let primary = Arc::new(primary);
     let standby = Arc::new(standby);
     let root = tempfile::tempdir().unwrap();
-    let anchor = (Utc::now() + chrono::Duration::seconds(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let anchor_at = Utc::now() + chrono::Duration::seconds(1);
+    let anchor = anchor_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let source = format!(r#"version 2
 mission "harvest" state="ready" {{
   goal "Perform the scheduled harvest occurrence."
@@ -84,7 +84,8 @@ schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "20ms" }}
     apply_source(&primary, &source, "future-standby-skip");
     sync(&primary, &standby);
     let primary_reconciler = Reconciler::new(primary.clone(), Arc::new(FakeRuntime::default()), "ivory".into(), Arc::new(Notify::new()));
-    let reconciler = Reconciler::new(standby.clone(), Arc::new(FakeRuntime::default()), "jade".into(), Arc::new(Notify::new()));
+    let wake = Arc::new(Notify::new());
+    let reconciler = Reconciler::new(standby.clone(), Arc::new(FakeRuntime::default()), "jade".into(), wake.clone());
     sync(&standby, &primary);
     primary_reconciler.reconcile_once().unwrap();
     // Retain the primary's ordinary future scheduling operation before the partition.
@@ -95,25 +96,37 @@ schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "20ms" }}
         "future standby wrote a replicated scheduling claim before eligibility");
     assert!(reconciler.delayed_restarts.lock().unwrap().keys().any(|key| key.starts_with("standby-due:schedule/orchard:")));
     let (_, tick, at) = reconciler.standby_due_ticks.lock().unwrap()["schedule/orchard"].clone();
-    assert_eq!(tick, 0);
+    // The anchor is a second ahead. Setup that takes longer under load has passed it, and then the
+    // next tick is the one skip preselects; the test follows whichever it is.
+    assert!(tick == 0 || now_ms() as i64 >= anchor_at.timestamp_millis(),
+        "the standby passed over tick 0 while it was still ahead");
     tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_ms() as i64).max(0) as u64 + 10)).await;
     reconciler.reconcile_once().unwrap();
     assert!(standby.claims_for("schedule/orchard", Some("schedule.occurrence-scheduled")).unwrap().iter().all(|claim| claim.origin != "jade"),
         "fresh heartbeat wrote a scheduling claim");
     tokio::time::sleep(Duration::from_millis(30)).await;
     reconciler.reconcile_once().unwrap();
-    tokio::time::sleep(Duration::from_millis(10)).await;
     let scheduled = standby.claims_for("schedule/orchard", Some("schedule.occurrence-scheduled")).unwrap()
         .into_iter().filter(|claim| claim.origin == "jade").collect::<Vec<_>>();
     assert_eq!(scheduled.len(), 1);
-    assert_eq!(scheduled[0].body["fields"]["occurrence"], 0, "skip lost the preselected due tick");
+    assert_eq!(scheduled[0].body["fields"]["occurrence"], tick, "skip lost the preselected due tick");
     assert_eq!(scheduled[0].body["fields"]["standby"]["host"], "jade");
-    let reached = standby.claims_for("schedule/orchard", Some("schedule.occurrence-reached")).unwrap();
+    // The occurrence's timer task writes the reached claim, then wakes the reconciler. Its wake
+    // keeps a permit, so one that comes before the wait still ends it; the bound only catches none.
+    let reached = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let reached = standby.claims_for("schedule/orchard", Some("schedule.occurrence-reached")).unwrap();
+            if !reached.is_empty() {
+                return reached;
+            }
+            wake.notified().await;
+        }
+    }).await.expect("the occurrence's timer never wrote its reached claim");
     assert_eq!(reached.len(), 1);
-    assert_eq!(reached[0].body["fields"]["occurrence"], 0);
+    assert_eq!(reached[0].body["fields"]["occurrence"], tick);
     // Work requests carry mission/NAME; the standby must find the stored bare mission ID.
     reconciler.reconcile_once().unwrap();
-    let run = Store::scheduled_mission_run_subject("schedule/orchard", 0);
+    let run = Store::scheduled_mission_run_subject("schedule/orchard", tick);
     assert!(standby.mission_run(&run).unwrap().is_some(), "standby rejected an available prefixed mission revision");
     assert_eq!(standby.claims_for("schedule/orchard", Some("schedule.work-started")).unwrap().len(), 1);
     assert!(standby.claims_for("schedule/orchard", Some("schedule.work-failed")).unwrap().is_empty());
@@ -121,4 +134,47 @@ schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "20ms" }}
     assert_eq!(primary.claims_for("schedule/orchard", Some("schedule.occurrence-scheduled")).unwrap().len(), 2);
     assert_eq!(primary.idempotency_conflicts(10).unwrap().0, 0,
         "host publication attempts conflicted despite sharing only occurrence run identity");
+}
+
+#[tokio::test]
+async fn a_primary_request_that_never_started_does_not_hold_the_standby_from_later_occurrences() {
+    let (primary, standby, _) = pair();
+    let primary = Arc::new(primary);
+    let standby = Arc::new(standby);
+    let root = tempfile::tempdir().unwrap();
+    let anchor_at = Utc::now() - chrono::Duration::seconds(1);
+    let anchor = anchor_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let source = format!(r#"version 2
+mission "harvest" state="ready" {{
+  goal "Perform the scheduled harvest occurrence."
+ completion {{ when "all-steps-exhausted" }}
+ step "done" {{ agentless }}
+}}
+schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "20ms" }}
+ every "1h"; anchor {anchor:?}; catch-up "latest"
+ work {{ mission "harvest"; workspace {:?} }}
+}}"#, root.path().to_str().unwrap());
+    apply_source(&primary, &source, "unstarted-primary-request");
+    // The primary reaches occurrence 0 and requests its work, then stops before it starts it.
+    let revision = primary.selected_desired_revision("schedule/orchard").unwrap().unwrap();
+    let append = |kind: &str, fields: Value, evidence: Vec<String>| primary.append_claim(&ClaimInput {
+        subject: "schedule/orchard".into(), kind: kind.into(), actor: None,
+        fields: serde_json::from_value(fields).unwrap(), evidence, expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let reached = append("schedule.occurrence-reached", json!({"revision": revision, "occurrence": 0,
+        "scheduled_at_unix_ms": anchor_at.timestamp_millis().to_string()}), vec![]);
+    append("schedule.work-requested", json!({"revision": revision, "occurrence": 0,
+        "mission": "mission/harvest", "mission_revision": "never-started",
+        "workspace": root.path().to_str().unwrap(), "inputs": {}}), vec![reached.id]);
+    // The standby's schedule gate counts only exchanges made since its reconciler started.
+    let reconciler = Reconciler::new(standby.clone(), Arc::new(FakeRuntime::default()), "jade".into(), Arc::new(Notify::new()));
+    sync(&primary, &standby);
+    sync(&standby, &primary);
+    sync(&primary, &standby);
+    assert_eq!(standby.pending_schedule_work_requests("schedule/orchard").unwrap().len(), 1);
+    reconciler.reconcile_once().unwrap();
+    // The standby never starts the primary's request, so only its own next occurrence can run.
+    let armed = reconciler.delayed_restarts.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert!(armed.iter().any(|key| key.starts_with("standby-due:schedule/orchard:") && key.ends_with(":jade:1")),
+        "the primary's unstarted request held the standby's next occurrence: {armed:?}");
 }

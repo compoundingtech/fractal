@@ -33,8 +33,16 @@ function Surface({ scheme, children }: { scheme: Scheme; children: React.ReactNo
 const columnSync = { _tag: 'Live', since: now - 5000 } as const
 
 type ColumnArgs = { scheme: Scheme; readingColumn: boolean }
-const meta = { title: 'Fractal UI/Transcript composer', component: OwnSendStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Transcript composer', component: OwnSendStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'OwnSendFollows:contract-fixture',
+  'OwnSendFollowsLight:contract-fixture',
+  'Placeholder:contract-fixture',
+  'PlaceholderLight:contract-fixture',
+]
 type Story = StoryObj<ColumnArgs>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Own-send follow and placeholder probes require controlled local composer state and host callbacks.' } } } satisfies Story
 
@@ -52,7 +60,7 @@ export const Placeholder: Story = { ...contractFixture, tags: ['critical'], rend
     const section = canvasElement.querySelector(`[data-testid="${testId}"]`)!
     const guidance = await waitFor(() => { const found = section.querySelector<HTMLElement>('[data-testid="composer-placeholder"]'); if (found === null) throw new Error(`No guidance in ${testId}`); return found })
     const input = section.querySelector('textarea')!
-    await expect(section.querySelector('form')).toHaveAccessibleName(`Message composer, ${expected === undefined ? 'Default placeholder example' : 'Custom placeholder example'}`)
+    await expect(section.querySelector('[role="group"][aria-label^="Message composer"]')).toHaveAccessibleName(`Message composer, ${expected === undefined ? 'Default placeholder example' : 'Custom placeholder example'}`)
     await expect(guidance).toBeVisible()
     await expect(guidance.textContent, `${testId} guidance`).not.toMatch(keyboardText)
     await expect(input.placeholder).toBe('')

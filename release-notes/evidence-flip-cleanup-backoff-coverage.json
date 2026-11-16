@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Evidence flip-ready cleanup tests record retry backoff instead of hiding it behind the shared no-op sleep patch.",
+  "replay": {"status": "none", "detail": "Test coverage only; no production behavior changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Tests assert cleanup attempt counts, the increasing backoff sequence, successful recovery and final error propagation without real sleeping. Other tests retain their no-op sleep patch."},
+  "compatibility": {"status": "none", "detail": "Production scripts and public interfaces are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart is needed."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Reverting removes test coverage only."}
+}
