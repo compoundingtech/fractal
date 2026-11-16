@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 /** Keep typing local. Profile changes replace the draft; leaving retains unfinished text. */
-export function useGatewayDraft(saved: string, retain: (value: string) => void) {
+export function useGatewayDraft(saved: string, retain: (value: string) => void, profileRevision = 0) {
   const [value, setValue] = useState(saved);
   const current = useRef(saved), dirty = useRef(false);
   useLayoutEffect(() => {
     current.current = saved; dirty.current = false; setValue(saved);
-  }, [saved]);
+  }, [saved, profileRevision]);
   useEffect(() => () => { if (dirty.current) retain(current.current); }, [retain]);
   const change = useCallback((next: string) => {
     current.current = next; dirty.current = true; setValue(next);

@@ -140,6 +140,7 @@ function useAppStore(proof?: FabricProfile) {
   const lastSnapshot = useRef('');
   const [order, setOrder] = useState<Tab[]>(tabOrder(null));
   const [url, setUrl] = useState(proof?.url ?? ''), [urlDraft, setUrlDraft] = useState('');
+  const [urlDraftProfileRevision, setUrlDraftProfileRevision] = useState(0);
   const [credential, setCredential] = useState<string | null>(proof?.credential ?? null);
   const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string; scanned?: true } | null>(null);
   const [data, setData] = useState<Data>(emptyData);
@@ -500,7 +501,7 @@ function useAppStore(proof?: FabricProfile) {
       setFabricMemberList(paired.routing.members);
       setCarrierChoice(paired.routing.carrier);
     }
-    if (gateway) { setUrl(gateway); setUrlDraft(gateway); }
+    if (gateway) { setUrl(gateway); setUrlDraft(gateway); setUrlDraftProfileRevision(revision => revision + 1); }
     // Only the current four-tab order is read; old phone preferences are retired.
     if (o.status === 'fulfilled' && o.value) { try { setOrder(tabOrder(JSON.parse(o.value))); } catch { /* use default */ } }
     if (bearer) {
@@ -931,7 +932,7 @@ function useAppStore(proof?: FabricProfile) {
           setFabricMemberList(next.routing.members);
           setCarrierChoice(next.routing.carrier);
         }
-        setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
+        setUrl(gateway); setUrlDraft(gateway); setUrlDraftProfileRevision(revision => revision + 1); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
       });
       // Paired over fabric alone: that member uses this device's own pairing.
       if (isFabricGatewayId(gateway) && fabricTarget && fabricGatewayId(fabricTarget) === gateway && !fabricTarget.device) {
@@ -1419,7 +1420,7 @@ function useAppStore(proof?: FabricProfile) {
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
 
   return {
-    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
+    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, urlDraftProfileRevision, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions, availability, readAvailability, autoResolved, readAutoResolved, overridePending, noteInput,

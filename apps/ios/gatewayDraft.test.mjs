@@ -63,8 +63,8 @@ function editor(initial, retain) {
   const useDraft = new Function('useState', 'useRef', 'useEffect', 'useLayoutEffect', 'useCallback', hook + '\nreturn useGatewayDraft;')(
     useState, useRef, effect(effects), effect(layout), useCallback,
   );
-  const render = saved => {
-    cursor = 0; const result = useDraft(saved, retain);
+  const render = (saved, revision = 0) => {
+    cursor = 0; const result = useDraft(saved, retain, revision);
     for (const commit of layout.splice(0)) commit();
     for (const commit of effects.splice(0)) commit();
     return result;
@@ -92,5 +92,16 @@ test('an external profile replacement resets the field and never restores the pr
   const replacing = h.render('https://new-profile.example');
   assert.equal(replacing.read(), 'https://new-profile.example', 'layout commit resets current value');
   assert.equal(h.render('https://new-profile.example').value, 'https://new-profile.example');
+  h.unmount(); assert.deepEqual(retained, []);
+});
+
+
+test('an explicit same-gateway profile replacement resets a dirty field without resetting on ordinary rerenders', () => {
+  const retained = [], h = editor('https://same.example', value => retained.push(value));
+  h.draft.change('https://unfinished.example');
+  assert.equal(h.render('https://same.example').read(), 'https://unfinished.example');
+  const replacing = h.render('https://same.example', 1);
+  assert.equal(replacing.read(), 'https://same.example');
+  assert.equal(h.render('https://same.example', 1).value, 'https://same.example');
   h.unmount(); assert.deepEqual(retained, []);
 });

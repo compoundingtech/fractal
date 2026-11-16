@@ -252,8 +252,8 @@ function CarrierSection() {
 export function PairScreen() {
   const { carrierInfo: fabricInfo, actions: fabricActions } = useStore();
   useEffect(() => { if (fabricInfo.built) void fabricActions.loadFabricNode(); }, [fabricInfo.built]);
-  const { url, urlDraft, setUrlDraft, pairDraft, busy, actions, carrierInfo } = useStore();
-  const gatewayDraft = useGatewayDraft(urlDraft, setUrlDraft);
+  const { url, urlDraft, setUrlDraft, urlDraftProfileRevision, pairDraft, busy, actions, carrierInfo } = useStore();
+  const gatewayDraft = useGatewayDraft(urlDraft, setUrlDraft, urlDraftProfileRevision);
   // Fabric chosen with a target saved (a build can carry one): a device with no gateway pairs over fabric alone.
   const overFabric = carrierInfo.built && carrierInfo.choice === 'fabric' && !!carrierInfo.target;
   const [id, setId] = useState(pairDraft?.id ?? ''), [code, setCode] = useState(pairDraft?.code ?? '');
