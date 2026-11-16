@@ -262,6 +262,33 @@ pub(crate) mod retained_discussion {
         origin
     }
 
+    pub(crate) fn retire_original_with_fallback(state: &AppState) {
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"garden/fallback\" { workspace \"/work/garden\"; harness \"omp\" {} }",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "retained-fallback-declare").unwrap();
+        state.store.configure_inbox_fallback_agent(Some("agent/garden/fallback")).unwrap();
+        let token = state.store.selected_desired_token(AGENT).unwrap().unwrap();
+        let (retirement, appended) = state.store.retire_agent(
+            AGENT, PERSON, "Original responsibility ended", &token, None, "retained-retire-original", &[],
+        ).unwrap();
+        assert!(appended);
+        assert_eq!(retirement.kind, "agent.retired");
+        assert_eq!(retirement.body["fields"]["declaration"], token);
+    }
+
+    pub(crate) fn fallback_request(state: &AppState, origin: &InboxOrigin, thread: &str, key: &str) -> ActionRequest {
+        let mut request = request(state, origin, thread, key);
+        request.parameters["agent_id"] = json!("agent/garden/fallback");
+        request
+    }
+
+    pub(crate) fn assert_first_result(replay: &Value, first: &Value) {
+        assert_eq!(replay["affected_ids"], first["affected_ids"]);
+        assert_eq!(replay["operation_id"], first["operation_id"]);
+    }
+
     pub(crate) fn request(state: &AppState, origin: &InboxOrigin, thread: &str, key: &str) -> ActionRequest {
         serde_json::from_value(json!({
             "api_version":CLIENT_API_VERSION, "id":format!("action/{key}"),
@@ -583,30 +610,108 @@ pub(crate) mod retained_discussion {
     }
 
     #[tokio::test]
-    async fn retained_discussion_uses_configured_fallback_when_original_cannot_participate() {
-        let (_root, state, _) = fixture(true);
-        state.store.configure_inbox_fallback_agent(Some(AGENT)).unwrap();
-        let source = "custom/garden/review/v1/unavailable-original";
-        let opening = state.store.append_claim(&ClaimInput {
-            subject:source.into(), kind:"custom.garden.review.v1.requested".into(),
-            actor:Some("agent/garden/undeclared".into()),
-            fields:serde_json::from_value(json!({
-                "title":"Retained original", "detail":"Explain", "recipient":PERSON,
-            })).unwrap(),
-            evidence:vec![], expected_subject:None, idempotency_key:Some("unavailable-original-open".into()),
-        }).unwrap();
-        state.store.append_claim(&ClaimInput {
-            subject:source.into(), kind:"custom.garden.review.v1.answered".into(), actor:Some(PERSON.into()),
-            fields:serde_json::from_value(json!({
-                "request":opening.id, "selection":"keep", "text":"Proceed.",
-            })).unwrap(),
-            evidence:vec![], expected_subject:None, idempotency_key:Some("unavailable-original-answer".into()),
-        }).unwrap();
-        let origin = InboxOrigin { source_id:source.into(), episode:opening.id };
-        let owner = ClientSession::local(Some(PERSON)).unwrap();
-        let actual = start(&state, &owner, request(&state, &origin,
-            "thread/retained-fallback", "retained-fallback")).await.unwrap();
-        assert_eq!(actual["affected_ids"][0], "thread/retained-fallback");
-        assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/retained-fallback").unwrap().agent_id, AGENT);
+    async fn terminal_retirement_uses_fallback_for_current_and_retained_sources() {
+        for resolved in [false, true] {
+            let (_root, state, origin) = fixture(resolved);
+            retire_original_with_fallback(&state);
+            let owner = ClientSession::local(Some(PERSON)).unwrap();
+            let stale = request(&state, &origin, "thread/retired-original-denied", "retired-original-denied");
+            assert_eq!(start(&state, &owner, stale).await.unwrap_err().status, StatusCode::NOT_FOUND);
+            let first = fallback_request(&state, &origin, "thread/terminal-fallback", "terminal-fallback");
+            let actual = start(&state, &owner, first.clone()).await.unwrap();
+            assert_eq!(actual["affected_ids"][0], "thread/terminal-fallback");
+            let summary = thread_metadata::summary(&state.store, PERSON, "thread/terminal-fallback").unwrap();
+            assert_eq!(summary.agent_id, "agent/garden/fallback");
+            assert_eq!(summary.message_count, 1);
+            assert_first_result(&start(&state, &owner, first).await.unwrap(), &actual);
+            assert!(state.store.claims_for("thread/retired-original-denied", None).unwrap().is_empty());
+            assert_eq!(state.store.attention_items(Some(PERSON)).unwrap().iter()
+                .any(|item| item.subject == SOURCE), !resolved);
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_retirement_preserves_existing_thread_and_first_key_result_but_deduplicates_by_recipient() {
+        for resolved in [false, true] {
+            let (_root, state, origin) = fixture(resolved);
+            let owner = ClientSession::local(Some(PERSON)).unwrap();
+            let original_request = request(&state, &origin, "thread/before-retirement", "before-retirement");
+            let original = start(&state, &owner, original_request.clone()).await.unwrap();
+            let before = thread_metadata::summary(&state.store, PERSON, "thread/before-retirement").unwrap();
+            retire_original_with_fallback(&state);
+            assert_first_result(&start(&state, &owner, original_request).await.unwrap(), &original);
+            let fallback = fallback_request(&state, &origin, "thread/after-retirement", "after-retirement");
+            let created = start(&state, &owner, fallback.clone()).await.unwrap();
+            assert_eq!(created["affected_ids"][0], "thread/after-retirement");
+            assert_ne!(created["affected_ids"], original["affected_ids"]);
+            assert_first_result(&start(&state, &owner, fallback).await.unwrap(), &created);
+            let old = thread_metadata::summary(&state.store, PERSON, "thread/before-retirement").unwrap();
+            assert_eq!(old.agent_id, AGENT);
+            assert_eq!(old.revision, before.revision);
+            assert_eq!(old.message_count, 1);
+            assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/after-retirement").unwrap().agent_id,
+                "agent/garden/fallback");
+            let history = thread_metadata::list_context(&state.store, PERSON,
+                ThreadContext::Inbox { source:SOURCE, episode:&origin.episode }, None, 20).unwrap();
+            assert_eq!(history.items.len(), 2);
+            if resolved {
+                let another = start(&state, &owner, fallback_request(&state, &origin,
+                    "thread/after-retirement-unused", "after-retirement-new-key")).await.unwrap();
+                assert_eq!(another["affected_ids"], created["affected_ids"]);
+                assert_eq!(another["operation_id"], created["operation_id"]);
+                assert!(state.store.claims_for("thread/after-retirement-unused", None).unwrap().is_empty());
+                assert_not_in_attention(&state);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn offline_and_unknown_originals_are_not_terminal_retirements() {
+        for resolved in [false, true] {
+            for availability in ["unknown-runtime", "stopped", "undeclared"] {
+                let (_root, state, origin) = fixture(resolved);
+                state.store.configure_inbox_fallback_agent(Some("agent/garden/fallback")).unwrap();
+                let origin = if availability == "undeclared" {
+                    let opening = state.store.append_claim(&ClaimInput {
+                        subject:"custom/garden/review/v1/unknown-original".into(),
+                        kind:"custom.garden.review.v1.requested".into(), actor:Some("agent/garden/undeclared".into()),
+                        fields:serde_json::from_value(json!({
+                            "title":"Unknown original", "detail":"Explain", "recipient":PERSON,
+                        })).unwrap(),
+                        evidence:vec![], expected_subject:None, idempotency_key:Some("unknown-original-open".into()),
+                    }).unwrap();
+                    if resolved {
+                        state.store.append_claim(&ClaimInput {
+                            subject:opening.subject.clone(), kind:"custom.garden.review.v1.answered".into(),
+                            actor:Some(PERSON.into()), fields:serde_json::from_value(json!({
+                                "request":opening.id, "selection":"keep", "text":"Proceed.",
+                            })).unwrap(),
+                            evidence:vec![], expected_subject:None, idempotency_key:Some("unknown-original-answer".into()),
+                        }).unwrap();
+                    }
+                    InboxOrigin { source_id:opening.subject, episode:opening.id }
+                } else {
+                    if availability == "stopped" {
+                        let intent = crate::graph::parse_intent("version 2\nstop \"agent/garden/seed\"",
+                            state.store.origin()).unwrap();
+                        state.store.apply_internal(&intent, "offline-original-stop").unwrap();
+                    }
+                    origin
+                };
+                let original_agent = if availability == "undeclared" { "agent/garden/undeclared" } else { AGENT };
+                let owner = ClientSession::local(Some(PERSON)).unwrap();
+                let refused = fallback_request(&state, &origin, "thread/availability-fallback", "availability-fallback");
+                assert_eq!(start(&state, &owner, refused).await.unwrap_err().status, StatusCode::NOT_FOUND);
+                let mut original = request(&state, &origin, "thread/availability-original", "availability-original");
+                original.parameters["agent_id"] = json!(original_agent);
+                let result = start(&state, &owner, original).await.unwrap();
+                assert_eq!(result["affected_ids"][0], "thread/availability-original");
+                assert_eq!(thread_metadata::summary(&state.store, PERSON, "thread/availability-original").unwrap().agent_id,
+                    original_agent);
+                assert!(state.store.claims_for("thread/availability-fallback", None).unwrap().is_empty());
+                assert_eq!(state.store.attention_items(Some(PERSON)).unwrap().iter()
+                    .any(|item| item.subject == origin.source_id), !resolved);
+            }
+        }
     }
 }

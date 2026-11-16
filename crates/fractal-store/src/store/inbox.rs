@@ -10,15 +10,62 @@ pub fn configured_agent_at(connection: &Connection) -> Result<Option<String>> {
     })
 }
 
-/// Choose responsibility without conflating discussion admission and approval visibility.
-fn candidate_agent_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct StartRecipient {
+    pub agent_id: String,
+    pub basis: StartRecipientBasis,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "_tag", rename_all = "snake_case")]
+pub enum StartRecipientBasis {
+    Original,
+    Configured,
+    Fallback {
+        original_agent_id: String,
+        retirement: RetirementProof,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RetirementProof {
+    pub claim_id: String,
+    pub kind: &'static str,
+    pub state: &'static str,
+}
+
+fn original_agent_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
     if let Some(agent) = item.conversation.as_deref() {
         return Ok(Some(agent.to_owned()));
     }
-    if let Some(agent) = attention_snapshot::conversation_agent(connection, item.step.as_deref(), item.mission_run.as_deref())? {
-        return Ok(Some(agent));
+    attention_snapshot::conversation_agent(connection, item.step.as_deref(), item.mission_run.as_deref())
+}
+
+/// Selection is shared by current reads and current/retained starts. Only admitted native
+/// terminal evidence permits replacing an associated original; absence and liveness do not.
+pub fn start_recipient_at(
+    connection: &Connection,
+    item: &AttentionItemView,
+) -> Result<Option<StartRecipient>, FractalError> {
+    let Some(original) = original_agent_at(connection, item).map_err(internal)? else {
+        return configured_agent_at(connection).map_err(internal)?.map(|agent|
+            identities::resolve_reference_conn(connection, &agent).map(|agent_id|
+                StartRecipient { agent_id, basis: StartRecipientBasis::Configured })
+        ).transpose();
+    };
+    let original = identities::resolve_reference_conn(connection, &original)?;
+    if let Some(claim) = retirements::terminal_retirement_at(connection, Some(&original))? {
+        return configured_agent_at(connection).map_err(internal)?.map(|agent|
+            identities::resolve_reference_conn(connection, &agent).map(|agent_id| StartRecipient {
+                agent_id,
+                basis: StartRecipientBasis::Fallback {
+                    original_agent_id: original,
+                    retirement: RetirementProof { claim_id: claim.id, kind: "agent.retired", state: "retired" },
+                },
+            })
+        ).transpose();
     }
-    configured_agent_at(connection)
+    Ok(Some(StartRecipient { agent_id: original, basis: StartRecipientBasis::Original }))
 }
 
 fn presentation_identity_at(connection: &Connection, agent: &str) -> Result<(String, Option<String>)> {
@@ -34,16 +81,25 @@ fn presentation_identity_at(connection: &Connection, agent: &str) -> Result<(Str
 /// A historical or temporarily unavailable association remains visible. Only the expected
 /// lifecycle fence is presentation data; storage failures still fail the read.
 pub fn responsible_agent_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
-    candidate_agent_at(connection, item)?.map(|agent|
-        presentation_identity_at(connection, &agent).map(|(identity, _)| identity)
-    ).transpose()
+    match start_recipient_at(connection, item) {
+        Ok(recipient) => Ok(recipient.map(|recipient| recipient.agent_id)),
+        // Ambiguous lifecycle keeps the historical association visible, never retargets it.
+        Err(error) if error.code == "lifecycle-unavailable" => {
+            let candidate = original_agent_at(connection, item)?.or(configured_agent_at(connection)?);
+            candidate.map(|agent| presentation_identity_at(connection, &agent)
+                .map(|(identity, _)| identity)).transpose()
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn discussion_unavailable_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
-    let Some(agent) = candidate_agent_at(connection, item)? else {
-        return Ok(Some("inbox-agent-not-configured".into()));
-    };
-    agent_unavailable_at(connection, &agent)
+    match start_recipient_at(connection, item) {
+        Ok(Some(recipient)) => agent_unavailable_at(connection, &recipient.agent_id),
+        Ok(None) => Ok(Some("inbox-agent-not-configured".into())),
+        Err(error) if error.code == "lifecycle-unavailable" => Ok(Some("lifecycle-unavailable".into())),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn agent_unavailable_at(connection: &Connection, agent: &str) -> Result<Option<String>> {
@@ -100,9 +156,7 @@ impl Store {
     /// The caller supplies the source item read under this same writer/read cut. This does
     /// not authorize answering its approval or sending to a stopped recipient.
     pub fn inbox_responsible_agent_at(&self, connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
-        candidate_agent_at(connection, item)?.map(|agent|
-            identities::resolve_reference_conn(connection, &agent).map_err(anyhow::Error::from)
-        ).transpose()
+        Ok(start_recipient_at(connection, item)?.map(|recipient| recipient.agent_id))
     }
 
     /// Missing configuration is visible to operators, while bootstrap and security approval

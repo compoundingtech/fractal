@@ -722,3 +722,49 @@ async fn browser_retained_discussion_rechecks_revocation_and_exact_expiry() {
     assert!(state.store.claims_for("thread/browser-retained-denied", None).unwrap().is_empty());
     assert_eq!(crate::store::thread_metadata::summary(&state.store, "person/operator", "thread/browser-retained").unwrap().message_count, 1);
 }
+
+#[tokio::test]
+async fn browser_discussion_terminal_retirement_creates_a_new_recipient_thread_without_retargeting_history() {
+    use super::thread_fence_tests::retained_discussion;
+    use crate::store::thread_metadata::{self, ThreadContext};
+    for resolved in [false, true] {
+        let (_root, state, owner) = fixture().await;
+        let origin = retained_discussion::install_source(&state, resolved);
+        let key = "d".repeat(64);
+        let pending = start(&state, &owner, &key).await;
+        answer(&state, &owner, &pending, "approve").unwrap();
+        let granted = poll(&state, &owner, &pending, &key).await.unwrap().0;
+        assert!(granted["bearer"].as_str().is_some());
+        let completion = state.store.claims_for_subject_kind_at(&begun(&state, &pending).subject,
+            "custom.client.pairing-completed", None, true, 1).unwrap().claims.remove(0);
+        let browser = paired_client_session(&state, &completion, "fabric-loopback", false).unwrap();
+        let original_request = retained_discussion::request(&state, &origin,
+            "thread/browser-original-recipient", "browser-original-recipient");
+        let original = retained_discussion::start(&state, &browser, original_request.clone()).await.unwrap();
+        let before = thread_metadata::summary(&state.store, "person/operator", "thread/browser-original-recipient").unwrap();
+        retained_discussion::retire_original_with_fallback(&state);
+        retained_discussion::assert_first_result(
+            &retained_discussion::start(&state, &browser, original_request).await.unwrap(), &original);
+        let fallback_request = retained_discussion::fallback_request(&state, &origin,
+            "thread/browser-terminal-fallback", "browser-terminal-fallback");
+        let fallback = retained_discussion::start(&state, &browser, fallback_request.clone()).await.unwrap();
+        assert_eq!(fallback["affected_ids"][0], "thread/browser-terminal-fallback");
+        assert_ne!(fallback["affected_ids"], original["affected_ids"]);
+        retained_discussion::assert_first_result(
+            &retained_discussion::start(&state, &browser, fallback_request.clone()).await.unwrap(), &fallback);
+        let old = thread_metadata::summary(&state.store, "person/operator", "thread/browser-original-recipient").unwrap();
+        assert_eq!(old.agent_id, "agent/garden/seed");
+        assert_eq!(old.revision, before.revision);
+        assert_eq!(old.message_count, 1);
+        let new = thread_metadata::summary(&state.store, "person/operator", "thread/browser-terminal-fallback").unwrap();
+        assert_eq!(new.agent_id, "agent/garden/fallback");
+        assert_eq!(new.message_count, 1);
+        assert_eq!(thread_metadata::list_context(&state.store, "person/operator",
+            ThreadContext::Inbox { source:&origin.source_id, episode:&origin.episode }, None, 20).unwrap().items.len(), 2);
+        assert_eq!(state.store.attention_items(Some("person/operator")).unwrap().iter()
+            .any(|item| item.subject == origin.source_id), !resolved);
+        revoke_current(State(state.clone()), Extension(browser.clone())).await.unwrap();
+        let denied = retained_discussion::start(&state, &browser, fallback_request).await.unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+    }
+}

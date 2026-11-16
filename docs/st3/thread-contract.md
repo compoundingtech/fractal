@@ -58,10 +58,12 @@ creation claim ID, not a snapshot ID. Labels, `about` links and arbitrary
 `custom.attention.*` kinds confer no authority. Reassignment removes retained discussion
 rights. Enrollment, browser/device admission, message scope, rollout and responsible-agent
 checks still apply; a retained source never grants an otherwise refused write.
-Retained-source starts prefer the original source agent through the existing responsibility
-selection chain. If that agent cannot participate under the existing admission check,
-they use the configured `inbox_fallback_agent`; no new recipient admission is introduced.
-Current-source selection is unchanged. Existing threads retain their frozen audience.
+Current and retained starts preserve the original source agent unless native authoritative
+`agent.retired` lifecycle evidence proves terminal retirement/removal. Only that terminal
+proof selects the configured `inbox_fallback_agent`; offline or unknown runtime, a missing
+declaration, reversible stop and other admission refusals never select a replacement.
+There is no inferred role or default agent. Existing threads retain their frozen audience;
+they are never retargeted and the retired agent is never revived.
 
 Authored human steps are not covered: their retained `step-run.state` opening does not
 carry the recipient at opening. Harness prompts, seat login, planning, revision proposals
@@ -72,10 +74,11 @@ historical row content.
 
 Retained starts are serialized with origin discovery in the writer transaction. The first
 start commits only the existing `thread.created` and `message.sent` claims. A different
-start key opens the newest owned thread for the exact source/episode (highest creation
-store index), without creating another thread or sending its draft. The action result
+start key opens the newest owned thread for the exact source/episode AND selected recipient
+agent (highest creation store index), without creating another thread or sending its draft.
+A newly selected fallback therefore never reuses a retired-recipient discussion. The action result
 names the actual thread and its first message. Same-key receipt replay is unchanged.
-Current-source starts retain their existing behavior. Starting or replying to a retained
+Current-source independent starts retain their existing behavior. Starting or replying to a retained
 discussion does not reactivate its resolved Inbox source or settle its original work.
 
 Unread Inbox-position lookup batch-qualifies the selected exact episodes through that
