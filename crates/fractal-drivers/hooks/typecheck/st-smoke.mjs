@@ -144,7 +144,7 @@ if (driver === "omp") {
   // The channel only forwards pending mail after the extension's readiness proof.
   // Both a cold start with an initial turn and a fresh channel attached mid-turn
   // must produce it without manufacturing an idle observation.
-  for (const lifecycle of ["session_start", "session_switch", "unsupported"]) {
+  for (const lifecycle of ["session_start", "restart", "session_switch", "unsupported"]) {
     fs.rmSync(frames, { force: true });
     fs.rmSync(outgoing, { force: true });
     delete globalThis.__stOmpChannel;
@@ -158,19 +158,26 @@ if (driver === "omp") {
     extension({ ...api, on: (name, handler) => activeEvents.set(name, handler),
       sendUserMessage: async (content, options) => activeHandoffs.push({ content, options }) });
     const activeCtx = { ...ctx, isIdle: () => false };
-    await activeEvents.get(lifecycle === "unsupported" ? "session_start" : lifecycle)({}, activeCtx);
+    const deliveryStarted = performance.now();
+    await activeEvents.get(lifecycle === "session_switch" ? "session_switch" : "session_start")({}, activeCtx);
     if (lifecycle === "unsupported") {
       assert.equal(read().some((frame) => frame.type === "delivery_ready"), false,
         "an incompatible hello cannot open the delivery gate");
       assert.deepEqual(activeHandoffs, []);
     } else {
-      await until(() => activeHandoffs.length === 1);
+      await until(() => read().some((frame) =>
+        frame.type === "delivered" && frame.meta?.messageId === "message/active-start"));
+      assert.ok(performance.now() - deliveryStarted < 1_000,
+        `${lifecycle}: active provider receives and acknowledges within one channel delivery interval`);
       const proof = read();
       assert.ok(proof.findIndex((frame) => frame.type === "ready") <
         proof.findIndex((frame) => frame.type === "delivery_ready"),
         "native session binding precedes handoff readiness");
       assert.equal(proof.some((frame) => frame.type === "state" && frame.state === "idle"), false);
       assert.deepEqual(activeHandoffs, [{ content: "ACTIVE FROM START", options: { deliverAs: "steer" } }]);
+      assert.equal(proof.filter((frame) =>
+        frame.type === "delivered" && frame.meta?.messageId === "message/active-start").length, 1,
+        `${lifecycle}: exactly one native delivery acknowledgement`);
     }
     await activeEvents.get("session_shutdown")({}, activeCtx);
   }

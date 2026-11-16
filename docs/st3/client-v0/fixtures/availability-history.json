@@ -1,0 +1,37 @@
+{
+  "api_version": "st3.client.v0",
+  "request_id": "request/example",
+  "snapshot": {
+    "id": "snapshot/example",
+    "host_id": "host/example",
+    "store_index": 12,
+    "projection_version": "client-projection.v0",
+    "created_at": "2026-11-12T10:30:00Z"
+  },
+  "value": {
+    "person": "person/ada",
+    "from": "2026-11-12T09:00:00.000Z",
+    "to": "2026-11-12T10:30:00.000Z",
+    "bucket_seconds": 3600,
+    "buckets": [
+      {
+        "start": "2026-11-12T09:00:00.000Z",
+        "covered_ms": 3600000,
+        "status": {"available": 2700000, "away": 900000},
+        "status_source": {"override": 0, "presence": 3000000, "unreported": 600000},
+        "presence": {"present": 2100000, "idle": 900000, "locked": 0, "unreported": 600000},
+        "interruptions": {"all": 3600000, "urgent": 0, "none": 0},
+        "deadline_clock": {"run": 3600000, "hold-routine": 0, "hold-all": 0}
+      },
+      {
+        "start": "2026-11-12T10:00:00.000Z",
+        "covered_ms": 1800000,
+        "status": {"available": 600000, "away": 1200000},
+        "status_source": {"override": 1200000, "presence": 600000, "unreported": 0},
+        "presence": {"present": 1800000, "idle": 0, "locked": 0, "unreported": 0},
+        "interruptions": {"all": 0, "urgent": 1800000, "none": 0},
+        "deadline_clock": {"run": 600000, "hold-routine": 1200000, "hold-all": 0}
+      }
+    ]
+  }
+}
