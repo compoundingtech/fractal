@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reload the inert kit-isolation audit document before capturing the previous storage snapshot, avoiding a cross-renderer localStorage propagation race in the browser regression test.",
+  "replay": { "status": "none", "detail": "Browser test fixture only; no application replay." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Only test snapshot initialization changes; production isolation checks are unchanged." },
+  "downtime": { "status": "none", "detail": "No service changes." },
+  "manual": { "status": "none", "detail": "No manual steps." },
+  "recovery": { "status": "none", "detail": "No application data changes." }
+}

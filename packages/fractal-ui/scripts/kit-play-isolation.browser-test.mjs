@@ -151,6 +151,9 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   const staleWriter = await worker.newPage(pageOptions)
   await staleWriter.goto(base)
   await staleWriter.evaluate(() => localStorage.setItem('prior-renderer-view', 'gone after clear'))
+  // Capture a fresh storage view instead of racing propagation to the retained
+  // renderer. The snapshot deliberately becomes stale only after reset.
+  await baseAudit.reload()
   const readAudit = baseAudit.evaluate.bind(baseAudit)
   const staleSnapshot = await readAudit(() => ({
     origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
