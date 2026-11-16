@@ -141,4 +141,14 @@ on the web UI, Effect schemas, or native platform APIs. The host owns immutable
 action IDs, idempotency keys, and fences. Creation requires a distinct identity
 and explicit `v2ReadersReady`; discovering server support does not establish
 that every arrangement reader has been upgraded. A retired arrangement is never
-silently replaced or migrated. An explicit refresh reopens an interrupted follow and rereads its memberships; it never replays an edit. A still-unresolved edit must settle before the session can be replaced.
+silently replaced or migrated. An explicit Refresh reopens an interrupted follow
+and rereads its memberships; it never replays an edit. While an edit request is
+still in flight, Refresh keeps its original session.
+
+Quick access edits retain their original request bodies, identities, fences and gateway in memory
+when delivery is unconfirmed. `phase: 'unconfirmed'` disables fresh edits even after Refresh
+or stream updates. Offer a separate **Check delivery** action calling `checkEdit()`; it sends
+only the same retained create or membership stage. A completed receipt settles that stage.
+A refusal of a repeated check does not prove the original attempt was unapplied. Ordinary
+connection loss must retain the same follow instance. Closing the instance or terminating the
+process discards this in-memory recovery state; this helper is not a durable outbox.

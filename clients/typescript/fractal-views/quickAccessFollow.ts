@@ -1,18 +1,20 @@
-import type { ActionOf, Arrangement, CollectionStream, FractalClient, OrderedMembership, OrderedMembershipOperation } from '@fractal/client'
+import type { Arrangement, CollectionStream, FractalClient, OrderedMembership, OrderedMembershipOperation } from '@fractal/client'
 import { quickAccessSelection, quickAccessDestination, validQuickAccessKey } from './quickAccess.ts'
+import { QuickAccessWrite, type QuickAccessEditIdentity as EditIdentity } from './quickAccessWrite.ts'
 
 export type QuickAccessGateway = Pick<FractalClient, 'discover' | 'arrangementsGet' | 'arrangementsMemberships' | 'arrangementEdit' | 'arrangementMembershipEdit' | 'collectionStream'>
-type EditIdentity = Pick<ActionOf<'arrangement.membership.edit'>, 'id' | 'idempotency_key' | 'fence'>
 export interface QuickAccessFollow {
   close(): void
   refresh(): Promise<void>
+  checkEdit(): Promise<void>
   edit(identity: EditIdentity, operations: OrderedMembershipOperation[], createIdentity?: EditIdentity): Promise<void>
 }
 export interface QuickAccessState {
-  readonly phase: 'connecting' | 'synced' | 'pending' | 'unavailable'
+  readonly phase: 'connecting' | 'synced' | 'pending' | 'unavailable' | 'unconfirmed'
   readonly members: readonly OrderedMembership[]
   readonly detail?: string
   readonly editable?: boolean
+  readonly unconfirmed?: { readonly stage: 'create' | 'membership' }
 }
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const isArrangement = (value: unknown): value is Arrangement => record(value) && typeof value.id === 'string' && typeof value.owner === 'string'
@@ -40,7 +42,7 @@ type FollowOptions = {
   /** The owner must coordinate all arrangement readers before enabling v2 creation. */
   readonly v2ReadersReady?: boolean
 }
-interface Session extends QuickAccessFollow { needsReconnect(): boolean; wasObserved(): boolean }
+interface Session { refuse(error: unknown): void; close(): void; refresh(): Promise<void>; needsReconnect(): boolean; wasObserved(): boolean; prepare(identity: EditIdentity, operations: OrderedMembershipOperation[], createIdentity?: EditIdentity): QuickAccessWrite }
 
 const openSession = async ({ gateway, onState, signal, v2ReadersReady = false }: FollowOptions, previous: { observed: boolean; members: readonly OrderedMembership[] }): Promise<Session> => {
   const discovery = (await gateway.discover(signal === undefined ? {} : { signal })).value
@@ -54,7 +56,6 @@ const openSession = async ({ gateway, onState, signal, v2ReadersReady = false }:
   let reading = false
   let dirty = false
   let ready = false
-  let busy = false
   let observed = previous.observed
   let retired = false
   let arrangement: Arrangement | undefined
@@ -65,7 +66,7 @@ const openSession = async ({ gateway, onState, signal, v2ReadersReady = false }:
   if (signal?.aborted) throw new TypeError('Quick access follow aborted')
   signal?.addEventListener('abort', close, { once: true })
   const publish = (next: QuickAccessState) => {
-    state = { ...next, editable: next.phase === 'synced' && ready && writable && !busy && !interrupted && !retired && (arrangement !== undefined || v2ReadersReady) }
+    state = { ...next, editable: next.phase === 'synced' && ready && writable && !interrupted && !retired && (arrangement !== undefined || v2ReadersReady) }
     if (!closed) onState(state)
   }
   const fail = (error: unknown) => { ready = false; publish({ ...state, phase: 'unavailable', detail: error instanceof Error ? error.message : String(error) }) }
@@ -113,7 +114,7 @@ const openSession = async ({ gateway, onState, signal, v2ReadersReady = false }:
         }
         if (!closed && !dirty && !interrupted) {
           ready = !retired
-          publish({ phase: retired ? 'unavailable' : busy ? 'pending' : 'synced', members, editable: writable && (next !== undefined || v2ReadersReady), ...(retired ? { detail: 'Restoring removed Pins is not available.' } : {}) })
+          publish({ phase: retired ? 'unavailable' : 'synced', members, editable: writable && (next !== undefined || v2ReadersReady), ...(retired ? { detail: 'Restoring removed Pins is not available.' } : {}) })
         }
       } while (dirty && !closed)
     } catch (error) { if (!closed) fail(error) } finally { reading = false }
@@ -141,32 +142,18 @@ const openSession = async ({ gateway, onState, signal, v2ReadersReady = false }:
   } catch (error) { interrupt(error) }
   return {
     close,
+    refuse: error => { if (hasCode(error, 'arrangement-retired')) { retired = true; observed = true } },
     refresh,
     needsReconnect: () => interrupted,
     wasObserved: () => observed,
-    edit: async (identity, operations, createIdentity) => {
-      if (closed || !ready || busy || !writable) throw new TypeError('Pins must be synced, writable and idle before editing')
-      const parameters = { ...selection, operations }
+    prepare: (identity, operations, createIdentity) => {
+      if (closed || !ready || !writable) throw new TypeError('Pins must be synced, writable and idle before editing')
       if (!validOperations(operations)) throw new TypeError('Invalid Pins membership operations')
-      if (operations.some((operation) => operation.op === 'place' && operation.bucket !== null)) throw new TypeError('Pins use only the root bucket')
-      busy = true
-      publish({ ...state, phase: 'pending' })
-      try {
-        if (arrangement === undefined) {
-          if (!v2ReadersReady || createIdentity === undefined) throw new TypeError('Creating Pins requires coordinated v2 readers and a separate create identity')
-          if (createIdentity.id === identity.id || createIdentity.idempotency_key === identity.idempotency_key) throw new TypeError('Create and membership actions require distinct identities')
-          try {
-            const created = await gateway.arrangementEdit({ ...createIdentity, parameters: { ...selection, version: 2, operations: [{ op: 'create', name: 'Pins' }] } })
-            if (created.value.status !== 'completed') throw new TypeError('Pins creation is not completed')
-          }
-          catch (error) { if (hasCode(error, 'arrangement-retired')) retired = true; if (!hasCode(error, 'arrangement-exists')) throw error }
-          await read()
-          if (arrangement === undefined || retired || !ready) throw new TypeError('Reserved Pins is unavailable')
-        }
-        const edited = await gateway.arrangementMembershipEdit({ ...identity, parameters })
-        if (edited.value.status !== 'completed') throw new TypeError('Pins edit is not completed')
-        await read()
-      } catch (error) { fail(error); throw error } finally { busy = false; if (ready) publish({ ...state, phase: 'synced' }) }
+      if (arrangement === undefined) {
+        if (!v2ReadersReady || createIdentity === undefined) throw new TypeError('Creating Pins requires coordinated v2 readers and a separate create identity')
+        if (createIdentity.id === identity.id || createIdentity.idempotency_key === identity.idempotency_key) throw new TypeError('Create and membership actions require distinct identities')
+      }
+      return new QuickAccessWrite(gateway, selection, identity, operations, arrangement === undefined ? createIdentity : undefined)
     },
   }
 }
@@ -175,7 +162,13 @@ const openSession = async ({ gateway, onState, signal, v2ReadersReady = false }:
 export const followQuickAccess = async (options: FollowOptions): Promise<QuickAccessFollow> => {
   let closed = false, generation = 0, observed = false, editing = false
   let current: Session | undefined, opening: Promise<void> | undefined, sessionAbort: AbortController | undefined
+  let pending: QuickAccessWrite | undefined
   let latest: QuickAccessState = { phase: 'connecting', members: [] }
+  const present = () => {
+    if (closed) return
+    options.onState(pending?.unconfirmed ? { ...latest, phase: editing ? 'pending' : 'unconfirmed', editable: false, unconfirmed: { stage: pending.stage }, detail: 'Fractal may have changed Quick access. Check delivery before making another edit.' }
+      : editing ? { ...latest, phase: 'pending', editable: false } : latest)
+  }
   const close = () => { closed = true; generation++; sessionAbort?.abort(); current?.close(); current = undefined; options.signal?.removeEventListener('abort', close) }
   if (options.signal?.aborted) throw new TypeError('Quick access follow aborted')
   options.signal?.addEventListener('abort', close, { once: true })
@@ -185,7 +178,7 @@ export const followQuickAccess = async (options: FollowOptions): Promise<QuickAc
     const version = ++generation
     observed ||= current?.wasObserved() ?? false
     current?.close(); current = undefined; sessionAbort?.abort(); sessionAbort = new AbortController()
-    const publish = (state: QuickAccessState) => { if (!closed && version === generation) { latest = state; options.onState(state) } }
+    const publish = (state: QuickAccessState) => { if (!closed && version === generation) { latest = state; present() } }
     publish({ phase: 'connecting', members: latest.members, editable: false })
     const task = openSession({ ...options, signal: sessionAbort.signal, onState: publish }, { observed, members: latest.members })
       .then(next => { if (closed || version !== generation) next.close(); else current = next })
@@ -194,14 +187,27 @@ export const followQuickAccess = async (options: FollowOptions): Promise<QuickAc
     void task.then(() => { if (opening === task) opening = undefined })
     return task
   }
+  const sendPending = async () => {
+    if (closed || editing || !pending) throw new TypeError('There is no idle Quick access edit to check')
+    const write = pending
+    editing = true; present()
+    try {
+      await write.send(); pending = undefined
+      await current?.refresh()
+    } catch (error) {
+      if (write.refused) { pending = undefined; current?.refuse(error); await current?.refresh() }
+      throw error
+    } finally { editing = false; present() }
+  }
   await reopen()
   return {
     close,
+    checkEdit: sendPending,
     refresh: () => closed ? Promise.resolve() : opening ?? (current && (!current.needsReconnect() || editing) ? current.refresh() : reopen()),
     edit: async (identity, operations, createIdentity) => {
-      if (closed || opening || editing || !current) throw new TypeError('Pins must be synced, writable and idle before editing')
-      editing = true
-      try { await current.edit(identity, operations, createIdentity) } finally { editing = false }
+      if (closed || opening || editing || pending || !current) throw new TypeError('Pins must be synced, writable and idle before editing')
+      pending = current.prepare(identity, operations, createIdentity)
+      await sendPending()
     },
   }
 }

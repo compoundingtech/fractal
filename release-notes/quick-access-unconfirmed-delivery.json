@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retain unconfirmed Quick access edits for explicit identical delivery checks",
+  "replay": {
+    "status": "none",
+    "detail": "No stored claims, membership winners or history are rewritten."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Existing arrangement wire and stored contracts are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Existing ownership, lifecycle and coordinated reader-readiness requirements remain."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The additive follow state unconfirmed and checkEdit method require consuming clients to present a separate delivery-check action and retain the follow across ordinary disconnects."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon restart is needed."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "After an unconfirmed edit, fresh edits remain blocked. Check delivery repeats only the immutable original create or membership stage using its original gateway, identity, key and fence. Refresh never resends or settles it."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Only a completed receipt settles a repeated check. A replay refusal cannot prove the original attempt unapplied. Recovery state is in-memory only and is lost when the follow closes or the process exits; this does not provide a durable outbox."
+  }
+}
