@@ -9,10 +9,9 @@ pub trait GithubStore {
     fn agent_repository_subjects(&self, host: &str) -> Result<Vec<DesiredSubject>>;
     /// Find a mission-run PR resource for this discovered PR when that run already has a human
     /// review gate for its own PR. Intake uses this graph provenance to avoid a second reviewer.
-    /// Why a pull request review that has not started must not start: since the request, its
-    /// pull request closed or merged, went back to draft, or moved to a newer head. `None` while
-    /// the requested head is still the open pull request's current head.
-    fn stale_pull_request_request(&self, resource: &str, discovery: &str)
+    /// Why a queued pull request snapshot is stale. Ready-head admission also requires an
+    /// open, non-draft PR; relevant-changes admission retains only the head freshness fence.
+    fn stale_pull_request_request(&self, resource: &str, discovery: &str, admission: Option<&str>)
     -> Result<Option<String>>;
     /// Only subscription deliveries follow the current PR head. Authored missions keep their
     /// pinned inputs, including missions that opened or are changing a pull request themselves.
@@ -37,8 +36,9 @@ impl GithubStore for Store {
         &self,
         resource: &str,
         discovery: &str,
+        admission: Option<&str>,
     ) -> Result<Option<String>> {
-        stale_pull_request_request_tx(&self.readers.get(), resource, discovery)
+        stale_pull_request_request_tx(&self.readers.get(), resource, discovery, admission)
     }
 
     fn stale_subscription_pull_request_run(&self, run: &MissionRunView) -> Result<Option<String>> {
@@ -61,13 +61,17 @@ impl GithubStore for Store {
                 return Ok(None);
             }
         }
+        let created = self.latest_claim(&run.subject, Some("mission-run.created"))?;
+        let admission = created.as_ref()
+            .and_then(|claim| claim.body.pointer("/fields/admission"))
+            .and_then(serde_json::Value::as_str);
         for input in run
             .inputs
             .values()
             .filter(|input| input.kind == MissionInputKind::Resource)
         {
             if let (Some(resource), Some(discovery)) = (&input.subject, &input.claim_id)
-                && let Some(reason) = self.stale_pull_request_request(resource, discovery)?
+                && let Some(reason) = self.stale_pull_request_request(resource, discovery, admission)?
             {
                 return Ok(Some(reason));
             }

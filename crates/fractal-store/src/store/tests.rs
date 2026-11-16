@@ -7226,6 +7226,11 @@ fn mailbox_state_read_preserves_ended_diagnostic_work_and_legacy_semantics() {
 
 #[test]
 fn subscription_run_lookup_cost_does_not_grow_with_unrelated_deliveries() {
+    // Match the production statement's cache key to observe its VM steps.
+    const SUBSCRIPTION_STARTED_RUN_QUERY: &str =
+        "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subscription_started_run_index
+         WHERE kind='subscription.mission-started'
+         AND json_extract(body, '$.fields.mission_run')=?1)";
     let store = Store::open_memory("orchid").unwrap();
     let mut connection = store.connection.write();
     let transaction = connection.transaction().unwrap();

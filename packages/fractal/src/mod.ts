@@ -656,13 +656,33 @@ export const ObserverSchema = Schema.Struct({
   every: Schema.optionalKey(Duration),
 }).annotate({ identifier: 'Fractal.Observer' })
 
-/** A message subscription to changed ref fields, optionally filtered by a field predicate. */
+/** Admission is opt-in; absence retains the existing ready-head policy. */
+export const SubscriptionAdmissionSchema = Schema.Literals(['ready-heads', 'relevant-changes'])
+
+/** Per-item mission delivery; admission and author scoping belong to this delivery. */
+export const SubscriptionMissionDeliverySchema = Schema.Struct({
+  mission: Text,
+  resource: Text,
+  workspace: Text,
+  admission: Schema.optionalKey(SubscriptionAdmissionSchema),
+  authors: Schema.optionalKey(
+    Schema.NonEmptyArray(Text).pipe(
+      Schema.refine(
+        (authors): authors is typeof authors =>
+          authors.every((author) => author.trim().length > 0) &&
+          new Set(authors.map((author) => author.toLowerCase())).size === authors.length,
+      ),
+    ),
+  ),
+}).annotate({ identifier: 'Fractal.SubscriptionMissionDelivery' })
+
+/** A message or per-item mission subscription, optionally filtered by a field predicate. */
 export const SubscriptionSchema = Schema.Struct({
   id: SubjectId,
   observer: FullSubject.pipe(Schema.refine((s): s is string => s.startsWith('observer/'))),
-  to: FullSubject,
+  to: Schema.optionalKey(FullSubject),
   on: UniqueFields,
-  delivery: Schema.Literal('message'),
+  delivery: Schema.Union([Schema.Literal('message'), SubscriptionMissionDeliverySchema]),
   when: Schema.optionalKey(
     Schema.Struct({
       path: Text.pipe(
@@ -682,7 +702,15 @@ export const SubscriptionSchema = Schema.Struct({
       ]),
     }),
   ),
-}).annotate({ identifier: 'Fractal.Subscription' })
+}).pipe(
+  Schema.refine(
+    (s): s is typeof s =>
+      s.delivery === 'message'
+        ? s.to !== undefined
+        : s.to === undefined &&
+          (s.delivery.admission !== 'relevant-changes' || s.on.includes('pull_requests')),
+  ),
+).annotate({ identifier: 'Fractal.Subscription' })
 
 const uniqueIds = (values: readonly { readonly id: string }[]): boolean =>
   new Set(values.map((value) => value.id)).size === values.length
@@ -1125,7 +1153,7 @@ export const observer = (input: typeof ObserverSchema.Encoded): Node => {
   })
 }
 
-/** Decodes and renders a message subscription to ref observations. */
+/** Decodes and renders a subscription, retaining omission of unconfigured admission fields. */
 export const subscription = (input: typeof SubscriptionSchema.Encoded): Node => {
   const s = decode({ schema: SubscriptionSchema, input })
   return node({
@@ -1133,7 +1161,7 @@ export const subscription = (input: typeof SubscriptionSchema.Encoded): Node => 
     args: [s.id],
     children: [
       child({ name: 'observer', value: s.observer }),
-      child({ name: 'to', value: s.to }),
+      ...optionalChild({ name: 'to', value: s.to }),
       ...s.on.map((field) => child({ name: 'on', value: field })),
       ...(s.when === undefined
         ? []
@@ -1145,7 +1173,23 @@ export const subscription = (input: typeof SubscriptionSchema.Encoded): Node => 
               ],
             }),
           ]),
-      child({ name: 'delivery', value: s.delivery }),
+      ...(s.delivery === 'message'
+        ? [child({ name: 'delivery', value: s.delivery })]
+        : [
+            node({
+              name: 'delivery',
+              args: ['mission'],
+              children: [
+                child({ name: 'mission', value: s.delivery.mission }),
+                child({ name: 'resource', value: s.delivery.resource }),
+                child({ name: 'workspace', value: s.delivery.workspace }),
+                ...optionalChild({ name: 'admission', value: s.delivery.admission }),
+                ...(s.delivery.authors ?? []).map((author) =>
+                  child({ name: 'author', value: author }),
+                ),
+              ],
+            }),
+          ]),
     ],
   })
 }

@@ -231,6 +231,7 @@
 "subagent.ended" = { class = "transition", window = "7d", pending = "the subagent lease fold reads it" }
 "subagent.renewed" = { class = "current", pending = "the subagent lease fold reads every renewal" }
 "slo.breach-transition" = { class = "transition", window = "7d" }
+"subscription.attribution" = { class = "durable" }
 "subscription.batch-sent" = { class = "transition", window = "7d", pending = "batch delivery reads it" }
 "subscription.batched" = { class = "transition", window = "7d", pending = "batch delivery reads it" }
 "subscription.mission-deferred" = { class = "transition", window = "7d" }

@@ -140,6 +140,9 @@ pub fn read_inputs(
         }
     }
     let repository_changed_fields = changed_fields.iter().cloned().collect::<Vec<_>>();
+    let relevant_admission = active_subscriptions.iter().any(|(_, subscription)| {
+        subscription.admission == Some(crate::model::SubscriptionAdmission::RelevantChanges)
+    });
     let mut recorded_items = HashMap::new();
     for (field, segment, _) in REPOSITORY_COLLECTIONS {
         for item in current_object
@@ -157,15 +160,19 @@ pub fn read_inputs(
                     .map_err(internal)?;
             let graph = observation.actual.and_then(|actual| actual.get("facts").cloned());
             // The graph is exact for every compact fact and every fact a wake or a delivery reads:
-            // each change to one is recorded, whatever the mode. A look's prior takes those from
-            // the graph, so a mirror that missed a look cannot make a delivered comment new again.
+            // each change to one is recorded, whatever the mode. Relevant-change subscriptions
+            // additionally retain full snapshots of their admission facts. Those must also win
+            // over a stale mirror after replication, so a return to an earlier value is discovered.
+            // Without that policy, keep the legacy mirror baseline for noncompact facts.
             let exact = |mut base: serde_json::Map<String, Value>, graph: &Value| {
-                for name in fractal_schema::github_plugin::COMPACT_FACTS.iter()
-                    .chain(fractal_schema::github_plugin::DELIVERY_FACTS)
+                for name in fractal_schema::github_plugin::COMPACT_FACTS.iter().copied()
+                    .chain(fractal_schema::github_plugin::DELIVERY_FACTS.iter().copied())
+                    .chain(["body_digest", "base_branch", "base_sha", "checks"].into_iter()
+                        .filter(|_| relevant_admission && field == "pull_requests"))
                 {
-                    match graph.get(*name) {
-                        Some(value) => base.insert((*name).into(), value.clone()),
-                        None => base.remove(*name),
+                    match graph.get(name) {
+                        Some(value) => base.insert(name.into(), value.clone()),
+                        None => base.remove(name),
                     };
                 }
                 if let Some(execution) = graph.pointer("/required_checks/execution")

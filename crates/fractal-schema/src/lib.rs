@@ -2973,6 +2973,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["schedule"],
         ),
         (
+            "subscription.attribution",
+            &["subscription"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("subscriptions"),
+            true,
+            &["subscription"],
+        ),
+        (
             "subscription.mission-requested",
             &["subscription"],
             WritePolicy::SystemOnly,
@@ -3584,6 +3593,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("stalled_after_ms", integer()),
             ("report_stalls", boolean()),
             ("report_completed", boolean()),
+            ("admission", enumeration(&["ready-heads", "relevant-changes"])),
+            ("authors", array()),
         ],
         "mission-run.report-to" => &[
             ("report_to", reference()),
@@ -4785,6 +4796,13 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("request", required_string()),
             ("mission_run", required_reference_to(&["mission-run"])),
         ],
+        "subscription.attribution" => &[
+            ("resource", required_reference_to(&["resource"])),
+            ("discovery", required_string()),
+            ("status", required_enum(&["attribution-pending", "scope-excluded", "matched"])),
+            ("reason", required_string()),
+            ("authors", array()),
+        ],
         "subscription.mission-requested" => &[
             ("mission", required_reference_to(&["mission"])),
             ("mission_revision", string()),
@@ -4797,6 +4815,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("held", boolean()),
             ("text_input", string()),
             ("text", string()),
+            ("admission", enumeration(&["ready-heads", "relevant-changes"])),
+            ("authors", array()),
+            ("change_identity", string()),
+            ("previous_delivery_key", string()),
         ],
         "subscription.mission-request-cancelled" | "subscription.mission-request-released" => {
             &[("request", required_string()), ("reason", string())]
@@ -4804,6 +4826,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         "subscription.mission-started" => &[
             ("request", required_string()),
             ("mission_run", required_reference_to(&["mission-run"])),
+            ("admission", enumeration(&["ready-heads", "relevant-changes"])),
+            ("authors", array()),
         ],
         "subscription.batched" => &[
             ("entries", required_array()),
@@ -5147,6 +5171,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subscription_attribution_and_admission_lineage_are_registered() {
+        let spec = registry().claim("subscription.attribution").unwrap();
+        assert_eq!(spec.subjects, ["subscription"]);
+        assert_eq!(spec.write_policy, WritePolicy::SystemOnly);
+        assert_eq!(spec.cardinality, Cardinality::Append);
+        assert_eq!(retention::policy().kind("subscription.attribution").class, retention::Class::Durable);
+        for status in ["attribution-pending", "scope-excluded", "matched"] {
+            let fields = BTreeMap::from([
+                ("resource".into(), Value::String("resource/github/acme/garden/pull-request/1".into())),
+                ("discovery".into(), Value::String("observation".into())),
+                ("status".into(), Value::String(status.into())),
+                ("reason".into(), Value::String("author scope".into())),
+            ]);
+            registry().validate_claim("subscription/hygiene", "subscription.attribution", &fields).unwrap();
+        }
+        for kind in ["subscription.mission-requested", "subscription.mission-started", "mission-run.created"] {
+            let spec = registry().claim(kind).unwrap();
+            assert!(!spec.fields["admission"].required);
+            assert!(!spec.fields["authors"].required);
+        }
+    }
+
+    #[test]
     fn runtime_start_process_provenance_fields_are_optional_and_typed() {
         let mut fields = BTreeMap::from([("action".into(), Value::from("start"))]);
         registry().validate_claim("agent/node/worker", "runtime.action.succeeded", &fields).unwrap();
@@ -5342,6 +5389,15 @@ mod tests {
     fn assistant_principal_registry_digest_transition() {
         // Reconstruct the principal-transition registry, excluding subsequent kinds and fields.
         let mut current = registry().clone();
+        current.claims.remove("subscription.attribution").unwrap();
+        for kind in ["subscription.mission-requested", "subscription.mission-started", "mission-run.created"] {
+            for field in ["admission", "authors"] {
+                current.claims.get_mut(kind).unwrap().fields.remove(field).unwrap();
+            }
+        }
+        for field in ["change_identity", "previous_delivery_key"] {
+            current.claims.get_mut("subscription.mission-requested").unwrap().fields.remove(field).unwrap();
+        }
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("work.person-override").unwrap();
         current.claims.remove("client.operation-authorized").unwrap();

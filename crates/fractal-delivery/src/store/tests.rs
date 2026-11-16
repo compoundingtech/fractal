@@ -29,6 +29,196 @@ use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 
 
+fn frontier_request(store: &Store, number: usize, relevant: bool) -> String {
+    let mut fields: BTreeMap<String, Value> = serde_json::from_value(serde_json::json!({
+        "mission": "mission/review", "resource": "resource/repo/pull-request/1",
+        "discovery": format!("snapshot-{number}"), "resource_input": "source", "workspace": "."
+    })).unwrap();
+    if relevant {
+        fields.insert("admission".into(), Value::String("relevant-changes".into()));
+    }
+    store.append_claim(&ClaimInput {
+        subject: "subscription/reviews".into(), kind: "subscription.mission-requested".into(),
+        actor: None, fields, evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap().id
+}
+
+fn finish_frontier_request(store: &Store, request: &str) {
+    store.append_claim(&ClaimInput {
+        subject: "subscription/reviews".into(), kind: "subscription.mission-request-cancelled".into(),
+        actor: Some("person/operator".into()),
+        fields: BTreeMap::from([
+            ("request".into(), Value::String(request.into())),
+            ("reason".into(), Value::String("finished fixture".into())),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+fn frontier_query_cost(store: &Store) -> (Vec<String>, i32) {
+    let connection = store.readers.get();
+    let mut query = super::delivery::prepare_pending_subscription_requests(&connection).unwrap();
+    let ids = query.query_map(["subscription/reviews"], |row| row.get::<_, String>(0)).unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    (ids, query.get_status(rusqlite::StatementStatus::VmStep))
+}
+
+#[test]
+fn relevant_request_hot_query_is_bounded_with_pending_and_finished_latest() {
+    let store = Store::open_memory("node").unwrap();
+    let sql = {
+        let connection = store.readers.get();
+        let mut query = super::delivery::prepare_pending_subscription_requests(&connection).unwrap();
+        query.raw_bind_parameter(1, "subscription/reviews").unwrap();
+        query.expanded_sql().unwrap()
+    };
+    let plan = query_plan(&store, &sql, []);
+    assert!(plan.iter().any(|detail|
+        detail.contains("claims_subscription_request_closer (subject=? AND <expr>=?)")),
+        "completion must seek the exact request, not scan subscription receipts: {plan:?}");
+    let mut costs = Vec::new();
+    let mut next = 0;
+    for history in [8, 128, 1024] {
+        while next < history {
+            let request = frontier_request(&store, next, true);
+            // Half the history has explicit terminal receipts; the rest is superseded without
+            // a receipt, precisely the burst that used to remain pending forever.
+            if next % 2 == 0 {
+                finish_frontier_request(&store, &request);
+            }
+            next += 1;
+        }
+        let latest = frontier_request(&store, next, true);
+        next += 1;
+        let (pending, pending_cost) = frontier_query_cost(&store);
+        assert_eq!(pending.as_slice(), std::slice::from_ref(&latest));
+        assert_eq!(store.pending_subscription_mission_requests("subscription/reviews").unwrap()[0].id, latest);
+        finish_frontier_request(&store, &latest);
+        let (pending, finished_cost) = frontier_query_cost(&store);
+        assert!(pending.is_empty(), "finished latest must not resurrect superseded snapshots");
+        assert!(store.pending_subscription_mission_requests("subscription/reviews").unwrap().is_empty());
+        costs.push((pending_cost, finished_cost));
+    }
+    for (pending, finished) in &costs {
+        assert!(*pending < 600 && *finished < 300, "bounded frontier query: {costs:?}");
+        assert!((pending - costs[0].0).abs() < 80, "pending cost grew with history: {costs:?}");
+        assert!((finished - costs[0].1).abs() < 80, "idle cost grew with history: {costs:?}");
+    }
+}
+
+#[test]
+fn relevant_frontier_survives_restart_rebuild_and_replication_without_changing_legacy_queue() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Store::open(&path, "left").unwrap();
+    frontier_request(&store, 0, true);
+    let latest = frontier_request(&store, 1, true);
+    finish_frontier_request(&store, &latest);
+    let first_default = frontier_request(&store, 2, false);
+    let second_default = frontier_request(&store, 3, false);
+    let export = store.export_replication(0).unwrap();
+    drop(store);
+    let store = Store::open(&path, "left").unwrap();
+    let replica = Store::open_memory("right").unwrap();
+    replica.import_replication("left", &export).unwrap();
+    for graph in [&store, &replica] {
+        let pending = graph.pending_subscription_mission_requests("subscription/reviews").unwrap();
+        assert_eq!(pending.iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(),
+            [first_default.as_str(), second_default.as_str()]);
+        let mut connection = graph.connection.write();
+        let tx = connection.transaction().unwrap();
+        fractal_store::store::subscription_request_frontier::rebuild(&tx).unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        assert_eq!(graph.pending_subscription_mission_requests("subscription/reviews").unwrap().len(), 2);
+        let winner: String = graph.readers.get().query_row(
+            "SELECT claim_id FROM local_subscription_request_frontier WHERE subject=?1",
+            ["subscription/reviews"], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(winner, latest);
+    }
+}
+
+#[test]
+fn concurrent_relevant_frontiers_converge_on_canonical_winner_and_keep_finished_fence() {
+    let left = Store::open_memory("left").unwrap();
+    let right = Store::open_memory("right").unwrap();
+    frontier_request(&left, 0, true);
+    frontier_request(&right, 1, true);
+    let left_export = left.export_replication(0).unwrap();
+    let right_export = right.export_replication(0).unwrap();
+    left.import_replication("right", &right_export).unwrap();
+    right.import_replication("left", &left_export).unwrap();
+    let winner = left.pending_subscription_mission_requests("subscription/reviews").unwrap();
+    assert_eq!(winner.len(), 1);
+    assert_eq!(right.pending_subscription_mission_requests("subscription/reviews").unwrap()[0].id, winner[0].id);
+    let expected: String = left.readers.get().query_row(
+        format!("SELECT claims.id FROM claims WHERE subject=?1 AND kind='subscription.mission-requested'
+            ORDER BY {} LIMIT 1", smallclaims::store::canonical::CANONICAL_ORDER_DESC).as_str(),
+        ["subscription/reviews"], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(winner[0].id, expected);
+    for graph in [&left, &right] {
+        let connection = graph.readers.get();
+        let (projected, stored_key): (String, Vec<u8>) = connection.query_row(
+            "SELECT claim_id,head_key FROM local_subscription_request_frontier WHERE subject=?1",
+            ["subscription/reviews"], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let sql_winner: String = connection.query_row(
+            format!("SELECT claims.id FROM claims WHERE subject=?1 AND kind='subscription.mission-requested'
+                ORDER BY {} LIMIT 1", smallclaims::store::canonical::CANONICAL_ORDER_DESC).as_str(),
+            ["subscription/reviews"], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(projected, sql_winner, "incremental projection must match canonical SQL");
+        assert_eq!(stored_key, smallclaims::store::canonical::sortable_key(
+            &smallclaims::store::canonical::claim_key(&connection, &sql_winner).unwrap()));
+        drop(connection);
+        let mut connection = graph.connection.write();
+        let tx = connection.transaction().unwrap();
+        fractal_store::store::subscription_request_frontier::rebuild(&tx).unwrap();
+        tx.commit().unwrap();
+        drop(connection);
+        assert_eq!(graph.pending_subscription_mission_requests("subscription/reviews").unwrap()[0].id, expected);
+    }
+    finish_frontier_request(&left, &expected);
+    right.import_replication("left", &left.export_replication(0).unwrap()).unwrap();
+    assert!(right.pending_subscription_mission_requests("subscription/reviews").unwrap().is_empty());
+}
+
+#[test]
+fn relevant_frontier_replays_corrected_canonical_metadata_and_bootstraps_existing_history() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("graph.db");
+    let store = Store::open(&path, "node").unwrap();
+    let older = frontier_request(&store, 0, true);
+    frontier_request(&store, 1, true);
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        // A correction can promote an existing request, not merely admit a new request.
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h7bc11cd5e0db owner=fractal_delivery::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='99999999999999999999' WHERE id=?1", [&older]).unwrap();
+        fractal_store::store::subscription_request_frontier::flush(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    assert_eq!(store.pending_subscription_mission_requests("subscription/reviews").unwrap()[0].id, older);
+    finish_frontier_request(&store, &older);
+    {
+        let connection = store.connection.write();
+        // Simulate a store opening this projection for the first time: history and receipts
+        // exist, but there is no derived frontier or initialization marker.
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h29c5c00ad271 owner=fractal_delivery::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_subscription_request_frontier;
+            DELETE FROM meta WHERE key='subscription_request_frontier_v1';").unwrap();
+    }
+    drop(store);
+    let store = Store::open(&path, "node").unwrap();
+    assert!(store.pending_subscription_mission_requests("subscription/reviews").unwrap().is_empty());
+    let winner: String = store.readers.get().query_row(
+        "SELECT claim_id FROM local_subscription_request_frontier WHERE subject=?1",
+        ["subscription/reviews"], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(winner, older);
+}
+
 #[test]
 fn subscription_retry_queries_use_history_indexes() {
     let store = Store::open_memory("node").unwrap();

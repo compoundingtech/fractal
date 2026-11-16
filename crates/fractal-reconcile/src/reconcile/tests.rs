@@ -12055,7 +12055,7 @@ subscription "reviews" {{ observer "observer/repo"; on "issues"
             let reconciler = Reconciler::new(store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()));
             let item = store.desired_subjects().unwrap().into_iter().find(|s| s.subject == "subscription/reviews").unwrap();
             let mut called = 0;
-            assert!(reconciler.reconcile_subscription_mission_with_start(&item, &[], |_, _, _, _, _| {
+            assert!(reconciler.reconcile_subscription_mission_with_start(&item, &[], |_, _, _, _, _, _, _| {
                 called += 1;
                 Err(smallclaims::error::internal(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None)))
             }).is_err());

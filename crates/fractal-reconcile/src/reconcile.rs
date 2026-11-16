@@ -17910,14 +17910,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         held: &[crate::model::AttentionRequestView],
     ) -> Result<()> {
         self.reconcile_subscription_mission_with_start(item, held,
-            |request, parent, subscription, resource, discovery| {
-                self.store.create_subscription_mission_run(request, parent, subscription, resource, discovery)
+            |request, parent, subscription, resource, discovery, fields, request_id| {
+                self.store.create_subscription_mission_run(request, parent, subscription, resource, discovery, Some(fields), Some(request_id))
             })
     }
 
     fn reconcile_subscription_mission_with_start(
         &self, item: &DesiredSubject, held: &[crate::model::AttentionRequestView],
-        mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, &str, &str)
+        mut start: impl FnMut(&MissionRunRequest, Option<&MissionRunView>, &str, &str, &str, &Value, &str)
             -> Result<MissionRunView, crate::model::FractalError>,
     ) -> Result<()> {
         let Some(spec) = crate::graph::subscription_spec(&item.desired) else {
@@ -17988,8 +17988,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut capacity_waiting = BTreeSet::new();
         let mut waiting = Vec::new();
         for request in requests {
-            // A queued review runs only for the current head of an open
-            // pull request.
+            // Eligibility is pinned to the request, never the current subscription declaration.
             let pull_request = request
                 .body
                 .pointer("/fields/resource")
@@ -18002,7 +18001,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .and_then(Value::as_str),
                 );
             if let Some((resource, discovery)) = pull_request
-                && let Some(reason) = self.store.stale_pull_request_request(resource, discovery)?
+                && let Some(reason) = self.store.stale_pull_request_request(
+                    resource, discovery, request.body.pointer("/fields/admission").and_then(Value::as_str),
+                )?
             {
                 self.store.append_claim(&ClaimInput {
                     subject: item.subject.clone(),
@@ -18137,7 +18138,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 },
                 None => None,
             };
-            let created = start(&request_value, parent.as_ref(), &item.subject, resource, discovery);
+            let created = start(&request_value, parent.as_ref(), &item.subject, resource, discovery, fields, &request.id);
             let run = match created {
                 Ok(run) => run,
                 Err(error) if matches!(error.code, "stale-ref-head" | "stale-pull-request" | "completed-subscription-snapshot") => {

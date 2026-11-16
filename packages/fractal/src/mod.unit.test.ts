@@ -51,6 +51,7 @@ import {
   product,
   runId,
   subscription,
+  SubscriptionSchema,
   t,
   terminal,
 } from './mod.ts'
@@ -2512,6 +2513,106 @@ describe('native mission grammar', () => {
     'rejects unpinned or malformed step document %s',
     (reference) => {
       expect(() => step({ id: 'read', documents: [reference] })).toThrow()
+    },
+  )
+  it.each(['ready-heads', 'relevant-changes'] as const)(
+    'round-trips subscription admission %s and repeated authors without adding defaults',
+    (admission) => {
+      const declaration = {
+        id: 'hygiene',
+        observer: 'observer/repository',
+        on: ['pull_requests', 'comments'],
+        delivery: {
+          mission: 'hygiene/evaluate',
+          resource: 'pull-request',
+          workspace: '/srv/hygiene',
+          admission,
+          authors: ['orchid-bot', 'Other-Bot'],
+        },
+      }
+      const decoded = Schema.decodeUnknownSync(SubscriptionSchema)(declaration)
+      expect(Schema.encodeSync(SubscriptionSchema)(decoded)).toEqual(declaration)
+      expect(emit([subscription(decoded)])).toBe(
+        `version 2
+subscription "hygiene" {
+  observer "observer/repository"
+  on "pull_requests"
+  on "comments"
+  delivery "mission" {
+    mission "hygiene/evaluate"
+    resource "pull-request"
+    workspace "/srv/hygiene"
+    admission "${admission}"
+    author "orchid-bot"
+    author "Other-Bot"
+  }
+}
+`,
+      )
+    },
+  )
+  it('omits absent subscription admission and authors from schema and KDL output', () => {
+    const declaration = {
+      id: 'review',
+      observer: 'observer/repository',
+      on: ['pull_requests'],
+      delivery: {
+        mission: 'review/pull-request',
+        resource: 'pull-request',
+        workspace: '/srv/reviews',
+      },
+    }
+    const decoded = Schema.decodeUnknownSync(SubscriptionSchema)(declaration)
+    expect(Schema.encodeSync(SubscriptionSchema)(decoded)).toEqual(declaration)
+    expect(decoded.delivery).not.toHaveProperty('admission')
+    expect(decoded.delivery).not.toHaveProperty('authors')
+    expect(emit([subscription(decoded)])).not.toMatch(/admission|author/u)
+    expect(
+      emit([subscription({
+        id: 'changed',
+        observer: 'observer/ref',
+        to: 'agent/worker',
+        on: ['head'],
+        delivery: 'message',
+      })]),
+    ).toBe(
+      'version 2\nsubscription "changed" {\n  observer "observer/ref"\n  to "agent/worker"\n  on "head"\n  delivery "message"\n}\n',
+    )
+  })
+  it('rejects unknown admission modes and relevant-change subscriptions without PR selection', () => {
+    const declaration = {
+      id: 'hygiene',
+      observer: 'observer/repository',
+      on: ['pull_requests'],
+      delivery: {
+        mission: 'hygiene/evaluate',
+        resource: 'pull-request',
+        workspace: '/srv/hygiene',
+        admission: 'all-changes',
+      },
+    }
+    expect(() => Schema.decodeUnknownSync(SubscriptionSchema)(declaration)).toThrow()
+    expect(() => Schema.decodeUnknownSync(SubscriptionSchema)({
+      ...declaration,
+      on: ['mentions'],
+      delivery: { ...declaration.delivery, admission: 'relevant-changes' },
+    })).toThrow()
+  })
+  it.each([{ authors: [] }, { authors: ['orchid-bot', 'ORCHID-BOT'] }, { authors: ['   '] }])(
+    'rejects author lists that cannot round-trip through repeatable KDL entries: %j',
+    ({ authors }) => {
+      expect(() => Schema.decodeUnknownSync(SubscriptionSchema)({
+        id: 'hygiene',
+        observer: 'observer/repository',
+        on: ['pull_requests'],
+        delivery: {
+          mission: 'hygiene/evaluate',
+          resource: 'pull-request',
+          workspace: '/srv/hygiene',
+          admission: 'relevant-changes',
+          authors,
+        },
+      })).toThrow()
     },
   )
   it('rejects invalid document hashes and observer/subscription field selections', () => {

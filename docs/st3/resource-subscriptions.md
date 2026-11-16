@@ -22,7 +22,7 @@ latest state. The repository resource keeps only its own facts, such as `reposit
 
 | Data type | Facts on each item |
 |---|---|
-| `pull_requests` | `number`, `url`, `title`, `author`, `created_at`, `state`, `merged` once closed, `draft`, `head_sha`, `branch`, `base_branch`, `checks_state`, `checks` (each `name`, `status`, `conclusion`), `required_checks` (`state`, `source`, `checks`, `failed`), `review_decision`, `reviews` (each reviewer's latest `state` and `commit`), `merge_queue` (`state`, `position`) while queued, and `opened_by`/`opened_by_run` |
+| `pull_requests` | `number`, `url`, `title`, `author`, `created_at`, `state`, `merged` once closed, `draft`, `head_sha`, `branch`, `base_branch`, `base_sha`, `body_digest` (SHA-256, never the raw body), `checks_state`, `checks` (each `name`, `status`, `conclusion`), `required_checks` (`state`, `source`, `checks`, `failed`), `review_decision`, `reviews` (each reviewer's latest `state` and `commit`), `merge_queue` (`state`, `position`) while queued, and `opened_by`/`opened_by_run` |
 | `issues` | `number`, `url`, `title`, `author`, `created_at`, `state`, `state_reason`, and optional `opened_by`/`opened_by_run` |
 | `comments` | `comments` (the count), `last_comment` (`id`, `author`, `url`, `created_at`, `updated_at`, `body_digest`), and `recent_comments`: the newest 20 conversation comments and submitted reviews, oldest first, each `kind` (`comment` or `review`), `id`, `author`, `at`, and a review's `state` |
 | `reactions` | `reactions` (each reaction's count), and `last_comment.reactions` |
@@ -90,9 +90,9 @@ start another run, including after restart, a definition revision, or replicatio
 completed run. The match uses the exact
 resource subject and observation claim, so a new snapshot remains eligible and failed reviews
 can be retried. Run creation checks completion and the current head in its writer transaction.
-An active subscription run is cancelled with its reason and normal cleanup when its pinned pull
-request moves to another head, closes, or becomes a draft. The next resource observation wakes
-that evaluation. Identifying a subscription run uses its parent or an indexed start-claim lookup;
+Under the default `ready-heads` admission, an active subscription run is cancelled with its reason
+and normal cleanup when its pinned pull request moves to another head, closes, or becomes a draft.
+The next resource observation wakes that evaluation. Identifying a subscription run uses its parent or an indexed start-claim lookup;
 another subscription's start claim does not wake it. Missions started explicitly retain their
 pinned inputs. Completion suppression uses the graph already received by the local store; it
 does not reserve snapshots across disconnected replicas.
@@ -546,8 +546,9 @@ subscription "new-ready-pull-requests" {
 }
 ```
 
-The repository provider creates one mission request for each newly discovered issue and each new
-ready pull request head. A pull request is reviewed at a head only when it first appears open and
+By default (`admission "ready-heads"`, also the effective policy when omitted), the repository
+provider creates one mission request for each newly discovered issue and each new ready pull
+request head. A pull request is reviewed at a head only when it first appears open and
 ready, when a draft becomes ready, or when a new head replaces a known one. A closure, a merge, a
 reopening at the same head, a title edit, and a field that an older build did not record never
 request a review. A known item whose head was never recorded gets a baseline head, not a review. The run input pins that item's exact discovery claim. Requests for the
@@ -559,6 +560,78 @@ exact mission revision. An old request without a delivery key is matched by its 
 claim. Before starting a PR review, the reconciler also checks whether a matching mission-run PR
 resource is already covered by that run's human review gate; if so, it cancels the redundant
 request with a reason naming the authoring run.
+
+### Opt-in relevant PR changes
+
+For per-PR autonomous evaluation, select `relevant-changes` inside the mission delivery:
+
+```kdl
+subscription "pr-hygiene" {
+  observer "observer/repository"
+  on "pull_requests"
+  on "comments"
+  delivery "mission" {
+    mission "hygiene/evaluate"
+    resource "pull-request"
+    workspace "/srv/hygiene"
+    admission "relevant-changes"
+    author "orchid-bot"
+    author "another-bot"
+  }
+}
+```
+
+This policy admits draft transitions, closure and reopen, head moves, same-head check and review
+outcomes, comment and body digests, and base changes. Drafts and closures are eligible inputs,
+not reasons to cancel an otherwise current request or run. Newer relevant snapshots supersede
+older unstarted requests: at most one pending request remains for each PR. Each request and its
+run-start lineage retain the selected admission and configured authors, including revision
+successors and retries, so a subscription edit does not reinterpret already queued or started
+work. The relevant-change delivery-key namespace is separate from the default ready-head namespace.
+The key includes the relevant snapshot identity and its preceding admitted delivery key: observing
+the same snapshot again is a no-op, while a genuine state cycle such as close → reopen → close
+is a new change each time. Replicated requests choose the same canonical pending frontier.
+Before comparing a poll with its local mirror, the observer overlays replicated admission facts
+from the graph. A stale mirror therefore cannot hide a genuine return to a previously seen state.
+Admission seeks an indexed stable mission/scope/resource frontier, including completed work and
+earlier subscription incarnations. Pending selection uses the same rebuildable all-status frontier;
+neither hot read ranks the subscription's lifetime request history.
+
+Repeated `author` entries form a case-insensitive GitHub login allowlist. They do not refer to
+`opened_by`, ownership, or authority. Omit them to leave authors unrestricted. A known nonmatching
+author is outside the subscription's scope. Missing author metadata is attribution-pending, not
+a negative match: the candidate is retained without advancing its handled frontier and native
+detail refresh supplies the missing attribution. Once the author is known to match, its current
+snapshot is eligible without requiring another technical change.
+
+`relevant-changes` requires the `github.repository` provider, `on "pull_requests"`, and per-item
+`delivery "mission"`. It cannot be combined with batched message delivery, a mission delivery's
+batched `text` input, `owner "message"` diversion, mentions-only selection, or a non-PR provider.
+This does not add current-open-set backfill or a separate backlog view.
+
+The TypeScript DSL expresses this as a mission delivery object:
+
+```ts
+subscription({
+  id: 'pr-hygiene',
+  observer: 'observer/repository',
+  on: ['pull_requests', 'comments'],
+  delivery: {
+    mission: 'hygiene/evaluate',
+    resource: 'pull-request',
+    workspace: '/srv/hygiene',
+    admission: 'relevant-changes',
+    authors: ['orchid-bot', 'another-bot'],
+  },
+})
+```
+
+In the JSON `SubscriptionSpec`, `admission` and `authors` are optional fields; both are omitted
+when absent. The DSL likewise emits neither KDL entry when unconfigured and never materializes
+the default admission. Requests and run-start lineage only add `admission: "relevant-changes"`
+when opted in, and `authors` when configured; legacy ready-head hashes remain unchanged.
+
+### Default request lifecycle
 
 The first listing that records a repository ID is a baseline for its collections. Earlier facts
 came from a first-page read, so the older items it adds were missed, not opened.
@@ -582,9 +655,9 @@ A cancelled request never starts.
 
 An optional `requester` names one exact agent or person as the run's requester.
 
-A draft pull request creates a resource and no request. Its first ready observation creates one mission request.
+Under ready-head admission, a draft pull request creates a resource and no request. Its first ready observation creates one mission request.
 
-A pull request review request that has not started, including a legacy hold or one waiting for
+A ready-head pull request review request that has not started, including a legacy hold or one waiting for
 capacity, starts only while its head is the open pull request's current head. When the pull request
 resource shows it closed, back in draft, or at a newer head, the reconciler records
 `subscription.mission-request-cancelled` with the reason instead of starting it. The newer head has

@@ -261,6 +261,8 @@ fn watched_ref_start_rechecks_the_head_inside_the_run_transaction_and_replays_st
             "subscription/apply",
             "resource/ref",
             &first.id,
+            None,
+            None,
         )
         .unwrap();
     observe("b");
@@ -272,6 +274,8 @@ fn watched_ref_start_rechecks_the_head_inside_the_run_transaction_and_replays_st
             "subscription/apply",
             "resource/ref",
             &first.id,
+            None,
+            None,
         )
         .unwrap_err();
     assert_eq!(stale.code, "stale-ref-head");
@@ -283,6 +287,8 @@ fn watched_ref_start_rechecks_the_head_inside_the_run_transaction_and_replays_st
             "subscription/apply",
             "resource/ref",
             &first.id,
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(replayed.id, started.id);
