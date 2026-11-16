@@ -392,24 +392,24 @@ without retries may omit `retried_by`. Older servers omit both fields. Readers
 must preserve the distinction between a new-run retry and a step's next attempt.
 
 A retry creates a new run, defaulting to the latest published mission revision;
-explicit same-revision retry uses the source's current revision. It retains exact
-resolved inputs and workspace, refuses incompatible latest inputs with both
-revisions and a reason, and restarts all steps and the program from the top.
-The source's status, generation, and execution history do not change. These links
-are navigation and attribution, not a signal to hide the source or reuse its work.
+explicit same-revision retry uses the source's current revision. Resolved inputs
+remain pinned; incompatible inputs refuse with both revisions and the reason.
+Compatible completed work and bound answers carry by reference; unfinished work
+restarts without adopting program journals. Launch provenance resolves the current
+workspace, while explicit workspaces and source execution history remain unchanged.
 See [the runtime contract](../mission-graph-runtime.md#retrying-a-failed-run).
 
-For a policy-less mission, new-revision publication automatically supersedes already-active
-stale runs after replacement admission succeeds. Existing human-only review and when-idle
-policies take precedence; approved cutover also creates a fresh linked run, and
-the existing `revision-draining` phase denotes the source's idle-boundary wait. List, detail, and history `run_details[]` include
+New-revision publication supersedes older active runs only without completed work or
+person responses and when pinned revision policy allows it. Existing explicit review
+admits a fresh linked run; when-idle timing alone does not authorize evidence loss.
+The `revision-draining` phase denotes the source's idle wait. List, detail, and history `run_details[]` include
 optional `supersedes` and `superseded_by` mission-run IDs and optional string
 `supersession_fault`. Absent strings are omitted, never null; older servers omit
 them. A refusal names both revisions and the incompatibility while leaving the
-source active. A replacement waits for predecessor cleanup to reach terminal,
-then restarts all steps and programs without adopting journals. Republish alone
-does nothing; an explicit same-revision retry after publication is not caught by
-a continuous stale-revision scan. See [automatic publication supersession](../mission-graph-runtime.md#automatic-publication-supersession).
+source active. A replacement waits for confirmed predecessor cleanup, carries compatible
+completed evidence by reference, and restarts unfinished programs without adopting journals.
+Republishing the same revision does nothing; an explicit same-revision retry is not caught
+by a continuous stale-revision scan. See [automatic publication supersession](../mission-graph-runtime.md#automatic-publication-supersession).
 
 ### Mission run timing
 

@@ -1040,3 +1040,33 @@ fn failure_after_canonical_carry_rolls_back_seats_generation_and_public_cards() 
         serde_json::to_value(cards_after).unwrap()
     );
 }
+
+#[test]
+fn continuity_cutover_refuses_changed_run_scoped_identity_without_cancelling_live_source() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let first = publish(&store, &source("Grow a garden."), "continuity-first");
+    let next = publish(&store, &source("Clarify the garden introduction."), "continuity-next");
+    let run = start(&store, &first, "continuity-live-declarations");
+    let reconciler = Reconciler::new(
+        store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+    );
+    settle(&reconciler);
+    let current = store.mission_run(&run.subject).unwrap().unwrap();
+    let declaring = current.steps.iter().find(|step| step.step == "start-seats").unwrap();
+    assert_eq!(declaring.status, "completed");
+    assert!(!reconciler.runtime.started_members.lock().unwrap().is_empty());
+    let before = store.index().unwrap();
+    let result = store.with_all_runs_fenced_internal(|transaction| {
+        store.supersede_mission_run_at_revision_tx(transaction, &current, &next.revision)
+    });
+    assert_eq!(result.unwrap_err().code, "unsafe-completed-declaration-carry");
+    assert_eq!(store.index().unwrap(), before, "refused transfer is atomic");
+    let retained = store.mission_run(&run.subject).unwrap().unwrap();
+    assert!(retained.superseded_by.is_none());
+    assert_eq!(retained.generation, current.generation);
+    assert_eq!(retained.status, current.status);
+    assert_eq!(retained.steps.iter().find(|step| step.step == "start-seats").unwrap().status, "completed");
+    let selected = store.desired_subjects_for_owner_step(&declaring.subject).unwrap();
+    assert_eq!(selected.len(), 4);
+    assert!(selected.iter().all(|desired| desired.owner_run.as_deref() == Some(run.subject.as_str())));
+}

@@ -170,6 +170,11 @@ fn mission_publication_current(
         connection, owner.strip_prefix("mission-run/").unwrap_or(owner),
     ).optional()?;
     let Some(run) = run else { return Ok(false); };
+    // A successor can already name the selected publication while its predecessor
+    // still owns physical work. Only cleanup admission releases this phase fence.
+    if run.phase == "supersession-waiting" {
+        return Ok(false);
+    }
     Ok(!store.mission_run_supersession_pending_tx(connection, &run)?)
 }
 
@@ -1264,6 +1269,84 @@ mod tests {
         // The daemon-local span owner is gone: a later start of the same invocation identity
         // would begin a fresh trace instead of reusing the leaked entry.
         assert_ne!(store.start_invocation_trace(&invocation, agent, &[]).trace_id(), trace.trace_id());
+    }
+
+    #[test]
+    fn supersession_waiting_successor_cannot_launch_before_cleanup_admission() {
+        let store = Store::open_memory("node").unwrap();
+        let original = "version 2\nmission \"launch-wait\" state=\"ready\" { concurrent-runs; goal \"Original.\"; step \"work\" { goal \"Work.\"; } }\n";
+        publish(&store, original, "wait-original");
+        let source = store.create_mission_run(&fractal_missions::model::MissionRunRequest {
+            mission: "launch-wait".into(), revision: None, workspace: "/work/launch".into(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: "wait-source".into(),
+        }).unwrap();
+        publish(&store, &original.replace("Original.", "Revised."), "wait-revised");
+        store.supersede_mission_publications().unwrap();
+        let source = store.mission_run(&source.subject).unwrap().unwrap();
+        let successor = store.mission_run(source.superseded_by.as_deref().unwrap()).unwrap().unwrap();
+        assert_eq!(successor.phase, "supersession-waiting");
+        let mut start = operation("wait-start", "agent/wait-successor", None);
+        start.body["subject"]["owner_run"] = Value::from(successor.subject.clone());
+        assert!(!mission_publication_current(&store, &store.readers.get(), &start).unwrap());
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Superseded);
+        assert!(!store.resume_superseding_mission_run(&successor.subject).unwrap());
+
+        store.set_mission_run_state(&source.subject, "cancelled", "terminal",
+            Some("predecessor work and cleanup confirmed finished")).unwrap();
+        // Terminal predecessor evidence alone is not successor admission.
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Superseded);
+        assert!(store.resume_superseding_mission_run(&successor.subject).unwrap());
+        assert!(mission_publication_current(&store, &store.readers.get(), &start).unwrap());
+        assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+        assert!(store.dispatch_runtime_start(&start.id, 1).unwrap());
+        assert!(store.runtime_start_intent_current(&start.id).unwrap());
+    }
+
+    #[test]
+    fn supersession_waiting_fences_already_prepared_owned_and_legacy_gate_starts() {
+        for gate in [false, true] {
+            for boundary in ["dispatch", "physical-guard"] {
+                let store = Store::open_memory("node").unwrap();
+                publish(&store,
+                    "version 2\nmission \"prepared-wait\" state=\"ready\" { goal \"Wait safely.\"; step \"work\" { goal \"Work.\"; } }\n",
+                    "prepared-wait-original");
+                let run = store.create_mission_run(&fractal_missions::model::MissionRunRequest {
+                    mission: "prepared-wait".into(), revision: None, workspace: "/work/launch".into(),
+                    requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+                    idempotency_key: "prepared-wait-source".into(),
+                }).unwrap();
+                let subject = if gate { "gate-operation/prepared-wait" } else { "agent/prepared-wait" };
+                let mut start = operation("prepared-wait-start", subject, None);
+                if gate {
+                    start.body["subject"]["kind"] = Value::from("gate");
+                    store.append_claim(&ClaimInput {
+                        subject: subject.into(), kind: "gate.requested".into(), actor: None,
+                        fields: BTreeMap::from([
+                            ("gate".into(), Value::from("prepared-wait")),
+                            ("owner".into(), Value::from(run.steps[0].subject.clone())),
+                            ("runner".into(), Value::from("exec")),
+                        ]),
+                        evidence: Vec::new(), expected_subject: None,
+                        idempotency_key: Some("prepared-wait-gate".into()),
+                    }).unwrap();
+                } else {
+                    start.body["subject"]["owner_run"] = Value::from(run.subject.clone());
+                }
+                assert_eq!(store.admit_runtime_start(&mut start, 1).unwrap(), RuntimeStartAdmission::Admitted);
+                if boundary == "physical-guard" {
+                    assert!(store.dispatch_runtime_start(&start.id, 1).unwrap());
+                }
+                // Interleave the authoritative phase change after the start's preparation.
+                // The selected publication is unchanged, so only the phase fence can stop it.
+                store.set_mission_run_state(&run.subject, "running", "supersession-waiting",
+                    Some("predecessor cleanup has not been admitted")).unwrap();
+                assert!(!store.runtime_start_intent_current(&start.id).unwrap());
+                if boundary == "dispatch" {
+                    assert!(!store.dispatch_runtime_start(&start.id, 1).unwrap());
+                }
+            }
+        }
     }
 
     #[test]

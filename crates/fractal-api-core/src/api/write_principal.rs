@@ -7,6 +7,10 @@ pub(super) struct WritePrincipal {
 }
 
 impl WritePrincipal {
+    pub(super) fn actor(&self) -> &str {
+        &self.actor
+    }
+
     fn derive(state: &AppState, request: &Request<Body>) -> Result<Option<Self>, ApiError> {
         if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable)) {
             return Err(ApiError::bad(FractalError::new(
@@ -102,6 +106,9 @@ impl WritePrincipal {
 
 fn native_scope(path: &str, value: Option<&Value>) -> Option<&'static str> {
     if path.starts_with("/v1/client/") { return None; }
+    if path == "/v1/mission-runs/continuity/preview" {
+        return Some("read.projections");
+    }
     if path == "/v1/work/override" {
         return Some("control.attention");
     }
