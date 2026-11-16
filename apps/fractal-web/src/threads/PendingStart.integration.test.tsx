@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { FractalClient } from '@fractal/client'
-import { Attention, decodeUnknownSync } from '@fractal/client/schema/read'
+import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema/read'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
@@ -83,7 +83,13 @@ it.each(['metadata', 'episode', 'closed', 'removed'] as const)('recovers the ori
   const registry = AtomRegistry.make()
   const threads = gatewayThreads(client, registry)
   const source = { ...fixtureSource({ world: {
-    now: Date.parse('2026-11-01T11:05:00Z'), events: [], agents: [], missions: [], attention: [],
+    now: Date.parse('2026-11-01T11:05:00Z'), events: [],
+    // Recovery reads the declared roster name, never a label derived from the routing id.
+    agents: [decodeUnknownSync(Agent)({
+      kind: 'agent', id: originalAgent, name: 'original', host_id: 'host/example', runtime_ids: [],
+      reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null,
+      revision: '1', updated_at: '2026-11-01T11:00:00Z',
+    })], missions: [], attention: [],
     conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
   } }), threads, attention }
   const host = document.createElement('div')

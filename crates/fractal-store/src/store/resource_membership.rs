@@ -51,20 +51,49 @@ pub enum Admission { Queued { reason: String }, Admitted(Grant), Refused { code:
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
-pub enum RefusalCode { AdmissionExpired, UnsupportedCoverage, ImpossibleCapacity, ClockUncertain, Cancelled, Retired, Retiring, Uncertain, InvalidState }
+pub enum RefusalCode {
+    AdmissionExpired,
+    UnsupportedCoverage,
+    // Historical authoritative refusals remain readable; new records use `impossible`.
+    #[serde(alias = "impossible-capacity")]
+    Impossible,
+    ClockUncertain,
+    Cancelled,
+    Retired,
+    Retiring,
+    Uncertain,
+    InvalidState,
+}
 
 impl RefusalCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AdmissionExpired => "admission-expired",
             Self::UnsupportedCoverage => "unsupported-coverage",
-            Self::ImpossibleCapacity => "impossible-capacity",
+            Self::Impossible => "impossible",
             Self::ClockUncertain => "clock-uncertain",
             Self::Cancelled => "cancelled",
             Self::Retired => "retired",
             Self::Retiring => "retiring",
             Self::Uncertain => "uncertain",
             Self::InvalidState => "invalid-state",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockedBy { Holder, Hold, Outside, Psi, Reserve, Fifo }
+
+impl BlockedBy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Holder => "holder",
+            Self::Hold => "hold",
+            Self::Outside => "outside",
+            Self::Psi => "psi",
+            Self::Reserve => "reserve",
+            Self::Fifo => "fifo",
         }
     }
 }
@@ -77,6 +106,8 @@ pub struct Fit {
     pub room: Option<Capacity>,
     pub held_bytes: u64,
     pub outside_bytes: u64,
+    /// Reclaim credit was withheld because PSI full is >= 1% or its observation is missing.
+    pub psi_blocked: bool,
     pub reserve_bytes: u64,
     pub fifo_predecessor: Option<String>,
 }
@@ -105,6 +136,8 @@ pub struct Membership {
     pub clock_epoch: String,
     #[serde(default)]
     pub refusal_code: Option<RefusalCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<BlockedBy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -378,7 +411,8 @@ impl Store {
             Membership { request: request.clone(), grant: None, state: "queued".into(), reason: "waiting for admission".into(),
                 queued_at: now_ms, admitted_at: None, payload_released_at: None, execution_ended_at: None,
                 retirement_requested_at: None, retired_at: None,
-                roots: Vec::new(), child_runs: Vec::new(), clock_uncertain: false, clock_epoch: epoch.clone(), refusal_code: None }
+                roots: Vec::new(), child_runs: Vec::new(), clock_uncertain: false, clock_epoch: epoch.clone(),
+                refusal_code: None, blocked_by: None }
         };
         let previous = exists.then(|| member.state.clone());
         if member.state != "queued" {
@@ -397,10 +431,11 @@ impl Store {
         } else if let Some(capacity) = request.capacity {
             match fit.room {
                 None => Some((RefusalCode::UnsupportedCoverage, "host lane fit is not configured".into())),
-                Some(room) if capacity.cores > room.cores || capacity.memory > room.memory => Some((RefusalCode::ImpossibleCapacity, "requested footprint exceeds host lane room".into())),
+                Some(room) if capacity.cores > room.cores || capacity.memory > room.memory => Some((RefusalCode::Impossible, "requested footprint exceeds host lane room".into())),
                 _ => None,
             }
         } else { None };
+        member.blocked_by = None;
         if let Some((code, reason)) = refused {
             member.state = "refused".into(); member.reason = reason; member.refusal_code = Some(code);
         } else {
@@ -414,14 +449,28 @@ impl Store {
                 "SELECT coalesce(sum(memory),0) FROM resource_memberships_v1
                  WHERE host=?1 AND id<>?2 AND state IN ('admitted','launched','retiring','uncertain')",
                 rusqlite::params![request.host,request.id], |row| row.get(0))?;
-            let free = fit.room.map_or(0, |room| room.memory.saturating_sub(fit.held_bytes).saturating_sub(finite_held)
-                .saturating_sub(fit.outside_bytes).saturating_sub(fit.reserve_bytes));
-            member.reason = if !holds.is_empty() { "host held".into() }
-                else if held >= request.max_members { "lane occupied".into() }
-                else if head.as_deref().is_some_and(|head| head != request.id) { "FIFO predecessor".into() }
-                else if let Some(predecessor) = &fit.fifo_predecessor { format!("host fit FIFO predecessor: {predecessor}") }
-                else if request.capacity.is_some_and(|capacity| capacity.memory > free) { "host footprint does not fit".into() }
-                else { String::new() };
+            let holder_free = fit.room.map_or(0, |room| room.memory.saturating_sub(fit.held_bytes).saturating_sub(finite_held));
+            let outside_free = holder_free.saturating_sub(fit.outside_bytes);
+            let free = outside_free.saturating_sub(fit.reserve_bytes);
+            let blocking = if !holds.is_empty() { Some((BlockedBy::Hold, "host held".into())) }
+                else if held >= request.max_members { Some((BlockedBy::Holder, "lane occupied".into())) }
+                else if head.as_deref().is_some_and(|head| head != request.id) { Some((BlockedBy::Fifo, "FIFO predecessor".into())) }
+                else if let Some(predecessor) = &fit.fifo_predecessor { Some((BlockedBy::Fifo, format!("host fit FIFO predecessor: {predecessor}"))) }
+                else if request.capacity.is_some_and(|capacity| capacity.memory > holder_free) {
+                    Some((BlockedBy::Holder, "holder footprint prevents admission".into()))
+                } else if request.capacity.is_some_and(|capacity| capacity.memory > outside_free) {
+                    Some(if fit.psi_blocked {
+                        (BlockedBy::Psi, format!("outside footprint prevents admission: {} bytes; PSI full >= 1% or observation unavailable; reclaim credit withheld", fit.outside_bytes))
+                    } else {
+                        (BlockedBy::Outside, format!("outside footprint prevents admission: {} bytes", fit.outside_bytes))
+                    })
+                } else if request.capacity.is_some_and(|capacity| capacity.memory > free) {
+                    Some((BlockedBy::Reserve, format!("host reserve prevents admission: {} bytes", fit.reserve_bytes)))
+                } else { None };
+            member.reason = if let Some((blocked_by, reason)) = blocking {
+                member.blocked_by = Some(blocked_by);
+                reason
+            } else { String::new() };
             if member.reason.is_empty() {
                 member.state = "admitted".into(); member.admitted_at = Some(now_ms);
                 member.grant = Some(Grant { membership_id: request.id.clone(), authority_epoch: epoch,
@@ -457,6 +506,7 @@ impl Store {
         if member.state == "queued" {
             member.state = "retired".into(); member.reason = "cancelled before admission".into(); member.retired_at = Some(now_ms);
             member.refusal_code = Some(RefusalCode::Cancelled);
+            member.blocked_by = None;
         } else if matches!(member.state.as_str(), "admitted" | "launched") {
             member.state = "retiring".into(); member.reason = "cancellation requested".into();
             member.retirement_requested_at.get_or_insert(now_ms);
@@ -715,6 +765,133 @@ mod tests {
     }
 
     #[test]
+    fn historical_impossible_refusal_remains_readable_with_canonical_output() {
+        let code: RefusalCode = serde_json::from_value(json!("impossible-capacity")).unwrap();
+        assert_eq!(code, RefusalCode::Impossible);
+        assert_eq!(serde_json::to_value(code).unwrap(), "impossible");
+    }
+
+    #[test]
+    fn impossible_cores_and_memory_refuse_before_lane_and_host_fifo() {
+        for capacity in [Capacity { cores: 5, memory: 64 }, Capacity { cores: 1, memory: 101 }] {
+            let store = fixture();
+            let mut first = request("predecessor");
+            first.capacity = Some(capacity);
+            let large_room = Fit { room: Some(Capacity { cores: 8, memory: 200 }), outside_bytes: 200, ..Fit::default() };
+            assert!(matches!(store.request_resource_membership(&first, large_room, 1).unwrap(), Admission::Queued { .. }));
+            let mut next = request("impossible");
+            next.capacity = Some(capacity);
+            let fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
+                fifo_predecessor: Some(first.id.clone()), ..Fit::default() };
+            let result = store.request_resource_membership(&next, fit, 2).unwrap();
+            assert!(matches!(result, Admission::Refused { code: RefusalCode::Impossible, .. }));
+            let member = store.resource_membership_record(&next.id, &next.owner).unwrap();
+            assert_eq!(member.blocked_by, None);
+            assert_eq!(serde_json::to_value(member).unwrap()["refusalCode"], "impossible");
+            assert_eq!(RefusalCode::Impossible.as_str(), "impossible");
+        }
+    }
+
+    #[test]
+    fn outside_observation_change_admits_without_any_holder_release() {
+        let store = fixture();
+        let mut request = request("outside");
+        request.capacity = Some(Capacity { cores: 1, memory: 60 });
+        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }), outside_bytes: 50, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.blocked_by, Some(BlockedBy::Outside));
+        assert!(member.reason.contains("50 bytes"));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
+        fit.outside_bytes = 40;
+        assert!(matches!(store.request_resource_membership(&request, fit, 2).unwrap(), Admission::Admitted(_)));
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.blocked_by, None);
+        assert_eq!(member.queued_at, 1);
+        assert_eq!(member.admitted_at, Some(2));
+    }
+
+    #[test]
+    fn psi_blocked_observation_then_low_psi_credit_admits_without_holder_release() {
+        let store = fixture();
+        let mut request = request("psi");
+        request.capacity = Some(Capacity { cores: 1, memory: 60 });
+        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
+            outside_bytes: 50, psi_blocked: true, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.blocked_by, Some(BlockedBy::Psi));
+        assert_eq!(serde_json::to_value(&member).unwrap()["blockedBy"], "psi");
+        assert!(member.reason.contains("50 bytes"));
+        assert!(member.reason.contains("PSI full >= 1%"));
+        assert!(member.reason.contains("observation unavailable"));
+        assert!(member.reason.contains("reclaim credit withheld"));
+        assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
+        // The next low-PSI observation permits reclaim credit in the host accountant.
+        fit.psi_blocked = false;
+        fit.outside_bytes = 40;
+        assert!(matches!(store.request_resource_membership(&request, fit, 2).unwrap(), Admission::Admitted(_)));
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.blocked_by, None);
+        assert_eq!(member.queued_at, 1);
+        assert_eq!(member.admitted_at, Some(2));
+    }
+
+    #[test]
+    fn psi_attribution_requires_an_outside_capacity_block() {
+        let store = fixture();
+        let mut request = request("psi-fit");
+        request.capacity = Some(Capacity { cores: 1, memory: 60 });
+        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
+            held_bytes: 50, outside_bytes: 50, psi_blocked: true, ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&request, fit.clone(), 1).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
+        fit.held_bytes = 0;
+        fit.outside_bytes = 40;
+        assert!(matches!(store.request_resource_membership(&request, fit, 2).unwrap(), Admission::Admitted(_)));
+        assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().blocked_by, None);
+    }
+
+    #[test]
+    fn footprint_attribution_uses_first_causal_limit_and_updates_while_queued() {
+        let store = fixture();
+        let mut request = request("attribution");
+        request.capacity = Some(Capacity { cores: 1, memory: 60 });
+        let mut fit = Fit { room: Some(Capacity { cores: 4, memory: 100 }),
+            held_bytes: 50, outside_bytes: 50, reserve_bytes: 50, ..Fit::default() };
+        for (now, expected) in [(1, BlockedBy::Holder), (2, BlockedBy::Outside), (3, BlockedBy::Reserve)] {
+            assert!(matches!(store.request_resource_membership(&request, fit.clone(), now).unwrap(), Admission::Queued { .. }));
+            let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+            assert_eq!(member.blocked_by, Some(expected));
+            assert_eq!(serde_json::to_value(&member).unwrap()["blockedBy"], expected.as_str());
+            if expected == BlockedBy::Holder { fit.held_bytes = 0; }
+            if expected == BlockedBy::Outside { fit.outside_bytes = 0; }
+        }
+        fit.reserve_bytes = 40;
+        assert!(matches!(store.request_resource_membership(&request, fit, 4).unwrap(), Admission::Admitted(_)));
+        let member = store.resource_membership_record(&request.id, &request.owner).unwrap();
+        assert_eq!(member.blocked_by, None);
+        assert!(serde_json::to_value(member).unwrap().get("blockedBy").is_none());
+    }
+
+    #[test]
+    fn host_and_lane_fifo_are_distinct_from_holder_occupancy() {
+        let store = fixture();
+        let first = request("first");
+        let fit = Fit { fifo_predecessor: Some("seat/predecessor".into()), ..Fit::default() };
+        assert!(matches!(store.request_resource_membership(&first, fit, 1).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&first.id, &first.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
+        let next = request("next");
+        assert!(matches!(store.request_resource_membership(&next, Fit::default(), 2).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&next.id, &next.owner).unwrap().blocked_by, Some(BlockedBy::Fifo));
+        grant(&store, &first, 3);
+        assert!(matches!(store.request_resource_membership(&next, Fit::default(), 4).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&next.id, &next.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
+        store.withdraw_resource_membership(&next.id, &next.owner, 5).unwrap();
+        assert_eq!(store.resource_membership_record(&next.id, &next.owner).unwrap().blocked_by, None);
+    }
+
+    #[test]
     fn contention_fifo_exact_withdrawal_and_handoff() {
         let store = fixture();
         let root = tempfile::tempdir().unwrap();
@@ -747,6 +924,7 @@ mod tests {
         }).unwrap();
         let request = request("blocked");
         assert!(matches!(store.request_resource_membership(&request, Fit::default(), 1).unwrap(), Admission::Queued { .. }));
+        assert_eq!(store.resource_membership_record(&request.id, &request.owner).unwrap().blocked_by, Some(BlockedBy::Hold));
         assert_eq!(store.held_resource_membership_bytes("host-a", "").unwrap(), 0);
         store.release_host_hold("person/operator", &ReleaseHostHold {
             actor: "person/operator".into(), host: "host-a".into(), id: hold.id,
@@ -757,6 +935,7 @@ mod tests {
         assert_eq!(record.queued_at, 1);
         assert_eq!(record.admitted_at, Some(2));
         assert_eq!(record.payload_released_at, None);
+        assert_eq!(record.blocked_by, None);
     }
 
     #[test]
@@ -1027,6 +1206,7 @@ mod tests {
             store.request_resource_membership(&second, fit.clone(), 2)
         });
         assert!(matches!(waiting.unwrap(), Admission::Queued { .. }), "different named lanes share one physical inventory");
+        assert_eq!(store.resource_membership_record(&second.id, &second.owner).unwrap().blocked_by, Some(BlockedBy::Holder));
         incremental.observe(&store).unwrap();
         incremental.evaluated("finite-waiter", reads, None);
         incremental.evaluated("seat-waiter", BTreeSet::from(["seat-admission".into()]), None);

@@ -5222,7 +5222,7 @@ export type ThreadTimelineAnchor = typeof ThreadTimelineAnchor.Type
 export type ThreadTimelineAnchorEncoded = typeof ThreadTimelineAnchor.Encoded
 
 export const ThreadTimelinePage = /*#__PURE__*/ (() => Schema.Struct({
-  /** Present only for around reads. Unavailable requires retained signed routing proof for the same owner and thread. Pending requires the caller's own authenticated signed Mark intent for that exact unknown anchor on this thread, not an active reminder; it activates no badge. Neither state exposes anchor content or grants read permission. */
+  /** Present only for around reads. Unavailable requires retained signed routing proof for the same owner and thread. Pending requires an authenticated signed Mark intent of the same owner and thread whose observed-mark dependencies are all validated and resolved, and whose anchor is the only missing proof. Unknown observed references keep the operation inert and return thread-unavailable until dependencies arrive. Pending exposes no body, grants no new read authority and activates no badge before membership is known. Around never acknowledges anything. */
   "anchor": optionalKey(ThreadTimelineAnchor),
   "items": Schema.Array(ThreadTimelineEvent),
   "next_cursor": Schema.OptionFromNullOr(Schema.String),
