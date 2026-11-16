@@ -208,6 +208,8 @@ function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'tim
         registry.set(answered, new Set([...registry.get(answered), alert.id]))
         return { _tag: 'Sent' as const }
       },
+      autoResolved: async () => ({ _tag: 'Observed' as const, asks: [], complete: true }),
+      override: async () => ({ _tag: 'Sent' as const }),
     } }),
   }
   return { agentRef, registry, source, currentThread }

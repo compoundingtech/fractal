@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v4.cancelled-ask-context;custom-source.v1;u128-time.v1;public-row.v7.urgent-and-discussion-availability",
+            fingerprint: "projected-source.v1;canonical-person-fences.v5.cancelled-ask-context-and-episode-owner;custom-source.v1;u128-time.v1;public-row.v7.urgent-and-discussion-availability",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -291,11 +291,8 @@ fn person_row(
                 }
             }
         }
-        if ask.actor.as_deref() == Some("daemon/runtime") && person_work::is_update(ask)
-            && let Some(about) = ask.body["fields"]["request"]["about"].as_str()
-        {
-            // Canonical source corrections must also refresh the notice's conversation link.
-            dependency(tx, "person", source, about)?;
+        if let Some((run, _)) = person_work::episode_owner(tx, ask)? {
+            run_dependencies(tx, source, &run)?;
         }
         for field in ["owner_run", "origin_step"] {
             if let Some(key) = ask.body["fields"][field].as_str() {
@@ -303,6 +300,17 @@ fn person_row(
                 if key.starts_with("mission-run/") {
                     run_dependencies(tx, source, key)?;
                 }
+            }
+        }
+        if person_work::is_update(ask)
+            && let Some(about) = ask.body["fields"]["request"]["about"].as_str()
+        {
+            // Source corrections refresh the conversation link and episode liveness.
+            dependency(tx, "person", source, about)?;
+            if about.starts_with("mission-run/") {
+                run_dependencies(tx, source, about)?;
+            } else if let Some(about) = person_work::step(tx, about)? {
+                run_dependencies(tx, source, &about.run)?;
             }
         }
     }

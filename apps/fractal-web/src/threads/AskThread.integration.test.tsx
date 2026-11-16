@@ -91,7 +91,7 @@ it.each([
     agents: [decodeNative(Agent)({ kind: 'agent', id: 'agent/example/atlas', name: 'atlas', host_id: 'host/example', runtime_ids: [], reachability: 'reachable',
       state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-11-01T11:00:00.000Z' })],
     conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
-  } }), threads: gatewayThreads(client, registry), alertActions: { act: answer } }
+  } }), threads: gatewayThreads(client, registry), alertActions: { act: answer, autoResolved: async () => ({ _tag: 'Observed' as const, asks: [], complete: true }), override: async () => ({ _tag: 'Sent' as const }) } }
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)

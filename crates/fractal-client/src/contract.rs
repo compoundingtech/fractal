@@ -83,6 +83,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("notes.list", "/v1/client/notes"),
     ("auto-resolved.list", "/v1/client/auto-resolved"),
     ("availability.list", "/v1/client/availability"),
+    ("availability.history", "/v1/client/availability/history"),
     ("custom-subjects.list", "/v1/client/custom-subjects"),
     ("custom-subjects.get", "/v1/client/custom-subjects/{id}"),
     ("private-notes.get", "/v1/client/private-notes/{uri}"),
