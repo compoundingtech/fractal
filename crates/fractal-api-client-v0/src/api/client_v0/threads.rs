@@ -45,9 +45,7 @@ pub(super) async fn list(
 }
 
 fn list_query_error(message: impl Into<String>) -> ApiError {
-    let mut error = validation(message);
-    error.code = "invalid-thread-list-query".into();
-    error
+    validation(message)
 }
 
 fn resolve_context(selection: &ThreadCollectionContext) -> Result<ThreadContext<'_>, ApiError> {
@@ -126,9 +124,7 @@ pub(super) async fn timeline(
     Query(query): Query<TimelineQuery>,
 ) -> ReadResult<TimelinePage> {
     if query.cursor.is_some() && query.around.is_some() {
-        let mut error = validation("around and cursor are mutually exclusive");
-        error.code = "invalid-thread-cursor".into();
-        return Err(error);
+        return Err(validation("around and cursor are mutually exclusive"));
     }
     with_owner(state, session, id, move |store, person, subject, _| {
         thread_metadata::mixed_timeline(
@@ -737,8 +733,23 @@ mod tests {
         ] {
             let context = serde_json::from_value(value).unwrap();
             let Err(error) = resolve_context(&context) else { panic!("mixed selector was accepted") };
-            assert_eq!(error.code, "invalid-thread-list-query");
+            assert_eq!(error.code, "validation-failed");
         }
+    }
+
+    #[tokio::test]
+    async fn marked_unread_rejects_mixed_selector_without_store_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-mixed-selector");
+        let before = state.store.read_snapshot(Ok).unwrap();
+        let response = crate::api::router(state.clone()).oneshot(
+            Request::builder().uri("/v1/client/threads?marked_unread=true&agent_id=agent%2Fatlas")
+                .header(LOCAL_PERSON_HEADER, "person/operator").body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "validation-failed", "{body}");
+        assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
     }
 
     #[tokio::test]
@@ -752,7 +763,7 @@ mod tests {
         ).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
-        assert_eq!(body["code"], "invalid-thread-cursor", "{body}");
+        assert_eq!(body["code"], "validation-failed", "{body}");
         assert_eq!(state.store.read_snapshot(Ok).unwrap(), before);
     }
 
