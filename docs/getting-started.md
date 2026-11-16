@@ -221,8 +221,13 @@ cannot enable it. On macOS, run:
 fractal service permissions
 ```
 
-Follow the instructions for the OS permissions you must grant, including Full Disk
-Access and Developer Tools. Fractal does not automate those approval prompts.
+Do not grant the daemon or agents Full Disk Access, Developer Tools, Accessibility,
+or Screen Recording. Keep work roots outside Desktop, Documents, Downloads,
+iCloud Drive and removable volumes. A protected-folder access may fail with
+`Operation not permitted` or cause a macOS privacy prompt; do not approve broad
+access to bypass it. Move the work or selected input to an unprotected workspace.
+See the [protected-operation contract](st3/macos-installation.md#protected-operation-helper-contract)
+for the empty helper allowlist and the first-real-operation gate.
 
 For an upgrade, `fractal service install` refreshes definitions and restarts services;
 `fractal service restart` suffices when definitions already point at the intended binaries.
