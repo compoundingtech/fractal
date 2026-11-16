@@ -363,7 +363,32 @@ public struct ErrorEnvelope: Codable, Error, Sendable {
     public let retryable: Bool
     public let retryAfterMS: UInt64?
     public let details: [String: JSONValue]
-    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", errorVersion = "error_version", requestID = "request_id", code, message, retryable, retryAfterMS = "retry_after_ms", details }
+    /// Raw metadata preserves missing versus null/malformed values for conservative certainty.
+    public let applied: JSONValue?
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", errorVersion = "error_version", requestID = "request_id", code, message, retryable, retryAfterMS = "retry_after_ms", details, applied }
+    init(apiVersion: String, errorVersion: String, requestID: String, code: ErrorCode, message: String, retryable: Bool, retryAfterMS: UInt64?, details: [String: JSONValue], applied: JSONValue? = nil) {
+        self.apiVersion = apiVersion; self.errorVersion = errorVersion; self.requestID = requestID
+        self.code = code; self.message = message; self.retryable = retryable
+        self.retryAfterMS = retryAfterMS; self.details = details; self.applied = applied
+    }
+    public init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        apiVersion = try box.decode(String.self, forKey: .apiVersion)
+        errorVersion = try box.decode(String.self, forKey: .errorVersion)
+        requestID = try box.decode(String.self, forKey: .requestID)
+        code = try box.decode(ErrorCode.self, forKey: .code)
+        message = try box.decode(String.self, forKey: .message)
+        retryable = try box.decode(Bool.self, forKey: .retryable)
+        retryAfterMS = try box.decodeIfPresent(UInt64.self, forKey: .retryAfterMS)
+        details = try box.decode([String: JSONValue].self, forKey: .details)
+        applied = box.contains(.applied) ? try box.decode(JSONValue.self, forKey: .applied) : nil
+    }
+    /// Neither malformed metadata nor UNKNOWN in either location can be overridden by NONE.
+    public var effectiveApplied: String? {
+        let present = [applied, details["applied"]].compactMap { $0 }
+        guard !present.isEmpty else { return nil }
+        return present.allSatisfy { $0 == .string("none") } ? "none" : "unknown"
+    }
 }
 
 public enum ErrorCode: Codable, Sendable, Equatable {
