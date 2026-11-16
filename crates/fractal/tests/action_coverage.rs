@@ -1125,6 +1125,25 @@ async fn attention_controls_survive_stale_fences_and_restarts() {
     assert_eq!(row["snoozed_until"], Value::Null);
     assert_eq!(row["deadline_at"], deadline);
     assert_eq!(control_claims(&daemon, PERSON, SNOOZED_KIND), 2);
+    // Manual return has explicit state, preserves the deadline, and survives restart.
+    let fence = daemon.fence(PERSON).await;
+    let indefinite = dispatch(&daemon.client(PERSON), "attention.snooze", "coverage:attention-indefinite", fence,
+        json!({"attention_id": snooze_id, "until": null, "indefinite": true})).await.unwrap();
+    assert_eq!(indefinite.value.attention_control.as_ref().unwrap().snoozed_indefinitely, Some(true));
+    daemon.restart().await;
+    let row = attention_row(&daemon, PERSON, &snooze_ask).await.unwrap();
+    assert_eq!(row["snoozed_indefinitely"], true);
+    assert_eq!(row["snoozed_until"], Value::Null);
+    assert_eq!(row["deadline_at"], deadline);
+    let fence = daemon.fence(PERSON).await;
+    let error = dispatch(&daemon.client(PERSON), "attention.snooze", "coverage:attention-conflicting-snooze", fence,
+        json!({"attention_id": snooze_id, "until": until, "indefinite": true})).await.unwrap_err();
+    assert_eq!(api_code(error), ErrorCode::ValidationFailed);
+    assert_eq!(attention_row(&daemon, PERSON, &snooze_ask).await.unwrap()["snoozed_indefinitely"], true);
+    let fence = daemon.fence(PERSON).await;
+    dispatch(&daemon.client(PERSON), "attention.snooze", "coverage:attention-clear-indefinite", fence,
+        json!({"attention_id": snooze_id, "until": null})).await.unwrap();
+    assert!(attention_row(&daemon, PERSON, &snooze_ask).await.unwrap().get("snoozed_indefinitely").is_none());
     // A past `until` is refused rather than recorded as an already-ended snooze.
     for (key, until) in [("past", "2000-01-01T00:00:00.000Z"), ("unparseable", "tomorrow")] {
         let fence = daemon.fence(PERSON).await;
@@ -1134,7 +1153,7 @@ async fn attention_controls_survive_stale_fences_and_restarts() {
             .unwrap_err();
         assert_eq!(api_code(error), ErrorCode::ValidationFailed, "{key}");
     }
-    assert_eq!(control_claims(&daemon, PERSON, SNOOZED_KIND), 2);
+    assert_eq!(control_claims(&daemon, PERSON, SNOOZED_KIND), 4);
     assert_eq!(attention_row(&daemon, PERSON, &snooze_ask).await.unwrap()["snoozed_until"], Value::Null);
 
     // Person only: an agent is refused whatever its scopes; another person's row, an unknown
@@ -1167,7 +1186,7 @@ async fn attention_controls_survive_stale_fences_and_restarts() {
         }
     }
     assert_eq!(control_claims(&daemon, PERSON, SEEN_KIND), 1);
-    assert_eq!(control_claims(&daemon, PERSON, SNOOZED_KIND), 2);
+    assert_eq!(control_claims(&daemon, PERSON, SNOOZED_KIND), 4);
     assert_eq!(control_claims(&daemon, "person/robin", SEEN_KIND), 0);
     assert_eq!(control_claims(&daemon, "person/robin", SNOOZED_KIND), 0);
     for ask in [&choice_ask, &robin_ask] {
@@ -4696,6 +4715,13 @@ async fn cli_alerts_seen_snooze_and_dismiss_survive_restart() {
     daemon.restart().await;
     assert_eq!(attention_row(&daemon, PERSON, &ask).await.unwrap()["snoozed_until"], Value::Null);
     assert_eq!(control_claims(&daemon, PERSON, SNOOZED_KIND), 2);
+
+    let indefinite = cli_value(daemon.cli(PERSON, &["alerts", "snooze", &id, "--indefinite", "--as", PERSON]).await);
+    assert_eq!(indefinite["attention_control"]["snoozed_indefinitely"], true);
+    daemon.restart().await;
+    assert_eq!(attention_row(&daemon, PERSON, &ask).await.unwrap()["snoozed_indefinitely"], true);
+    let back = cli_value(daemon.cli(PERSON, &["alerts", "snooze", &id, "--clear", "--as", PERSON]).await);
+    assert!(back["attention_control"].get("snoozed_indefinitely").is_none());
 
     let dismissed = cli_value(daemon.cli(PERSON, &["alerts", "dismiss", &id, "--text", "Not now.", "--as", PERSON]).await);
     assert_eq!(dismissed["affected_ids"], json!([ask]), "{dismissed}");
