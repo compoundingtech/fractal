@@ -317,6 +317,8 @@ pub mod message_routing;
 pub mod thread_delivery;
 pub mod thread_links;
 pub mod thread_metadata;
+// COMPILE-ONLY CONTRACT STUB: drop this commit when the root store patch arrives.
+pub mod thread_reading;
 pub mod thread_rollout;
 #[cfg(test)]
 mod claim_commit_context_tests;
