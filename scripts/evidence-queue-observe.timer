@@ -1,0 +1,10 @@
+[Unit]
+Description=Shadow merge-queue signer, observe, every minute (a group commit is fetched while its queue branch exists)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

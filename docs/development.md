@@ -6,13 +6,13 @@ Read the [product README](../README.md) and the guide for the behavior you are c
 Use invented people, host names, and paths in this public repository. Run
 `python3 scripts/check-public-repo` before opening a pull request.
 
-For st3 claims, missions, replication, runtime ownership, or recovery, start with the
-[documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
-read and preserve the proofs in [st2 invariants](st2/invariants.md).
+For Fractal claims, missions, replication, runtime ownership, or recovery, start with the
+[documentation index](st3/README.md) and preserve the applicable proofs in
+[native runtime invariants](st3/invariants.md).
 
 ## CLI actor contract
 
-`st actor-contract --json` prints the actor syntax of the binary that runs it. It
+`fractal actor-contract --json` prints the actor syntax of the binary that runs it. It
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
 commands. `aliases` lists other names under each canonical command. `contract_sha256` is
@@ -20,6 +20,19 @@ the SHA-256 of compact JSON for `contract`, not of the formatted output. The
 printer computes this digest; the checked-in snapshot omits it and the equality
 test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
+
+Operational reads accept optional leading `--as ACTOR` immediately after these
+leaf paths: `actor-contract`, `agents lane`,
+`agents rename-id proof verify`, `changes list`, `changes show`, `claims ls`, `conversations export`,
+`fleet anchor show`, `gate ci-passed`, `gate merged`,
+`missions blocked`, `missions waiting-on`,
+`missions rename-id proof verify`, `recorder report`,
+`subject history`, `terminals peek`, `trace show`, and `validate`.
+The CLI emits a stderr read-attribution record with the actor and canonical command
+path; stdout, queried subjects, filters, and daemon authorization are unchanged.
+An agent caller must supply its literal environment identity; a different explicit
+actor or an empty/conflicting agent identity fails before the read, including offline
+commands. Omitting `--as` preserves the existing read behavior.
 
 Version policy:
 
@@ -55,7 +68,7 @@ After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
 
 ```sh
-st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
 cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
@@ -67,7 +80,7 @@ if an alias changes. Supplement coverage also compares the reviewed setup/UI,
 note and changes paths, including every descendant, against the real clap
 inventory. Additions or removals require reviewing the identity handlers named
 beside `implicit_person`; mutation tests exercise added setup/UI descendants and
-a removed UI descendant. `st ui open` resolves the configured person before
+a removed UI descendant. `fractal ui open` resolves the configured person before
 queueing a request in that person's terminal UI request directory.
 This is freshness coverage, not proof of live runtime fallback or authority.
 Host, account, repository and harness policy remains in the
@@ -84,8 +97,16 @@ nix profile install .
 For local development, enter `nix develop`. The shell provides Rust, sccache,
 cargo-nextest, and mold on Linux. Cargo uses mold for Linux links and the system
 linker on macOS; dev and test builds keep line tables for workspace crates and
-omit dependency debug info. On both platforms the shell sets `RUSTC_WRAPPER` to
-sccache. Run tests with `cargo nextest run --workspace --locked`.
+omit dependency debug info. Both Rust shells provide sccache 0.19.0 (including
+client-side compilation) and default `RUSTC_WRAPPER` only when it is unset.
+An inherited wrapper, including an explicitly empty value, is preserved.
+`SCCACHE_CLIENT_SIDE`, `SCCACHE_SERVER_UDS`, and host cache settings pass through
+unchanged. GitHub Actions still defaults to the CI wrapper, except when a host
+client-side configuration is inherited. Run tests with
+`cargo nextest run --workspace --locked`. The shell's environment contract can
+be checked without building it: `python3 scripts/sccache-shell-env-test`.
+The `ci-script-tests` lane runs its `--offline` mode, evaluating the shared hook
+with fixture package paths and no flake inputs or network access.
 The default and perf shells can opt into an owner-provisioned read-only WebDAV
 cache with `ST_SCCACHE_READ_ENDPOINT` and `ST_SCCACHE_READ_SERVER_PORT`. Leave
 both unset for the existing cache behavior. The port must be separate from the
@@ -130,6 +151,40 @@ the macOS 26.5 and 27 SDKs.
 
 The script builds and installs `st3` and `fractal-migrate`, and makes `st` a symlink to
 the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fixed app bundle; see [macOS installation and signing](st3/macos-installation.md). A source install also needs [`pty`](https://github.com/compoundingtech/pty-rust) on `PATH`.
+
+## Shared TypeScript SDK
+
+`packages/fractal-sdk` owns the app-independent `@fractal/sdk` package. Its
+`@fractal/sdk/effect` entry point provides transport, follow state, decoding, and
+trace-context propagation without browser startup or UI dependencies.
+`FractalLive(options)` works without an application platform layer; callers can supply
+an explicit socket in options for custom transports and tests.
+
+Browser behavior stays in `apps/fractal-web/src/data`: early collection socket
+adoption, traced browser fetch/WebSocket wrappers, and visibility/LRU admission
+policy. The app supplies those through `FractalPlatform`; the neutral SDK does not
+adopt a browser bootstrap socket or install browser visibility policy by default.
+`@fractal/sdk/admission` exposes the admission primitives used by that adapter.
+
+`Fractal.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
+existing window collection and the descriptor's `decodeRow` decodes its rows.
+Optional `spec.descriptor` is a stable local decoder ID for independent decoder
+and admission identity; it is never sent on the wire. The watch shares the scoped
+follow lifecycle and multiplexed socket; it does not introduce another wire format.
+
+`FractalOptions.credential` resolves a bearer credential for each HTTP request and
+socket open. It is not an actor selector. The `client` option is only a reported
+client/build label, never authenticated identity or authority. An explicit
+credential bypasses browser bootstrap socket adoption; non-browser socket
+factories must honor the provided credential headers.
+
+The SDK is a root workspace member, not a nested app package. Its standalone
+Node suite and typecheck run with:
+
+```sh
+pnpm --filter @fractal/sdk test
+pnpm --filter @fractal/sdk typecheck
+```
 
 ## Fractal web diagnostics member
 
@@ -200,11 +255,136 @@ inventory's read-only permissions (Git does not preserve them).
 [Fractal web implementation](fractal-web.md) documents the app’s security policy, transcript paint,
 captured changes, composer, arrangements, roster and terminal attachment.
 
+### Storybook deployment
+
+The UI component reference targets [storybook.compounding.tech](https://storybook.compounding.tech).
+Its Alchemy v2 stack lives in `infra/storybook` (`@fractal/storybook-deploy`).
+The separate [deployment workflow](ci.md#storybook-deployment) is not a required
+check: every push to `main` deploys stage `main` to the one canonical site.
+There are no pull-request deployments or close-cleanup jobs. CI checks out the
+push's immutable commit, so deployment credentials are available only to code
+merged into `main`, not PR-head infrastructure code. No draft-policy exception
+is needed. Deployment URLs appear in the Actions job summary, not PR comments;
+the workflow needs no repository write permissions.
+If either Cloudflare secret is absent, the workflow succeeds with a skip summary
+without installing, building or deploying resources.
+
+#### Account and domain setup
+
+Use the **compounding.tech** Cloudflare account. Alchemy creates a new static-asset
+Worker, not a Pages project. An administrator must add the repository
+Actions secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`; keep the token
+out of source control, logs and command arguments. Local commands use the same
+environment variables.
+
+Scope the token to that account with **Workers Scripts: Edit**,
+**Account Settings: Read**, and **Secrets Store: Read**. The one-time bootstrap
+also needs **Secrets Store: Edit** and an account/plan that supports Durable
+Objects. For a custom domain, grant **Zone: Read** and **Workers Routes: Edit**
+for its zone; Cloudflare's [custom-domain authorization](https://developers.cloudflare.com/workers/authorization/workers/)
+uses Workers Routes permissions, not just DNS permissions. An administrator
+also needs **DNS: Edit** if changing existing DNS records during domain setup;
+it does not replace Workers Routes access. No zone permissions are needed for
+`workers.dev`-only deployment.
+
+Before the first deployment, bootstrap remote state once from the web shell,
+after installing the isolated infrastructure dependencies, with the same account
+environment:
+
+```sh
+pnpm --dir infra/storybook exec alchemy provider cloudflare bootstrap
+```
+
+Alchemy v2's `Cloudflare.state()` uses the account-wide `alchemy-state-store`
+Worker and its Durable Object, with its encryption key and bearer token held
+in Cloudflare Secrets Store, not Workers KV. CI retrieves state credentials via
+a temporary edge-preview Worker bound to Secrets Store; no additional
+`ALCHEMY_PASSWORD` or state-token GitHub secret is required. Preserve the state
+Worker, Durable Object and Secrets Store across deployments. They are shared
+bootstrap infrastructure, not resources to remove when redeploying the site.
+
+`STORYBOOK_DOMAIN` controls the canonical domain. Unset defaults
+to `storybook.compounding.tech`; a hostname selects another custom domain, and
+an empty string disables the custom domain and uses the Worker's `workers.dev`
+URL. Set the repository Actions variable `STORYBOOK_DOMAIN` to override CI;
+the workflow distinguishes an absent variable from an explicitly empty one.
+For local commands, `export STORYBOOK_DOMAIN=''` selects `workers.dev`.
+Enable the account's Workers subdomain before using the fallback URL. A custom
+domain must belong to a zone in the configured Cloudflare account.
+
+#### Build and deploy
+
+Materialize the pinned `effect-utils` member before installing dependencies,
+as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
+Use the web shell's pnpm 12.17.0, not a separate global install:
+
+```sh
+mr apply --worktree-mode commit
+nix develop .#web
+pnpm install --frozen-lockfile
+pnpm --dir infra/storybook install --frozen-lockfile
+node apps/fractal-web/scripts/changelog-registry.mjs
+pnpm --filter @fractal/ui build-storybook
+pnpm --dir infra/storybook run deploy --stage main
+```
+
+The build writes `packages/fractal-ui/storybook-static`; deployment consumes that
+directory. The infrastructure package has an isolated pnpm dependency root so
+Alchemy dependencies are not installed by the existing required checks.
+Alchemy is pinned exactly to `2.0.0-beta.83` with Effect `4.0.5`; `beta.72` is
+incompatible with Effect 4. The isolated package keeps this deployment-only
+version boundary out of the UI toolchain.
+
+To restore earlier Storybook content, build the desired revision and redeploy
+stage `main` using the same Cloudflare account and remote state.
+These instructions describe the deployment configuration, not evidence of a
+successful live deployment or a recorded approval for public hosting.
+
+### Production app stories
+
+The kit Storybook loads app stories only by the explicit file entries in
+`packages/fractal-ui/.storybook/stories.ts`. A story titled `Fractal/App/<Module>` is a
+production module suite: its `meta.component` is that app module, imported from its
+production file and mounted by the story. `Fractal/App/LiveAgentWorkspace` and
+`Fractal/App/ConversationPane` mount the real modules under `DataSourceProvider` over
+`fixtureSource` feeds of the deterministic fixture world (`src/fixtures/appStoryStates.ts`);
+they never start the live runtime or contact a gateway. Each suite has one story per state,
+with a scheme control for light and dark: loading, empty, populated, failed tool, offline (stale
+feeds, reconnecting socket, browser offline), unavailable and the streaming repair session. Each
+story mounts exactly one production boundary; its play waits for the real transcript, composer
+and, for the workspace, the workspace root, then marks the canvas `data-proof="passed"`. The
+responsive phone layout stays in `Fractal/Narrow layout`.
+
+These states do not depend on width or scheme, so `APP_CASE_OVERRIDES` in
+`packages/fractal-ui/scripts/kit-play-commit-set.mjs` runs each of the 14 stories in one case,
+dark at 1440 px: 14 merge-gate cases instead of the full four-case matrix. A state whose
+behaviour does depend on width needs its own reviewed override. The suites carry no `critical`
+tag, so the per-commit set does not run them; they run in the merge gate (`KIT_PLAY_SET=all`).
+Every file they bundle is listed in `KIT_PATTERNS` in `scripts/ci-fractal-web-changes`, so a
+change to any of them selects kit plays.
+
+`LiveAgentWorkspace.graph.integration.test.ts` keeps the eager startup boundary and adds a
+lazy-inclusive identity check: it follows literal `import()` edges from `main.tsx` without
+evaluating modules, resolves every configured module suite's `meta.component` through imports,
+aliases and `React.lazy`, and requires both directions: each suite mounts a module of that
+production graph whose name matches its title, and `LiveAgentWorkspace.tsx` and
+`ConversationPane.tsx` each have a configured suite. Planted story-local, lazily imported,
+renamed and missing suites must fail. `appStoryAssertions.unit.test.ts` is the negative
+control for the play assertion: a stubbed production module or a gallery of boundaries fails.
+
+The synthetic-fixture privacy scanner
+(`apps/fractal-web/scripts/synthetic-fixtures/scan.mjs`) scans a root inside Git by its
+publication inputs, `git ls-files --cached --others --exclude-standard`: committed and
+untracked non-ignored files, including tracked files under an ignored directory. Git-ignored
+build output such as `storybook-static` or installed dependencies is not a publication input.
+Roots outside Git are scanned in full, and a root reached through a symlinked directory is
+matched by its resolved path. This adds no filename, vendor or content-hash exemptions.
+
 ## Continuous integration
 
-Workspace CI runs on pull requests and merge groups. The five required checks are `linux-gate`,
-`isolation-vm`, `genie-freshness`, `typescript-client`, and `mail-redelivery-canaries`.
-A ready pull request lands through GitHub’s merge queue after review and all five required checks
+Workspace CI runs on pull requests and merge groups. The four required checks are `linux-gate`,
+`genie-freshness`, `typescript-client` and `fractal-web`; the VM tests and the mail redelivery canaries
+run once a day (`daily-long.yml`). A ready pull request lands through GitHub’s merge queue after review and all four required checks
 pass. Keep the approved head fixed; a new head requires review of its own changes before queueing.
 
 The queue checks the exact commit that lands. Main upkeep verifies those checks, runs `perf-cost`,
@@ -213,6 +393,21 @@ Namespace as overflow for ordinary PRs. The second test shard and supporting job
 `ci1-priority` lane; other merge groups use `ci1-merge`. Forks run on Namespace.
 macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
+
+The `perf-cost` messaging-faults fixture applies its recipient on the receiving node,
+then waits for both provider readiness there and a successful native recipient
+preflight on the sending node before its cross-node warmup. Local provider readiness
+and agent-card visibility do not prove the sender's materialized recipient state is
+ready; the fixture polls the same `/v1/messages/recipient` endpoint as native sends.
+The subsequent fault and delivery deadline remain unchanged.
+
+Changes to `docs/site/**` on `main` notify `compoundingtech/private` to deploy
+fractal.how. The docs notification workflow mints a repository-scoped GitHub App
+token using this repository's `SITE_CI_APP_ID` variable and
+`SITE_CI_APP_PRIVATE_KEY` secret. The App must be installed on
+`compoundingtech/private` with Contents: write permission for repository dispatches.
+The website deploy separately mints a read-only token for `compoundingtech/fractal`
+and reads the documentation from `main`, not from the dispatch payload.
 
 The standalone Rust client's generated `crates/fractal-client/src/lib.rs` must be
 regenerated with `cargo run -p fractal-client-codegen`, including after changes to
@@ -237,12 +432,20 @@ the actual execution seat without reconstructing identity from display labels.
 `Mission.step_metadata` retains each selected step's raw `blocked_reason` and `last_progress`,
 keyed by its step-run ID. These facts survive state changes independently of a step's waiting
 blocker or derived queue `note`, and are not normalized by display text policies.
-Shared widgets and other UI models are separate follow-up work, not part of this mission extraction.
+`crates/fractal-mission-ui` composes mission step rows and their progress meter without
+owning a shell or choosing a default renderer. Enable its optional `ratatui` feature
+and call `steps` with a borrowed mission, expansion keys, spinner, `Palette`,
+`Glyphs`, and the caller's shared conversation `Theme` for inline markdown.
+The returned shared `Doc<Intent>` contains styled lines and
+`Intent::ToggleStep` click targets using `step:{mission}:{name}` keys. The embedding
+application owns expansion state and the surrounding card. Token defaults reproduce
+the terminal UI; progress counts every described step, not only runnable steps.
+Header and agent-work composition remain outside this crate.
 
 ## Embedding native conversations
 
 `crates/fractal-conversation-ui` provides the same native conversation presentation used by
-`st`’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
+Fractal’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
 `fractal-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
 adapt the timeline with caller-owned display names, and render it with `Cache::render`
 and caller-supplied `Theme` tokens. The returned document contains styled lines and typed
@@ -253,7 +456,7 @@ by ID. Frame `has_more` is `Option<bool>`: an absent delta leaves the timeline's
 unchanged, while an explicit value updates it. A replacement or changed session starts fresh.
 The timeline keeps a boolean for the current window, and older pages track their own start.
 
-The shared crate and the `stui` library use workspace Ratatui 0.30. An embedding application must align its
+The shared crate and the `fractal-tui` library use workspace Ratatui 0.30. An embedding application must align its
 rendering dependency before passing buffers or lines across this boundary. Native conversations are not a terminal emulator: harness menus and arbitrary
 permission prompts still require access to the harness terminal.
 
@@ -282,19 +485,27 @@ registry/file inventory and deterministic newest-first ordering. A public build 
 entries and private source imports; the UI is not the privacy boundary. The emitted
 `changelog.v1.json` describes precisely the entries included in that build.
 
-The Changes disclosure lazily loads prose and acknowledges included IDs on opening. The
-device-local cursor is scoped by origin, product, and deployment channel; `live`, `main`,
-and `stable` do not share cursors. Seen IDs survive rollbacks and skipped builds. No version
-string or timestamp comparison decides whether a change is new. First visits show “Recent
-changes”; subsequent visits show “New since you last looked” followed by “Recent”.
-The Changes trigger is the `changelog` segment of the shared developer bar, next to the build
-version. When the bar overflows, the kit's +N control mirrors its unread dot.
-Its React Aria popover anchors to the visible bar with an 8px gap and restores focus
-on dismissal. It uses the shared light/dark theme, glass surface, and change-kind pills.
+Build identity and recent changes share one entry of the shared developer bar, the `build`
+segment. Its trigger shows the short build identity (revision, age, `*` for uncommitted
+changes) and, while this build lists an entry the device has not acknowledged, an unread dot;
+when the bar overflows, the kit's +N control mirrors that dot. Hovering or focusing the trigger
+shows the kit's identity tooltip and warms the changelog chunk; it never acknowledges.
+The trigger opens the kit's anchored native popover: one build line (full identity in a
+disclosure) above "What's new", which lazily loads prose. Escape closes it and returns focus to
+the trigger.
+
+Changes are acknowledged, and the dot clears in the same commit, when the first readable item
+(the first entry's title, or the empty notice) is wholly visible inside the open popover. The
+kit bounds the popover to the space beside the bar, so on short viewports that item can start
+below the fold; it is then acknowledged once scrolled into view. Loading and failed states
+acknowledge nothing. The device-local cursor is scoped by origin, product, and deployment
+channel; `live`, `main`, and `stable` do not share cursors. Seen IDs survive rollbacks and
+skipped builds. No version string or timestamp comparison decides whether a change is new.
+First visits show “Recent changes”; subsequent visits show “New since you last looked” followed
+by “Recent”, diffed against the cursor as it was when the popover opened.
 The contract and compiler do not depend on a status-bar package or disclosure slot.
 The button names unread changes directly for assistive technology; its dot is decorative.
-Popover dimensions and spacing use composition tokens. Story fixtures are synthetic, and
-already-open story disclosures seed the acknowledged cursor while retaining the opening baseline.
+Popover dimensions and spacing use composition tokens; story fixtures are synthetic.
 
 The `fractal-changelog` PR check requires a newly added entry for product UI source changes
 under `apps/fractal-web` or `packages/fractal-ui`. The `no-changelog` label explicitly opts
@@ -310,18 +521,17 @@ wording consistent when both describe the same change.
 | Path | Contents |
 | --- | --- |
 | `crates/fractal` | Current daemon and CLI. |
-| `crates/fractal-tui` | Terminal UI library used by `st`. |
+| `crates/fractal-tui` | Terminal UI library used by Fractal. |
 | `crates/fractal-drivers`, `crates/fractal-runtime` | Harness drivers and shared runtime. |
 | `crates/fractal-client`, `crates/fractal-feed`, `crates/fractal-schema`, `crates/fractal-client-codegen` | Client API, feeds, schema, and code generation. |
 | `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
 | `clients`, `apps/ios` | TypeScript/Swift clients and the iOS app. |
 | `crates/fractal-migrate` | Migration tooling. |
-| `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
-| `examples/st3`, `docs` | Runnable declarations and documentation. |
+| `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `stui` package is a library embedded in `st`; it has no standalone executable. Its existing
-Clippy baseline allowances remain under the `stui` package key because the library still owns
+The `fractal-tui` package is a library embedded in `fractal`; it has no standalone executable. Its existing
+Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

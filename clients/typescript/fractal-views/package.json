@@ -10,6 +10,7 @@
     "./conversationSimple": "./conversationSimple.ts",
     "./sessionView": "./sessionView.ts",
     "./homeView": "./homeView.ts",
+    "./promptForm": "./promptForm.ts",
     "./requestView": "./requestView.ts",
     "./sidebarView": "./sidebarView.ts",
     "./deviceSigning": "./deviceSigning.ts",

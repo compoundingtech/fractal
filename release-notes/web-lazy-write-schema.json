@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Load web write schemas lazily and use the read schema at startup",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "Generated wire contracts and validation are unchanged; only browser module loading boundaries change."},
+  "rules": {"status": "none", "detail": "No rule changes or accessibility exemptions."},
+  "compatibility": {"status": "none", "detail": "Upload, send, folder edits and terminal actions retain their generated validation and refusal handling. Full startup savings require the SDK lazy codec changes in #5277."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes; existing lazy chunk recovery is reused without retrying mutations."}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve mailbox custody across descriptive PTY metadata updates and report verified restart exits accurately",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No storage or schema changes."},
+  "rules": {"status": "changed", "detail": "Mailbox physical revalidation fences the PTY session name, root PID, creation time, start-operation and subject tags, isolation and scope tags, and peer ancestry. Descriptive tags such as agent.harness.session.id and display names may change without replacing custody. Runtime liveness remains required. Fence refusals identify the differing field in the API error and journal without exposing its value."},
+  "compatibility": {"status": "changed", "detail": "Restart failure diagnostics distinguish an interrupted attempt from a verified launch whose replacement disappeared, including the matching harness end reason when available. Verified start receipts are read from local observations as well as retained replicated claims and matched to the exact attempt operation. Terminal reasons come from retained driver observations for the verified incarnation, not the live harness view, which excludes exited runtimes."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "none", "detail": "No configuration changes required."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}

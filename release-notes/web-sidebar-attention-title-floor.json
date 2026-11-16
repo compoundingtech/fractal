@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve sidebar title space by dropping unread counts before stronger attention markers",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "The existing 60 percent title floor remains unchanged."},
+  "compatibility": {"status": "none", "detail": "A wider needs-you diamond no longer lets combined unread badges consume shared title space. Unread counts remain in accessible descriptions."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

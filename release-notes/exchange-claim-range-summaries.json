@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Peers compare the claims they retain by claim-range digest during sync",
+  "replay": {
+    "status": "none",
+    "detail": "No replay. The summary reads the existing claim range digests (64 top ranges) once per exchange export and receipt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage change. The comparison times live in memory with the other per-peer sync measurements."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Each exchange carries a claim-range summary (protocol version 1: count and digest of every retained claim, omitted while the range index folds). A member records when it last compared its claims with each peer's and since when they differ (claims_compared_at_unix_ms, claims_differ_since_unix_ms in the peer's sync status). The difference gates nothing: no divergence, first-sync, repair or admission change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Adds an optional claim_ranges field to the replication exchange and two optional fields to a peer's sync status. Older peers ignore the field and send none, so they are compared by envelopes alone; members upgrade in any order."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back to an earlier binary is supported; it drops the field and the comparison."
+  }
+}

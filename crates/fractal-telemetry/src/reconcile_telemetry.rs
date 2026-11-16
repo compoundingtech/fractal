@@ -45,7 +45,6 @@ impl Drop for Member<'_> {
 
 pub fn phase(scope: &str) -> Phase {
     use opentelemetry::trace::Tracer as _;
-    let profile = smallclaims::profile::span(scope);
     let name = match scope {
         "pass/changes" => "st.reconcile.changes",
         "pass/gate-runners" => "st.reconcile.gate-runners",
@@ -68,8 +67,11 @@ pub fn phase(scope: &str) -> Phase {
         "stage/missions" => "st.reconcile.stage.missions",
         "stage/subagents" => "st.reconcile.stage.subagents",
         "fault_snapshot" => "st.reconcile.fault_snapshot",
-        _ => return Phase { _profile: profile, span: None, members: None },
+        // Per-item scopes, such as one member's turn: no stage span and no I/O counters.
+        _ => return Phase { _profile: smallclaims::profile::span(scope), span: None, members: None },
     };
+    // A stage also counts its reads, from disk and in all, which a profile minute reports per span.
+    let profile = smallclaims::profile::span_with_io(scope);
     let span = smallclaims::sqlite::telemetry::phase_spans_enabled().then(|| {
         let tracer = opentelemetry::global::tracer("st3");
         tracer.span_builder(name)

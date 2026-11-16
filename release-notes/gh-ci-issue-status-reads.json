@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "GitHub issue and commit-status reads use the gh-ci installation once its token grants them",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "No runtime or policy rule changes."},
+  "compatibility": {"status": "none", "detail": "Behaviour is unchanged until an operator-published gh-ci sidecar grants issues or statuses read; forbidden installation reads still replay with the PAT."},
+  "downtime": {"status": "none", "detail": "No runtime deployment or migration changes."},
+  "manual": {"status": "none", "detail": "Granting Issues and Commit statuses read to the gh-ci App moves those reads off the PAT; no action is required otherwise."},
+  "recovery": {"status": "none", "detail": "Revoking the permissions returns those reads to the PAT on the next token refresh."}
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add a local, read-only report of native person asks by mission × person over a rolling 7 days; not fleet-complete.",
+  "replay": { "status": "none", "detail": "Uses the existing canonical request and run-lineage claims." },
+  "schema": { "status": "none", "detail": "No durable claim or table changes." },
+  "rules": { "status": "none", "detail": "This report is not a budget window, admission or enforcement. No changes to attention delivery, approvals or work admission." },
+  "compatibility": { "status": "none", "detail": "Adds the public Rust Store::attention_request_count method and AttentionRequestCount type; no CLI, HTTP or wire API changes." },
+  "downtime": { "status": "none", "detail": "No startup changes." },
+  "manual": { "status": "none", "detail": "No operator actions." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

@@ -81,6 +81,47 @@ const conversationItems = (live: LiveSource) => {
 }
 
 describe('scenario replay through the real live source', () => {
+  it.live('keeps Pins reads and sockets inside the replay transports', () =>
+    withReplay(world, (live, clock) => Effect.gen(function* () {
+      const network = vi.fn(() => { throw new Error('Unexpected real transport') })
+      vi.stubGlobal('fetch', network); vi.stubGlobal('WebSocket', network)
+      const pins = live.source.pins!
+      const release = live.registry.mount(pins)
+      try {
+        yield* settle(clock)
+        expect(live.registry.get(pins).state.phase).not.toBe('connecting')
+        expect(network).not.toHaveBeenCalled()
+      } finally { release() }
+    })),
+  )
+  it.live('keeps quota and history reads inside the replay transport', () =>
+    withReplay(world, (live) => Effect.gen(function* () {
+      const network = vi.fn(() => { throw new Error('Unexpected real transport') })
+      vi.stubGlobal('fetch', network)
+      const usage = live.source.usage
+      if (usage._tag !== 'declared') throw new Error('Expected the live usage relay')
+      const quota = yield* Effect.result(usage.source.quota)
+      const history = yield* Effect.result(usage.source.history('synthetic/account'))
+      // The world does not model quota: its transport returns an explicit unsupported route.
+      expect(quota).toMatchObject({ _tag: 'Failure', failure: { kind: 'http', reason: 'quota returned HTTP 501' } })
+      expect(history).toMatchObject({ _tag: 'Failure', failure: { kind: 'http', reason: 'history returned HTTP 501' } })
+      expect(network).not.toHaveBeenCalled()
+    })),
+  )
+
+  it.live('classifies an unmodelled replay usage read as unsupported', () =>
+    withReplay(world, (live, clock) => Effect.gen(function* () {
+      const usage = live.source.nativeDetails!.usagePeriod(world.slices.roster.state.agents[0]!.id)
+      const release = live.registry.mount(usage)
+      try {
+        yield* settle(clock)
+        expect(live.registry.get(usage)).toMatchObject({ _tag: 'Unavailable', reason: 'unsupported' })
+      } finally {
+        release()
+      }
+    })),
+  )
+
   it.live('decodes the world roster and conversation, then publishes a timed append', () =>
     withReplay(world, (live, clock) => Effect.gen(function* () {
       expect(catalog.some((entry) => entry.id === world.id)).toBe(true)
@@ -98,7 +139,7 @@ describe('scenario replay through the real live source', () => {
       expect(initial.length).toBeGreaterThan(0)
       expect(initialIds.every((id) => thread.items.some((entry) => entry.id === id))).toBe(true)
       expect(initial).toContainEqual(expect.objectContaining({
-        _tag: 'UnknownEvent', id: thread.items.at(-1)!.id, eventType: 'diagnostic_summary',
+        _tag: 'Unsupported', id: thread.items.at(-1)!.id, harness: 'st', recordKind: 'diagnostic_summary', reason: 'unknown-entry-type',
       }))
 
       const event = world.slices.conversation.timeline[0]!
@@ -109,7 +150,8 @@ describe('scenario replay through the real live source', () => {
       expect(updated).toHaveLength(initial.length + event.items.length)
       expect(updated.map((item) => item.id)).toEqual([...initialIds, ...event.items.map((entry) => entry.id)])
       expect(updated.at(-1)).toMatchObject({
-        _tag: 'UnknownEvent', eventType: 'diagnostic_summary', data: { status: 'passed' },
+        _tag: 'Unsupported', harness: 'st', recordKind: 'diagnostic_summary', reason: 'unknown-entry-type',
+        inspect: { text: expect.stringContaining('passed'), truncated: false },
       })
     })),
   )

@@ -112,6 +112,9 @@ export const spaceVars = stylex.defineVars({
   zero: '0', hairline: '1px', xxxs: '1px', row: '10px', section: '24px', control: '28px', panel: '32px',
 })
 
+/** Shared by the row's CSS and its exact virtualizer layout. */
+export const sidebarRowSize = 48
+
 /** Fixed geometry: band heights, lane widths, control sizes, gutters. */
 export const geometryVars = stylex.defineVars({
   band: '52px',
@@ -130,11 +133,12 @@ export const geometryVars = stylex.defineVars({
   heroSize: '30px', heroLeading: '36px',
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
-  gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
-  sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
+  gutter40: '40px', icon: '16px', status: '14px', statusSm: '12px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
-  /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
-  workRowColumns: '16px minmax(0, 1fr) auto 16px 80px',
+  /** Work rows: disclosure slot · glyph slot · title · one right-aligned metadata column (status word, duration). */
+  workRowColumns: '16px 16px minmax(0, 1fr) minmax(80px, auto)',
+  /** Kept for the package's consumers; work rows size their metadata column through workRowColumns. */
   durationColumn: '80px', statusWordMax: '20ch',
   /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
   textColumn: '22px', railInset: '7.5px',
@@ -142,6 +146,13 @@ export const geometryVars = stylex.defineVars({
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
   modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
+  /** Fit-within box for a sent image in the transcript; it opens full size on press. */
+  imageMaxWidth: '320px', imageMaxHeight: '240px',
+  /** Widest a staged attachment chip grows to fit its name: narrower on phones, where the tray scrolls. */
+  attachmentMax: { default: '180px', '@media (min-width: 600px)': '240px' },
+  detailsValueMin: '120px',
+  /** The widest a line of supporting prose runs inside a wider card. */
+  readingMeasure: '68ch',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
   emptyMark: '36px', avatar: '32px', fileMax: '192px', emptyHintMax: '288px',
@@ -168,6 +179,7 @@ export const geometryNumbers = {
   sidebarDefault: 256,
   panelDefault: 540,
   panelMin: 360,
+  detailsColumnsMin: 360,
   drawerDefault: 220,
   footer: 40,
   drawerMin: 120, drawerMax: 600,
@@ -177,11 +189,14 @@ export const geometryNumbers = {
   threadViewportMin: 96,
 } as const
 
+
 export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
   ease: 'ease', linear: 'linear', surfaceTransform: 'scale(0.98)',
 })
 
+/** Numeric twin of `motionVars.standard` for imperative motion such as the eased return to the transcript end. */
+export const motionNumbers = { standard: 200 } as const
 export const elevationVars = stylex.defineVars({
   popover: '0 18px 44px -18px rgb(0 0 0 / 80%)',
   dialog: '0 24px 64px -24px rgb(0 0 0 / 65%)',

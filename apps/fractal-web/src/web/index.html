@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
-    <title>webfractal</title>
+    <title>Fractal</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzE4MTgxYiIvPjxwYXRoIGQ9Ik05IDhoMTV2NEgxM3Y0aDl2NGgtOXY2SDl6IiBmaWxsPSIjZmFmYWZhIi8+PC9zdmc+" />
     <script data-wf-theme-bootstrap>
       ;(() => {
@@ -12,6 +12,7 @@
           const saved = JSON.parse(localStorage.getItem('wf.ui@1') ?? 'null')
           const entry = saved?.version === 1 ? saved.entries?.['round2.scheme'] : undefined
           if (entry?.version === 1 && (entry.value === 'dark' || entry.value === 'light')) scheme = entry.value
+          if (entry?.version === 1 && entry.value === 'system') scheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
         } catch {}
         const root = document.documentElement
         root.dataset.scheme = scheme
@@ -55,10 +56,11 @@
         const url = new URL('/v1/client/collections/stream', location.href)
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
         url.searchParams.set('traceparent', traceparent)
+        url.searchParams.set('client', "__FRACTAL_WEB_CLIENT__")
         let socket
         try {
-          // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-          socket = new WebSocket(url, ['st3.client.collections.v0'])
+          // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: deploy only after every receiver runs #3430; sunset 2026-11-01.
+          socket = new WebSocket(url, ['fractal.client.collections.v0'])
         } catch {
           return
         }

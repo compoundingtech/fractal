@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve an owned exec's exit status when it exits between the status and process-identity probes.",
+  "replay": { "status": "none", "detail": "No replay or backfill; previously recorded unknown exit statuses are unchanged." },
+  "schema": { "status": "none", "detail": "Uses the existing exec generation exit-code, signal and terminal fields." },
+  "rules": { "status": "changed", "detail": "An owned child already observed as exited is reaped and its status persisted before group completion, including while descendants remain alive. Terminal exit-code gates can therefore observe its actual result." },
+  "compatibility": { "status": "none", "detail": "No command, API or stored-format change. Adopted children without a local Child handle retain existing behavior." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout; no migration." },
+  "manual": { "status": "none", "detail": "No configuration or operator action required." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback; existing generation records remain readable." }
+}

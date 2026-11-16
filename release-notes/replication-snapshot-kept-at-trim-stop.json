@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "When a trim's run stops, the replication snapshot is patched with the envelopes the run deleted instead of being built again from nothing, so the first exchange after the stop no longer loads the whole inventory while every other exchange waits behind it",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "Additive and local only: a trigger replica_envelopes_inventory_DELETE_TAIL moves the replication inventory generation when the newest envelope row is deleted, since the next envelope admitted reuses its rowid and a snapshot built on looks only past it. It is created at open if missing. An older build leaves it in place and already compares that generation, so it builds its next snapshot from nothing, as it always could. Storage version is unchanged."},
+  "rules": {"status": "none", "detail": "No retention change."},
+  "compatibility": {"status": "none", "detail": "No API, wire or config change. Inventories and their digests are the same; only which payloads the snapshot marks as gone is kept exact without a full load."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build as usual. The trigger can be dropped; without it a deleted newest rowid is again only covered by the full load an older build does when a trim's run stops."}
+}

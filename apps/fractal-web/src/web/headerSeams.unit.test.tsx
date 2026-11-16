@@ -14,18 +14,21 @@ const unknown = { _tag: 'Unknown' } as const
 const file: ResourceFile = { path: 'captured/file.ts', added: unknown, removed: unknown, lines: unknown }
 const resource: ResourceData = { kind: 'diff', label: 'Recorded capture', detail: 'Captured successful-tool excerpt', fileCount: unknown, files: [file] }
 const header = {
-  folder: 'Reported folder', title: 'Reported agent', panelOpen: false, drawerOpen: false,
-  onTogglePanel() {}, onToggleDrawer() {},
+  folder: 'Reported folder', title: 'Reported agent', panelOpen: false, terminalOpen: false,
+  onTogglePanel() {}, onToggleTerminal() {},
   nativeActions: createElement('button', { 'data-native-action': 'existing' }, 'Bound action'),
 }
 const agent: Agent = { ref: 'agent/fixture/readonly', terminal: '', name: 'Reported name', lifecycle: unknown, host: 'Reported host', connected: true, activity: 'idle', status: 'idle', usage: unknown, checkout: unknown, workspace: unknown, startedAt: unknown, endedAt: unknown, blockedOn: unknown, ask: unknown, lastActivityAt: unknown }
 
 describe('resource card seam', () => {
-  it('keeps unknown counts explicit instead of rendering zero', () => {
-    const card = renderToStaticMarkup(createElement(ResourceCardV1, { resource }))
-    expect(card).toMatch(/Changed files · count unknown/)
-    expect(card).not.toMatch(/\+0|−0|0 changed/)
-    expect(renderToStaticMarkup(createElement(ResourceCardV1, { resource: { ...resource, files: [] } }))).not.toMatch(/\+0|−0/)
+  it('omits unreported counts instead of rendering zero or literal unknown metadata', () => {
+    for (const files of [[file], []]) {
+      const card = renderToStaticMarkup(createElement(ResourceCardV1, { resource: { ...resource, files } }))
+      // The kit names an uncounted diff by its painted label alone; a missing count is omitted, never invented.
+      expect(card).toContain('>Changed files</span>')
+      expect(card).not.toMatch(/\d+ changed files?/)
+      expect(card).not.toMatch(/unknown|\+0|−0|0 changed/i)
+    }
   })
   it('renders a reported zero as zero', () => {
     const zero: ResourceFile = { ...file, added: { _tag: 'Known', value: 0 }, removed: { _tag: 'Known', value: 0 }, lines: { _tag: 'Known', value: [] } }
@@ -40,19 +43,20 @@ describe('thread header seam', () => {
     const bare = renderToStaticMarkup(createElement(ThreadHeader, header))
     expect(bare).toMatch(/data-native-action="existing"/)
     expect(bare).toMatch(/native-action-slot/)
-    expect(bare).not.toMatch(/Toggle terminal drawer|>Open|>Commit|1970|Needs you/)
+    expect(bare).not.toMatch(/Show terminal|>Open|>Commit|1970|Needs you/)
     const bound = renderToStaticMarkup(createElement(ThreadHeader, { ...header, terminalAvailable: true, onOpen() {}, onCommit() {}, status: 'working', freshness: 'stale', statusSince: 1000, now: 2000 }))
-    expect(bound).toMatch(/Toggle terminal drawer/)
+    expect(bound).toMatch(/Show terminal/)
     expect(bound).toMatch(/>Open/)
     expect(bound).toMatch(/>Commit/)
     expect(bound).toMatch(/stale observation/)
     expect(bound).not.toMatch(/Needs you/)
   })
   it.each([
-    ['waiting', 'Native waiting for tool response', false, 'Needs you'],
-    ['errored', 'Native tool execution errored', false, 'Stale observation'],
+    ['waiting', 'Native waiting for tool response', false, 'Waiting'],
+    ['errored', 'Native tool execution errored', false, 'Failed'],
     ['working', 'Native working before connection loss', true, 'Last verified · Working'],
-  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale, canonical) => {
+    ['idle', 'invalid-status', false, 'Idle'],
+  ] as const)('recognizes %s activity and sanitizes unrecognized native status labels through the roster projection', (activity, reported, stale, canonical) => {
     const row = sidebarRow({ agent: { ...agent, activity, status: reported }, stale })
     const output = renderToStaticMarkup(createElement(ThreadHeader, { ...header, status: row.status, statusLabel: row.statusLabel, statusSince: row.statusSince, freshness: row.freshness, now: 2000 }))
     expect(output).toContain(`aria-label="${canonical}; Status boundary unavailable; ${row.freshness} observation${stale ? '; last-observed snapshot' : ''}"`)

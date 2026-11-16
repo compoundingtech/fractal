@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reuse the newest pnpm store cache for the same operating system and Node/pnpm versions when the lockfile changes in Workspace CI and main cache upkeep, and allow three minutes for web detection and gate jobs including runner teardown.",
+  "replay": { "status": "none", "detail": "CI cache reuse only; no runtime state replay." },
+  "schema": { "status": "none", "detail": "No database or wire schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint or authority rule change." },
+  "compatibility": { "status": "none", "detail": "Exact lockfile cache keys and frozen workspace installs remain unchanged; fallback stores only supply reusable packages." },
+  "downtime": { "status": "none", "detail": "No deployed runtime change." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Cache entries expire normally; no persisted runtime state change." }
+}

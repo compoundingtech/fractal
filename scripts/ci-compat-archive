@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Prepare an exact-cache archive; a claimed hit may never fall back to the network."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shutil
+import subprocess
+import tempfile
+import zipfile
+
+
+def identity(kind, target, *, root=None):
+    root = root or Path(__file__).resolve().parent.parent
+    manifest = json.loads((root / f".github/{kind}-compat-baseline.json").read_text())
+    sha = manifest["bundles"][target]["sha256"]
+    if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha):
+        raise ValueError(f"Invalid pinned SHA256 for {kind}/{target}")
+    relative = Path("tmp/compat-archives") / target / f"{sha}.tar.gz"
+    # Producers cache across runs; artifacts carry the verified bytes across runner types.
+    return {"sha256": sha, "key": f"compat-archive-v1-{target}-{sha}",
+            "cache-path": str(relative), "path": str(root / relative),
+            "directory": str((root / relative).parent)}
+
+
+def artifact_name(key, job, attempt):
+    return f"{key}-job-{job}-attempt-{attempt}"
+
+
+def prepare(kind, target, archive, *, cache_hit, root=None, run=subprocess.run):
+    root = root or Path(__file__).resolve().parent.parent
+    archive = Path(archive).resolve()
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    # Never inherit an unrelated local override on a producer cache miss.
+    env.pop("COMPAT_BASELINE_ARCHIVE", None)
+    if cache_hit:
+        # Missing/corrupt restored bytes fail closed in compat-baseline, even on an installed hit.
+        env["COMPAT_BASELINE_ARCHIVE"] = str(archive)
+    with tempfile.TemporaryDirectory(prefix="compat-verify-") as extraction:
+        run(["python3", str(root / "scripts/compat-baseline"), kind, extraction,
+             "--target", target, "--save-archive", str(archive)],
+            env=env, check=True)
+
+
+def workflow_head(environment):
+    if environment.get("GITHUB_EVENT_NAME") == "pull_request":
+        event = json.loads(Path(environment["GITHUB_EVENT_PATH"]).read_text())
+        source = event["pull_request"]["head"]["sha"]
+    else:
+        source = environment["GITHUB_SHA"]
+    if not isinstance(source, str) or not re.fullmatch(r"[a-f0-9]{40}", source):
+        raise ValueError("invalid workflow run head SHA")
+    return source
+
+
+def download(kind, target, archive, *, root=None):
+    """Verify the complete private artifact ZIP before publishing any consumer input."""
+    root = root or Path(__file__).resolve().parent.parent
+    archive = Path(archive).resolve()
+    artifact_id = os.environ["CI_TEST_ARCHIVE_ARTIFACT_ID"]
+    name = os.environ["COMPAT_ARCHIVE_NAME"]
+    repository_id = os.environ["GITHUB_REPOSITORY_ID"]
+    if not name or not artifact_id.isdecimal() or int(artifact_id) <= 0:
+        raise ValueError("one explicit successful producer artifact ID/name is required")
+    if not repository_id.isdecimal() or int(repository_id) <= 0:
+        raise ValueError("invalid repository ID")
+    endpoint = f"repositories/{repository_id}/actions/artifacts/{artifact_id}"
+    metadata = json.loads(subprocess.check_output(["gh", "api", endpoint], timeout=60))
+    run = metadata.get("workflow_run", {})
+    expected = metadata.get("digest", "")
+    size = metadata.get("size_in_bytes")
+    if (metadata.get("id") != int(artifact_id) or metadata.get("name") != name
+            or metadata.get("expired") is not False
+            or str(run.get("id")) != os.environ["GITHUB_RUN_ID"]
+            or run.get("head_sha") != workflow_head(os.environ)
+            or type(size) is not int or size <= 0
+            or not re.fullmatch(r"sha256:[a-f0-9]{64}", expected)):
+        raise ValueError("compatibility artifact metadata identity/digest mismatch")
+    transfer = runpy.run_path(str(root / "scripts/ci-test-archive"))
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="compat-transfer-", dir=archive.parent) as temporary:
+        private = Path(temporary)
+        zipped = private / "artifact.zip"
+        transfer["transfer_zip"](endpoint, zipped, size, {}, 120)
+        if zipped.stat().st_size != size or transfer["digest"](zipped) != expected.removeprefix("sha256:"):
+            raise ValueError("compatibility artifact ZIP size/digest mismatch")
+        filename = f"{identity(kind, target, root=root)['sha256']}.tar.gz"
+        retained = private / filename
+        with zipfile.ZipFile(zipped) as bundle:
+            if bundle.namelist() != [filename]:
+                raise ValueError("compatibility artifact ZIP must contain exactly the pinned archive")
+            with bundle.open(filename) as source, retained.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
+        prepare(kind, target, retained, cache_hit=True, root=root)
+        os.replace(retained, archive)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("identity", "prepare", "download"))
+    parser.add_argument("kind", choices=("fleet", "messaging"))
+    parser.add_argument("target", choices=("x86_64-unknown-linux-gnu", "aarch64-apple-darwin"))
+    parser.add_argument("archive", type=Path, nargs="?")
+    args = parser.parse_args()
+    if args.action == "identity":
+        if args.archive is not None:
+            parser.error("identity does not accept an archive path")
+        values = identity(args.kind, args.target)
+        values["artifact-name"] = artifact_name(values["key"], os.environ["GITHUB_JOB"],
+                                               os.environ["GITHUB_RUN_ATTEMPT"])
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            for key, value in values.items():
+                output.write(f"{key}={value}\n")
+        with open(os.environ["GITHUB_ENV"], "a") as environment:
+            environment.write(f"COMPAT_BASELINE_ARCHIVE={values['path']}\n")
+    else:
+        if args.archive is None:
+            parser.error(f"{args.action} requires an archive path")
+        if args.action == "download":
+            download(args.kind, args.target, args.archive)
+        else:
+            prepare(args.kind, args.target, args.archive,
+                    cache_hit=os.environ.get("COMPAT_ARCHIVE_CACHE_HIT") == "true")
+
+
+if __name__ == "__main__":
+    main()

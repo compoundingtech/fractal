@@ -5,6 +5,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -32,7 +33,7 @@ loader.exec_module(source_receipt)
 class WorkflowBoundary(unittest.TestCase):
     def test_generated_producer_has_the_same_bytes_as_the_pinned_recipe(self):
         workflow = (ROOT / '.github/workflows/fleet.yml').read_text()
-        job = workflow.split('  evidence-source:\n', 1)[1].split('  upgrade-impact:\n', 1)[0]
+        job = re.split(r'(?m)^  [A-Za-z0-9_-]+:\n', workflow.split('  evidence-source:\n', 1)[1], maxsplit=1)[0]  # up to the next job
         embedded = job.split("<<'EVIDENCE_SOURCE_PY'\n", 1)[1].split('          EVIDENCE_SOURCE_PY\n', 1)[0]
         recipe = '\n'.join(line.removeprefix('          ') for line in embedded.splitlines()) + '\n'
         self.assertEqual(recipe.encode(), SCRIPT.read_bytes())

@@ -1,4 +1,4 @@
-// The simplified conversation, as st3-conversation-ui draws it (Density::Simple): a tool call is
+// The simplified conversation, as fractal-conversation-ui draws it (Density::Simple): a tool call is
 // one line, and a run of calls in a row is one line saying how many and how they went until it
 // is opened. Everything else reads as in full. The phone shows it by default; the choice is the
 // device's own.
@@ -10,7 +10,7 @@ export type SimpleRow =
   | { kind: 'call'; entry: ConversationEntry; tool: Tool }
   | { kind: 'bundle'; id: string; calls: Array<{ entry: ConversationEntry; tool: Tool }>; ok: number; failed: number; running: number; last: string; open: boolean };
 
-/** The id that opens a run of calls starting at `first`, as stui's `bundle_id`. */
+/** The id that opens a run of calls starting at `first`, as the Fractal terminal UI's `bundle_id`. */
 export const bundleId = (first: string) => `bundle:${first}`;
 
 /** Entries, oldest first, as simplified rows; `open` holds the ids of opened runs. */

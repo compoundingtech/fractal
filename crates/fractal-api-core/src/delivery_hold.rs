@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{ClaimInput, St3Error};
+use crate::model::{ClaimInput, FractalError};
 use crate::store::Store;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -19,6 +19,9 @@ pub struct HoldRequest {
     /// Used only when a replacement adopts an older provider's unexpired DND.
     #[serde(default)]
     pub legacy_adoption: bool,
+    /// Hold a member of an `enforce` owned set anyway, recording source debt with `reason`.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -48,23 +51,23 @@ pub fn view(store: &Store, subject: &str, now: u64) -> anyhow::Result<HoldView> 
     })
 }
 
-pub fn input(request: HoldRequest, now: u64) -> Result<ClaimInput, St3Error> {
+pub fn input(request: HoldRequest, now: u64) -> Result<ClaimInput, FractalError> {
     fractal_schema::registry()
         .validate_subject(&request.subject)
-        .map_err(|error| St3Error::new(error.code, error.message))?;
+        .map_err(|error| FractalError::new(error.code, error.message))?;
     let own = request.actor == request.subject;
     if !request.subject.starts_with("agent/")
         || !(own || request.actor.starts_with("person/"))
         || (request.legacy_adoption && !own)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "delivery-hold-forbidden",
             "a delivery hold requires the seat's actor or a person; legacy adoption requires the seat",
         ));
     }
     fractal_schema::registry()
         .validate_subject(&request.actor)
-        .map_err(|error| St3Error::new(error.code, error.message))?;
+        .map_err(|error| FractalError::new(error.code, error.message))?;
     if request.reason.trim().is_empty()
         || request.reason.len() > 2048
         || (request.held && request.until_unix_ms <= now)
@@ -72,7 +75,7 @@ pub fn input(request: HoldRequest, now: u64) -> Result<ClaimInput, St3Error> {
         || (request.legacy_adoption
             && (!request.held || request.until_unix_ms > now.saturating_add(16 * 60 * 1000)))
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "invalid-delivery-hold",
             "a hold needs a nonempty reason and future expiry; a release has expiry zero",
         ));
@@ -109,6 +112,7 @@ mod tests {
             reason: "quiet interval".into(),
             idempotency_key: key.into(),
             legacy_adoption: false,
+            force: false,
         }
     }
 

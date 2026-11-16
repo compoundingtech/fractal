@@ -1,4 +1,4 @@
-// The production entry for a tailnet-hosted web app; the environment is documented in docs/fractal-web.md.
+// The opt-in tailnet publisher, separate from the daemon web listener; see docs/fractal-web.md.
 import { readHostConfig, startHost } from './host.mts'
 
 const served = startHost(readHostConfig(process.env))

@@ -6,8 +6,8 @@ const content = (sequence, text) => ({ id: `entry/${sequence}`, revision: 1, seq
 const message = (sequence, title) => ({ id: `entry/${sequence}-message`, revision: 1, sequence, type: 'message', role: 'user', body: { message_id: `message/${sequence}`, from: 'agent/example/lead', to: 'agent/example/worker', title } });
 const texts = conversation => conversation.entries.map(entry => entry.body.text ?? entry.body.title);
 
-// A newest page full of status heartbeats does not hide the conversation in it, and Small Talk
-// joined by st is part of the conversation.
+// A newest page full of status heartbeats does not hide the conversation in it, and Fractal
+// messages joined into the stream are part of the conversation.
 const page = [status(30), content(20, 'Latest reply'), message(15, 'Review the plan'), status(12), content(10, 'Earlier reply')];
 const loaded = applyConversation(undefined, { replace: true, items: page, hasMore: false });
 assert.deepEqual(texts(loaded), ['Earlier reply', 'Review the plan', 'Latest reply']);
@@ -151,4 +151,4 @@ got = await readOlder(read, { paged: true, start: false, loading: false, cursor:
 assert.deepEqual(asked, ['p2']);
 asked.length = 0;
 await readOlder(read, { paged: true, start: false, loading: false, cursor: { value: 'p2', at: 0 } }, oldest, 300_000);
-assert.deepEqual(asked, [undefined, 'p2'], 'a cursor st has let go is not tried');
+assert.deepEqual(asked, [undefined, 'p2'], 'a cursor Fractal has let go is not tried');

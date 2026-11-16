@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep tool-heavy scenario turns running while the final tool call is pending",
+  "replay": {"status": "none", "detail": "No daemon replay or recovery changes. The tool-heavy conversation variant now reports running rather than completed so pending shell work remains active."},
+  "schema": {"status": "none", "detail": "No wire schema changes. The variant uses the existing running timeline status; committed fixtures are unchanged."},
+  "rules": {"status": "none", "detail": "No checkpoint or rule changes. Kit tests reject pending tool calls following a terminal status across all worlds and conversation variants."},
+  "compatibility": {"status": "none", "detail": "Existing fixture shapes and identities are unchanged; failed-tools remains waiting."},
+  "downtime": {"status": "none", "detail": "No service deployment or interruption required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or recovery restrictions."}
+}

@@ -1,0 +1,9 @@
+# Separate install root: deploy tooling must not enter required web-check installs.
+packages:
+  - .
+ignoreScripts: true
+strictPeerDependencies: true
+# capnp-es ships generated declarations compatible with the repository's TS 6 toolchain.
+peerDependencyRules:
+  allowedVersions:
+    capnp-es>typescript: ">=6.0.0"

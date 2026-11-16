@@ -53,7 +53,7 @@ function RunStopStory({ scheme, refuse, onStopRequest }: { scheme: Scheme; refus
     <EmbraceRuntimeProvider options={options}>
       <ThreadHeader
         folder="workstation-a" title="Row projection" status={running ? 'working' : 'idle'} statusLabel={running ? 'working' : 'idle'} statusSince={Date.parse(startedAt)} freshness="live" now={now}
-        terminalAvailable panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}}
+        terminalAvailable panelOpen={false} terminalOpen={false} onTogglePanel={() => {}} onToggleTerminal={() => {}}
       />
       <div {...stylex.props(styles.transcript)}><Transcript viewportKey="run" title="Row projection" turns={[turn]} sync={sync} now={now} observedAt={now - 3000} onOpenTool={() => {}} /></div>
       <div data-testid="story-composer-dock" {...stylex.props(styles.dock)}><EmbraceComposer variant="C1" readingColumn {...(stopRefusal === undefined ? {} : { stopRefusal })} /></div>
@@ -62,6 +62,7 @@ function RunStopStory({ scheme, refuse, onStopRequest }: { scheme: Scheme; refus
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Run stop',
   component: RunStopStory,
   parameters: { scenario: { _tag: 'contract-fixture', reason: "Controlled stop acknowledgement, refusal and IME events require local host lifecycle state." }, layout: 'fullscreen' },
@@ -69,6 +70,17 @@ const meta = {
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, refuse: { control: 'boolean' } },
 } satisfies Meta<typeof RunStopStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'EscapeDuringCompositionKeepsRunning:contract-fixture',
+  'Running:contract-fixture',
+  'RunningLight:contract-fixture',
+  'StopRefused:contract-fixture',
+  'StopRefusedLight:contract-fixture',
+  'StopsOnEscape:contract-fixture',
+  'StopsOnPress:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 const stop = (canvasElement: HTMLElement) => canvasElement.querySelector<HTMLButtonElement>('[data-testid="run-stop"]')

@@ -11,8 +11,8 @@ pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3cc529e49cd3 o
 
 pub const KIND: &str = "agent.retired";
 
-pub fn writer_required() -> St3Error {
-    St3Error::new(
+pub fn writer_required() -> FractalError {
+    FractalError::new(
         "invalid-retirement",
         "terminal retirement must be written through agent.retire",
     )
@@ -46,7 +46,7 @@ pub fn record(
     connection: &Connection,
     subject: &str,
     at: Option<u64>,
-) -> Result<Option<ClaimRecord>, St3Error> {
+) -> Result<Option<ClaimRecord>, FractalError> {
     connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h70beb7474d50 owner=fractal_store::store::retirements TODO=trace-statement-and-value-representation */ &format!(
         "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='agent.retired' AND (?2 IS NULL OR claims.store_index<=?2)
@@ -78,7 +78,7 @@ pub fn retired_subjects_at(
         .collect::<rusqlite::Result<BTreeSet<_>>>()?)
 }
 
-fn retired(recipient: &str, claim: &ClaimRecord) -> St3Error {
+fn retired(recipient: &str, claim: &ClaimRecord) -> FractalError {
     MessageSendRefusal::Retired {
         recipient: recipient.into(),
         successor: claim.body["fields"]["successor"]
@@ -92,7 +92,7 @@ fn retired(recipient: &str, claim: &ClaimRecord) -> St3Error {
 pub fn refuse_declaration(
     connection: &Connection,
     desired: &DesiredSubject,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if desired.kind == "agent"
         && let Some(claim) = record(connection, &desired.subject, None)?
     {
@@ -106,7 +106,7 @@ pub fn refuse_declaration(
 pub fn terminal_selection(
     connection: &Connection,
     desired: &DesiredSubject,
-) -> Result<Option<bool>, St3Error> {
+) -> Result<Option<bool>, FractalError> {
     if !desired.subject.starts_with("agent/") {
         return Ok(None);
     }
@@ -122,7 +122,7 @@ pub fn terminal_selection(
 pub fn admit_recipient(
     connection: &Connection,
     recipient: Option<&str>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let Some(recipient) = recipient.filter(|to| to.starts_with("agent/")) else {
         return Ok(());
     };
@@ -171,9 +171,57 @@ pub fn admit_recipient(
     Ok(())
 }
 
+/// A read or close is admitted against the recipient's terminal claim in the same writer
+/// transaction that stores the signed lifecycle claim. A stale OLD process cannot race retire.
+pub fn admit_mail_claim(connection: &Connection, input: &ClaimInput) -> Result<(), FractalError> {
+    if !matches!(input.kind.as_str(), "message.staged" | "message.delivered" | "message.read" | "message.closed") {
+        return Ok(());
+    }
+    let created: Option<u64> = connection.query_row(
+        "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND kind='message.sent'",
+        [&input.subject], |row| row.get(0),
+    ).map_err(internal)?;
+    let Some(created) = created else { return Ok(()); };
+    let message = message_view_tx(connection, &input.subject, created).map_err(internal)?;
+    admit_mail_claim_to(connection, input, &message)
+}
+
+/// `admit_mail_claim` for a lifecycle step on `message`, read by the caller. A stream item's
+/// sent claim is in the messages shard, so its step is admitted against its merged view.
+pub fn admit_mail_claim_to(
+    connection: &Connection,
+    input: &ClaimInput,
+    message: &crate::model::MessageView,
+) -> Result<(), FractalError> {
+    let actor = input.actor.as_deref().unwrap_or("");
+    let Some(retirement) = record(connection, &message.to, None)? else {
+        if input.fields.contains_key("acting_for") {
+            return Err(FractalError::new("wrong-message-recipient", "mail has no custody grant"));
+        }
+        return Ok(());
+    };
+    if !matches!(input.kind.as_str(), "message.read" | "message.closed") {
+        return Err(FractalError::new("wrong-message-recipient", format!(
+            "retired `{}` cannot acknowledge mail", message.to,
+        )));
+    }
+    let successor = retirement.body["fields"]["successor"].as_str();
+    if successor != Some(actor)
+        || input.fields.get("acting_for").and_then(Value::as_str) != Some(message.to.as_str())
+        || !input.evidence.iter().any(|id| id == &retirement.id)
+        || record(connection, actor, None)?.is_some()
+    {
+        return Err(FractalError::new("wrong-message-recipient", format!(
+            "message `{}` belongs to retired `{}`; `{actor}` has no current mail custody",
+            input.subject, message.to,
+        )));
+    }
+    Ok(())
+}
+
 /// Runtime selection lowers terminal identity to a stop, retaining the declaration token and
 /// ownership history. The terminal claim remains separate and can never be overwritten by KDL.
-pub fn project_subject(connection: &Connection, subject: &str) -> Result<(), St3Error> {
+pub fn project_subject(connection: &Connection, subject: &str) -> Result<(), FractalError> {
     if let Some(claim) = record(connection, subject, None)? {
         let body = json!({"name":"stop", "arguments":[subject], "properties":{}, "children":[], "retirement":claim.id});
         connection
@@ -204,7 +252,7 @@ pub fn overlay_row(
     Ok(row)
 }
 
-pub fn unavailable(subject: &str, reason: LifecycleUnavailableReason) -> St3Error {
+pub fn unavailable(subject: &str, reason: LifecycleUnavailableReason) -> FractalError {
     MessageSendRefusal::LifecycleUnavailable {
         recipient: subject.into(),
         reason,
@@ -218,7 +266,7 @@ pub fn declaration(
     connection: &Connection,
     subject: &str,
     token: &str,
-) -> Result<DesiredSubject, St3Error> {
+) -> Result<DesiredSubject, FractalError> {
     let mut claim = claim_by_id_tx(connection, token)
         .map_err(internal)?
         .ok_or_else(|| unavailable(subject, LifecycleUnavailableReason::Unavailable))?;

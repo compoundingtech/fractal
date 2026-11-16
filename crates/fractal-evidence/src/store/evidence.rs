@@ -1,4 +1,4 @@
-//! The part of `store::evidence` that moved up from st3-store.
+//! The part of `store::evidence` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStore;
 use super::*;
@@ -6,8 +6,28 @@ pub use fractal_attention::store::evidence::*;
 
 /// A roster head: its cut, every agent's refs, the first cards in order, and when published.
 pub type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);
+use crate::store::published_list::PublicationBuild;
+
+pub struct AgentsPublicationSource {
+    pub watermark: crate::store::agents_publication::AgentsStatusWatermark,
+    pub rows: Arc<Vec<Value>>,
+    pub valid_until_ms: Option<u64>,
+}
 
 pub trait EvidenceStore {
+    fn agents_publication(&self) -> Option<Arc<crate::store::agents_publication::AgentsPublication>>;
+    fn subscribe_agents_publications(&self) -> tokio::sync::watch::Receiver<u64>;
+    fn agents_publication_build(&self) -> Result<PublicationBuild>;
+    fn agents_publication_demand(&self) -> bool;
+    fn agents_publication_source(&self, index: u64) -> Result<AgentsPublicationSource>;
+    fn publish_presented_agents(
+        &self,
+        build: PublicationBuild,
+        source: AgentsPublicationSource,
+        at: u64,
+        valid_until: Option<u64>,
+        rows: Vec<Value>,
+    ) -> Result<()>;
     /// Lazily attach the one Store publisher shared by receipt waits and collection
     /// consumers. Registration and journal installation happen when the Store opens.
     /// Attachment errors are returned on each call until attachment succeeds; failures
@@ -76,13 +96,86 @@ pub trait EvidenceStore {
 }
 
 impl EvidenceStore for Store {
+    fn agents_publication(&self) -> Option<Arc<crate::store::agents_publication::AgentsPublication>> {
+        match self.fractal.presented_agents.current() {
+            crate::store::published_list::ListRead::Served(publication, _) => Some(publication),
+            _ => None,
+        }
+    }
+
+    fn agents_publication_demand(&self) -> bool {
+        self.fractal.agents_publication_demand()
+    }
+
+    fn subscribe_agents_publications(&self) -> tokio::sync::watch::Receiver<u64> {
+        let receiver = self.fractal.presented_agents.subscribe();
+        // A subscription contributes only receiver demand: its wake is not an explicit
+        // refresh request that must survive the last receiver leaving.
+        if let Some(wake) = self.fractal.agent_roster_refresh.get() {
+            wake.notify_one();
+        }
+        receiver
+    }
+
+    fn agents_publication_build(&self) -> Result<PublicationBuild> {
+        self.fractal.presented_agents.begin_materialization()
+            .context("the agents publication materialization counter is exhausted")
+    }
+
+    fn agents_publication_source(&self, index: u64) -> Result<AgentsPublicationSource> {
+        let local = roster_local_frontier(&self.readers.get(), index)?;
+        let cache = self.fractal.agent_resources_cache.lock()
+            .map_err(|_| anyhow::anyhow!("agent resources cache poisoned"))?;
+        let entry = cache.iter().rev().find(|entry| entry.index == index && entry.local == local
+            && !entry.history && entry.covered.is_none())
+            .context("the complete current agents source is unavailable")?;
+        Ok(AgentsPublicationSource {
+            watermark: crate::store::agents_publication::AgentsStatusWatermark {
+                store_index: index, local_frontier: local,
+            },
+            rows: Arc::clone(&entry.items),
+            valid_until_ms: entry.valid_until_unix_ms.map(|deadline| deadline.min(u128::from(u64::MAX)) as u64),
+        })
+    }
+
+    fn publish_presented_agents(
+        &self,
+        build: PublicationBuild,
+        source: AgentsPublicationSource,
+        at: u64,
+        valid_until: Option<u64>,
+        rows: Vec<Value>,
+    ) -> Result<()> {
+        use crate::store::{agents_publication::PresentedAgents, published_list::Publication};
+        if let Some(current) = self.agents_publication()
+            && current.metadata().status_watermark == source.watermark && current.rows() == rows
+            && self.fractal.presented_agents.retain_materialization(build, &current)
+        {
+            return Ok(());
+        }
+        let order = rows.iter().map(|row| row["id"].as_str()
+            .context("a complete agent card has no ID").map(str::to_owned))
+            .collect::<Result<Vec<_>>>()?;
+        self.fractal.presented_agents.start();
+        let epoch = self.fractal.presented_agents_epoch.get();
+        if self.fractal.presented_agents.publish_identified(build, |identity| Publication {
+            cut: source.watermark.store_index,
+            published_at_unix_ms: u128::from(at),
+            valid_until_unix_ms: valid_until.map(u128::from),
+            rows: PresentedAgents::new(epoch, identity, source.watermark, at, rows, order),
+        }).is_none() {
+            anyhow::bail!("the agents source reset while materializing its publication");
+        }
+        // Serialize once outside the shared owner lock.
+        if let Some(publication) = self.agents_publication() { let _ = publication.encoded(); }
+        Ok(())
+    }
 
     fn ivm_publisher(&self) -> Result<Option<Arc<smallclaims::ivm::events::Publisher>>> {
-        if self.smalltalk.ivm_views.is_none() {
+        if self.fractal.ivm_views.is_none() {
             return Ok(None);
         }
-        let mut publisher = self
-            .smalltalk
+        let mut publisher = self.fractal
             .ivm_publisher
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -99,11 +192,11 @@ impl EvidenceStore for Store {
             index: u64,
             history: bool,
         ) -> Result<bool> {
-        if self.smalltalk.agent_roster_refresh.get().is_none()
+        if self.fractal.agent_roster_refresh.get().is_none()
             || self.agent_roster_faults_pending(history) {
             return Ok(false);
         }
-        let Some((cut, local, valid_until, items)) = self.smalltalk.agent_resources_cache.lock()
+        let Some((cut, local, valid_until, items)) = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter()
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index <= index)
             .max_by_key(|entry| (entry.index, entry.local))
@@ -130,16 +223,19 @@ impl EvidenceStore for Store {
             index: u64,
             history: bool,
         ) -> Option<(u64, Arc<Vec<Value>>, u128)> {
-        self.smalltalk.agent_roster_refresh.get()?;
+        self.fractal.agent_roster_refresh.get()?;
         self.warn_if_agent_roster_overdue();
-        self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned").iter()
+        let newest = |entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index <= index)
             .max_by_key(|entry| (entry.index, entry.local))
-            .map(|entry| {
-                crate::otel::record_roster("hit", entry.items.len());
-                (entry.index, Arc::clone(&entry.items), entry.published_at_unix_ms)
-            })
+            .map(|entry| (entry.index, Arc::clone(&entry.items), entry.published_at_unix_ms));
+        // While a projection catching up refolds the roster, readers keep the one they had.
+        let roster = newest(&mut self.fractal.agent_resources_cache.lock()
+            .expect("agent resources cache poisoned").iter())
+            .or_else(|| newest(&mut self.fractal.agent_roster_previous.lock()
+                .expect("previous agent roster poisoned").resources.iter()))?;
+        crate::otel::record_roster("hit", roster.1.len());
+        Some(roster)
     }
 
     fn published_agent_roster_at(
@@ -147,15 +243,17 @@ impl EvidenceStore for Store {
             cut: u64,
             history: bool,
         ) -> Option<(Arc<Vec<Value>>, u128)> {
-        self.smalltalk.agent_roster_refresh.get()?;
-        self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned").iter()
+        self.fractal.agent_roster_refresh.get()?;
+        let at = |entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
             .filter(|entry| entry.history == history && entry.covered.is_none() && entry.index == cut)
             .max_by_key(|entry| entry.local)
-            .map(|entry| {
-                crate::otel::record_roster("hit", entry.items.len());
-                (Arc::clone(&entry.items), entry.published_at_unix_ms)
-            })
+            .map(|entry| (Arc::clone(&entry.items), entry.published_at_unix_ms));
+        let roster = at(&mut self.fractal.agent_resources_cache.lock()
+            .expect("agent resources cache poisoned").iter())
+            .or_else(|| at(&mut self.fractal.agent_roster_previous.lock()
+                .expect("previous agent roster poisoned").resources.iter()))?;
+        crate::otel::record_roster("hit", roster.0.len());
+        Some(roster)
     }
 
     fn published_agent_roster_head(
@@ -163,16 +261,15 @@ impl EvidenceStore for Store {
             index: u64,
             count: usize,
         ) -> Option<PublishedRosterHead> {
-        self.smalltalk.agent_roster_refresh.get()?;
+        self.fractal.agent_roster_refresh.get()?;
         self.warn_if_agent_roster_overdue();
-        let (cut, refs) = self.smalltalk.agent_page_refs_cache.lock()
+        let current = self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned").iter()
             .filter(|entry| !entry.history && entry.index <= index)
             .max_by_key(|entry| entry.index)
-            .map(|entry| (entry.index, Arc::clone(&entry.items)))?;
-        let cache = self.smalltalk.agent_resources_cache.lock()
-            .expect("agent resources cache poisoned");
-        let head = cache.iter().filter(|entry| entry.index == cut && !entry.history)
+            .map(|entry| (entry.index, Arc::clone(&entry.items)));
+        let head_at = |cut: u64, refs: &Arc<Vec<Value>>, entries: &mut dyn Iterator<Item = &crate::store::runtime::AgentResourcesEntry>| entries
+            .filter(|entry| entry.index == cut && !entry.history)
             .find_map(|entry| {
                 let cards = entry.items.iter()
                     .filter_map(|card| Some((card["id"].as_str()?, card)))
@@ -181,7 +278,24 @@ impl EvidenceStore for Store {
                     .map(|reference| cards.get(reference["id"].as_str()?).map(|card| (*card).clone()))
                     .collect::<Option<Vec<_>>>()
                     .map(|head| (head, entry.published_at_unix_ms))
-            })?;
+            });
+        let (cut, refs, head) = match current {
+            Some((cut, refs)) => {
+                let head = head_at(cut, &refs, &mut self.fractal.agent_resources_cache.lock()
+                    .expect("agent resources cache poisoned").iter())?;
+                (cut, refs, head)
+            }
+            // While a projection catching up refolds the roster, readers keep the head they had:
+            // its page order and the cards at the same cut.
+            None => {
+                let previous = self.fractal.agent_roster_previous.lock()
+                    .expect("previous agent roster poisoned");
+                let refs = previous.page_refs.as_ref().filter(|entry| entry.index <= index)?;
+                let (cut, refs) = (refs.index, Arc::clone(&refs.items));
+                let head = head_at(cut, &refs, &mut previous.resources.iter())?;
+                (cut, refs, head)
+            }
+        };
         crate::otel::record_roster("hit", head.0.len());
         Some((cut, refs, head.0, head.1))
     }
@@ -310,36 +424,41 @@ impl EvidenceStore for Store {
 
     fn mission_gate_runners(&self) -> Result<Vec<MissionGateRunner>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(
-            "SELECT DISTINCT subject, origin,
-                    COALESCE(json_extract(body, '$.fields.owner'),
-                      'legacy:' || substr(subject, 16, instr(substr(subject, 16), '/')-1))
-             FROM claims request WHERE kind='gate.requested'
-               AND (json_extract(body, '$.fields.runner') IN ('exec','loop-metric')
-                    OR json_extract(body, '$.fields.model') IS NOT NULL)
-               AND NOT EXISTS (
-                 SELECT 1 FROM claims stopped
-                 WHERE stopped.subject=request.subject AND stopped.kind='runtime.observed'
-                   AND json_extract(stopped.body, '$.fields.status')='stopped'
-               )",
-        )?;
-        let mut requests = BTreeMap::<String, Vec<(String, String)>>::new();
+        // Trigger-kept from the claims (`gate_runners`): reading the claims parsed every
+        // mechanical gate request in history, one 9.2 s query after a busy host's restart.
+        // Until the requests older than its triggers are copied, the list reads the claims.
+        let source = if crate::store::gate_runners::complete(&connection)? {
+            "local_gate_runners".to_owned()
+        } else {
+            format!("({})", crate::store::gate_runners::FROM_CLAIMS)
+        };
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha3d84de9cc54 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT DISTINCT runner.subject,
+                    COALESCE(json_extract(request.body, '$.fields.host'), runner.origin),
+                    runner.owner,
+                    COALESCE(json_extract(request.body, '$.fields.dispatch.owner_attempt'),
+                        json_extract(request.body, '$.fields.attempt'))
+             FROM {source} runner JOIN claims request ON request.id=runner.claim_id"
+        ))?;
+        let mut requests = BTreeMap::<String, Vec<(String, String, Option<u32>)>>::new();
         for row in statement.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, Option<u32>>(3)?,
             ))
         })? {
-            let (subject, host, owner) = row?;
+            let (subject, host, owner, attempt) = row?;
             // A runner leaves this list once its stop is observed on it.
             smallclaims::touched::note_read(|| subject.clone());
-            requests.entry(owner).or_default().push((subject, host));
+            requests.entry(owner).or_default().push((subject, host, attempt));
         }
         // New requests, and owners that finish or move on.
         for kind in [
             "gate.requested",
             "step-run.state",
+            "step-run.retried",
             "mission-run.state",
             "run-generation.state",
         ] {
@@ -355,7 +474,7 @@ impl EvidenceStore for Store {
                     step.status IN ('completed','failed','cancelled')
                     OR generation.status IN ('completed','failed','cancelled','superseded')
                     OR run.phase='terminal' OR run.phase LIKE 'cleanup-%'
-                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%'
+                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%', step.attempt
              FROM step_runs step
              JOIN mission_runs run ON run.id=step.run_id
              JOIN mission_runs root ON root.id=run.root_run_id
@@ -364,7 +483,7 @@ impl EvidenceStore for Store {
              SELECT 'mission-run/' || run.id, 'mission-run/' || run.id,
                     run.phase IN ('final-cancelled','terminal') OR run.phase LIKE 'cleanup-%'
                     OR run.status IN ('completed','failed','cancelled')
-                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%'
+                    OR root.phase='terminal' OR root.phase LIKE 'cleanup-%', 1
              FROM mission_runs run
              JOIN mission_runs root ON root.id=run.root_run_id",
         )?;
@@ -374,17 +493,18 @@ impl EvidenceStore for Store {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, bool>(2)?,
+                row.get::<_, u32>(3)?,
             ))
         })? {
-            let (owner, owner_run, retired) = row?;
+            let (owner, owner_run, retired, current_attempt) = row?;
             for key in [owner.clone(), format!("legacy:{}", owner.replace('/', "."))] {
                 if let Some(requests) = requests.get(&key) {
-                    runners.extend(requests.iter().map(|(subject, host)| MissionGateRunner {
+                    runners.extend(requests.iter().map(|(subject, host, attempt)| MissionGateRunner {
                         subject: subject.clone(),
                         host: host.clone(),
                         owner_run: owner_run.clone(),
                         owner_step: owner.starts_with("step-run/").then(|| owner.clone()),
-                        retired,
+                        retired: retired || attempt.is_some_and(|attempt| attempt != current_attempt),
                     }));
                 }
             }
@@ -410,12 +530,14 @@ impl EvidenceStore for Store {
 
     fn human_gate_requests(&self) -> Result<Vec<(String, String, String)>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(
-            "SELECT id, json_extract(body, '$.fields.owner'), json_extract(body, '$.fields.reviewer')
-             FROM claims INDEXED BY claims_human_gate_request_index
-             WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL
-               AND json_extract(body, '$.fields.owner') IS NOT NULL",
-        )?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc89d14431aec owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+            "SELECT request.id, json_extract(request.body, '$.fields.owner'), {}
+             FROM claims request INDEXED BY claims_human_gate_request_index
+             WHERE request.kind='gate.requested' AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
+               AND json_extract(request.body, '$.fields.owner') IS NOT NULL
+             ORDER BY CANONICAL_ASC(request)",
+            human_review_reassignment::reviewer_sql("request"),
+        )))?;
         statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<Vec<_>, _>>()

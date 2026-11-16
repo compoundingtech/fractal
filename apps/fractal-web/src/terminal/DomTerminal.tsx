@@ -17,14 +17,16 @@ import { graphemes, graphemeWidth, isPlainAscii, textWidth } from './cellWidth.t
 import { terminalRunStyle, type TerminalPalette } from './palette.ts'
 import { TERMINAL_FONT_FAMILY, terminalFontsReady } from './terminalFonts.ts'
 
-/** Shared cell font size (px) for every renderer, so the bake-off compares like with like. */
-export const TERMINAL_FONT_SIZE = 13
-/** Shared row height (px); rows are positioned on this grid. */
-export const TERMINAL_LINE_HEIGHT = 17
+import { terminalMetrics } from './terminalMetrics.stylex.ts'
+
 /** Inputs of the DOM renderer: the screen frame and the palette its colours resolve against. */
 export type DomTerminalProps = {
   readonly screen: TerminalScreen
   readonly palette: TerminalPalette
+  /** Positioned on the cell grid above the rows, e.g. the input target at the cursor. */
+  readonly overlay?: ReactNode
+  /** Id of the element describing how to interact with this terminal. */
+  readonly describedBy?: string
 }
 
 /** Keep loading visible instead of font-display:block turning a connected terminal all black. */
@@ -124,8 +126,8 @@ const styles = stylex.create({
   root: {
     position: 'relative',
     display: 'inline-block',
-    fontSize: `${TERMINAL_FONT_SIZE}px`,
-    lineHeight: `${TERMINAL_LINE_HEIGHT}px`,
+    fontSize: `${terminalMetrics.fontSize}px`,
+    lineHeight: `${terminalMetrics.lineHeight}px`,
     fontVariantLigatures: 'none',
     fontKerning: 'none',
     fontFeatureSettings: '"liga" 0, "calt" 0',
@@ -136,13 +138,13 @@ const styles = stylex.create({
     },
   },
   line: {
-    height: `${TERMINAL_LINE_HEIGHT}px`,
+    height: `${terminalMetrics.lineHeight}px`,
     whiteSpace: 'pre',
     overflow: 'hidden',
   },
   run: {
     display: 'inline-block',
-    height: `${TERMINAL_LINE_HEIGHT}px`,
+    height: `${terminalMetrics.lineHeight}px`,
     verticalAlign: 'top',
     overflow: 'hidden',
   },
@@ -150,8 +152,8 @@ const styles = stylex.create({
     display: 'inline-block',
     // Fallback fonts have taller ascents; a fixed box keeps them from growing the row's line box
     // and pushing the row's plain text below the clipped 1-row height.
-    height: `${TERMINAL_LINE_HEIGHT}px`,
-    lineHeight: `${TERMINAL_LINE_HEIGHT}px`,
+    height: `${terminalMetrics.lineHeight}px`,
+    lineHeight: `${terminalMetrics.lineHeight}px`,
     textAlign: 'center',
     overflow: 'hidden',
     verticalAlign: 'top',
@@ -168,7 +170,7 @@ const styles = stylex.create({
     pointerEvents: 'none',
     userSelect: 'none',
     width: '1ch',
-    height: `${TERMINAL_LINE_HEIGHT}px`,
+    height: `${terminalMetrics.lineHeight}px`,
   },
   cursorBlock: {
     mixBlendMode: 'difference',
@@ -190,7 +192,7 @@ const styles = stylex.create({
   },
 })
 
-const LoadedTerminal = ({ screen, palette }: DomTerminalProps) => {
+const LoadedTerminal = ({ screen, palette, overlay, describedBy }: DomTerminalProps) => {
   const fonts = use(terminalFontsReady())
   if (fonts._tag === 'Failed') {
     return (
@@ -205,14 +207,15 @@ const LoadedTerminal = ({ screen, palette }: DomTerminalProps) => {
       role="region"
       aria-roledescription="terminal"
       aria-label={`Terminal: ${screen.title}`}
-      // Focusable so keyboard users can reach (and later type into) the pane.
+      aria-describedby={describedBy}
+      // Focusable so keyboard users can reach the pane, select and copy its text.
       tabIndex={0}
       data-terminal-renderer="T1"
       {...stylex.props(styles.root)}
       style={{
         fontFamily: TERMINAL_FONT_FAMILY,
         width: `${screen.columns}ch`,
-        height: screen.rows * TERMINAL_LINE_HEIGHT,
+        height: screen.rows * terminalMetrics.lineHeight,
         color: palette.foreground,
         backgroundColor: palette.background,
       }}
@@ -221,6 +224,7 @@ const LoadedTerminal = ({ screen, palette }: DomTerminalProps) => {
         <TerminalLineView key={line.row} line={line} palette={palette} />
       ))}
       <Cursor cursor={screen.cursor} palette={palette} />
+      {overlay}
     </div>
   )
 }
@@ -304,7 +308,7 @@ const Cursor = ({
 }) => {
   if (!cursor.visible) return null
   const position: CSSProperties = {
-    top: cursor.row * TERMINAL_LINE_HEIGHT,
+    top: cursor.row * terminalMetrics.lineHeight,
     left: `${cursor.column}ch`,
     borderColor: palette.cursor,
   }

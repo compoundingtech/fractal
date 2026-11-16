@@ -18,9 +18,12 @@ import textwrap
 import time
 import unittest
 
+from release_delivery import (DAILY_BUILD_ENV, FABRIC_FRAMEWORK, build_environment,
+                              bundle_id, framework_hash, ios_env, variant_state)
+
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
-BUNDLE_ID = "com.compoundingtech.smalltalk"
+BUNDLE_ID = "com.compoundingtech.fractal"
 
 # These are process-boundary fixtures, not replacements for delivery logic:
 # Git, cloning, state persistence, subprocesses, and flock remain real.
@@ -35,12 +38,15 @@ name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 root = Path(os.environ["DELIVERY_FIXTURE_ROOT"])
 control = json.loads((root / "control.json").read_text())
+bundle_id = "com.compoundingtech.fractal" + (".test" if os.environ.get("APP_VARIANT") == "test" else "")
 with (root / "commands.jsonl").open("a") as log:
     log.write(json.dumps({"command": name, "args": args, "cwd": os.getcwd(),
                           "developer_dir": os.environ.get("DEVELOPER_DIR"),
                           "deploy_approval": os.environ.get("AGENT_ACTION_APPROVAL"),
                           "native_env": {key: os.environ.get(key) for key in (
-                              "APP_VARIANT", "ST3_FABRIC_PROOF", "ST3_FABRIC_OFFLINE_DEBUG")}}) + "\n")
+                              "APP_VARIANT", "FRACTAL_FABRIC", "ST3_FABRIC",
+                              "FRACTAL_FABRIC_PROOF", "ST3_FABRIC_PROOF",
+                              "FRACTAL_FABRIC_OFFLINE_DEBUG", "ST3_FABRIC_OFFLINE_DEBUG")}}) + "\n")
 
 if name == "gate-slot":
     command = args[args.index("--") + 1:]
@@ -51,26 +57,65 @@ if name == "taskpolicy":
 if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
+if name == "nix":
+    if args[0] == "build":
+        assert args == ["build", "--max-jobs", "0", "--option", "builders", "",
+                        "--option", "external-builders", "[]", "--no-link",
+                        "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo"], args
+        sys.exit(control.get("toolchain_exit", 0))
+    assert args == ["run", "--max-jobs", "0", "--option", "builders", "",
+                    "--option", "external-builders", "[]",
+                    "github:overengineeringstudio/effect-utils/" + "a" * 40 + "#megarepo",
+                    "--", "apply", "--worktree-mode", "commit", "--git-protocol", "https",
+                    "--lock-sync", "off"], args
+    if control.get("member_exit"):
+        print("member apply failed", file=sys.stderr)
+        sys.exit(control["member_exit"])
+    publisher = Path.cwd() / "repos/effect-utils/nix/devenv-modules/tasks/shared/stage-pnpm-source-inputs.mjs"
+    publisher.parent.mkdir(parents=True, exist_ok=True)
+    publisher.write_text("// publisher fixture\n")
+    sys.exit(0)
+if name == "node":
+    assert Path(args[0]).is_file(), args
+    assert args[1:4] == ["publish", str(Path.cwd()), ".devenv/pnpm-source-inputs"], args
+    if control.get("publish_exit"):
+        sys.exit(control["publish_exit"])
+    staged = Path.cwd() / ".devenv/pnpm-source-inputs/current"
+    staged.mkdir(parents=True, exist_ok=True)
+    (staged / "fixture.json").write_text(json.dumps(args[4:]))
+    sys.exit(0)
+if name == "fabric-build":
+    assert os.environ["FRACTAL_FABRIC"] == os.environ["ST3_FABRIC"] == "1"
+    assert os.environ["FRACTAL_NIX_CACHE_ONLY"] == "1"
+    framework = Path.cwd() / "modules/fractal-fabric/ios/build/FractalFabricRust.xcframework"
+    if control.get("missing_framework"):
+        import shutil
+        shutil.rmtree(framework, ignore_errors=True)
+    else:
+        framework.mkdir(parents=True, exist_ok=True)
+        (framework / "Info.plist").write_text("fixture framework")
+        (framework / "libfixture.a").write_text(control.get("framework_content", "rust bridge"))
+    sys.exit(0)
 if name == "pnpm":
     if args == ["install", "--frozen-lockfile", "--ignore-scripts"]:
         for package in ("", "apps/ios", "clients/typescript/fractal-views", "clients/typescript/fractal-client"):
             (Path.cwd() / package / "node_modules").mkdir(parents=True, exist_ok=True)
         sys.exit(0)
     if args == ["run", "export:ios"]:
-        assert os.environ["APP_VARIANT"] == "daily"
+        assert os.environ["APP_VARIANT"] in ("daily", "test")
         sys.exit(0)
     assert args[:2] == ["exec", "expo"], args
     if "config" in args:
-        print(json.dumps({"name": control.get("expo_name", "Smalltalk"), "slug": "smalltalk", "ios": {
-            "bundleIdentifier": "com.compoundingtech.smalltalk"}}))
+        print(json.dumps({"name": control.get("expo_name", "Fractal"), "slug": "fractal", "ios": {
+            "bundleIdentifier": bundle_id}}))
     elif "prebuild" in args:
-        (Path.cwd() / "ios" / "smalltalk.xcworkspace").mkdir(parents=True, exist_ok=True)
+        (Path.cwd() / "ios" / "fractal.xcworkspace").mkdir(parents=True, exist_ok=True)
         (Path.cwd() / "ios" / "Podfile").write_text("# Fixture native project\n")
-        native = Path.cwd() / "ios" / "smalltalk"
+        native = Path.cwd() / "ios" / "fractal"
         native.mkdir(parents=True, exist_ok=True)
         with (native / "Info.plist").open("wb") as info:
-            plistlib.dump({"CFBundleIdentifier": "com.compoundingtech.smalltalk",
-                          "CFBundleExecutable": "smalltalk", "CFBundleVersion": "0",
+            plistlib.dump({"CFBundleIdentifier": bundle_id,
+                          "CFBundleExecutable": "fractal", "CFBundleVersion": "0",
                           "StBuildCommit": "unstamped"}, info)
     else:
         raise AssertionError(args)
@@ -93,7 +138,7 @@ if name == "xcodebuild":
     output = Path(args[args.index("-derivedDataPath") + 1])
     build_exit = control.get("build_exit", 0)
     if not build_exit or control.get("artifact_on_failure", False):
-        app = output / "Build" / "Products" / "Release-iphoneos" / "smalltalk.app"
+        app = output / "Build" / "Products" / "Release-iphoneos" / "fractal.app"
         app.mkdir(parents=True, exist_ok=True)
         workspace = Path(args[args.index("-workspace") + 1])
         with (workspace.parent / workspace.stem / "Info.plist").open("rb") as template:
@@ -105,7 +150,7 @@ if name == "xcodebuild":
             bundle["CFBundleVersion"] = control["built_version"]
         with (app / "Info.plist").open("wb") as info:
             plistlib.dump(bundle, info)
-        (app / "smalltalk").write_bytes(os.environ["EXPO_PUBLIC_ST3_BUILD"].encode())
+        (app / "fractal").write_bytes(os.environ["EXPO_PUBLIC_ST3_BUILD"].encode())
         # Records the external inputs the product was built with, so tests can
         # check installed content independently of the reconciler's own keys.
         (app / "inputs.json").write_text(json.dumps({
@@ -122,13 +167,23 @@ if name == "node":
     assert args in (["--version"], ["-v"]), args
     print("v24.0.0")
     sys.exit(0)
+if name == "nm":
+    assert args[:2] == ["-g", "-U"], args
+    assert Path(args[2]).is_file(), args
+    if not control.get("fabric_stub"):
+        print("00000000 T _st_fabric_identity\n00000010 T _st_fabric_dial")
+    else:
+        # The stub deliberately shares the real module's Swift class name.
+        print("00000000 T FractalFabricModule")
+    sys.exit(0)
 if name == "xcrun":
     assert args[0] == "devicectl", args
     result = {}
     status = 0
     if "apps" in args:
         installed = root / "device-apps.json"
-        result = {"apps": control.get("apps", json.loads(installed.read_text()) if installed.exists() else [])}
+        result = {"apps": control.get("apps", json.loads(installed.read_text()) if installed.exists() else [
+            {"bundleIdentifier": "com.compoundingtech.fractal", "bundleVersion": "0"}])}
         status = control.get("apps_exit", 0)
     elif "processes" in args:
         result = {"runningProcesses": control.get("processes", [])}
@@ -140,12 +195,18 @@ if name == "xcrun":
             app = Path(next(arg for arg in args if arg.endswith(".app")))
             with (app / "Info.plist").open("rb") as file:
                 bundle = plistlib.load(file)
-            (root / "device-apps.json").write_text(json.dumps([{
+            installed = root / "device-apps.json"
+            existing = json.loads(installed.read_text()) if installed.exists() else [
+                {"bundleIdentifier": "com.compoundingtech.fractal", "bundleVersion": "0"}]
+            others = [record for record in existing
+                      if record["bundleIdentifier"] != bundle["CFBundleIdentifier"]]
+            installed.write_text(json.dumps([*others, {
                 "bundleIdentifier": bundle["CFBundleIdentifier"],
                 "bundleVersion": bundle["CFBundleVersion"],
             }]))
     elif "launch" in args:
-        assert "com.compoundingtech.smalltalk" in args, args
+        assert any(identifier in args for identifier in (
+            "com.compoundingtech.fractal", "com.compoundingtech.fractal.test")), args
         status = control.get("launch_exit", 0)
     else:
         raise AssertionError(args)
@@ -161,7 +222,145 @@ raise AssertionError((name, args))
 '''
 
 
+class IosEnvironmentTests(unittest.TestCase):
+    def test_fabric_cache_only_is_opted_in_and_manual_builds_still_realize(self):
+        script = SCRIPT.parents[1] / "modules/fractal-fabric/build.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$@\" > \"$NIX_ARGUMENTS\"\n"
+                           "exit 1\n")
+            nix.chmod(0o755)
+            arguments = root / "arguments"
+            for cache_only in ("1", ""):
+                with self.subTest(cache_only=cache_only):
+                    result = subprocess.run(
+                        ["sh", str(script)], capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_ARGUMENTS": str(arguments), "FRACTAL_NIX_CACHE_ONLY": cache_only})
+                    self.assertEqual(result.returncode, 1)
+                    actual = arguments.read_text().splitlines()
+                    if cache_only:
+                        self.assertEqual(actual[:9],
+                                         ["build", "--max-jobs", "0", "--option", "builders", "",
+                                          "--option", "external-builders", "[]"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build it locally or remotely", result.stderr)
+                    else:
+                        self.assertEqual(actual[:3], ["build", "--no-link", "--print-out-paths"])
+                        self.assertEqual(len(actual), 4)
+                        self.assertNotIn("binary cache", result.stderr)
+
+    def test_workspace_cache_miss_and_apply_failure_have_distinct_messages(self):
+        script = SCRIPT.parents[3] / "scripts/prepare-pnpm-source-inputs.py"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "flake.lock").write_text(json.dumps({
+                "nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}}))
+            nix = root / "nix"
+            nix.write_text("#!/bin/sh\n"
+                           "printf '%s\\n' \"$1\" >> \"$NIX_COMMANDS\"\n"
+                           "if [ \"$1\" = build ]; then exit \"$REALIZE_EXIT\"; fi\n"
+                           "echo 'member apply failed' >&2\n"
+                           "exit 42\n")
+            nix.chmod(0o755)
+            commands = root / "commands"
+            for realize_exit in ("7", "0"):
+                with self.subTest(realize_exit=realize_exit):
+                    commands.unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [sys.executable, str(script), "apply", "--cache-only"],
+                        cwd=root, capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                             "NIX_COMMANDS": str(commands), "REALIZE_EXIT": realize_exit})
+                    self.assertNotEqual(result.returncode, 0)
+                    if realize_exit != "0":
+                        self.assertEqual(commands.read_text().splitlines(), ["build"])
+                        self.assertIn("closure is not available in the binary cache", result.stderr)
+                        self.assertIn("delivery refuses to build", result.stderr)
+                    else:
+                        self.assertEqual(commands.read_text().splitlines(), ["build", "run"])
+                        self.assertIn("member apply failed", result.stderr)
+                        self.assertNotIn("binary cache", result.stderr)
+
+    def test_normal_identity_and_state_are_unchanged(self):
+        state = Path("/lane")
+        self.assertEqual(bundle_id("normal"), BUNDLE_ID)
+        self.assertEqual(variant_state(state, "normal"), state)
+        self.assertEqual(build_environment("normal"), DAILY_BUILD_ENV)
+
+    def test_test_identity_state_and_pinned_guard_environment(self):
+        self.assertEqual(bundle_id("test"), BUNDLE_ID + ".test")
+        self.assertEqual(variant_state(Path("/lane"), "test"), Path("/lane/ios-test-variant"))
+        self.assertEqual(build_environment("test"), {**DAILY_BUILD_ENV, "APP_VARIANT": "test"})
+
+    def test_fractal_values_win_and_empty_values_mask_legacy(self):
+        for suffix in ("REF", "EXPECTED_ORIGIN", "TRUSTED_COMMIT", "DEVICE", "TEAM",
+                       "NOTIFY_FROM", "NOTIFY_TO", "MAX_DEFERRAL", "BUILD_BACKOFF", "BUILD_ONLY"):
+            for legacy, fractal, expected in (
+                (None, None, "default"),
+                ("legacy", None, "legacy"),
+                (None, "fractal", "fractal"),
+                ("same", "same", "same"),
+                ("legacy", "fractal", "fractal"),
+                ("legacy", "", ""),
+                ("", None, ""),
+                (None, "", ""),
+            ):
+                with self.subTest(suffix=suffix, legacy=legacy, fractal=fractal):
+                    environment = {}
+                    if legacy is not None:
+                        environment["ST_IOS_" + suffix] = legacy
+                    if fractal is not None:
+                        environment["FRACTAL_IOS_" + suffix] = fractal
+                    self.assertEqual(ios_env(suffix, "default", environment), expected)
+
+
 class ReleaseDeliveryTests(unittest.TestCase):
+    def test_test_variant_has_separate_artifacts_and_same_fabric_guard(self):
+        self.env.update(FRACTAL_IOS_VARIANT="test",
+                        FRACTAL_IOS_TEST_APP_PROFILE="Fractal Test Development",
+                        FRACTAL_IOS_TEST_RUNNER_PROFILE="Fractal Test Runner Development")
+        self.configure(fabric_stub=True)
+        self.reconcile("--build-only")
+        test_state = self.state / "ios-test-variant"
+        self.assertFalse((self.state / "state.json").exists())
+        data = json.loads((test_state / "state.json").read_text())
+        self.assertIn("failed_build", data)
+        self.assertFalse(list((test_state / "artifacts").glob("*/success.json")))
+        self.assertEqual(len(self.commands("nm")), 1)
+        self.configure(fabric_stub=False)
+        self.reconcile("--build-only")
+        receipts = list((test_state / "artifacts").glob("*/success.json"))
+        self.assertEqual(len(receipts), 1)
+        app = Path(json.loads(receipts[0].read_text())["app"])
+        with (app / "Info.plist").open("rb") as file:
+            self.assertEqual(plistlib.load(file)["CFBundleIdentifier"], BUNDLE_ID + ".test")
+        self.assertTrue(app.is_relative_to(test_state))
+        for command in self.commands("xcodebuild"):
+            self.assertIn("CODE_SIGN_STYLE=Manual", command["args"])
+            self.assertNotIn("-allowProvisioningUpdates", command["args"])
+        self.assertFalse(self.device_commands("install"))
+        normal_record = {"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18528"}
+        (self.root / "device-apps.json").write_text(json.dumps([normal_record]))
+        self.reconcile()
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.assertIn(BUNDLE_ID + ".test", self.device_commands("launch")[0]["args"])
+        installed = json.loads((self.root / "device-apps.json").read_text())
+        self.assertEqual(len(installed), 2)
+        self.assertEqual([record for record in installed if record["bundleIdentifier"] == BUNDLE_ID],
+                         [normal_record])
+
+    def test_cli_variant_overrides_environment_and_requires_test_profile(self):
+        self.env["FRACTAL_IOS_VARIANT"] = "test"
+        failed = self.invoke("--build-only")
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("test-app-profile", failed.stderr)
+        self.reconcile("--variant", "normal", "--build-only")
+        self.assertTrue((self.state / "state.json").exists())
+        self.assertFalse((self.state / "ios-test-variant").exists())
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="release-delivery-tests-")
         self.addCleanup(temporary.cleanup)
@@ -174,14 +373,15 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.control_path = self.root / "control.json"
         self.control_path.write_text("{}")
         self.command_log = self.root / "commands.jsonl"
-        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node"):
+        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node", "nix", "fabric-build", "nm"):
             executable = self.tools / name
             executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent(COMMAND_FIXTURE))
             executable.chmod(0o755)
         git = shutil.which("git")
         self.assertIsNotNone(git, "Git is required for the delivery fixtures")
         git_bin = Path(git).parent
-        self.env = dict(os.environ)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("FRACTAL_IOS_", "ST_IOS_"))}
         self.env.update({
             "PATH": os.pathsep.join((str(self.tools), str(git_bin), "/usr/bin", "/bin")),
             "DELIVERY_FIXTURE_ROOT": str(self.root),
@@ -212,13 +412,20 @@ class ReleaseDeliveryTests(unittest.TestCase):
             }))
             self.write_source(f"{relative}/index.ts", "export const fixture = 1;\n")
         self.write_source("package.json", json.dumps({
-            "private": True, "packageManager": "pnpm@12.7.0", "workspaces": list(packages),
+            "private": True, "packageManager": "pnpm@12.17.0", "workspaces": list(packages),
         }))
         self.write_source("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n")
         self.write_source("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
+        self.write_source("scripts/prepare-pnpm-source-inputs.py",
+                          (SCRIPT.parents[3] / "scripts/prepare-pnpm-source-inputs.py").read_text())
+        self.write_source("flake.lock", json.dumps({"nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}}))
+        self.write_source("megarepo.lock", json.dumps({"version": 1, "members": {}}))
+        self.write_source("pnpm-source-inputs.json", json.dumps({"sourceInputPaths": [
+            "repos/effect-utils/packages/@overeng/utils"]}))
         self.write_source("apps/ios/app.json", json.dumps({"expo": {
-            "name": "Smalltalk", "slug": "smalltalk", "ios": {"bundleIdentifier": BUNDLE_ID},
+            "name": "Fractal", "slug": "fractal", "ios": {"bundleIdentifier": BUNDLE_ID},
         }}))
+        self.write_source("apps/ios/modules/fractal-fabric/build.sh", "exec fabric-build\n")
         self.write_source("server/main.go", "package main\n")
         self.initial_commit = self.commit("Initial fixture")
 
@@ -302,6 +509,31 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def assert_installed(self, commit):
         self.assertEqual(self.saved_state().get("installed"), commit)
         self.assertFalse(self.saved_state().get("pending"))
+
+    def test_fractal_environment_configures_delivery_without_legacy_values_winning(self):
+        preferred = {
+            "REF": "origin/main",
+            "EXPECTED_ORIGIN": str(self.origin),
+            "TRUSTED_COMMIT": self.initial_commit,
+            "DEVICE": "TEST-DEVICE",
+            "TEAM": "TESTTEAM",
+            "NOTIFY_FROM": "",
+            "NOTIFY_TO": "",
+            "MAX_DEFERRAL": "0",
+            "BUILD_BACKOFF": "0",
+            "BUILD_ONLY": "1",
+        }
+        for suffix, value in preferred.items():
+            self.env["ST_IOS_" + suffix] = "invalid-legacy"
+            self.env["FRACTAL_IOS_" + suffix] = value
+        self.env["DEVELOPER_DIR"] = str(self.root / "Xcode.app" / "Contents" / "Developer")
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "--repo", str(self.source), "--state", str(self.state),
+        ], cwd=self.root, env=self.env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("built", self.outcomes())
+        self.assertFalse(self.device_commands("install"))
+        self.assertFalse(self.notifications())
 
     def test_app_and_recursive_local_packages_trigger_delivery(self):
         self.reconcile()
@@ -464,7 +696,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def test_running_daily_app_defers_install_until_deadline(self):
         self.configure(processes=[{
             "processIdentifier": 123,
-            "executable": "/Applications/Smalltalk.app/Smalltalk",
+            "executable": "/Applications/Fractal.app/Fractal",
         }])
         self.reconcile()
         self.assertIn("install_deferred", self.outcomes())
@@ -684,6 +916,127 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state()["trusted_head"], self.initial_commit)
         self.assertEqual(len(self.commands("xcodebuild")), 1)
 
+    def stale_installed_fixture(self):
+        self.reconcile("--build-only")
+        data = self.saved_state()
+        data.update(installed_version="17664", installed=self.initial_commit, installed_key="stale")
+        data["pending"]["build_version"] = "18516"
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18528"}])
+
+    def test_reconcile_installed_raises_floor_without_approval_or_deployment(self):
+        self.stale_installed_fixture()
+        self.env.pop("AGENT_ACTION_APPROVAL")
+        before = len(self.commands())
+        self.origin.rename(self.root / "offline-origin.git")
+        self.reconcile("--reconcile-installed")
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "18528")
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        self.assertEqual(data["pending"]["build_version"], "18516")
+        self.assertEqual(self.outcomes()[-1], "installed_reconciled")
+        self.assertEqual([entry["command"] for entry in self.commands()[before:]], ["xcrun"])
+        self.assertEqual(len(self.device_commands("apps")), 1)
+        self.assertEqual(self.device_commands("install"), [])
+        self.assertEqual(self.device_commands("launch"), [])
+        self.assertFalse((self.state / "installed-apps.json").exists())
+
+    def test_reconcile_installed_never_lowers_floor(self):
+        self.stale_installed_fixture()
+        data = self.saved_state()
+        data["installed_version"] = "19000"
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.reconcile("--reconcile-installed")
+        self.assertEqual(self.saved_state()["installed_version"], "19000")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_approved_tick_reads_device_and_refuses_stale_pending_build(self):
+        self.stale_installed_fixture()
+        self.reconcile()
+        self.assertEqual(self.saved_state()["installed_version"], "18528")
+        self.assertEqual(self.outcomes()[-1], "install_refused")
+        self.assertEqual(self.saved_state()["pending"]["build_version"], "18516")
+        self.assertEqual(self.device_commands("install"), [])
+        self.assertEqual(self.device_commands("launch"), [])
+
+    def test_approved_tick_refuses_pending_equal_to_device_build(self):
+        self.stale_installed_fixture()
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "18516"}])
+        self.reconcile()
+        self.assertEqual(self.outcomes()[-1], "install_refused")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_reconciled_floor_discards_older_pending_on_next_approved_tick(self):
+        self.stale_installed_fixture()
+        self.reconcile("--reconcile-installed")
+        self.configure(build_exit=65)
+        self.reconcile()
+        self.assertIn("pending_discarded", self.outcomes())
+        self.assertEqual(self.saved_state()["installed_version"], "18528")
+        self.assertFalse(self.saved_state().get("pending"))
+        self.assertEqual(self.device_commands("install"), [])
+
+    def test_approved_tick_readback_failures_refuse_install(self):
+        self.stale_installed_fixture()
+        for control in (
+            {"apps_exit": 1},
+            {"apps_exit": 0, "apps": []},
+            {"apps": [{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "unparseable"}]},
+        ):
+            with self.subTest(control=control):
+                self.configure(**control)
+                self.reconcile()
+                self.assertEqual(self.outcomes()[-1], "install_deferred")
+                self.assertEqual(self.saved_state()["installed_version"], "17664")
+                self.assertEqual(self.device_commands("install"), [])
+                self.assertEqual(self.device_commands("launch"), [])
+
+    def test_reconcile_installed_readback_failure_preserves_floor(self):
+        self.stale_installed_fixture()
+        self.configure(apps=[])
+        result = self.invoke("--reconcile-installed")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.saved_state()["installed_version"], "17664")
+        self.assertEqual(self.device_commands("install"), [])
+
+    def reconciled_failed_launch(self, *, source_changed):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}])
+        self.reconcile("--reconcile-installed")
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertFalse(data["pending"]["installed"])
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        if source_changed:
+            self.change_js("after-external-install")
+        installs = len(self.device_commands("install"))
+        launches = len(self.device_commands("launch"))
+        self.configure(launch_exit=0, build_exit=65)
+        self.reconcile()
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        self.assertEqual(len(self.device_commands("install")), installs)
+        self.assertEqual(len(self.device_commands("launch")), launches)
+        self.configure(build_exit=0)
+        self.reconcile()
+        self.assertGreater(int(self.saved_state()["installed_version"]), 99)
+        self.assertEqual(len(self.device_commands("install")), installs + 1)
+        self.assertEqual(len(self.device_commands("launch")), launches + 1)
+        self.assert_installed(self.git("rev-parse", "HEAD"))
+
+    def test_reconcile_installed_invalidates_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=False)
+
+    def test_reconcile_installed_invalidates_superseded_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=True)
+
     def test_interrupted_install_reads_back_success_without_reinstalling(self):
         self.configure(launch_exit=1)
         self.reconcile()
@@ -695,7 +1048,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.reconcile()
         self.assert_installed(self.initial_commit)
         self.assertEqual(len(self.device_commands("install")), 1)
-        self.assertEqual(len(self.device_commands("apps")), 1)
+        self.assertEqual(len(self.device_commands("apps")), 2)
         self.assertEqual(len(self.device_commands("launch")), 2)
         self.assertFalse((self.state / "installed-apps.json").exists())
 
@@ -717,7 +1070,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(len(self.device_commands("install")), 1)
                 self.assertEqual(self.device_commands("launch"), [])
                 self.assertIn("install_attempt", self.saved_state())
-                self.assertFalse(self.saved_state().get("installed_version"))
+                self.assertEqual(self.saved_state()["installed_version"], "0")
                 self.assertFalse((self.state / "installed-apps.json").exists())
 
     def test_recovered_higher_device_version_forces_new_monotonic_build(self):
@@ -734,8 +1087,8 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.device_commands("install")), 2)
 
     def test_contradictory_readback_reinstalls_reverted_content(self):
-        for apps, minimum_version in (([], 1), ([{
-                "bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}], 100)):
+        for apps, minimum_version in (([{
+                "bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}], 100),):
             with self.subTest(apps=apps):
                 self.reset_delivery()
                 self.reconcile()
@@ -932,18 +1285,23 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state()["trusted_head"], revert)
         self.assertEqual(len(self.commands("xcodebuild")), 3)
 
-    def test_inherited_native_environment_is_pinned_to_daily_release_values(self):
-        self.env.update(ST3_FABRIC_PROOF="1", ST3_FABRIC_OFFLINE_DEBUG="1", APP_VARIANT="dev")
+    def test_inherited_native_environment_is_pinned_to_fabric_enabled_daily_release(self):
+        self.env.update(FRACTAL_FABRIC="0", ST3_FABRIC="0",
+                        FRACTAL_FABRIC_PROOF="1", ST3_FABRIC_PROOF="1",
+                        FRACTAL_FABRIC_OFFLINE_DEBUG="1", ST3_FABRIC_OFFLINE_DEBUG="1",
+                        APP_VARIANT="dev")
         self.reconcile()
         native = [entry["native_env"] for entry in self.commands()
-                  if entry["command"] in ("pnpm", "pod", "xcodebuild")]
+                  if entry["command"] in ("pnpm", "pod", "xcodebuild", "fabric-build")]
         self.assertTrue(native)
         for observed in native:
-            self.assertEqual(observed, {"APP_VARIANT": "daily", "ST3_FABRIC_PROOF": "0",
-                                        "ST3_FABRIC_OFFLINE_DEBUG": "0"})
+            self.assertEqual(observed, {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "1", "ST3_FABRIC": "1",
+                                        "FRACTAL_FABRIC_PROOF": "0", "ST3_FABRIC_PROOF": "0",
+                                        "FRACTAL_FABRIC_OFFLINE_DEBUG": "0", "ST3_FABRIC_OFFLINE_DEBUG": "0"})
         # The inherited values are not build inputs, so dropping them neither
         # rebuilds nor reinstalls.
-        for key in ("ST3_FABRIC_PROOF", "ST3_FABRIC_OFFLINE_DEBUG", "APP_VARIANT"):
+        for key in ("FRACTAL_FABRIC", "ST3_FABRIC", "FRACTAL_FABRIC_PROOF", "ST3_FABRIC_PROOF",
+                    "FRACTAL_FABRIC_OFFLINE_DEBUG", "ST3_FABRIC_OFFLINE_DEBUG", "APP_VARIANT"):
             del self.env[key]
         self.reconcile()
         self.assertEqual(self.outcomes()[-1], "unchanged")
@@ -1011,7 +1369,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                     self.assertLessEqual(len(new_installs), 1, message)
                     if new_installs:
                         app = Path(next(arg for arg in new_installs[0]["args"] if arg.endswith(".app")))
-                        built = self.git("rev-parse", (app / "smalltalk").read_text())
+                        built = self.git("rev-parse", (app / "fractal").read_text())
                         content = (self.app_trees(built), json.loads((app / "inputs.json").read_text()))
                         # Every install carries the most recently observed content.
                         self.assertEqual(content, expected, message)
@@ -1022,6 +1380,138 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                         # stays stuck behind a matching or superseded artifact.
                         self.assertEqual(phone, expected, message)
                         self.assert_installed(self.saved_state()["installed"])
+
+    def test_framework_hash_is_deterministic_and_content_addressed(self):
+        framework = self.root / FABRIC_FRAMEWORK
+        framework.mkdir(parents=True)
+        (framework / "z.a").write_bytes(b"rust")
+        (framework / "Info.plist").write_bytes(b"metadata")
+        original = framework_hash(self.root)
+        (framework / "z.a").unlink()
+        (framework / "z.a").write_bytes(b"rust")
+        os.utime(framework / "Info.plist", (1, 1))
+        self.assertEqual(framework_hash(self.root), original)
+        (framework / "z.a").write_bytes(b"changed")
+        self.assertNotEqual(framework_hash(self.root), original)
+        (framework / "z.a").write_bytes(b"rust")
+        (framework / "z.a").rename(framework / "a.a")
+        self.assertNotEqual(framework_hash(self.root), original)
+
+    def test_framework_hash_invalidates_build_and_native_cache(self):
+        self.reconcile("--build-only")
+        receipt_path = self.state / "artifacts" / self.initial_commit / "success.json"
+        original = json.loads(receipt_path.read_text())
+        checkout = self.state / "checkout"
+        self.assertEqual(original["fabric_framework_hash"], framework_hash(checkout))
+        self.assertEqual(self.saved_state()["observed"]["inputs"], original["build_inputs"])
+        self.reconcile("--build-only")
+        self.assertEqual(len(self.commands("fabric-build")), 1)
+        self.configure(framework_content="changed rust bridge")
+        (checkout / FABRIC_FRAMEWORK / "libfixture.a").write_text("changed rust bridge")
+        self.reconcile("--build-only")
+        changed = json.loads(receipt_path.read_text())
+        self.assertNotEqual(original["fabric_framework_hash"], changed["fabric_framework_hash"])
+        self.assertNotEqual(original["key"], changed["key"])
+        self.assertNotEqual(original["build_inputs"], changed["build_inputs"])
+        self.assertEqual(len(self.commands("pod")), 2)
+        self.assertEqual(len(self.commands("xcodebuild")), 2)
+        commands = [entry["command"] for entry in self.commands()]
+        self.assertLess(commands.index("fabric-build"), commands.index("pod"))
+        self.reconcile("--build-only")
+        self.assertEqual(len(self.commands("xcodebuild")), 2)
+
+    def test_missing_framework_fails_before_pods_or_linking(self):
+        self.configure(missing_framework=True)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+        self.assertEqual(self.commands("pod"), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual(self.device_commands("install"), [])
+        output = self.state / "artifacts" / self.initial_commit
+        self.assertFalse((output / "success.json").exists())
+        self.assertIn("Missing FractalFabricRust.xcframework", (output / "build.log").read_text())
+
+    def test_disabled_stub_fails_linkage_check_before_publishing(self):
+        self.configure(fabric_stub=True)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        self.assertEqual(self.commands("codesign"), [])
+        self.assertEqual(self.device_commands("install"), [])
+        output = self.state / "artifacts" / self.initial_commit
+        self.assertFalse((output / "success.json").exists())
+        self.assertIn("refusing the disabled stub", (output / "build.log").read_text())
+
+    def test_disabled_stub_is_refused_before_pending_or_retained_install(self):
+        for retained in (False, True):
+            with self.subTest(retained=retained):
+                self.reset_delivery()
+                self.reconcile("--build-only")
+                if retained:
+                    data = self.saved_state()
+                    del data["pending"]
+                    data["installed_version"] = "0"
+                    (self.state / "state.json").write_text(json.dumps(data))
+                # Model a snapshot published by an older updater without the build guard.
+                self.configure(fabric_stub=True)
+                self.reconcile()
+                event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+                self.assertEqual(event["outcome"], "install_refused")
+                self.assertEqual(event["reason"], "fabric_missing")
+                self.assertEqual(event["commit"], self.initial_commit)
+                self.assertNotIn("pending", self.saved_state())
+                self.assertNotIn("install_attempt", self.saved_state())
+                self.assertEqual(self.commands("xcrun"), [])
+                self.assertEqual(self.device_commands("install"), [])
+                self.assertEqual(self.device_commands("launch"), [])
+                receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+                self.assertFalse(receipt.exists())
+                self.reconcile()
+                self.assertEqual(self.outcomes()[-1], "build_failed")
+                self.assertEqual(self.commands("xcrun"), [])
+                self.assertEqual(len(self.commands("xcodebuild")), 2)
+
+    def test_disabled_stub_is_refused_before_install_recovery_readback(self):
+        self.reconcile("--build-only")
+        data = self.saved_state()
+        data["install_attempt"] = dict(data["pending"])
+        (self.state / "state.json").write_text(json.dumps(data))
+        self.configure(fabric_stub=True)
+        self.reconcile()
+        event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(event["outcome"], "install_refused")
+        self.assertEqual(event["reason"], "fabric_missing")
+        self.assertNotIn("pending", self.saved_state())
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.assertEqual(self.commands("xcrun"), [])
+        receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+        self.assertFalse(receipt.exists())
+
+    def test_disabled_stub_is_refused_before_installed_launch_retry(self):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.command_log.unlink()
+        self.configure(fabric_stub=True, launch_exit=0)
+        self.reconcile()
+        event = json.loads((self.state / "outcomes.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(event["outcome"], "install_refused")
+        self.assertEqual(event["reason"], "fabric_missing")
+        self.assertNotIn("pending", self.saved_state())
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.assertNotIn("installed_key", self.saved_state())
+        self.assertEqual(self.commands("xcrun"), [])
+        receipt = self.state / "artifacts" / self.initial_commit / "success.json"
+        self.assertFalse(receipt.exists())
+
+    def test_pending_artifact_with_real_bridge_installs(self):
+        self.reconcile("--build-only")
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        self.assertEqual(len(self.commands("nm")), 2)
+        self.assertEqual(len(self.device_commands("install")), 1)
+        self.assertEqual(len(self.device_commands("launch")), 1)
 
     def test_changed_build_inputs_rebuild_unchanged_revision_before_trusting_artifacts(self):
         self.reconcile("--build-only")
@@ -1237,7 +1727,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 inputs = json.loads((self.state / "build-cache" / "inputs.json").read_text())
                 self.assertEqual(inputs["js_env"]["EXPO_PUBLIC_FRACTAL_BUILD"], commit[:12])
                 self.assertEqual(inputs["js_env"]["EXPO_PUBLIC_ST3_BUILD"], commit[:12])
-                bundle = self.state / "artifacts" / commit / "smalltalk.app" / "main.jsbundle"
+                bundle = self.state / "artifacts" / commit / "fractal.app" / "main.jsbundle"
                 self.assertEqual(bundle.read_text(), commit[:12])
 
     def test_js_only_changes_reuse_native_cache_but_reset_inlined_js_transforms(self):
@@ -1278,6 +1768,69 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                           for entry in builds}, {str(derived)})
         self.assertEqual(self.device_commands("install"), [])
 
+    def test_source_inputs_are_republished_before_install_and_on_cached_builds(self):
+        self.reconcile("--build-only")
+        commands = self.commands()
+        names = [entry["command"] for entry in commands]
+        self.assertLess(names.index("nix"), names.index("node"))
+        self.assertLess(names.index("node"), names.index("pnpm"))
+        staged = self.state / "checkout/.devenv/pnpm-source-inputs/current/fixture.json"
+        self.assertEqual(json.loads(staged.read_text()), ["repos/effect-utils/packages/@overeng/utils"])
+        staged.unlink()
+        self.change_js("republish")
+        self.reconcile("--build-only")
+        self.assertTrue(staged.exists())
+        self.assertEqual(len(self.install_commands()), 1)
+        self.assertEqual(len(self.commands("node")), 2)
+
+    def test_missing_nix_fails_closed_with_actionable_log(self):
+        (self.tools / "nix").unlink()
+        # Hide every host Nix: the fixture directory supplies Git and no Nix.
+        (self.tools / "git").symlink_to(shutil.which("git", path=self.env["PATH"]))
+        self.env["PATH"] = os.pathsep.join((str(self.tools), "/usr/bin", "/bin"))
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("nix is required on PATH", log.read_text())
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+
+    def test_unpinned_megarepo_tool_is_refused_before_network_or_install(self):
+        self.write_source("flake.lock", json.dumps({"nodes": {"effect-utils": {"locked": {"rev": "main"}}}}))
+        commit = self.commit("Invalid CLI pin")
+        self.reconcile("--build-only")
+        self.assertEqual(self.commands("nix"), [])
+        self.assertEqual(self.install_commands(), [])
+        log = self.state / "artifacts" / commit / "build.log"
+        self.assertIn("must be a full commit SHA", log.read_text())
+
+    def test_publisher_failure_never_installs_or_builds(self):
+        self.configure(publish_exit=43)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+
+    def test_member_preparation_failure_never_installs_or_builds(self):
+        self.configure(member_exit=42)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual(self.saved_state().get("pending"), None)
+        events = [json.loads(line) for line in (self.state / "outcomes.jsonl").read_text().splitlines()]
+        self.assertEqual(events[-1]["reason"], "source_inputs_preparation_failed")
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("member apply failed", log.read_text())
+        self.assertNotIn("binary cache", log.read_text())
+
+    def test_workspace_toolchain_cache_miss_never_applies_or_builds(self):
+        self.configure(toolchain_exit=7)
+        self.reconcile("--build-only")
+        self.assertEqual(self.install_commands(), [])
+        self.assertEqual(self.commands("xcodebuild"), [])
+        self.assertEqual([entry["args"][0] for entry in self.commands("nix")], ["build"])
+        log = self.state / "artifacts" / self.initial_commit / "build.log"
+        self.assertIn("closure is not available in the binary cache", log.read_text())
+
     def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
         changes = (
@@ -1285,8 +1838,12 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
              json.dumps({"name": "@fractal/client", "version": "2.0.0", "dependencies": {}})),
             ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
-            ("package.json", (self.source / "package.json").read_text().replace("12.7.0", "12.7.1")),
+            ("package.json", (self.source / "package.json").read_text().replace("12.17.0", "12.17.1")),
             (".pnpmfile.cjs", "module.exports = { hooks: {} };\n"),
+            ("megarepo.lock", json.dumps({"version": 1, "members": {}, "test": "changed"})),
+            ("flake.lock", json.dumps({"nodes": {"effect-utils": {"locked": {"rev": "a" * 40}}}, "test": "changed"})),
+            ("pnpm-source-inputs.json", json.dumps({"sourceInputPaths": [
+                "repos/effect-utils/packages/@overeng/utils-dev"]})),
         )
         for count, (relative, contents) in enumerate(changes, start=1):
             with self.subTest(path=relative):
@@ -1338,7 +1895,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.install_commands()), 2)
         self.assertEqual(Path(self.install_commands()[-1]["cwd"]), checkout)
         self.assertEqual(len(self.prebuild_commands()), 1)
-        (checkout / "apps/ios/ios/smalltalk.xcworkspace").rmdir()
+        (checkout / "apps/ios/ios/fractal.xcworkspace").rmdir()
         self.change_js("missing-workspace")
         self.reconcile("--build-only")
         self.assertEqual(len(self.prebuild_commands()), 2)
@@ -1369,12 +1926,23 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.install_commands()), 2)
         self.assertEqual(len(self.prebuild_commands()), 4)
 
+    def test_stale_product_from_previous_app_identity_does_not_block_delivery(self):
+        products = self.state / "build-cache/derived/Build/Products/Release-iphoneos"
+        # A previous generated workspace can leave its product in persistent DerivedData.
+        legacy = products / "smalltalk.app"  # Historical product fixture for identity cutover.
+        legacy.mkdir(parents=True)
+        (legacy / "Info.plist").write_bytes(b"stale legacy product; never inspected")
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        self.assertTrue((self.state / "artifacts" / self.initial_commit / "fractal.app").is_dir())
+        self.assertTrue(legacy.is_dir())
+
     def test_failed_build_preserves_partial_cache_and_appends_retry_logs(self):
         self.configure(build_exit=65, artifact_on_failure=True)
         self.invoke()
         cache = self.state / "build-cache"
         first_inputs = json.loads((cache / "inputs.json").read_text())
-        product = cache / "derived/Build/Products/Release-iphoneos/smalltalk.app"
+        product = cache / "derived/Build/Products/Release-iphoneos/fractal.app"
         self.assertTrue((product / "Info.plist").exists())
         sentinel = cache / "derived/partial-cache-sentinel"
         sentinel.write_text("partial build cache")
@@ -1386,7 +1954,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.device_commands("launch"), [])
         artifact = self.state / "artifacts" / self.initial_commit
         self.assertFalse((artifact / "success.json").exists())
-        self.assertFalse((artifact / "smalltalk.app").exists())
+        self.assertFalse((artifact / "fractal.app").exists())
         self.assertEqual((artifact / "build.log").read_text().count("fixture build output"), 2)
         self.configure(build_exit=0)
         self.reconcile()
@@ -1401,14 +1969,14 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.configure(install_exit=1)
         self.invoke()
         first_app = Path(self.saved_state()["pending"]["app"])
-        first_bytes = (first_app / "smalltalk").read_bytes()
+        first_bytes = (first_app / "fractal").read_bytes()
         self.assertEqual(first_app.parent, self.state / "artifacts" / self.initial_commit)
         next_commit = self.change_js("snapshot-successor")
         self.configure(build_exit=65, artifact_on_failure=True)
         self.invoke("--build-only")
         # The superseded pending artifact is dropped; its snapshot stays intact.
         self.assertFalse(self.saved_state().get("pending"))
-        self.assertEqual((first_app / "smalltalk").read_bytes(), first_bytes)
+        self.assertEqual((first_app / "fractal").read_bytes(), first_bytes)
         self.assertEqual(len(self.device_commands("install")), 1)
         self.assertFalse((self.state / "artifacts" / next_commit / "success.json").exists())
         self.configure(build_exit=0)
@@ -1416,16 +1984,16 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         second_app = Path(self.saved_state()["pending"]["app"])
         self.assertEqual(second_app.parent, self.state / "artifacts" / next_commit)
         self.assertNotEqual(first_app, second_app)
-        self.assertNotEqual((second_app / "smalltalk").read_bytes(), first_bytes)
-        self.assertEqual((first_app / "smalltalk").read_bytes(), first_bytes)
-        shared_product = self.state / "build-cache/derived/Build/Products/Release-iphoneos/smalltalk.app/smalltalk"
-        self.assertEqual(shared_product.read_bytes(), (second_app / "smalltalk").read_bytes())
+        self.assertNotEqual((second_app / "fractal").read_bytes(), first_bytes)
+        self.assertEqual((first_app / "fractal").read_bytes(), first_bytes)
+        shared_product = self.state / "build-cache/derived/Build/Products/Release-iphoneos/fractal.app/fractal"
+        self.assertEqual(shared_product.read_bytes(), (second_app / "fractal").read_bytes())
         self.configure(install_exit=0)
         self.reconcile()
         self.assert_installed(next_commit)
         self.assertEqual(len(self.commands("xcodebuild")), 3)
         self.assertIn(str(second_app), self.device_commands("install")[-1]["args"])
-        self.assertEqual((first_app / "smalltalk").read_bytes(), first_bytes)
+        self.assertEqual((first_app / "fractal").read_bytes(), first_bytes)
 
     def test_native_plist_product_and_receipt_identify_exact_commit(self):
         for iteration in range(2):
@@ -1437,7 +2005,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(receipt["commit"], commit)
                 self.assertEqual(receipt["build_version"], build_version)
                 self.assertEqual(self.saved_state()["pending"]["build_version"], build_version)
-                native = self.state / "checkout/apps/ios/ios/smalltalk/Info.plist"
+                native = self.state / "checkout/apps/ios/ios/fractal/Info.plist"
                 product = Path(receipt["app"]) / "Info.plist"
                 for path in (native, product):
                     with path.open("rb") as info:
@@ -1460,7 +2028,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
                 self.assertEqual(self.device_commands("launch"), [])
                 artifact = self.state / "artifacts" / self.initial_commit
                 self.assertFalse((artifact / "success.json").exists())
-                self.assertFalse((artifact / "smalltalk.app").exists())
+                self.assertFalse((artifact / "fractal.app").exists())
                 self.assertIn("Built app has stale source identity", (artifact / "build.log").read_text())
 
     def test_stale_js_bundle_stamp_never_becomes_pending_or_installed(self):
@@ -1474,7 +2042,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.device_commands("launch"), [])
         artifact = self.state / "artifacts" / self.initial_commit
         self.assertFalse((artifact / "success.json").exists())
-        self.assertFalse((artifact / "smalltalk.app").exists())
+        self.assertFalse((artifact / "fractal.app").exists())
         self.assertIn("Built app embeds a stale build stamp", (artifact / "build.log").read_text())
         # The failed build must not record the inlined stamp, so the next
         # attempt resets the transform cache again instead of trusting it.

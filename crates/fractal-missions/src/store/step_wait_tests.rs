@@ -87,7 +87,7 @@ fn a_wait_stops_the_clock_a_resume_starts_it_and_the_deadline_ends_a_forgotten_w
 #[test]
 fn a_wait_needs_a_bounded_duration_and_a_reason_and_only_a_wait_takes_one() {
     let Waiting { store, subject, .. } = claimed_step();
-    let code = |result: Result<StepRunView, St3Error>| result.unwrap_err().code;
+    let code = |result: Result<StepRunView, FractalError>| result.unwrap_err().code;
     assert_eq!(
         code(store.work_action(&subject, "wait", &request("no-duration", Some("build slot"), None))),
         "invalid-wait"
@@ -221,4 +221,127 @@ fn a_resumed_wait_gives_back_what_it_did_not_use() {
             &request("wait-b", Some("merge queue"), Some(MAX_STEP_WAIT_MS - 6 * 60_000)),
         )
         .unwrap();
+}
+
+const EXEC_MISSION: &str = "version 2\nmission \"queued\" state=\"ready\" { goal \"Check.\"; step \"check\" timeout=\"1m\" { agentless; exec \"check\" { command \"true\"; restart \"never\" } } }";
+
+/// A working agentless step, its run, and the exec it declared for its first attempt, as the
+/// reconciler materializes it: owned by the step, with the step's attempt in its environment.
+fn exec_step(mission: &str) -> (Waiting, MissionRunView, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("exec-wait.sqlite3"), "node").unwrap();
+    let intent = crate::graph::parse_test_intent(mission, "node").unwrap();
+    let plan = store
+        .mission(&intent, IntentInput { kdl: mission.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &plan.subject_tokens, "queued-mission").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "queued".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "queued-run".into(),
+        })
+        .unwrap();
+    let subject = run.steps[0].subject.clone();
+    store.set_step_state(&subject, "working", None).unwrap();
+    let exec = declare_exec(&store, &run, &subject, "1");
+    (Waiting { _directory: directory, store, subject }, run, exec)
+}
+
+fn declare_exec(store: &Store, run: &MissionRunView, step: &str, attempt: &str) -> String {
+    let source = "version 2\nexec \"check\" { command \"true\"; restart \"never\" }";
+    let mut intent = crate::graph::parse_execution_intent(source, "node", &run.id).unwrap();
+    for desired in intent.subjects.values_mut() {
+        desired.owner_run = Some(run.subject.clone());
+        desired.owner_generation = Some(run.generation.clone());
+        desired.owner_step = Some(step.into());
+        let member = desired.member.as_mut().unwrap();
+        member.environment.insert("ST_ATTEMPT".into(), attempt.into());
+    }
+    let plan = store
+        .mission(&intent, IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &plan.subject_tokens, &format!("materialize-{attempt}")).unwrap();
+    intent.subjects.into_keys().next().unwrap()
+}
+
+fn exec_request(exec: &str, key: &str, reason: Option<&str>, wait_ms: Option<u64>) -> WorkRequest {
+    WorkRequest {
+        actor: Some(exec.into()),
+        incarnation: Some("launch".into()),
+        ..request(key, reason, wait_ms)
+    }
+}
+
+#[test]
+fn a_steps_own_exec_stops_and_restarts_its_clock_without_a_lease() {
+    let (Waiting { store, subject, .. }, _, exec) = exec_step(EXEC_MISSION);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+
+    let waiting = store
+        .work_action(&subject, "wait", &exec_request(&exec, "exec-wait", Some("build slot"), Some(60_000)))
+        .unwrap();
+    assert_eq!(waiting.status, "working");
+    assert_eq!(waiting.blocked_reason.as_deref(), Some("build slot"));
+    assert_eq!((waiting.claimant, waiting.claim_expires_at_unix_ms), (None, None));
+    assert_eq!(waiting.execution_started_at_unix_ms, None);
+    assert!(waiting.execution_paused_until_unix_ms.is_some());
+    let used = waiting.execution_elapsed_ms;
+    let record = store.latest_claim(&subject, Some("work.progress")).unwrap().unwrap();
+    assert_eq!(record.actor.as_deref(), Some(exec.as_str()));
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert_eq!(store.step_run(&subject).unwrap().unwrap().execution_elapsed_ms, used);
+
+    let resumed = store
+        .work_action(&subject, "resume", &exec_request(&exec, "exec-resume", None, None))
+        .unwrap();
+    assert_eq!(resumed.blocked_reason, None);
+    assert!(resumed.execution_started_at_unix_ms.is_some());
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    assert!(store.step_run(&subject).unwrap().unwrap().execution_elapsed_ms > used);
+
+    // A wait the exec never resumes ends at its deadline, so a hung exec still times out.
+    store
+        .work_action(&subject, "wait", &exec_request(&exec, "exec-forgotten", Some("merge queue"), Some(30)))
+        .unwrap();
+    let before = store.step_run(&subject).unwrap().unwrap().execution_elapsed_ms;
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let ended = store.step_run(&subject).unwrap().unwrap();
+    assert!(ended.execution_started_at_unix_ms.is_some());
+    assert!(ended.execution_elapsed_ms > before + 20);
+}
+
+#[test]
+fn only_the_exec_declared_for_the_working_attempt_moves_the_clock_and_nothing_else() {
+    let code = |result: Result<StepRunView, FractalError>| result.unwrap_err().code;
+    let (Waiting { store, subject, .. }, run, exec) = exec_step(EXEC_MISSION);
+    let wait = |actor: &str, key: &str| {
+        store.work_action(&subject, "wait", &exec_request(actor, key, Some("build slot"), Some(60_000)))
+    };
+    assert_eq!(code(wait("exec/elsewhere/check", "foreign")), "work-not-available");
+    for action in ["claim", "progress", "complete", "fail", "release", "renew"] {
+        assert_eq!(
+            code(store.work_action(&subject, action, &exec_request(&exec, action, None, None))),
+            "exec-work-action"
+        );
+    }
+    store.set_step_state(&subject, "ready", None).unwrap();
+    assert_eq!(code(wait(&exec, "not-working")), "work-not-running");
+    store.set_step_state(&subject, "working", None).unwrap();
+    declare_exec(&store, &run, &subject, "2");
+    assert_eq!(code(wait(&exec, "next-attempt")), "stale-work-attempt");
+    assert!(store.claims_for(&subject, Some("work.progress")).unwrap().is_empty());
+
+    // A step with a worker keeps its clock with that worker's lease.
+    let assigned = EXEC_MISSION.replace("agentless;", "assigned-to \"agent/node.worker\";");
+    let (Waiting { store, subject, .. }, _, exec) = exec_step(&assigned);
+    assert_eq!(
+        code(store.work_action(&subject, "wait", &exec_request(&exec, "worker", Some("build slot"), Some(60_000)))),
+        "work-not-available"
+    );
 }

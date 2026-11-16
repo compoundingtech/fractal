@@ -4,7 +4,8 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import type { Key } from 'react-aria-components'
 import { SidebarTree, type SidebarTreeItem } from './SidebarTree'
-import { SidebarAgentRow, SidebarQueryContext } from './SidebarAgentRow'
+import { SidebarAgentRow } from './SidebarAgentRow'
+import { SidebarQueryContext } from './rowPresentation.tsx'
 import { matchPositions, type SidebarAgentRow as Row } from './model'
 import { lightTheme } from '../composition-theme'
 import { borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
@@ -185,6 +186,7 @@ function HighlightProbe() {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar tree',
   component: SidebarTree,
   parameters: { scenario: { _tag: 'contract-fixture', reason: "Identity-retained synthetic rows and calibrated negative controls isolate filter rendering and keystroke cost." },
@@ -193,6 +195,14 @@ const meta = {
   },
 } satisfies Meta
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AgentRowNamesSurviveReposition:contract-fixture',
+  'FilterBehavior:contract-fixture',
+  'FilterHighlightsWithoutRowRenders:contract-fixture',
+  'FilterKeystrokeToPaint:contract-fixture',
+]
 type Story = StoryObj
 
 const read = (root: HTMLElement, key: 'filterSamples' | 'referenceSamples'): readonly Sample[] => JSON.parse(root.dataset[key] ?? '[]') as Sample[]
@@ -302,6 +312,17 @@ async function playFilterProbes(canvasElement: HTMLElement, benchmark: boolean) 
     const filter = [...production.samples, ...restored.samples]
     const reference = [...production.reference, ...restored.reference]
     root.dataset.pooledRatio = String(p90(filter) / p90(reference))
+    // Publish completed measurements before the assertion. Storybook 10.6.1 drops
+    // reporter results when play throws; this synchronous event survives that failure.
+    const [theme, width] = root.dataset.testid!.slice('filter-probe-'.length).split('-')
+    window.dispatchEvent(new CustomEvent('kit-filter-benchmark', { detail: {
+      width: Number(width), theme,
+      filterP90Milliseconds: p90(filter),
+      referenceP90Milliseconds: p90(reference),
+      pooledRatio: Number(root.dataset.pooledRatio),
+      busyControlRatio: Number(root.dataset.busyRatio),
+      threshold: ratioBudget,
+    } }))
     await assertRatio(filter, reference)
   }
 }

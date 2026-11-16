@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "mail-redelivery-canaries can be signed locally: scripts/ci-local runs a scripts/ci-linux stage as its CI job does, in a scratch home with no st, GitHub or SSH agent variable; st-test runs it when named or with --all (a heavy check, never on the pre-push hook's default run); the lane and the host and agent levels (lane-bound, pull requests only) admit its notes.",
+  "replay": {
+    "status": "none",
+    "detail": "No record or signature format changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "A new lane entry and by_level entries in existing files; no new keys."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "A host- or agent-signed note for mail-redelivery-canaries now counts on pull requests when it was signed against the base's lane definition; the check stays in shadow (enforce false) until its own flip. The merge queue runs the stage as before."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "st-test's default selection is unchanged; the new check runs only when asked for."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None: a host signs it with its existing key (scripts/st-test --check mail-redelivery-canaries --push origin)."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Remove the by_level entries; nothing else depends on them."
+  }
+}

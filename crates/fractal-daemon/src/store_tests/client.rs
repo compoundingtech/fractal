@@ -1,4 +1,4 @@
-//! Client tests that serve the real API on a socket; they live in st3-daemon because the API does.
+//! Client tests that serve the real API on a socket; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports)]
 
@@ -104,11 +104,14 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     let socket = directory.path().join("st3.sock");
     let store = Arc::new(crate::store::Store::open_memory("message-retry").unwrap());
     let state = crate::api::AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
         notify: Arc::new(tokio::sync::Notify::new()),
         event_notify: tokio::sync::watch::channel(0).0,
         node: "message-retry".into(),
+        api_socket: directory.path().join("api.sock"),
         state_dir: directory.path().into(),
         pty_root: directory.path().join("pty"),
         pty_binary: "pty".into(),
@@ -117,6 +120,9 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
@@ -141,14 +147,15 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
         tokio::task::yield_now().await;
     }
     let request = MessageSendRequest {
-        idempotency_key: "message-retry-accepted-001".into(),
-        from: "person/ada".into(),
-        to: "agent/example/worker".into(),
-        content: "Hello once".into(),
-        title: Some("A greeting".into()),
-        in_reply_to: None,
-        tags: vec!["example".into()],
-        attachments: Vec::new(),
+    owner: None,
+    idempotency_key: "message-retry-accepted-001".into(),
+    from: "person/ada".into(),
+    to: "agent/example/worker".into(),
+    content: "Hello once".into(),
+    title: Some("A greeting".into()),
+    in_reply_to: None,
+    tags: vec!["example".into()],
+    attachments: Vec::new(),
     };
     let mut client = fast_client(Endpoint::Unix(socket));
     client.deadlines.request = Duration::from_millis(200);
@@ -187,7 +194,11 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     server.abort();
 }
 
-#[tokio::test]
+// The clock is paused, so time passes only while every task waits on a timer. The client's
+// connect and request deadlines are then reached only once the server's handler has taken the
+// attempt and sleeps, never because a loaded host has not yet run this runtime's server task:
+// on the wall clock such a miss sent one request, or none, and the count could never reach 2.
+#[tokio::test(start_paused = true)]
 async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
@@ -213,14 +224,15 @@ async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
     }
     let error = fast_client(Endpoint::Unix(socket))
         .send_message(&MessageSendRequest {
-            idempotency_key: "retry-this-key".into(),
-            from: "person/ada".into(),
-            to: "agent/example/worker".into(),
-            content: "Hello".into(),
-            title: None,
-            in_reply_to: None,
-            tags: vec![],
-            attachments: Vec::new(),
+        owner: None,
+        idempotency_key: "retry-this-key".into(),
+        from: "person/ada".into(),
+        to: "agent/example/worker".into(),
+        content: "Hello".into(),
+        title: None,
+        in_reply_to: None,
+        tags: vec![],
+        attachments: Vec::new(),
         })
         .await
         .unwrap_err()
@@ -235,7 +247,11 @@ async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
     server.abort();
 }
 
-#[tokio::test]
+// The clock is paused, so time passes only while every task waits on a timer. The client's 30 ms
+// request deadline is then reached only by a daemon that does not answer, never by a loaded host
+// that has not yet run this runtime's server task: one such miss is a deadline gap, and the
+// follow backoff waits 5 to 15 s after it, past the read's bound below.
+#[tokio::test(start_paused = true)]
 async fn follow_reads_wait_for_a_typed_connect_outage_with_daemon_wait_zero() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
@@ -506,7 +522,7 @@ async fn a_terminal_attachment_reconnects_across_a_temporary_gateway_restart() {
             get(move |websocket: WebSocketUpgrade| {
                 let attempt = route_stream_attempts.fetch_add(1, Ordering::SeqCst);
                 async move {
-                    websocket.protocols(["st3.terminal.v1"]).on_upgrade(
+                    websocket.protocols(["fractal.terminal.v1"]).on_upgrade(
                         move |mut socket| async move {
                             if attempt == 0 {
                                 let _ = socket.close().await;

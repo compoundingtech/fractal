@@ -87,6 +87,10 @@ async fn a_missing_document_says_whether_it_is_unknown_or_not_synced() {
         let refused = get(&state, invalid).await.unwrap_err();
         assert_eq!(refused.code, "invalid-document-reference", "{invalid}");
     }
+    // Both codes reach clients as they are: a client tells "not synced yet" from "not found".
+    for code in ["document-not-synced", "invalid-document-reference"] {
+        assert_eq!(super::client_error_code(Some(code)), code);
+    }
 }
 
 #[tokio::test]
@@ -128,14 +132,15 @@ async fn a_message_names_its_content_document_and_the_links_in_its_text() {
         accept_message_receipt(
             &state,
             MessageSendRequest {
-                idempotency_key: key.into(),
-                from: "person/alex".into(),
-                to: "agent/garden/worker".into(),
-                content,
-                title: None,
-                in_reply_to: None,
-                tags: Vec::new(),
-                attachments: Vec::new(),
+            owner: None,
+            idempotency_key: key.into(),
+            from: "person/alex".into(),
+            to: "agent/garden/worker".into(),
+            content,
+            title: None,
+            in_reply_to: None,
+            tags: Vec::new(),
+            attachments: Vec::new(),
             },
             None,
             None,

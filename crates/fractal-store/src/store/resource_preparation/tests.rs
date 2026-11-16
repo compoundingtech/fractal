@@ -35,9 +35,27 @@ fn a_second_connection_commit_is_detected_by_the_same_writer_data_version() {
     assert!(!fence.current(&store, &writer, &prepared));
 }
 
+#[test]
+fn preparation_fence_accepts_only_exact_native_queue_notifier_definitions() {
+    let directory = tempfile::tempdir().unwrap();
+    let names = ["preparation_work_pending", "preparation_work_dirty"].into_iter()
+        .chain(custom::work_notifier_definitions().keys().map(String::as_str));
+    for name in names {
+        let store = Store::open(&directory.path().join(format!("{name}.sqlite")), "example-notifier-fence").unwrap();
+        let writer = store.connection.write();
+        assert!(temporary_schema_safe(&writer), "the installed body-free notifiers are eligible");
+        writer.execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-hf18af68df655 owner=fractal_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER temp.{name};
+             CREATE TEMP TRIGGER {name} AFTER INSERT ON main.local_resource_preparation_dirty
+             BEGIN SELECT 1; END;"
+        )).unwrap();
+        assert!(!temporary_schema_safe(&writer), "a trusted name cannot admit an altered notifier");
+    }
+}
+
 // Use the public client admission and the same local AUTOINCREMENT publication as log_diet.
 // Warm up its actor key before pinning so a key-creation failure cannot imitate the lock.
-fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), St3Error> {
+fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), FractalError> {
     let subject = "agent/invented.sequence-writer";
     store.append_client_claim_outcome(&ClaimInput {
         subject: subject.into(),
@@ -64,7 +82,7 @@ fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool
     })
 }
 
-fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), St3Error> {
+fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), FractalError> {
     // A separate thread exercises an unrelated caller, not a write through the pinned reader.
     // Join before returning; no task or guard escapes on the error path.
     std::thread::scope(|scope| {
@@ -77,7 +95,7 @@ fn concurrent_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, boo
 
 #[test]
 fn a_shared_cache_frontier_blocks_an_unrelated_sequence_publication_but_wal_does_not() {
-    let memory = Store::open_memory("sequence-lock").unwrap();
+    let memory = Store::open_shared_memory("sequence-lock").unwrap();
     let directory = tempfile::tempdir().unwrap();
     let file = Store::open(&directory.path().join("claims.sqlite3"), "sequence-lock").unwrap();
     for store in [&memory, &file] {
@@ -105,7 +123,7 @@ fn a_shared_cache_frontier_blocks_an_unrelated_sequence_publication_but_wal_does
 
 #[test]
 fn preparation_never_pins_shared_cache_before_an_unrelated_publication() {
-    let memory = Store::open_memory("preparation-lock").unwrap();
+    let memory = Store::open_shared_memory("preparation-lock").unwrap();
     let directory = tempfile::tempdir().unwrap();
     let file = Store::open(&directory.path().join("claims.sqlite3"), "preparation-lock").unwrap();
     for store in [&memory, &file] {

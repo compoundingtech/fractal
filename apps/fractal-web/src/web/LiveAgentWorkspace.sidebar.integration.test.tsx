@@ -7,20 +7,26 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
-import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/read'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
+import { initialFeedSync, type FeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import * as dataHooks from '../data/react.tsx'
 import * as rowProjection from './sidebarRow.ts'
 import * as treeProjection from './liveSidebarTree.ts'
 import * as folderComponents from '../shell/AgentFolders.tsx'
-import type { ConnectionState } from '@fractal/sdk/effect'
+import type { ConnectionState } from '@fractal/sdk/read'
+import { within } from 'storybook/test'
+import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
 
-vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
+// Vitest hoists the factory above static imports; load the shared mock inside it.
+vi.mock('@stylexjs/stylex', async () => ({
+  ...await import('../testStylex.ts'),
+  props: (...styles: unknown[]) => ({ 'data-style-contract': JSON.stringify(Object.assign({}, ...styles.filter(style => typeof style === 'object' && style !== null))) }),
+}))
 
 const gateway = 'gateway.example.invalid'
 const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example-primary', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' }))
@@ -74,9 +80,140 @@ const mount = async (width: number) => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
 }
-const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
+const sidebar = () => host.querySelector<HTMLElement>('aside[aria-label="Agents"]') ?? host.querySelector<HTMLElement>('[role="dialog"][aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const band = () => host.querySelector('[data-connection-state]')
+
+it('connects the responsive drawer toggle to its dialog while retaining narrow agent details', async () => {
+  registry.set(agents, observed({ value: [agent] }))
+  await mount(800)
+  const toggle = within(host).getByRole('button', { name: 'Expand sidebar' })
+  expect(toggle.getAttribute('aria-haspopup')).toBe('dialog')
+  expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  expect(toggle.hasAttribute('aria-controls')).toBe(false)
+  expect(within(host).getByRole('button', { name: 'Agent details' })).not.toBeNull()
+  await act(async () => toggle.click())
+  const dialog = within(host).getByRole('dialog', { name: 'Agents' })
+  expect(dialog.id).toBe(toggle.getAttribute('aria-controls'))
+  expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  expect(within(dialog).getByRole('navigation', { name: 'Agent roster' })).not.toBeNull()
+})
+
+it('names a child mission by the hydrated title it paints rather than the agent work label', async () => {
+  const primary: Mission = { ...fixtureMissions[0]!, id: 'mission/example/primary', title: 'Primary mission' }
+  const child: Mission = { ...fixtureMissions[0]!, id: 'mission/example/release', title: 'Release checks' }
+  const values = [primary, child]
+  const missions = Atom.make<Feed<readonly Mission[]>>(observed({ value: values })).pipe(Atom.keepAlive)
+  const missionsSync = Atom.make<FeedSync<readonly Mission[]>>({
+    last: Option.some({ value: values, observedAt: 2000 }),
+    sync: { status: { _tag: 'Live', since: 2000 }, observedAt: 2000 },
+  }).pipe(Atom.keepAlive)
+  source = { ...source, missions, sync: { ...source.sync!, missions: missionsSync } }
+  const seat = openAgent(decodeUnknownSync(Agent)({
+    kind: 'agent', id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
+    runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
+    blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-20T12:00:00Z',
+    current_work: [
+      { id: 'work/example/primary', mission_id: primary.id, mission_run_id: 'mission-run/example/primary', path: 'primary', title: 'Primary task', state: 'claimed', since: '2026-10-20T12:00:00Z' },
+      { id: 'work/example/release', mission_id: child.id, mission_run_id: 'mission-run/example/release', path: 'release', title: 'Run tests', state: 'claimed', since: '2026-10-20T12:00:00Z' },
+    ],
+  }))
+  registry.set(agents, observed({ value: [seat] }))
+  await mount(1440)
+  const content = roster().querySelector<HTMLElement>(`[data-mission-child="${child.id}"]`)!
+  expect(content.querySelector('[data-row-column="title"]')?.textContent).toBe(child.title)
+  expect(content.closest('[role="row"]')?.getAttribute('aria-label')).toMatch(/^Release checks, Mission/)
+})
+
+it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).flatMap(scheme =>
+  (['missions', 'attention'] as const).map(family => ({ width, scheme, family })))))
+('retains $family freshness and distinguishes missing mission info at $width $scheme', async ({ family, width, scheme }) => {
+  window.localStorage.setItem('wf.ui@1', JSON.stringify({ version: 1, entries: {
+    'round2.scheme': { version: 1, value: scheme, clock: 1, writer: 'mission-test' },
+  } }))
+  const mission = fixtureMissions[0]!
+  const runId = 'mission-run/example/review'
+  const hydrated: Mission = { ...mission, run_generations: {}, run_details: [{
+    ...mission.run_details![0]!, id: runId, generation_id: undefined, progress: { done: 2, total: 5 },
+  }] }
+  const seat = openAgent(decodeUnknownSync(Agent)({
+    kind: 'agent', id: 'agent/example-worker', name: 'Worker', host_id: 'host/example-worker',
+    runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'working',
+    blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-20T12:00:00Z',
+    current_work: [{ id: 'work/example/review', mission_id: mission.id, mission_run_id: runId,
+      path: 'review', title: 'Review changes', state: 'claimed', since: '2026-10-20T12:00:00Z' }],
+  }))
+  const question: Attention = { ...fixtureAttention[0]!, attention_kind: 'agent-request', state: 'open',
+    actions: ['work.done'], conversation_id: seat.id, detail: 'Ship the reviewed change?', update: undefined }
+  const missionValues = [hydrated]
+  const attentionValues = [question]
+  const missions = Atom.make<Feed<readonly Mission[]>>(observed({ value: missionValues })).pipe(Atom.keepAlive)
+  const attention = Atom.make<Feed<readonly Attention[]>>(observed({ value: attentionValues })).pipe(Atom.keepAlive)
+  const missionsSync = Atom.make<FeedSync<readonly Mission[]>>({
+    last: Option.some({ value: missionValues, observedAt: 2000 }),
+    sync: { status: { _tag: 'Live', since: 2000 }, observedAt: 2000 },
+  }).pipe(Atom.keepAlive)
+  const attentionSync = Atom.make<FeedSync<readonly Attention[]>>({
+    last: Option.some({ value: attentionValues, observedAt: 3000 }),
+    sync: { status: { _tag: 'Live', since: 3000 }, observedAt: 3000 },
+  }).pipe(Atom.keepAlive)
+  source = { ...source, missions, attention, sync: { ...source.sync!, missions: missionsSync, attention: attentionSync } }
+  registry.set(agents, observed({ value: [seat] }))
+  await mount(width)
+  if (width === 390) {
+    const opener = host.querySelector<HTMLButtonElement>('button[aria-label="Expand sidebar"]')!
+    expect(opener).not.toBeNull()
+    await act(async () => opener.click())
+  }
+  const row = () => roster().querySelector('[data-wf-agent-ref="agent/example-worker"]')!.closest('[role="row"]')!
+  const expected = `Worker, Working, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps, Waiting for you: Ship the reviewed change?`
+  expect(row().getAttribute('aria-label')).toBe(expected)
+  expect(row().querySelector('[data-mission-progress="2/5"]')).not.toBeNull()
+  expect(row().querySelector('[data-row-field="host"]')).toBeNull()
+  await act(async () => {
+    if (family === 'missions') {
+      registry.set(missions, observed({ value: missionValues, freshness: 'stale' }))
+      registry.set(missionsSync, { ...registry.get(missionsSync),
+        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: 4000 } })
+    } else {
+      registry.set(attention, observed({ value: attentionValues, freshness: 'stale' }))
+      registry.set(attentionSync, { ...registry.get(attentionSync),
+        sync: { status: { _tag: 'Stale', reason: { _tag: 'Unknown' } }, observedAt: 4000 } })
+    }
+  })
+  expect(row().getAttribute('aria-label')).toBe(`${expected}, mission info may be out of date`)
+  expect(row().querySelector('[data-mission-info="stale"]')).not.toBeNull()
+  expect(row().querySelector('[data-mission-updated-at="2000"]')).not.toBeNull()
+  await act(async () => {
+    const sync = { status: { _tag: 'Failed', cause: { _tag: 'Unknown' } }, observedAt: 4500 } as const
+    if (family === 'missions') registry.set(missionsSync, { ...registry.get(missionsSync), sync })
+    else registry.set(attentionSync, { ...registry.get(attentionSync), sync })
+  })
+  expect(row().getAttribute('aria-label')).toBe(`${expected}, mission info may be out of date`)
+  expect(row().querySelector('[data-mission-info="failed"]')).not.toBeNull()
+  expect(row().querySelector('[data-mission-updated-at="2000"]')).not.toBeNull()
+  await act(async () => {
+    const missing = { _tag: 'Unavailable', reason: 'failed', detail: 'Follow failed before a value was available' } as const
+    if (family === 'missions') {
+      registry.set(missions, missing)
+      registry.set(missionsSync, { ...registry.get(missionsSync), last: Option.none() })
+    } else {
+      registry.set(attention, missing)
+      registry.set(attentionSync, { ...registry.get(attentionSync), last: Option.none() })
+    }
+  })
+  expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
+  expect(row().querySelector('[data-mission]')).toBeNull()
+  const warning = row().querySelector('[data-mission-unavailable]')!
+  expect(warning.textContent).toContain('Mission info unavailable')
+  expect(warning.querySelector('svg')).not.toBeNull()
+  expect(warning.closest('button')).toBeNull()
+  expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
+  await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
+  expect(row().getAttribute('aria-label')).toBe('Worker, Working')
+  expect(row().querySelector('[data-mission-unavailable], [data-mission]')).toBeNull()
+  expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
+})
 
 it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {
   if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
@@ -204,17 +341,18 @@ it('marks retained live-feed rows stale on a connection-only transition', async 
   const status = () => row().querySelector('[data-row-field="status"] svg')!.getAttribute('aria-label')!
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('Idle;')
+  // A live mark says the state alone; the qualifier appears only once the observation is not live.
+  expect(status()).toBe('Idle')
   await act(async () => registry.set(connection, { _tag: 'Connecting', attempt: 1 }))
   expect(registry.get(agents)).toBe(retained)
   expect(freshness()).toBe('stale')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Last verified · Idle')
-  expect(status()).toContain('Last verified · Idle;')
+  expect(status()).toContain('Last verified · Idle; stale observation')
   expect(status()).toContain('stale observation')
   await act(async () => registry.set(connection, { _tag: 'Live' }))
   expect(freshness()).toBe('live')
   expect(row().getAttribute('aria-label')).toContain('Example Agent, Idle')
-  expect(status()).toContain('live observation')
+  expect(status()).toBe('Idle')
 })
 
 it('refreshes sidebar activity labels at their exact second and minute boundaries', async () => {
@@ -274,7 +412,7 @@ it('reveals a slightly future activity timestamp when only the leaf clock catche
   }
 })
 
-it('reveals a future status boundary in ClockedThreadHeader without rendering the header projection', async () => {
+it('keeps a calm agent\'s status, and its clock, out of ClockedThreadHeader without rendering the header projection', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
   const at = '1970-01-01T00:00:05.500Z'
@@ -287,9 +425,11 @@ it('reveals a future status boundary in ClockedThreadHeader without rendering th
     const header = host.querySelector('section[aria-label="Agent workspace"] header')!
     expect(header).not.toBeNull()
     const count = projectedRows.mock.calls.length
+    // Suspended is calm: no mark beside the title, so no status clock there either, before or after its boundary.
+    expect(header.querySelector('[data-status]')).toBeNull()
     expect(header.querySelector('time')).toBeNull()
     await act(async () => registry.set(now, 6000))
-    expect(header.querySelector('time')?.textContent).toBe('0s')
+    expect(header.querySelector('time')).toBeNull()
     expect(projectedRows).toHaveBeenCalledTimes(count)
   } finally {
     projectedRows.mockRestore()
@@ -333,6 +473,16 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
     expect(band()?.getAttribute('data-connection-state')).toBe('reconnecting')
     expect(sidebar().contains(band())).toBe(false)
     expect(host.textContent).not.toContain(gateway)
+  })
+
+  it('shows the offline band outside the sidebar when the network goes offline despite a live observation', async () => {
+    const network = Atom.make({ _tag: 'Offline' } as const)
+    source = { ...source, network }
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(band()?.getAttribute('data-connection-state')).toBe('offline')
+    expect(sidebar().contains(band())).toBe(false)
+    expect(sidebar().querySelector('footer [role="status"]')).toBeNull()
   })
 
   it('removes the waiting notice and skeleton as soon as roster rows are published', async () => {
@@ -412,8 +562,10 @@ describe('shipped live sidebar search', () => {
     await mount(1440)
     const rowName = () => roster().querySelector('[role="row"][data-sidebar-tree-key="agent/example"]')?.getAttribute('aria-label')
     expect(rowName()).toBe('Example Agent, Idle')
+    expect(roster().querySelector('[data-subagent-count]')).toBeNull()
     await act(async () => registry.set(agents, { _tag: 'Observed', value: [agent], freshness: 'stale' }))
     expect(rowName()).toBe('Example Agent, Last verified · Idle')
+    expect(roster().querySelector('[data-subagent-count]')).toBeNull()
   })
 })
 
@@ -435,15 +587,61 @@ describe('workspace overlays', () => {
       // RAC reserves vertical arrows for row navigation, even from a row control.
       trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }))
     })
-    const menu = document.querySelector('[role="menu"]')
+    const menu = await within(document.body).findByRole('menu')
     expect(menu).not.toBeNull()
     expect(host.querySelector('[data-testid="live-agent-workspace"]')!.contains(menu)).toBe(true)
   })
 })
 
+describe('responsive agent navigation', () => {
+  it.each([440, 700])('starts closed below 900px and opens a minimum-width modal at %ipx', async width => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(within(host).queryByRole('complementary', { name: 'Agents' })).toBeNull()
+    expect(host.querySelector('[data-resizer="live-agent-sidebar"]')).toBeNull()
+    const opener = within(host).getByRole('button', { name: 'Expand sidebar' })
+    await act(async () => opener.click())
+    const dialog = within(host).getByRole('dialog', { name: 'Agents' })
+    const workspace = within(host).getByTestId('thread-header')
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).not.toBeNull()
+    expect(dialog.closest('[inert], [aria-hidden="true"]')).toBeNull()
+    expect(sidebar().getAttribute('data-sidebar-presentation')).toBe('drawer')
+    expect(JSON.parse(dialog.getAttribute('data-style-contract')!).width).toBe('min(320px, calc(100vw - 40px))')
+    await act(async () => within(host).getByRole('button', { name: 'Close agents' }).click())
+    expect(within(host).queryByRole('complementary', { name: 'Agents' })).toBeNull()
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).toBeNull()
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', ctrlKey: true, bubbles: true })) })
+    const reopened = within(host).getByRole('dialog', { name: 'Agents' })
+    expect(reopened.getAttribute('aria-modal')).toBe('true')
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).not.toBeNull()
+  })
+
+  it.each([900, 1440])('keeps a minimum-width dock and resize floor at %ipx', async width => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(sidebar().getAttribute('data-sidebar-presentation')).toBe('dock')
+    expect(Number.parseFloat(sidebar().style.width)).toBeGreaterThanOrEqual(240)
+    expect(within(host).getByRole('separator', { name: 'Agent sidebar width' }).getAttribute('aria-valuemin')).toBe('240')
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it.each([[899, 'Close agents'], [900, 'Collapse agents']] as const)('gives the drawer and the dock one header at %ipx', async (width, collapse) => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    if (width < 900) await act(async () => within(host).getByRole('button', { name: 'Expand sidebar' }).click())
+    const header = sidebar().querySelector<HTMLElement>('[data-sidebar-header]')!
+    expect(header).not.toBeNull()
+    // Collapse leads, then the wordmark, then the alerts: no separate drawer title or trailing close.
+    expect(header.querySelector('button')!.getAttribute('aria-label')).toBe(collapse)
+    expect(header.querySelector('strong')!.textContent).toBe('Fractal')
+    expect(sidebar().querySelectorAll(':scope > header').length).toBe(1)
+  })
+})
+
 // Remembered machines live in module state shared across tests; keep these after the suites that expect an unfiltered roster.
 describe('shipped live sidebar Show filter', () => {
-  it('filters Waiting for answer from st questions only and keeps the persisted query across remount', async () => {
+  it('filters Waiting for answer from Fractal questions only and keeps the persisted query across remount', async () => {
     registry.set(agents, observed({ value: [
       { ...agent, id: 'agent/asker', name: 'Asker', host_id: Option.some('host/host-b'), blocked_on: Option.some('human'), ask: Option.some('question') },
       { ...agent, id: 'agent/permission', name: 'Permission', host_id: Option.some('host/host-b'), blocked_on: Option.some('human'), ask: Option.some('permission') },

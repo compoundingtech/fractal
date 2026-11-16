@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add an unwired web sidebar membership paging reducer and read adapter with complete-set publication and bounded frontier resets.",
+  "replay": { "status": "none", "detail": "The new reducer is not connected to runtime state or stored data." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rule or fleet coordination change." },
+  "compatibility": { "status": "none", "detail": "Existing web behavior and wire requests are unchanged; the unwired adapter refuses missing authoritative membership epochs." },
+  "downtime": { "status": "none", "detail": "No deployment or restart required." },
+  "manual": { "status": "none", "detail": "No upgrade steps required; activation awaits the authoritative membership read contract." },
+  "recovery": { "status": "none", "detail": "Revert the unwired module and tests; no persisted state or active behavior requires rollback." }
+}

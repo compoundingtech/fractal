@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "otel_export::replication_projection_is_linked_root_only_for_new_data waits for the daemon's first checkpoint seal before its first replication receive. The daemon seals that checkpoint in the background just after it starts. When the seal committed while the first receive was projecting, it moved the store past that projection's target, so the projection stayed deferred. The duplicate receive then projected again with a root span of its own, and the test counted two projection roots (left: 2), about once in 240 loaded runs.",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage or schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, permission or trust change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, CLI or client change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing runs differently on installed machines."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit."
+  }
+}

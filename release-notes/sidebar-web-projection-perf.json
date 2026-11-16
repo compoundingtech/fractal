@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cache inactive Sidebar membership projection indexes before per-input planning",
+  "replay": {"status": "none", "detail": "Journal replay and action identities are unchanged."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "The unwired planner consumes a complete validated projection. All callers use the indexed contract. The bounded single-entry cache copies primitive arrangement identity/revision, membership frontier, scope, catalog revision and presentation revision keys. Hosts supply resolved.parents directly: each lookup checks completeness and parent values for at most 1024 folders, never scanning members on a valid hit. Invalidations delegate to full projection, which validates duplicate and wrong-container memberships before reporting missing resolved parents, matching Rust precedence. Incomplete or refused projections are never cached. Unrelated global snapshot writes retain the projection."},
+  "downtime": {"status": "none", "detail": "No active Sidebar wiring changes."},
+  "manual": {"status": "none", "detail": "FRACTAL_SIDEBAR_PERF=1 opts into warm cached projection plus planning plus pending-state p95 <=4 ms and <=2x equivalent v1 component work; cold projection p50/p95 is reported separately. The v1 comparison includes production projection, move planning and optimistic arrangement update. Browser rendering, next-frame presentation and D-dependent real socket acceptance remain unmeasured."},
+  "recovery": {"status": "none", "detail": "The cache is derived, in-memory and single-entry; no migration or rollback action is needed."}
+}

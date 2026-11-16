@@ -348,20 +348,26 @@ async fn watched_ref_discards_inflight_results_even_after_cadence_returns_to_def
         tokio::time::advance(Duration::from_secs(31)).await;
         for _ in 0..10 { tokio::task::yield_now().await; }
     }
-    let mut requests = std::mem::take(&mut *provider.0.lock().unwrap());
-    assert_eq!(requests.len(), 3);
+    // One look runs per observer: the first arm's look is in flight, and the arms that
+    // retired it wait for it rather than polling beside it.
+    let requests = std::mem::take(&mut *provider.0.lock().unwrap());
+    assert_eq!(requests.len(), 1);
     let observation = |head: &str| crate::resource::ProviderObservation {
         facts: serde_json::json!({"head":head}),
         cursor: Some(head.into()),
         next_check_unix_ms: now_ms() + 300_000,
     };
-    requests.pop().unwrap().send(observation("newest")).unwrap();
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    // The retired look's result is discarded, and only then does the current arm look.
     for request in requests {
         request.send(observation("stale")).unwrap();
     }
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(store.latest_actual_value("resource/ref").unwrap().is_none(), "a retired look recorded");
+    let mut requests = std::mem::take(&mut *provider.0.lock().unwrap());
+    assert_eq!(requests.len(), 1, "the current arm looks once the retired look ends");
+    requests.pop().unwrap().send(observation("newest")).unwrap();
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
@@ -846,6 +852,70 @@ async fn observer_refresh_replaces_the_idle_arm_and_wakes_for_its_receipt() {
     settle_observer_tasks().await;
     assert_eq!(provider.0.load(Ordering::SeqCst), 3);
     assert_eq!(*reconciler.event_notify.borrow(), generation + 1);
+}
+
+/// Webhook refreshes that arrive while a refresh look runs do not retire it: it keeps its answer,
+/// and one more look answers all of them.
+#[tokio::test(start_paused = true)]
+async fn webhook_refreshes_during_a_look_keep_it_and_coalesce_into_one_more() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    apply_source(&store, BACKOFF_REF_OBSERVER, "ref");
+    let (send, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let reconciler = Reconciler::new(
+        store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+    ).with_resource_provider(Arc::new(CompletionProvider { requests: send }));
+    let observation = |head: &str| Ok(crate::resource::ProviderObservation {
+        facts: serde_json::json!({"head": head}),
+        cursor: Some(head.into()),
+        next_check_unix_ms: now_ms() + 300_000,
+    });
+    let attempt = |delivery: &str| crate::github_webhook::attempt(delivery, "observer/ref");
+    let refresh = |delivery: &str| {
+        store.append_claim(&ClaimInput {
+            subject: "observer/ref".into(),
+            kind: "observer.refresh-requested".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("attempt".into(), Value::String(attempt(delivery))),
+                ("revision".into(), Value::String(store.selected_desired_revision("observer/ref").unwrap().unwrap())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    let answered = || store.claims_for("observer/ref", Some("observer.observed")).unwrap().iter()
+        .filter_map(|claim| claim.body["fields"]["attempt"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let desired = store.desired_subjects().unwrap();
+    reconciler.reconcile_resource_observers(&desired, &[]).unwrap();
+    settle_observer_tasks().await;
+    requests.try_recv().unwrap().1.send(observation("a")).unwrap();
+    settle_observer_tasks().await;
+
+    refresh("d-1");
+    reconciler.reconcile_resource_observers(&desired, &[]).unwrap();
+    settle_observer_tasks().await;
+    let (_, look) = requests.try_recv().unwrap();
+    refresh("d-2");
+    refresh("d-3");
+    reconciler.reconcile_resource_observers(&desired, &[]).unwrap();
+    settle_observer_tasks().await;
+    assert_eq!(reconciler.armed_observers.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
+    look.send(observation("b")).unwrap();
+    settle_observer_tasks().await;
+    assert_eq!(answered(), [attempt("d-1")], "the running look kept its answer");
+    assert!(requests.try_recv().is_err());
+
+    reconciler.reconcile_resource_observers(&desired, &[]).unwrap();
+    settle_observer_tasks().await;
+    requests.try_recv().unwrap().1.send(observation("c")).unwrap();
+    settle_observer_tasks().await;
+    assert_eq!(answered(), [attempt("d-1"), attempt("d-3")]);
+    assert!(store.pending_observer_refresh_attempt("observer/ref").unwrap().is_none());
+    reconciler.reconcile_resource_observers(&desired, &[]).unwrap();
+    settle_observer_tasks().await;
+    assert!(requests.try_recv().is_err(), "d-2 was answered with d-3");
 }
 
 const BACKOFF_REF_OBSERVER: &str = "version 2\nresource \"ref\" { kind \"vcs.ref\" }\nobserver \"ref\" { resource \"resource/ref\"; provider \"github.ref\"; locator \"acme/garden@main\"; field \"head\" }";

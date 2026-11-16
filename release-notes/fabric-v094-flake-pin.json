@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Pin the Fabric flake input from 1e6e93e9 (package version 0.9.2) to v0.9.4 (19e7f8964ce8305aeb8c200fb717967aa03f738f) for packages.fabric-pairing only; no Fractal runtime change",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes in Fractal. This change only selects the external Fabric package revision."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No Fractal tables, indexes, schema versions, stored formats or data rewrites change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or digest changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The fabric flake input and lock move from 1e6e93e9a662a40749f91d63eeecc4e98de114bd (package version 0.9.2) to Fabric v0.9.4 at 19e7f8964ce8305aeb8c200fb717967aa03f738f. Production hosts currently run Fabric v0.9.3 (285bd482), a separate deployment baseline rather than the previous flake pin. The input's only consumer is packages.fabric-pairing; Fractal runtime code, Cargo dependencies and deployed services are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "The pin does not restart or deploy Fabric or Fractal."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "For the re-key rollout, deploy Fabric v0.9.4 on every participating member first, before deploying the Fractal re-key changes or starting any re-key."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Changing this package pin writes no runtime state. It does not authorize an in-place downgrade of a Fabric daemon that has already written expiry state."
+  }
+}

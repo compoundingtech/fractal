@@ -3,6 +3,9 @@ use std::collections::BTreeMap;
 
 struct FakeManager {
     services: Services,
+    domain: Option<String>,
+    registrations: Option<[Vec<String>; 2]>,
+    journal: Option<PathBuf>,
     events: Vec<String>,
     idle_calls: usize,
     idle_failure: Option<usize>,
@@ -14,7 +17,15 @@ struct FakeManager {
 }
 
 impl FakeManager {
+    fn observe_journal(&mut self) -> Result<()> {
+        if let Some(path) = &self.journal {
+            let journal: Journal = serde_json::from_slice(&fs::read(path)?)?;
+            self.events.push(format!("saved:{}", journal.launchd_domain.context("missing saved domain")?));
+        }
+        Ok(())
+    }
     fn unit_mut(&mut self, name: &str) -> Result<&mut Unit> {
+        if let Some(domain) = &self.domain { self.events.push(format!("domain-operation:{domain}")); }
         self.services.legacy.iter_mut().chain(&mut self.services.target)
             .find(|unit| unit.name == name).context("unknown test service")
     }
@@ -27,6 +38,15 @@ impl FakeManager {
 
 impl Manager for FakeManager {
     fn kind(&self) -> &'static str { "fake" }
+    fn domain(&self) -> Option<&str> { self.domain.as_deref() }
+    fn bind_domain(&mut self, recorded: Option<&str>, recovery: bool) -> Result<()> {
+        if let Some(jobs) = &self.registrations {
+            self.domain = Some(launchd::resolve(501, recorded, recovery, |domain| {
+                Ok(launchd::Probe::Available(jobs[usize::from(domain.starts_with("user/"))].clone()))
+            })?);
+        }
+        Ok(())
+    }
 
     fn inspect(&mut self) -> Result<Services> {
         self.events.push("inspect".into());
@@ -39,12 +59,14 @@ impl Manager for FakeManager {
     }
 
     fn stop(&mut self, unit: &Unit) -> Result<()> {
+        self.observe_journal()?;
         self.events.push(format!("stop:{}", unit.name));
         self.unit_mut(&unit.name)?.running = false;
         Ok(())
     }
 
     fn start(&mut self, unit: &Unit) -> Result<()> {
+        self.observe_journal()?;
         self.events.push(format!("start:{}", unit.name));
         if self.fail_legacy_start_once && self.services.legacy.iter().any(|old| old.name == unit.name) {
             self.fail_legacy_start_once = false;
@@ -55,6 +77,7 @@ impl Manager for FakeManager {
     }
 
     fn enable(&mut self, unit: &Unit, enabled: bool) -> Result<()> {
+        self.observe_journal()?;
         self.events.push(format!("enable:{}:{enabled}", unit.name));
         if enabled && self.fail_target_enable_once {
             self.fail_target_enable_once = false;
@@ -115,6 +138,7 @@ impl Fixture {
             profiles: Some(vec![root.path().join("profiles"), root.path().join("legacy-profiles")]),
             directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
             daemon_state: state.join("st3"),
+            store_dir: None,
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
         };
@@ -157,7 +181,7 @@ impl Fixture {
         let services = Services { legacy, target };
         Ok(Self {
             root, layout,
-            manager: FakeManager { services, events: Vec::new(), idle_calls: 0,
+            manager: FakeManager { services, domain: None, registrations: None, journal: None, events: Vec::new(), idle_calls: 0,
                 idle_failure: None, probe_failure: false, target_protection: None,
                 fail_target_enable_once: false, omit_missing: false, fail_legacy_start_once: false },
         })
@@ -176,7 +200,7 @@ impl Fixture {
     }
 
     async fn run(&mut self, dry_run: bool, rollback: bool) -> Result<Receipt> {
-        cutover(&self.layout, &mut self.manager, "test-host", &HostArgs { dry_run, rollback }).await
+        cutover(&self.layout, &mut self.manager, "test-host", &HostArgs { dry_run, rollback, config: None, state_dir: None, store_dir: None }).await
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
@@ -220,7 +244,7 @@ fn snapshot(root: &Path, ignored: &Path) -> Result<Snapshot> {
 #[tokio::test]
 async fn swaps_authority_by_rename_preserving_all_dropins_and_receipting_memory() -> Result<()> {
     let mut fixture = Fixture::new()?;
-    let pairs = fixture.layout.pairs(&fixture.manager.services);
+    let pairs = fixture.layout.pairs(&fixture.manager.services)?;
     let before = pairs.iter().map(|(old, _)| fs::metadata(old).map(|metadata| metadata.ino()))
         .collect::<std::io::Result<Vec<_>>>()?;
     let receipt = fixture.run(false, false).await?;
@@ -356,6 +380,161 @@ fn configured_state_must_remain_within_the_product_root() -> Result<()> {
 }
 
 #[tokio::test]
+async fn explicit_store_moves_only_with_legacy_root_or_stays_external() -> Result<()> {
+    for nested in [false, true] {
+        let mut fixture = Fixture::new()?;
+        let (old, new) = fixture.layout.directories[1].clone();
+        let store = if nested { old.join("store") } else { fixture.root.path().join("external-store") };
+        fs::create_dir(&store)?;
+        for name in fractal_daemon::config::STORE_DATABASE_FILES { fs::write(store.join(name), name)?; }
+        let inode = fs::metadata(&store)?.ino();
+        let config = Config { state_dir: old.clone(), store_dir: Some(store.clone()), ..Config::default() };
+        fixture.layout.configure_store(&config);
+        let target = if nested { new.join("store") } else { store.clone() };
+        assert_eq!(fixture.layout.target_store_dir(), Some(target.clone()));
+        fixture.run(true, false).await?;
+        assert!(!fixture.manager.changed_services());
+        fixture.run(false, false).await?;
+        assert_eq!(fs::metadata(&target)?.ino(), inode);
+        for name in fractal_daemon::config::STORE_DATABASE_FILES {
+            assert_eq!(fs::read(target.join(name))?, name.as_bytes());
+        }
+        assert!(new.join("node-identity.lock").is_file());
+        assert!(!target.join("node-identity.lock").exists());
+        fixture.run(true, false).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unreachable_store_refuses_before_service_or_journal_changes() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let store = fixture.root.path().join("missing-store");
+    fixture.layout.store_dir = Some(store.clone());
+    let error = fixture.run(false, false).await.unwrap_err();
+    assert_eq!(error.to_string(), format!("configured store_dir {} is not reachable; mount or restore it before host migration", store.display()));
+    assert!(!fixture.layout.journal.exists());
+    assert!(!fixture.manager.changed_services());
+    Ok(())
+}
+
+#[test]
+fn explicit_store_refuses_destination_and_symlinked_legacy_paths() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (old, new) = fixture.layout.directories[1].clone();
+    fs::create_dir_all(new.join("store"))?;
+    fixture.layout.store_dir = Some(new.join("store"));
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} is inside the destination product root {}; keep it outside both product roots or in an ordinary directory below the legacy root before cutover",
+        new.join("store").display(), new.display()));
+    let external = fixture.root.path().join("external");
+    fs::create_dir_all(external.join("store"))?;
+    symlink(&external, old.join("linked"))?;
+    fixture.layout.store_dir = Some(old.join("linked/store"));
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} must be an ordinary directory below the product root without symlinked ancestors", old.join("linked/store").display()));
+    Ok(())
+}
+
+#[test]
+fn store_path_validation_and_target_reachability_have_exact_refusals() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let old = fixture.layout.directories[1].0.clone();
+    for store in [PathBuf::from("relative-store"), old.join("../store")] {
+        fixture.layout.store_dir = Some(store.clone());
+        assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+            "host migration requires an absolute store_dir without parent traversal; configured store_dir is {}", store.display()));
+    }
+    let link = fixture.root.path().join("linked-store");
+    symlink(&old, &link)?;
+    fixture.layout.store_dir = Some(link.clone());
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} must be an ordinary directory or an external mount, not a symlink", link.display()));
+    let alias = fixture.root.path().join("alias");
+    symlink(&old, &alias)?;
+    fs::create_dir(old.join("store"))?;
+    fixture.layout.store_dir = Some(alias.join("store"));
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} resolves inside product root {}; configure its ordinary path before host migration", alias.join("store").display(), old.display()));
+    fixture.layout.store_dir = Some(old.join("store"));
+    let target = fixture.layout.target_store_dir().unwrap();
+    assert_eq!(fixture.layout.check_store(true).unwrap_err().to_string(), format!(
+        "configured store_dir {} is not reachable; mount or restore it before host migration", target.display()));
+    let config = Config { state_dir: old.clone(), store_dir: Some(old), ..Config::default() };
+    fixture.layout.configure_store(&config);
+    assert_eq!(fixture.layout.store_dir, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn owned_store_refuses_before_root_exchange_and_restores_legacy_services() -> Result<()> {
+    for nested in [false, true] {
+        let mut fixture = Fixture::new()?;
+        let (old, new) = fixture.layout.directories[1].clone();
+        let store = if nested { old.join("store") } else { fixture.root.path().join("external-store") };
+        fs::create_dir(&store)?;
+        fs::write(store.join("claims.sqlite3"), b"unchanged authority")?;
+        fixture.layout.store_dir = Some(store.clone());
+        let owner = fractal_daemon::node_identity::lock_directory(&store)?;
+        assert_eq!(fixture.layout.lock_store().unwrap_err().to_string(),
+            "cannot lock configured store directory after legacy service stop; stop its owner or restore the directory before host migration");
+        let inode = fs::metadata(&old)?.ino();
+        let error = fixture.run(false, false).await.unwrap_err();
+        assert!(format!("{error:#}").contains("cannot lock configured store directory after legacy service stop; stop its owner or restore the directory before host migration"));
+        assert_eq!(fs::metadata(&old)?.ino(), inode);
+        assert!(!new.exists());
+        assert!(!fixture.layout.journal.exists());
+        assert!(fixture.manager.services.legacy.iter().all(|unit| unit.running));
+        assert_eq!(fs::read(store.join("claims.sqlite3"))?, b"unchanged authority");
+        drop(owner);
+        fixture.run(false, false).await?;
+    }
+    Ok(())
+}
+
+#[test]
+fn nested_store_directory_fence_follows_root_exchange_without_extra_files() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (old, new) = fixture.layout.directories[1].clone();
+    let store = old.join("store");
+    fs::create_dir(&store)?;
+    fixture.layout.store_dir = Some(store.clone());
+    let guard = fixture.layout.lock_store()?;
+    symlink(&new, &new)?;
+    exchange(&old, &new)?;
+    let target = new.join("store");
+    assert!(fractal_daemon::node_identity::lock_directory(&target).is_err());
+    assert!(fs::read_dir(&target)?.next().is_none());
+    assert!(new.join("node-identity.lock").is_file());
+    drop(guard);
+    let _target_owner = fractal_daemon::node_identity::lock_directory(&target)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn store_database_symlinks_refuse_before_service_or_root_changes() -> Result<()> {
+    for name in fractal_daemon::config::STORE_DATABASE_FILES {
+        for dangling in [false, true] {
+            let mut fixture = Fixture::new()?;
+            let store = fixture.root.path().join("external-store");
+            fs::create_dir(&store)?;
+            let backing = fixture.root.path().join("database-backing");
+            if !dangling { fs::write(&backing, b"outside authority")?; }
+            symlink(&backing, store.join(name))?;
+            fixture.layout.store_dir = Some(store.clone());
+            let expected = format!("configured store database file {} must not be a symlink", store.join(name).display());
+            let error = fixture.run(false, false).await.unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            assert!(!fixture.manager.changed_services());
+            assert!(!fixture.layout.journal.exists());
+            assert!(!fixture.layout.directories[1].1.exists());
+            assert!(format!("{:#}", fixture.layout.lock_store().unwrap_err()).contains(&expected));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn nonempty_fractal_dotfiles_are_rejected_before_stop_even_with_a_receipt() -> Result<()> {
     for with_receipt in [false, true] {
         let mut fixture = Fixture::new()?;
@@ -473,13 +652,13 @@ async fn explicit_rollback_recovers_an_interrupted_uncommitted_swap() -> Result<
     let mut fixture = Fixture::new()?;
     let before = fixture.snapshot()?;
     let services = fixture.manager.services.clone();
-    let pairs = fixture.layout.pairs(&services);
+    let pairs = fixture.layout.pairs(&services)?;
     for (old, new) in &pairs { fs::rename(old, new)?; }
     for (old, new) in pairs.iter().take(2) {
         fs::write(new.join(RECEIPT_FILE), format!("{MIGRATION_ID}\n"))?;
         symlink(new, old)?;
     }
-    let journal = Journal { migration: MIGRATION_ID.into(), services, moves: (0..pairs.len()).collect(),
+    let journal = Journal { migration: MIGRATION_ID.into(), launchd_domain: None, services, moves: (0..pairs.len()).collect(),
         pairs, emptied: Vec::new(), receipts: vec![0, 1], links: vec![0, 1], config_fence: false, committed: false,
         before: memory_protection(), after: None, gap_ms: 0 };
     save(&fixture.layout, &journal)?;
@@ -528,7 +707,7 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
         legacy: vec![unit("org.nix-community.home.smalltalk"), unit("org.nix-community.home.smalltalk-apply")],
         target: vec![unit("com.compoundingtech.fractal"), unit("com.compoundingtech.fractal-apply")],
     };
-    let pairs = fixture.layout.pairs(&services);
+    let pairs = fixture.layout.pairs(&services)?;
     assert_eq!(pairs.len(), 4);
     for (index, (old, new)) in pairs.iter().skip(2).enumerate() {
         assert_eq!(*old, dropins(&services.legacy[index].file));
@@ -539,8 +718,8 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
 
 fn interrupted_journal(fixture: &Fixture) -> Journal {
     Journal {
-        migration: MIGRATION_ID.into(), services: fixture.manager.services.clone(),
-        pairs: fixture.layout.pairs(&fixture.manager.services), moves: Vec::new(),
+        migration: MIGRATION_ID.into(), launchd_domain: None, services: fixture.manager.services.clone(),
+        pairs: fixture.layout.pairs(&fixture.manager.services).unwrap(), moves: Vec::new(),
         emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false,
         committed: false, before: memory_protection(), after: None, gap_ms: 0,
     }
@@ -687,6 +866,11 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
         let immutable = fixture.root.path().join("immutable-config");
         fs::write(&immutable, b"node = \"test\"\n")?;
         symlink(&immutable, fixture.layout.directories[0].0.join("config.toml"))?;
+        let generation = fs::read_link(retain_generation(&fixture, 0, 1, "", false)?)?;
+        let marker = generation.join("launchd-staged");
+        fs::write(&marker, b"Home Manager launchd staging\n")?;
+        symlink(&marker, fixture.layout.directories[0].0.join("launchd-staged"))?;
+        let marker_inode = fs::symlink_metadata(fixture.layout.directories[0].0.join("launchd-staged"))?.ino();
         let before = fixture.snapshot()?;
         fixture.manager.probe_failure = failed;
         let result = fixture.run(false, false).await;
@@ -700,6 +884,8 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
             assert_eq!(fs::read(legacy.join("config.toml"))?, fs::read(target.join(CONFIG_BACKING))?);
             assert!(fs::read_to_string(target.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
             assert!(!target.join(PENDING_RECEIPT).exists());
+            assert_eq!(fs::read_link(target.join("launchd-staged"))?, marker);
+            assert_eq!(fs::symlink_metadata(target.join("launchd-staged"))?.ino(), marker_inode);
         }
     }
     Ok(())
@@ -795,6 +981,115 @@ fn retained_generation_array_mutations_refuse_with_generation_number() -> Result
         assert!(message.contains("retained Home Manager generation 17"), "{message}");
         assert!(message.contains("unsupported forcedPaths references"), "{message}");
         assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
+
+mod worker_control;
+
+#[tokio::test]
+async fn launchd_domain_is_durable_and_recovery_ignores_later_login() -> Result<()> {
+    for selected in ["gui/501", "user/501"] {
+        let mut fixture = Fixture::new()?;
+        let daemon = "com.compoundingtech.st3".to_owned();
+        let index = usize::from(selected.starts_with("user/"));
+        let mut jobs = [Vec::new(), Vec::new()];
+        jobs[index].push(daemon.clone());
+        fixture.manager.registrations = Some(jobs);
+        let before = fixture.snapshot()?;
+        assert_eq!(fixture.run(true, false).await?.launchd_domain.as_deref(), Some(selected));
+        assert_eq!(fixture.snapshot()?, before);
+        assert!(!fixture.manager.changed_services());
+        let mut journal = interrupted_journal(&fixture);
+        journal.launchd_domain = Some(selected.into());
+        save(&fixture.layout, &journal)?;
+        // A later login now exposes the job in the other domain. Recovery is
+        // bound to its durable plan, not a new discovery of legacy ownership.
+        fixture.manager.registrations = Some([vec![daemon.clone()], vec![daemon]]);
+        fixture.manager.domain = None;
+        assert_eq!(fixture.run(false, true).await?.launchd_domain.as_deref(), Some(selected));
+        assert!(fixture.manager.events.iter().any(|event| event == &format!("domain-operation:{selected}")));
+        assert!(!fixture.manager.events.iter().any(|event| event.starts_with("domain-operation:") && event != &format!("domain-operation:{selected}")));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn launchd_missing_journal_domain_refuses_before_inspection() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.manager.registrations = Some([Vec::new(), Vec::new()]);
+    let mut bytes = serde_json::to_value(interrupted_journal(&fixture))?;
+    bytes.as_object_mut().unwrap().remove("launchd_domain");
+    fs::write(&fixture.layout.journal, serde_json::to_vec(&bytes)?)?;
+    let before = fs::read(&fixture.layout.journal)?;
+    let error = fixture.run(false, true).await.unwrap_err();
+    assert!(matches!(error.downcast_ref::<launchd::DomainError>(), Some(launchd::DomainError::MissingJournalField)));
+    assert!(!fixture.manager.events.iter().any(|event| event == "inspect"));
+    assert_eq!(fs::read(&fixture.layout.journal)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn launchd_cutover_saves_selected_domain() -> Result<()> {
+    for (index, domain) in ["gui/501", "user/501"].into_iter().enumerate() {
+        let mut fixture = Fixture::new()?;
+        let mut jobs = [Vec::new(), Vec::new()];
+        jobs[index].push("com.compoundingtech.st3".into());
+        fixture.manager.registrations = Some(jobs);
+        fixture.manager.journal = Some(fixture.layout.journal.clone());
+        assert_eq!(fixture.run(false, false).await?.launchd_domain.as_deref(), Some(domain));
+        let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+        assert_eq!(journal.launchd_domain.as_deref(), Some(domain));
+        let saved = fixture.manager.events.iter().position(|event| event == &format!("saved:{domain}")).unwrap();
+        let mutation = fixture.manager.events.iter().position(|event| event.starts_with("enable:") || event.starts_with("stop:")).unwrap();
+        assert!(saved < mutation);
+        assert!(journal.committed);
+        fixture.manager.registrations = Some([vec!["com.compoundingtech.st3".into()], vec!["com.compoundingtech.st3".into()]]);
+        fixture.manager.domain = None;
+        fixture.manager.events.clear();
+        assert_eq!(fixture.run(false, false).await?.launchd_domain.as_deref(), Some(domain));
+        assert!(fixture.manager.events.iter().any(|event| event == &format!("domain-operation:{domain}")));
+        assert!(!fixture.manager.events.iter().any(|event| event.starts_with("domain-operation:") && event != &format!("domain-operation:{domain}")));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn launchd_ownership_refusals_do_not_mutate_host() -> Result<()> {
+    for other in [None, Some("com.compoundingtech.st3"), Some("com.compoundingtech.fractal")] {
+        let mut fixture = Fixture::new()?;
+        let gui = other.map_or_else(Vec::new, |_| vec!["com.compoundingtech.st3".into()]);
+        fixture.manager.registrations = Some([gui, other.into_iter().map(str::to_owned).collect()]);
+        let before = fixture.snapshot()?;
+        assert!(fixture.run(false, false).await.unwrap_err().is::<launchd::DomainError>());
+        assert_eq!(fixture.snapshot()?, before);
+        assert!(!fixture.layout.journal.exists());
+        assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn launchd_query_is_read_only_and_uses_recorded_domain_after_cutover() -> Result<()> {
+    for (index, domain) in ["gui/501", "user/501"].into_iter().enumerate() {
+        let mut fixture = Fixture::new()?;
+        let before = fixture.snapshot()?;
+        assert_eq!(queried_launchd_domain(&fixture.layout, 501, |candidate| Ok(launchd::Probe::Available(
+            if candidate == domain { vec!["com.compoundingtech.st3".into()] } else { vec![] }
+        )))?, domain);
+        assert_eq!(fixture.snapshot()?, before);
+        let mut jobs = [vec![], vec![]];
+        jobs[index].push("com.compoundingtech.st3".into());
+        fixture.manager.registrations = Some(jobs);
+        fixture.run(false, false).await?;
+        let before = fixture.snapshot()?;
+        assert_eq!(queried_launchd_domain(&fixture.layout, 501, |_| panic!("journal must prevent rediscovery"))?, domain);
+        assert_eq!(fixture.snapshot()?, before);
+        let mut journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+        journal.launchd_domain = None;
+        save(&fixture.layout, &journal)?;
+        assert!(matches!(queried_launchd_domain(&fixture.layout, 501, |_| panic!("missing field must fail closed"))
+            .unwrap_err().downcast_ref(), Some(launchd::DomainError::MissingJournalField)));
     }
     Ok(())
 }

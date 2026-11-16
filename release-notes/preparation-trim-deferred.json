@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A trim rebuilds each resource's preparation once instead of once per deleted claim, so deleting resource.observed claims from kept envelopes no longer costs a pull request's whole history per claim",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "Local table local_resource_preparation_deferred (one subject per row), created on open; the claims delete trigger is replaced (preparation_claims_dirty_delete_ranked becomes preparation_claims_dirty_delete_deferring). Local derived state only, never replicated."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. An older build does not remove preparation_claims_dirty_delete_deferring: it adds preparation_claims_dirty_delete_ranked beside it, so after a rollback both fire. A trim's planned drops are then rebuilt at once, as before, and still land in the deferred table, which this build's next checkpoint step clears on re-upgrade."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build: trims rebuild a resource's preparation per deleted claim again."}
+}

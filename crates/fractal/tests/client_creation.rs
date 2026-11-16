@@ -10,11 +10,14 @@ use tower::ServiceExt as _;
 
 fn state(root: &Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("creation-test").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0).0,
         node: "creation-test".into(),
+        api_socket: root.join("api.sock"),
         state_dir: root.into(),
         pty_root: root.join("pty"),
         pty_binary: "pty".into(),
@@ -23,6 +26,9 @@ fn state(root: &Path) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 async fn request(

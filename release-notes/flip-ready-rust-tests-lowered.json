@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-flip-ready judges rust-tests by its lowered trigger (5 agreeing host-signed lines, none disagreeing, no hidden red); the flip it proposes writes sample_one_in 1 (no run sampled) for every check, and for rust-tests trusts host and agent per-crate notes on pull requests and no CI-signed note",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or storage format changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No verifier or gate rule changes; only the readiness report and the flip it proposes for rust-tests."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Other checks keep the 30-line trigger; the report adds agreeing and disagreeing for rust-tests."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the change to scripts/evidence-flip-ready; nothing is stored."
+  }
+}

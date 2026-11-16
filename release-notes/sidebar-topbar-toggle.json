@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show or hide the TUI sidebar from a compact top-bar item before the connection and activity counts; the item highlights while the sidebar is shown",
+  "replay": { "status": "none", "detail": "No replay or backfill." },
+  "schema": { "status": "none", "detail": "No graph, storage, or preference schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or admission changes." },
+  "compatibility": { "status": "none", "detail": "The new pointer target invokes the same sidebar toggle as Ctrl+S, preserving existing visibility persistence and focus behavior." },
+  "downtime": { "status": "none", "detail": "Normal restart." },
+  "manual": { "status": "none", "detail": "Click sidebar at the left of the top bar, choose its action from the F10 top-bar menu, or continue using Ctrl+S. Narrow terminals omit the shortcut to preserve the existing status actions and glass selector." },
+  "recovery": { "status": "none", "detail": "Click sidebar again or use Ctrl+S to restore the previous visibility." }
+}

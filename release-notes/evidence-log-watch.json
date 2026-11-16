@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-log-watch (with a 2-minute systemd timer) alerts when the published evidence log head is older than 360 s or unreadable for that long: once when the stall begins, hourly while it lasts, and once when it recovers",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; nothing a verifier reads changes."},
+  "compatibility": {"status": "none", "detail": "A new host-side tool; nothing runs it until a host installs its timer."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "changed", "detail": "To install on a host: copy scripts/evidence-log-watch to ~/.local/bin, put EVIDENCE_LOG_WATCH_NOTIFY (a JSON argv) in ~/.config/evidence-log-watch/env, install the .service and .timer as user units and enable the timer."},
+  "recovery": {"status": "none", "detail": "Its only state is ~/.local/state/evidence-log-watch; removing it starts the watch afresh."}
+}

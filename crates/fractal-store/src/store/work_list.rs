@@ -248,10 +248,10 @@ pub fn viewer_seat(viewer: &str) -> String {
 /// Whether `viewer` sees `view` in its own work list, as the direct read's actor filter does.
 fn visible_to(view: &StepRunView, viewer: &str) -> bool {
     !view.agentless
-        && (view.assigned_to.as_deref() == Some(viewer)
-            || view.claimant.as_deref() == Some(viewer)
+        && (super::work_actor_matches(view.assigned_to.as_deref(), viewer)
+            || super::work_actor_matches(view.claimant.as_deref(), viewer)
             || (matches!(view.status.as_str(), "ready" | "blocked")
-                && view.available_to.iter().any(|seat| seat == viewer)))
+                && view.available_to.iter().any(|seat| super::work_actor_matches(Some(seat), viewer))))
 }
 
 /// How the work list ranks a step's state: ready work first, ended work last.
@@ -357,10 +357,12 @@ impl WorkRows {
     }
 
     /// The rows `actor` sees, as indexes into `order`, in the order the direct read gives it:
-    /// its ready work by its seat queue at this publication's own cut. Built on the actor's
-    /// first read of this publication; says whether this read built it.
+    /// its ready work by its seat queue at this publication's own cut. Legacy slash-qualified
+    /// agent IDs share the canonical actor's memo. Says whether this read built it.
     pub fn actor_rows(&self, actor: &str) -> (Arc<Vec<u32>>, bool) {
-        let viewer = smallclaims::store::normalize_actor(actor, "agent");
+        let actor = smallclaims::store::normalize_actor(actor, "agent");
+        let viewer = fractal_schema::canonical_agent_actor(&actor)
+            .unwrap_or(std::borrow::Cow::Borrowed(&actor));
         self.actors.get_or_build(&viewer, || self.actor_order(&viewer))
     }
 
@@ -374,8 +376,7 @@ impl WorkRows {
             .map(|(index, step)| (index as u32, &self.rows[step].view))
             .filter(|(_, view)| visible_to(view, viewer))
             .collect::<Vec<_>>();
-        // The direct read hands `select` its own seat string (the actor if it names a kind, else
-        // `agent/ACTOR`, which is `viewer`) and looks the queue up by the normalized seat.
+        // Queue lookup and the shared selector use the same canonical seat identity.
         let queue = self.seat_orders.get(&viewer_seat(viewer)).map_or(&[][..], |order| order.as_slice());
         let steps = shown
             .iter()
@@ -432,7 +433,7 @@ impl Store {
     /// [`published_list::PublishedList::current`], which also refuses a forgotten generation.
     #[cfg(any(test, feature = "test-support"))]
     pub fn published_work(&self) -> Option<Arc<published_list::Publication<WorkRows>>> {
-        self.smalltalk.published_work.newest()
+        self.fractal.published_work.newest()
     }
 
     /// Set how far replicated claims are projected, as a replication pass would, for tests.
@@ -465,23 +466,23 @@ impl Store {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn seat_lookups(&self) -> usize {
-        self.smalltalk.seat_lookups.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.seat_lookups.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn last_seats_read(&self) -> BTreeSet<String> {
-        self.smalltalk.last_seats_read.lock().unwrap().clone()
+        self.fractal.last_seats_read.lock().unwrap().clone()
     }
 
     /// How many seats' queue orders folds have read, for tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn seat_order_reads(&self) -> usize {
-        self.smalltalk.seat_order_reads.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.seat_order_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn direct_work_reads(&self) -> usize {
-        self.smalltalk.direct_work_reads.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.direct_work_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
 }
@@ -703,8 +704,13 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
+        // json_each walks only the bound actor spelling array (at most canonical + legacy),
+        // not a stored table. Keep rejecting scans of the mission and step projections.
         for line in &plan {
-            if line.starts_with("SCAN ") && !line.starts_with("SCAN CONSTANT") {
+            if line.starts_with("SCAN ")
+                && !line.starts_with("SCAN CONSTANT")
+                && !line.starts_with("SCAN json_each VIRTUAL TABLE INDEX ")
+            {
                 assert!(line.contains("USING "), "a bare table scan:\n{}", plan.join("\n"));
             }
         }

@@ -36,7 +36,7 @@ test('idle feed with focused inventories makes no request for longer than all ol
   assert.equal(seen.size, 6);
   t.mock.timers.tick(HEARTBEAT_WAIT_MS);
   assert.equal(sockets[0].closed, true, 'a blackholed socket is closed when protocol heartbeats stop');
-  assert.deepEqual(states.at(-1), ['reconnecting', 'st stopped answering']);
+  assert.deepEqual(states.at(-1), ['reconnecting', 'Fractal stopped answering']);
   const before = sockets[0].sent.length;
   transport.onping();
   assert.equal(sockets[0].sent.length, before, 'a closed socket cannot revive itself');

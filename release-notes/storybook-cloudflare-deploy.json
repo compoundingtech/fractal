@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Publish the Fractal UI Storybook to one canonical Cloudflare site from main",
+  "replay": { "status": "none", "detail": "No replay or projection changes." },
+  "schema": { "status": "none", "detail": "No application schema or migration changes." },
+  "rules": { "status": "none", "detail": "No runtime admission or reconciliation rule changes." },
+  "compatibility": { "status": "changed", "detail": "Adds a separate, non-required Storybook deployment workflow and an Alchemy v2 stack with Cloudflare remote state. Every push to main deploys stage main to https://storybook.compounding.tech by default. There are no PR previews or close-cleanup jobs; deployment credentials are exposed only to code on main and no draft-policy exception is needed. Existing required checks are unchanged." },
+  "downtime": { "status": "none", "detail": "Static Storybook hosting is independent of the application and daemon." },
+  "manual": { "status": "changed", "detail": "An administrator must configure CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID for an existing Cloudflare account, authorize remote-state bootstrap and deployment, and configure the custom-domain zone or choose workers.dev. See docs/development.md#storybook-deployment." },
+  "recovery": { "status": "changed", "detail": "Redeploy the desired revision to stage main with the same Cloudflare account and remote state to restore Storybook content." }
+}

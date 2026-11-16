@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The getting-started test waits for the daemon's verdict passes to judge every sealed claim, bounded at 120 s, instead of racing them for 10 s",
+  "replay": {"status": "none", "detail": "Test only; no claim replay or recovery changes."},
+  "schema": {"status": "none", "detail": "No database change."},
+  "rules": {"status": "none", "detail": "No claim rule changes."},
+  "compatibility": {"status": "none", "detail": "No product change."},
+  "downtime": {"status": "none", "detail": "No downtime."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Test only; rolling back changes nothing installed."}
+}

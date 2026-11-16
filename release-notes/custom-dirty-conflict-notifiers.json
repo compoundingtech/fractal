@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Repair the custom projection dirty-work hint regression introduced by #5690: invalidating an already queued subject must still wake the current writer's custom finalizer.",
+  "replay": {"status": "changed", "detail": "Custom and notice dirty-queue UPSERT conflicts now issue an intentional no-op subject UPDATE, invoking the connection-local UPDATE notifier even when another connection queued the subject first. Replica-record custom.* lifecycle changes also wake the custom finalizer."},
+  "schema": {"status": "changed", "detail": "Replace existing durable dirty-queue invalidation trigger definitions; no claim shape or database table change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or preparation-fence allowlist change."},
+  "compatibility": {"status": "changed", "detail": "Fixes the connection-local hint introduced by commit 392c872af22c0f27aaf546e6be2584bb3c1f89f0 in #5690. It can otherwise leave registered custom subjects and native notice projections showing old fields, attention and ready health after queued changes or repairs. Version 0.3.30 predates the hint; the 0.3.31 candidate includes it."},
+  "downtime": {"status": "none", "detail": "No fleet coordination or claim migration; trigger definitions refresh when the store opens."},
+  "manual": {"status": "none", "detail": "No operator migration. Store open drains durable custom dirty work."},
+  "recovery": {"status": "changed", "detail": "Do not revert to the broken connection-local hint implementation while durable custom invalidations can be written by another connection."}
+}

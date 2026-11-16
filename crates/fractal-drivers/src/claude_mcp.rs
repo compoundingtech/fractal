@@ -27,55 +27,33 @@ use crate::reexec::{self, StdinChunk};
 const POLL: Duration = Duration::from_millis(250);
 const PRESENCE_REFRESH: Duration = Duration::from_secs(1);
 const REPLACEMENT_CHECK: Duration = Duration::from_secs(1);
-const LEGACY_SERVER_NAME: &str = "st2";
-const ST3_SERVER_NAME: &str = "st3";
-
-pub fn run(catalog_root: &Path, identity: &str) -> Result<()> {
-    run_named(catalog_root, identity, LEGACY_SERVER_NAME, false)
-}
+const FRACTAL_SERVER_NAME: &str = "st3";
 
 /// Run the ST3-owned public channel.
 ///
-/// The protocol body is shared with the legacy channel, but its MCP identity and readiness edge
-/// belong to ST3. Claude starting the stdio server is the first positive proof that an interactive
+/// Claude starting the stdio server is the first positive proof that an interactive
 /// session made it past startup dialogs and actually loaded the channel; mere Claude child
 /// liveness is not that proof.
-pub fn run_st3(catalog_root: &Path, identity: &str) -> Result<()> {
-    run_named(catalog_root, identity, ST3_SERVER_NAME, true)
-}
-
-fn run_named(
-    catalog_root: &Path,
-    identity: &str,
-    server_name: &'static str,
-    observe_initialized: bool,
-) -> Result<()> {
+pub fn run_fractal(catalog_root: &Path, identity: &str) -> Result<()> {
+    let server_name = FRACTAL_SERVER_NAME;
     let agent_dir =
         message::resolve_declared_dir(catalog_root, identity, &crate::run::detect_host())?
             .with_context(|| format!("Claude MCP agent '{identity}' is not declared"))?;
-    // Only the st3 channel follows a replaced binary: st3 answers the resume probe and owns the
-    // daemon a deploy restarts.
-    let resumed = if observe_initialized {
-        match reexec::resume_path(reexec::CHANNEL_RESUME_ENV) {
-            Some(path) => {
-                let state = reexec::read_state::<ChannelResume>(&path);
-                reexec::unblock_stop_signals();
-                Some(state.context("resuming the Claude channel after a binary replacement")?)
-            }
-            None => None,
+    let resumed = match reexec::resume_path(reexec::CHANNEL_RESUME_ENV) {
+        Some(path) => {
+            let state = reexec::read_state::<ChannelResume>(&path);
+            reexec::unblock_stop_signals();
+            Some(state.context("resuming the Claude channel after a binary replacement")?)
         }
-    } else {
-        None
+        None => None,
     };
-    let mut watch = observe_initialized
-        .then(reexec::ReplacementWatch::for_current_process)
-        .flatten();
+    let mut watch = reexec::ReplacementWatch::for_current_process();
     let (mut delivered, mut initialized, mut lines) = match resumed {
         Some(state) => (state.delivered, state.initialized, state.lines),
         None => (HashSet::new(), false, reexec::LineBuffer::default()),
     };
-    let mut initialized_writer = (observe_initialized && !initialized)
-        .then(|| st3_initialized_writer(&agent_dir, identity))
+    let mut initialized_writer = (!initialized)
+        .then(|| fractal_initialized_writer(&agent_dir, identity))
         .flatten();
     let inbox = message::inbox_dir(&agent_dir);
     let (input_tx, input_rx) = mpsc::channel();
@@ -129,8 +107,8 @@ fn run_named(
                     // promoted the channel notification into a real model turn. The outer st3
                     // driver correlates this exact immutable inbox filename before publishing
                     // `message.delivered`; writing MCP bytes alone is not a receipt.
-                    let notice = match crate::ding::st3_message_reference(&msg) {
-                        Some(reference) => crate::ding::st3_ping_text(
+                    let notice = match crate::ding::fractal_message_reference(&msg) {
+                        Some(reference) => crate::ding::fractal_ping_text(
                             reference,
                             msg.from.as_deref().unwrap_or_default(),
                             msg.subject.as_deref(),
@@ -160,7 +138,7 @@ fn run_named(
         }
         stdout.flush()?;
         let now = Instant::now();
-        if observe_initialized && now >= next_presence {
+        if now >= next_presence {
             let _ = write_presence(&agent_dir);
             next_presence = now + PRESENCE_REFRESH;
         }
@@ -312,7 +290,7 @@ pub fn read_presence(agent_dir: &Path) -> Option<ChannelPresence> {
     serde_json::from_slice(&std::fs::read(agent_dir.join(PRESENCE_FILE)).ok()?).ok()
 }
 
-fn st3_initialized_writer(agent_dir: &Path, identity: &str) -> Option<Writer> {
+fn fractal_initialized_writer(agent_dir: &Path, identity: &str) -> Option<Writer> {
     let runtime_id = crate::contracts::env(crate::claude_session::RUNTIME_ID_ENV)
         .filter(|value| !value.is_empty())?;
     let session = crate::contracts::env(crate::claude_session::SESSION_ENV)
@@ -350,34 +328,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_and_st3_channels_report_their_own_public_mcp_identity() {
+    fn fractal_channel_reports_its_public_mcp_identity() {
         let request = json!({"jsonrpc":"2.0","id":7,"method":"initialize"});
         assert_eq!(
-            initialize_response(&request, LEGACY_SERVER_NAME)["result"]["serverInfo"]["name"],
-            "st2"
-        );
-        assert_eq!(
-            initialize_response(&request, ST3_SERVER_NAME)["result"]["serverInfo"]["name"],
+            initialize_response(&request, FRACTAL_SERVER_NAME)["result"]["serverInfo"]["name"],
             "st3"
         );
     }
 
     #[test]
-    fn both_channels_tell_the_agent_to_answer_a_person_in_the_conversation() {
+    fn fractal_channel_tells_the_agent_to_answer_a_person_in_the_conversation() {
         let request = json!({"jsonrpc":"2.0","id":7,"method":"initialize"});
-        for name in [LEGACY_SERVER_NAME, ST3_SERVER_NAME] {
-            let instructions = initialize_response(&request, name)["result"]["instructions"]
+        let instructions =
+            initialize_response(&request, FRACTAL_SERVER_NAME)["result"]["instructions"]
                 .as_str()
                 .unwrap()
                 .to_owned();
-            assert!(instructions.contains("answered in this conversation"));
-            assert!(instructions.contains("people have no inbox, so do not reply with st"));
-            assert!(instructions.contains("conversations reply"));
-        }
+        assert!(instructions.contains(crate::ding::PERSON_REPLY_INSTRUCTION));
+        assert!(instructions.contains("even when the person is present"));
+        assert!(instructions.contains("conversations reply"));
     }
 
     #[test]
-    fn initialized_st3_channel_is_the_positive_readiness_edge() {
+    fn initialized_fractal_channel_is_the_positive_readiness_edge() {
         let temp = tempfile::tempdir().unwrap();
         let identity = "fleet.cos.standing.cos";
         let session = "st3-channel-session";

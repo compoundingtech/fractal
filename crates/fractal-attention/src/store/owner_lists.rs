@@ -1,4 +1,4 @@
-//! The part of `store::owner_lists` that moved up from st3-seats.
+//! The part of `store::owner_lists` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AttentionListStore;
 use super::*;
@@ -26,8 +26,8 @@ impl OwnerView {
 
     fn list(self, store: &Store) -> &OwnerList {
         match self {
-            Self::Glasses => &store.smalltalk.glass_list,
-            Self::Arrangements => &store.smalltalk.arrangement_list,
+            Self::Glasses => &store.fractal.glass_list,
+            Self::Arrangements => &store.fractal.arrangement_list,
         }
     }
 
@@ -145,7 +145,11 @@ impl OwnerListsStore for Store {
             let published = list.published.lock().unwrap_or_else(PoisonError::into_inner);
             (list.forgotten.load(AtomicOrdering::Acquire), published.clone())
         };
-        self.read_snapshot(|index| {
+        // A refold reads everyone, as a first refresh does, under the same generation. If the
+        // read fails, the next refresh refolds instead.
+        let refold = list.refold.swap(false, AtomicOrdering::AcqRel);
+        let previous = previous.filter(|_| !refold);
+        let refreshed = self.read_snapshot(|index| {
             let projection = self.attention_projection_frontier()?;
             let connection = self.readers.get();
             let (mut owners, people) = match &previous {
@@ -214,7 +218,11 @@ impl OwnerListsStore for Store {
                 owners,
             }));
             Ok(changed)
-        })
+        });
+        if refold && refreshed.is_err() {
+            list.refold.store(true, AtomicOrdering::Release);
+        }
+        refreshed
     }
 
     #[cfg(any(test, feature = "test-support"))]

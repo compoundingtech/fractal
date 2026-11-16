@@ -3,6 +3,7 @@ name = "fractal-chatgpt"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+default-run = "fractal-chatgpt"
 
 [dependencies]
 axum = { version = "0.8", features = ["json"] }
@@ -21,5 +22,11 @@ tempfile = "3"
 parking_lot = "0.12"
 
 [[bin]]
+name = "fractal-chatgpt"
+path = "src/main.rs"
+
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+[[bin]]
 name = "st-chatgpt"
 path = "src/main.rs"
+# LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias

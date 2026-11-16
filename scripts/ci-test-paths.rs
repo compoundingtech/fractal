@@ -101,15 +101,15 @@ mod tests {
     fn nextest_supplies_the_relocated_executable() {
         assert_eq!(
             resolve(
-                "CARGO_BIN_EXE_st3-fixture",
-                "/build/target/debug/st3-fixture",
+                "CARGO_BIN_EXE_fractal-fixture",
+                "/build/target/debug/fractal-fixture",
                 Some("/build"),
                 Some("/consumer"),
-                Some("/extract/target/debug/st3-fixture"),
+                Some("/extract/target/debug/fractal-fixture"),
                 true
             )
             .unwrap(),
-            "/extract/target/debug/st3-fixture"
+            "/extract/target/debug/fractal-fixture"
         );
     }
 

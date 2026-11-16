@@ -36,8 +36,18 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
     {/* LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback */}
   </main>
 }
-const meta = { title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises selection, focus, shortcuts and surface tokens without domain state." }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises selection, focus, shortcuts and surface tokens without domain state." }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:primitive',
+  'Dark1440:primitive',
+  'Dark440:primitive',
+  'Light1440:primitive',
+  'Light440:primitive',
+  'RadioSelection:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 /** The probe exercises the real entry keyframes and also proves a resting surface does not animate. */

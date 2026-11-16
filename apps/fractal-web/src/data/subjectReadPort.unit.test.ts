@@ -1,6 +1,7 @@
 import type { ClientOptions } from '@fractal/client'
 import { Agent } from '@fractal/client/schema'
 import { DateTime, Effect, Schema, Stream } from 'effect'
+import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it } from 'vitest'
 
 import { observed, unavailable } from './source.ts'
@@ -13,11 +14,19 @@ import {
 
 const envelope = (value: unknown) => ({
   api_version: 'st3.client.v0',
-  snapshot: { id: 'snapshot/test' },
+  snapshot: { id: 'snapshot/test', created_at: '1970-01-01T00:00:03Z' },
   value,
 })
 
 describe('native subject reads', () => {
+  it('classifies a getter that is not implemented as unsupported rather than a retryable failure', async () => {
+    const options: ClientOptions = { baseUrl: 'http://gateway.invalid', fetchImpl: async input =>
+      String(input).endsWith('/capabilities') ? Response.json(recording.capabilities) :
+        Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unsupported', message: 'Not implemented', retryable: false, request_id: 'request/example-unsupported', details: {} }, { status: 501 }) }
+    const reads = gatewaySubjectReads({ options })
+    expect((await Effect.runPromise(Effect.flip(reads.session.read('session/example-details')))).reason).toBe('unsupported')
+    expect((await Effect.runPromise(Effect.flip(reads.agentQueue.read('agent/example-details')))).reason).toBe('unsupported')
+  })
   it('decodes fixture wire once before publishing rich values to typed registry consumers', () => {
     const feed = nativeSubjectFixture({ schema: Agent, wire: recording.cases.agent.payload.value })
     expect(feed._tag).toBe('Observed')
@@ -57,11 +66,13 @@ describe('native subject reads', () => {
 
   it('keeps the last good native DTO with an explicit stale failure then recovers', async () => {
     let failed = false
+    let requests = 0
     const client: ClientOptions = {
       baseUrl: 'http://gateway.invalid',
       fetchImpl: async (input) => {
         if (String(input).endsWith('/capabilities'))
           return Response.json(envelope({ limits: { max_page_items: 100 } }))
+        requests++
         if (failed) throw new Error('Gateway disconnected')
         return Response.json(envelope({ reference: 'blob/document', bytes: [65] }))
       },
@@ -81,20 +92,67 @@ describe('native subject reads', () => {
           ),
         ),
       )
-    expect(Array.from(await one())[0]).toEqual(
-      observed({ value: { reference: 'blob/document', bytes: [65] } }),
-    )
+    const first = Array.from(await one())[0]!
+    expect(first).toEqual({
+      ...observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
+      readAt: expect.any(Number),
+    })
+    expect(requests).toBe(1)
     failed = true
     expect(Array.from(await one())[0]).toEqual({
       _tag: 'Observed',
       value: { reference: 'blob/document', bytes: [65] },
+      snapshotCreatedAt: DateTime.makeUnsafe(3000),
+      readAt: first._tag === 'Observed' ? first.readAt : undefined,
       freshness: 'stale',
       error: { reason: 'failed', detail: 'Gateway disconnected' },
     })
+    expect(requests).toBe(2)
     failed = false
-    expect(Array.from(await one())[0]).toEqual(
-      observed({ value: { reference: 'blob/document', bytes: [65] } }),
-    )
+    expect(Array.from(await one())[0]).toEqual({
+      ...observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
+      readAt: expect.any(Number),
+    })
+    expect(requests).toBe(3)
+  })
+
+  it('revalidates an unmounted reader without restarting an acquisition held by a feed consumer', async () => {
+    const registry = AtomRegistry.make()
+    let requests = 0
+    const reader = gatewaySubjectReads({
+      registry,
+      options: {
+        baseUrl: 'http://gateway.invalid',
+        fetchImpl: async (input) => {
+          if (String(input).endsWith('/capabilities'))
+            return Response.json(recording.capabilities)
+          requests++
+          return Response.json(envelope({ reference: 'blob/document', bytes: [requests] }))
+        },
+      },
+    }).document
+    const release = registry.mount(reader.feed('guide'))
+    try {
+      expect(await Effect.runPromise(reader.read('guide'))).toEqual({
+        reference: 'blob/document',
+        bytes: [1],
+      })
+      expect(await Effect.runPromise(reader.read('guide'))).toEqual({
+        reference: 'blob/document',
+        bytes: [1],
+      })
+      expect(requests).toBe(1)
+      release()
+      // No scheduler drain: demand can return before deferred atom disposal.
+      expect(await Effect.runPromise(reader.read('guide'))).toEqual({
+        reference: 'blob/document',
+        bytes: [2],
+      })
+      expect(requests).toBe(2)
+    } finally {
+      release()
+      registry.dispose()
+    }
   })
 
   it('decodes the selected machine independently of unrelated malformed list rows', async () => {

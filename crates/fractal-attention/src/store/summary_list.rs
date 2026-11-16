@@ -1,4 +1,4 @@
-//! The part of `store::summary_list` that moved up from st3-seats.
+//! The part of `store::summary_list` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AttentionListStore;
 use super::*;
@@ -104,7 +104,7 @@ impl SummaryListStore for Store {
             return PublishedSummary::Unserved;
         }
         self.note_published_view_read();
-        let list = &self.smalltalk.summary_list;
+        let list = &self.fractal.summary_list;
         let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
         let selections = &mut lists.selections;
         let key = person.map(str::to_owned);
@@ -127,7 +127,7 @@ impl SummaryListStore for Store {
             within_ms: u64,
             waiting_only: bool,
         ) -> (u64, Vec<Option<String>>) {
-        let list = &self.smalltalk.summary_list;
+        let list = &self.fractal.summary_list;
         let now = now_ms() as u64;
         let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
         lists.selections.retain(|_, selection| now.saturating_sub(selection.read_at) <= within_ms);
@@ -144,7 +144,7 @@ impl SummaryListStore for Store {
     }
 
     fn summary_shared(&self) -> Option<(Arc<SummaryShared>, SummaryInputs)> {
-        self.smalltalk
+        self.fractal
             .summary_list
             .lists
             .lock()
@@ -154,15 +154,15 @@ impl SummaryListStore for Store {
     }
 
     fn start_summary_shared(&self) {
-        self.smalltalk.summary_list.started.store(true, AtomicOrdering::Release);
+        self.fractal.summary_list.started.store(true, AtomicOrdering::Release);
     }
 
     fn note_summary_shared_failed(&self, failed: bool) -> bool {
-        self.smalltalk.summary_list.failing.swap(failed, AtomicOrdering::AcqRel) != failed && failed
+        self.fractal.summary_list.failing.swap(failed, AtomicOrdering::AcqRel) != failed && failed
     }
 
     fn summary_shared_starting(&self) -> bool {
-        !self.smalltalk.summary_list.started.load(AtomicOrdering::Acquire)
+        !self.fractal.summary_list.started.load(AtomicOrdering::Acquire)
     }
 
     fn publish_summary_shared(
@@ -171,7 +171,7 @@ impl SummaryListStore for Store {
             shared: Arc<SummaryShared>,
             inputs: SummaryInputs,
         ) {
-        let list = &self.smalltalk.summary_list;
+        let list = &self.fractal.summary_list;
         let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
         if list.forgotten.load(AtomicOrdering::Acquire) != generation
             || lists.shared.as_ref().is_some_and(|(newest, _)| newest.cut > shared.cut)
@@ -182,7 +182,7 @@ impl SummaryListStore for Store {
     }
 
     fn summary_selection_waiting(&self) -> bool {
-        self.smalltalk
+        self.fractal
             .summary_list
             .lists
             .lock()
@@ -198,7 +198,7 @@ impl SummaryListStore for Store {
             person: &Option<String>,
             row: Option<SummaryRow>,
         ) -> bool {
-        let list = &self.smalltalk.summary_list;
+        let list = &self.fractal.summary_list;
         let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
         if list.forgotten.load(AtomicOrdering::Acquire) != generation {
             return false;
@@ -226,7 +226,7 @@ impl SummaryListStore for Store {
     }
 
     fn summary_machines(&self) -> Option<SummaryMachines> {
-        self.smalltalk
+        self.fractal
             .summary_list
             .lists
             .lock()
@@ -236,7 +236,7 @@ impl SummaryListStore for Store {
     }
 
     fn keep_summary_machines(&self, generation: u64, machines: SummaryMachines) {
-        let list = &self.smalltalk.summary_list;
+        let list = &self.fractal.summary_list;
         let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
         if list.forgotten.load(AtomicOrdering::Acquire) != generation
             || lists.machines.as_ref().is_some_and(|newest| newest.cut > machines.cut)

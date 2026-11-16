@@ -177,6 +177,13 @@ fn store(runtime: &Arc<StageRuntime>, pending: usize) -> (tempfile::TempDir, Sto
     );
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("claims.sqlite3"), "node", runtime.clone()).unwrap();
+    // Each stage is timed against an injected sleep. A loaded disk's fsync once took 147 ms of a
+    // commit and failed a stage that was not the one slowed; durability is not what this checks.
+    store
+        .connection
+        .write()
+        .pragma_update(None, "synchronous", "OFF")
+        .unwrap();
     assert!(store.project_replication_backlog().unwrap());
     for index in 0..pending {
         store
@@ -516,20 +523,13 @@ fn holds_outside_the_projection_loan_carry_no_stages() {
     for row in rows {
         let mut keys = row.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
         keys.sort();
-        assert_eq!(
-            keys,
-            [
-                "at",
-                "client",
-                "held_ms",
-                "holder",
-                "kind",
-                "longest_write_ms",
-                "started_unix_ms",
-                "writes"
-            ],
-            "{row}"
-        );
+        // Only a batch counts its writes.
+        let expected: &[&str] = if row["kind"] == "batch" {
+            &["at", "client", "held_ms", "holder", "kind", "longest_write_ms", "started_unix_ms", "writes"]
+        } else {
+            &["at", "client", "held_ms", "holder", "kind", "started_unix_ms"]
+        };
+        assert_eq!(keys, expected, "{row}");
     }
 }
 

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A revoked client grant is refused on every member whatever order it admitted the pairing and the revocation in, and revalidation checks the canonical newest completion",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No database or claim schema change. A store read picks the canonical newest claim through the existing subject and kind index."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "No wire, stored format or claim kind change. A member that admitted a revocation before the pairing it revokes used to accept the credential; it now refuses it, as other members already did. With two completions of one grant, every member revalidates against the same one."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step. A device whose grant was revoked pairs again to get a new grant, as before."},
+  "recovery": {"status": "none", "detail": "Nothing stored changes; reverting restores the previous reads."}
+}

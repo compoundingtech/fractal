@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add pre-activation iOS sidebar scale, paging-fault and opt-in CPU latency harnesses",
+  "replay": {"status": "none", "detail": "Test-only change; no replay behavior changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Exercises 1,001 and 4,096 memberships, 1,024 folders, atomic operation/byte refusals and stale paging states without activating v2."},
+  "downtime": {"status": "none", "detail": "No restart required."},
+  "manual": {"status": "none", "detail": "Optional CPU evidence: SIDEBAR_IOS_PERF=1 nix develop .#web --command pnpm --dir apps/ios test. Native release frame/render gates require PR25; real socket load, sustained daemon writes and server admission evidence require #4739 D. These gates are explicitly skipped, not claimed by the in-memory harness."},
+  "recovery": {"status": "none", "detail": "Revert the test-only change to remove coverage."}
+}

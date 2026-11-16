@@ -182,11 +182,14 @@ fn forwarded_deadline(operation: &crate::peer::ClientReadOperation) -> Option<Du
         | ClientReadOperation::TerminalScreenChange { .. } => Some(ORDINARY + operation.wait()),
         ClientReadOperation::ConversationContent { .. }
         | ClientReadOperation::Timeline { .. }
+        | ClientReadOperation::SessionDetail { .. }
         | ClientReadOperation::TerminalScreen { .. }
         | ClientReadOperation::SeatSnapshot { .. }
         | ClientReadOperation::AgentWorkspace { .. }
         | ClientReadOperation::Blob { .. }
         | ClientReadOperation::HarnessInventory { .. }
+        | ClientReadOperation::GithubPlugin { .. }
+        | ClientReadOperation::GithubPluginRead { .. }
         | ClientReadOperation::Messages { .. } => Some(ORDINARY),
     }
 }
@@ -396,8 +399,8 @@ async fn envelope_work(
 pub enum WorkError {
     Join(tokio::task::JoinError),
     Panic,
-    Deadline(crate::model::St3Error),
-    Store(crate::model::St3Error),
+    Deadline(crate::model::FractalError),
+    Store(crate::model::FractalError),
 }
 
 impl std::fmt::Display for WorkError {
@@ -824,11 +827,11 @@ pub fn query<T>(
 
 pub fn error(error: &WorkError) -> Option<ApiError> {
     match error {
-        WorkError::Deadline(_) => Some(ApiError::bad(crate::model::St3Error::new(
+        WorkError::Deadline(_) => Some(ApiError::bad(crate::model::FractalError::new(
             "read-deadline",
             "the read exceeded its deadline or was cancelled",
         ))),
-        WorkError::Store(error) => Some(ApiError::bad(crate::model::St3Error {
+        WorkError::Store(error) => Some(ApiError::bad(crate::model::FractalError {
             code: error.code,
             message: error.message.clone(),
             details: error.details.clone(),
@@ -880,6 +883,15 @@ use super::*;
 
     #[test]
     fn export_read_loan_writer_wait_holds_no_reader() {
+        // The writer-wait count is process-wide; in its own process only this export waits.
+        const NAME: &str = "api::read_deadline::tests::export_read_loan_writer_wait_holds_no_reader";
+        if std::env::var("ST_EXPORT_WRITER_WAIT_TEST").as_deref() != Ok("1") {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("ST_EXPORT_WRITER_WAIT_TEST", "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("claims.sqlite");
         let store = Arc::new(super::super::Store::open(&path, "node").unwrap());
@@ -908,8 +920,14 @@ use super::*;
             done.send(response.status()).unwrap();
         });
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Check once the export waits for the writer, past its sealing and snapshot reads.
+        let asked = std::time::Instant::now();
+        while smallclaims::windows::holds::report()["waiting"]["writer"] == 0 {
+            assert!(asked.elapsed() < Duration::from_secs(10), "the export never asked for the writer");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         // The writer is unavailable, but the export must not pin reader capacity or WAL.
-        assert!(answer.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(answer.try_recv().is_err());
         assert_eq!(store.readers.live_read_report().live_checkouts, 0);
         let checkpoint = rusqlite::Connection::open(&path).unwrap();
         let report = smallclaims::sqlite::checkpoint_wal_report(&checkpoint).unwrap();
@@ -943,7 +961,7 @@ use super::*;
         let loan = store.readers.get();
         let mut report = smallclaims::sqlite::WalCheckpointReport {
             frames: 10, backfilled: 4, passive_ms: 0, writer_wait_ms: 0,
-            truncate_ms: None, recycled: false,
+            truncate_ms: None, recycled: false, blocked_by: None,
         };
         telemetry::wal_checkpoint_observed(&store.readers, Some(&report));
         provider.force_flush().unwrap();
@@ -1443,7 +1461,7 @@ use super::*;
                     async move {
                         let work = super::super::events_page(State(state.clone()), Query(
                             super::super::EventQuery {
-                                after: 0, subject: None, owner_run: None, wait: Some(true),
+                                after: 0, messages_after: None, subject: None, owner_run: None, wait: Some(true),
                                 timeout_ms: Some(30_000), limit: Some(10),
                             },
                         ));
@@ -1839,9 +1857,9 @@ use super::*;
                     writing.connection.batched(|transaction| {
                         transaction.execute(
                             "INSERT INTO meta(key,value) VALUES('blocking-ack','committed')", [],
-                        ).map_err(|error| crate::model::St3Error::new("internal", error.to_string()))?;
+                        ).map_err(|error| crate::model::FractalError::new("internal", error.to_string()))?;
                         Ok(())
-                    }).map_err(|error| crate::model::St3Error::new("internal", error))?
+                    }).map_err(|error| crate::model::FractalError::new("internal", error))?
                 }))
             }).await;
             let acknowledged_before_release = !released_flag.load(Ordering::SeqCst);
@@ -2454,7 +2472,7 @@ use super::*;
                         read_budget::check()?;
                         count.fetch_add(1, Ordering::Relaxed);
                     }
-                    Ok::<_, crate::model::St3Error>(())
+                    Ok::<_, crate::model::FractalError>(())
                 })();
                 let _ = done_tx.send(result);
             })
@@ -2503,7 +2521,7 @@ use super::*;
                         std::hint::black_box(items);
                     }
                     #[allow(unreachable_code)]
-                    Ok::<_, crate::model::St3Error>(())
+                    Ok::<_, crate::model::FractalError>(())
                 })();
                 let _ = done_tx.send((items, result));
             })

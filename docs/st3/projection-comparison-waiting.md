@@ -75,11 +75,11 @@ same digests on both sides every time the comparison was made.
 - Local conditions that make a comparison premature still apply immediately: unsealed local
   batches, claims waiting for their kinds, a deferred projection, a different registry.
 - The status exports what the reported comparison found (`projection_graphs_equal`) and when it was
-  made (`projection_compared_at_unix_ms`). `st replication diff` and the peer lines of
-  `st replication status` read those, not the equality of the peer's last digests with this node's
+  made (`projection_compared_at_unix_ms`). `fractal replication diff` and the peer lines of
+  `fractal replication status` read those, not the equality of the peer's last digests with this node's
   live ones, and show the comparison's age ("graphs compared 3m ago").
 - Every waiting pair now says why in `projection_comparison_waiting_reason`, and
-  `st replication status` and `st replication diff` print it:
+  `fractal replication status` and `fractal replication diff` print it:
   - claims wait for a build that knows their kinds,
   - this node has unsealed local batches,
   - the projection is deferred,

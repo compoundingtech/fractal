@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-local gives every test process a short TMPDIR of its own on disk, so a test that leaves an empty .git in its temporary directory can no longer fail the tests that run after it, and the tests' Unix socket paths fit their 108-byte limit",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "CI is unchanged: the target runner is set only inside scripts/ci-local. The commands the stages run and the notes they sign are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}

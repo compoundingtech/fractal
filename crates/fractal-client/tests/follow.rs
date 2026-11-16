@@ -34,9 +34,13 @@ async fn accept(stream: tokio::net::UnixStream) -> Socket {
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     tokio_tungstenite::accept_hdr_async(stream, |request: &Request, mut response: Response| {
         assert_eq!(request.uri().path(), "/v1/client/collections/stream");
+        assert_eq!(
+            request.headers()["sec-websocket-protocol"],
+            "fractal.client.collections.v0",
+        );
         response.headers_mut().insert(
             "sec-websocket-protocol",
-            "st3.client.collections.v0".parse().unwrap(),
+            "fractal.client.collections.v0".parse().unwrap(),
         );
         Ok(response)
     })
@@ -89,6 +93,42 @@ async fn state<T: Send + Sync + 'static>(
     })
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn collection_subscribe_null_filters_match_schema() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("commands.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        accept(stream).await
+    });
+    let mut stream = Client::unix(&path).collection_stream().await.unwrap();
+    let mut socket = server.await.unwrap();
+    let contract: Value = serde_json::from_str(include_str!(
+        "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+    ))
+    .unwrap();
+    let schema = json!({"$ref": "#/$defs/CollectionCommand", "$defs": contract["$defs"]});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+
+    for collection in [
+        "commands", "clients", "usage", "machines", "devices", "sessions", "terminals",
+        "missions", "attention", "work", "glasses", "summary", "agents",
+    ] {
+        stream.subscribe("test", collection, 10, None, None).await.unwrap();
+        let value = command(&mut socket).await;
+        assert_eq!(value["actor"], Value::Null, "{collection}");
+        assert_eq!(value["status"], Value::Null, "{collection}");
+        assert!(validator.is_valid(&value), "{collection}: {value}");
+    }
+
+    stream.subscribe("filtered", "missions", 10, Some("agent/test"), Some("active")).await.unwrap();
+    let value = command(&mut socket).await;
+    assert_eq!(value["actor"], "agent/test");
+    assert_eq!(value["status"], "active");
+    assert!(validator.is_valid(&value), "{value}");
 }
 
 #[tokio::test]

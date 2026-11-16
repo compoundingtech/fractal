@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-perf-slot-test holds the slot with runs that wait until the test releases them, not with fixed one- and 1.5-second sleeps: on a loaded host a sleep ended before the runs meant to queue behind it had joined the line, and the test timed out (\"b in line\") or saw the second run already holding the slot.",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage or schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, permission or trust change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, CLI or client change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing runs differently on installed machines."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit."
+  }
+}

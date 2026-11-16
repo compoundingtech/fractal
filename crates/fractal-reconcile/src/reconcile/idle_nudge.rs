@@ -364,7 +364,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .iter()
                 .map(|step| Value::String(format!("mission-run:{}", step.run))),
         );
-        self.store.append_claim(&ClaimInput {
+        crate::store::message_routing::send(&self.store, &ClaimInput {
             subject: message.clone(),
             kind: "message.sent".into(),
             actor: Some("daemon/runtime".into()),

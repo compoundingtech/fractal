@@ -1,30 +1,30 @@
 #!/usr/bin/env node
 /**
- * Live proof of the conversation alert strip against a real, isolated st.
+ * Live proof of the conversation alert strip against a real, isolated Fractal instance.
  *
  *   node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]
  *
- * `up` makes a throwaway st: the instance `webproof` under its own HOME in WEBPROOF_ROOT
- * (default /var/tmp/st-webproof), so neither `~/.st-instance` nor the default install, its
+ * `up` makes a throwaway Fractal instance: `webproof` under its own HOME in WEBPROOF_ROOT
+ * (default /var/tmp/fractal-webproof), so neither `~/.st-instance` nor the default install, its
  * daemon or its service units are touched. It founds a one-machine dial-out fleet, starts the
- * daemon in a transient user unit (`webproof-st-up`), declares person/avery and one program
+ * daemon in a transient user unit (`webproof-fractal-up`), declares person/avery and one program
  * seat, agent/example/atlas, and pairs a full-control device for avery whose bearer credential
  * stays in WEBPROOF_ROOT/authorization (mode 0600, never printed).
  * `run` (the default) brings it up when it is not, has atlas ask avery a yes-or-no question and
  * a structured decision, serves the app on loopback with WF_ST_GATEWAY/WF_ST_AUTHORIZATION set
  * to the instance's paired gateway, opens atlas's conversation in headless Chromium, answers
- * both from the strip (Yes, then the recommended decision; each confirmed with Send) and checks
- * with st that each step finished with that answer. It prints one JSON receipt: `firstDataMs`
+ * both from the card (Yes, then the preselected recommended decision; each sent with Send) and checks
+ * with Fractal that each step finished with that answer. It prints one JSON receipt: `firstDataMs`
  * (navigation to the ask in the strip, warm; `coldFirstDataMs` includes Vite's first optimize),
  * and per answer `answerToClearedMs` (Send click to the first frame painted without the alert,
  * against the 2000 ms alert_landed budget), the client requests the answer made, and
- * `alertFrameMs`, when st's collection stream first pushed a frame naming the alert. Earlier
+ * `alertFrameMs`, when Fractal's collection stream first pushed a frame naming the alert. Earlier
  * runs' unanswered asks are cleared first. Screenshots go to OUT (default WEBPROOF_ROOT/out).
  * `down` stops the daemon, uninstalls the instance and removes WEBPROOF_ROOT.
  *
- * Each st command runs in its own transient user unit (`systemd-run --user`) with a scrubbed
+ * Each Fractal command runs in its own transient user unit (`systemd-run --user`) with a scrubbed
  * environment: the daemon attributes a local caller by the ST_AGENT of its process ancestors, so
- * from inside an st seat a plain call would speak for that seat and its daemon. Nothing here
+ * from inside a Fractal seat a plain call would speak for that seat and its daemon. Nothing here
  * reaches the default daemon or any real person.
  *
  * Needs: systemd user manager; ST3_BINARY and PTY_BINARY (default: `st3` and `pty` on PATH);
@@ -41,16 +41,23 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const app = fileURLToPath(new URL('..', import.meta.url))
-const root = process.env.WEBPROOF_ROOT ?? '/var/tmp/st-webproof'
+const root = process.env.WEBPROOF_ROOT ?? '/var/tmp/fractal-webproof'
 const out = process.env.OUT ?? join(root, 'out')
 const instance = 'webproof'
 const person = 'person/avery'
 const seat = 'agent/example/atlas'
-const unit = 'webproof-st-up'
+const unit = 'webproof-fractal-up'
 const home = join(root, 'home')
 const tools = join(root, 'tools')
 const runDir = join(home, '.st-instance', instance, 'run')
-const gateway = join(runDir, 'st3-client.sock')
+const gateway = () => {
+  const socket = join(runDir, 'fractal-client.sock')
+  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+  const legacy = join(runDir, 'st3-client.sock')
+  if (!existsSync(socket) && existsSync(legacy)) return legacy
+  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+  return socket
+}
 const authorizationFile = join(root, 'authorization')
 const BUDGET_MS = 2000
 
@@ -63,16 +70,16 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const isolated = (argv) => [env, '-i', `HOME=${home}`, `PATH=${tools}:${dirname(sleep)}:/usr/bin:/bin`, `USER=${process.env.USER ?? 'webproof'}`, 'LANG=C.UTF-8', 'SHELL=/bin/sh', ...argv]
 const st = (args, { check = true } = {}) => {
   const result = spawnSync('systemd-run', ['--user', '--wait', '--pipe', '--collect', '--quiet', ...isolated([join(tools, 'st3'), '--instance', instance, ...args])], { encoding: 'utf8' })
-  if (check && result.status !== 0) throw new Error(`st ${args.join(' ')} exited ${result.status}: ${result.stderr || result.stdout}`)
+  if (check && result.status !== 0) throw new Error(`Fractal ${args.join(' ')} exited ${result.status}: ${result.stderr || result.stdout}`)
   return result
 }
 const stJson = (args) => JSON.parse(st(['--json', ...args]).stdout)
-const alive = () => existsSync(gateway) && st(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
+const alive = () => existsSync(gateway()) && st(['--daemon-wait', '0', 'agents', 'ls'], { check: false }).status === 0
 
 /** One unauthenticated request to the paired gateway socket (pairing completion). */
 const gatewayPost = (path, body) => new Promise((resolve, reject) => {
   const payload = JSON.stringify(body)
-  const req = request({ socketPath: gateway, path, method: 'POST', headers: { host: '127.0.0.1', 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (res) => {
+  const req = request({ socketPath: gateway(), path, method: 'POST', headers: { host: '127.0.0.1', 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, (res) => {
     let text = ''
     res.on('data', (chunk) => { text += chunk })
     res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(text)) : reject(new Error(`POST ${path}: ${res.statusCode} ${text}`)))
@@ -106,7 +113,7 @@ async function start() {
   mkdirSync(join(root, 'workspace'), { recursive: true })
   if (!existsSync(join(tools, 'st3'))) {
     copyFileSync(process.env.ST3_BINARY ?? which('st3'), join(tools, 'st3'))
-    copyFileSync(process.env.PTY_BINARY ?? which('pty'), join(tools, 'pty')) // st3 finds pty beside itself
+    copyFileSync(process.env.PTY_BINARY ?? which('pty'), join(tools, 'pty')) // Fractal finds pty beside itself
     chmodSync(join(tools, 'st3'), 0o755); chmodSync(join(tools, 'pty'), 0o755)
     symlinkSync('st3', join(tools, 'st'))
   }
@@ -130,8 +137,8 @@ async function start() {
 function down() {
   // WEBPROOF_ROOT comes from the environment: act only on a directory this script made,
   // so a wrong root neither uninstalls nor deletes anything.
-  if (!basename(root).startsWith('st-webproof') || !existsSync(join(root, 'fleet-created'))) {
-    console.error(`not removing ${root}: it is not named st-webproof* or has no fleet-created marker from this script`)
+  if (!basename(root).startsWith('fractal-webproof') || !existsSync(join(root, 'fleet-created'))) {
+    console.error(`not removing ${root}: it is not named fractal-webproof* or has no fleet-created marker from this script`)
     process.exitCode = 1
     return
   }
@@ -144,7 +151,7 @@ function down() {
   console.log(`removed ${root}`)
 }
 
-/** The step behind an alert, as st reports it once answered. */
+/** The step behind an alert, as Fractal reports it once answered. */
 const stepAnswer = (step) => {
   const view = stJson(['work', 'show', step]).value
   const last = view.person_answers?.at(-1)
@@ -184,7 +191,7 @@ async function proof() {
   const yesStep = ask(yesTitle, ['--reason', 'Answer yes or no.'])
   const alertIds = new Map(stJson(['alerts', 'ls', '--as', person]).value.items.map((item) => [item.title, item.id]))
 
-  process.env.WF_ST_GATEWAY = gateway
+  process.env.WF_ST_GATEWAY = gateway()
   process.env.WF_ST_AUTHORIZATION = readFileSync(authorizationFile, 'utf8').trim()
   const { createServer, loadConfigFromFile } = await import('vite')
   const loaded = await loadConfigFromFile({ command: 'serve', mode: 'development' }, `${app}/vite.config.ts`, app)
@@ -214,7 +221,6 @@ async function proof() {
     }
     const coldFirstDataMs = await firstData(() => page.goto(`${origin}/w/${seat}?open=thread`, { waitUntil: 'commit', timeout: 120_000 }))
     const firstDataMs = await firstData(() => page.reload({ waitUntil: 'commit' }))
-    await strip.locator(`section[aria-label="${decisionTitle}"]`).waitFor({ state: 'attached', timeout: 60_000 })
     // Without HMR, StyleX's dev stylesheet misses lazily loaded modules until fetched again.
     const shoot = async (name) => {
       await page.evaluate(async () => {
@@ -225,18 +231,19 @@ async function proof() {
     }
     await shoot('alerts-before.png')
 
-    /** Click CHOICE then Send in the alert's confirm group; time Send to the paint without it. */
+    /** Choose CHOICE then press Send in the alert's card; time Send to Fractal confirming it, not to the card's instant local hide. */
     const answer = async (title, choice, shot) => {
       const section = strip.locator(`section[aria-label="${title}"]`)
-      await section.evaluate((node) => { if (!node.checkVisibility()) node.closest('details')?.setAttribute('open', '') })
-      await section.getByRole('button', { name: choice, exact: true }).click()
-      const send = section.getByRole('group', { name: 'Confirm your answer' }).getByRole('button', { name: 'Send', exact: true })
+      // Several alerts page one at a time: answering the first brings the next.
+      await section.waitFor({ state: 'attached', timeout: 60_000 })
+      await section.getByRole('radio', { name: new RegExp(`^${choice}`) }).check()
+      const send = section.getByRole('button', { name: 'Send', exact: true })
       await send.waitFor()
-      // The in-page clock starts on the Send click and stops at the first frame painted without the alert.
+      // The in-page clock starts on the Send click and stops at the first frame painted with the answer confirmed gone.
       await page.evaluate((title) => {
         let sentAt
         document.addEventListener('click', () => { sentAt ??= performance.now() }, { capture: true, once: true })
-        const gone = () => ![...document.querySelectorAll('[data-testid="conversation-alerts"] section')].some((node) => node.getAttribute('aria-label') === title)
+        const gone = () => [...document.querySelectorAll('[data-testid="conversation-alerts"] section[data-answer-phase="confirmed"]')].some((node) => node.getAttribute('aria-label') === `Answered: ${title}`)
         window.__alertCleared = new Promise((resolve) => {
           // Where the time went: each client request the answer made, as ms after the click.
           const requests = () => performance.getEntriesByType('resource')
@@ -263,7 +270,7 @@ async function proof() {
       }
     }
     const yes = await answer(yesTitle, 'Yes', 'alerts-after-yes.png')
-    const decision = await answer(decisionTitle, 'Publish the notes (recommended)', 'alerts-after-decision.png')
+    const decision = await answer(decisionTitle, 'Publish the notes', 'alerts-after-decision.png')
     const yesSt = stepAnswer(yesStep)
     const decisionSt = stepAnswer(decisionStep)
     const receipt = {
@@ -295,7 +302,7 @@ async function proof() {
 }
 
 const command = process.argv[2] ?? 'run'
-if (command === 'up') { await up(); console.log(`up: WF_ST_GATEWAY=${gateway} WF_ST_AUTHORIZATION=$(cat ${authorizationFile})`) }
+if (command === 'up') { await up(); console.log(`up: WF_ST_GATEWAY=${gateway()} WF_ST_AUTHORIZATION=$(cat ${authorizationFile})`) }
 else if (command === 'down') down()
 else if (command === 'run') await proof()
 else throw new Error('usage: alerts-live-proof.mjs [run|up|down]')

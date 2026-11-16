@@ -1,9 +1,9 @@
-# Small Talk repository guidance
+# Fractal repository guidance
 
 Read [README.md](README.md) before changing the product surface.
 
-Read [docs/st2/invariants.md](docs/st2/invariants.md) before changing st2 lifecycle, messaging, teardown, or presence.
-Each st2 invariant names its proof. Preserve that proof while st2 remains in this repository.
+Read [native runtime invariants](docs/st3/invariants.md) before changing native delivery,
+harness state, context, diagnostics, stop ordering or status-line chaining. Preserve each row's proof.
 
-Read [docs/st3/README.md](docs/st3/README.md) before changing st3 claims, missions, replication,
-runtime ownership, or recovery. `st skill` prints how an agent seat uses st at runtime.
+Read [docs/st3/README.md](docs/st3/README.md) before changing Fractal claims, missions, replication,
+runtime ownership, or recovery. `st skill` prints how an agent seat uses Fractal at runtime.

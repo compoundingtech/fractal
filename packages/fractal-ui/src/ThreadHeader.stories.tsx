@@ -2,37 +2,75 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
+import { ChromeControl } from './assistant-ui/composition/ChromeControl'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { colorVars as c, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 const terminalReason = 'The terminal opens once this agent is running on a host.'
-function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, narrow = false, laneWidth }: { scheme?: Scheme; terminalDisabledReason?: string; narrow?: boolean; laneWidth?: number }) {
+function ThreadHeaderStory({ scheme = 'dark', terminalDisabledReason, terminalAvailable = false, terminalOpen = false, narrow = false, laneWidth }: { scheme?: Scheme; terminalDisabledReason?: string; terminalAvailable?: boolean; terminalOpen?: boolean; narrow?: boolean; laneWidth?: number }) {
   return <main data-scheme={scheme} style={laneWidth === undefined ? undefined : { width: laneWidth }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     {narrow
       ? <div data-testid="phone-frame" {...stylex.props(styles.phone)}>
-        <ThreadHeader narrow folder="workstation-a" title="Row projection with a long agent name" status="working" statusLabel="working" freshness="live" sidebarCollapsed onToggleSidebar={() => {}} sidebarSheet={{ open: false, id: 'agents-sheet' }} terminalAvailable panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} />
+        {/* The app's phone header carries the agent's actions and the conversation menu; its Terminal toggle lives in the workspace tab row, so a header told the terminal is available still renders none. */}
+        <ThreadHeader narrow folder="workstation-a" title="Row projection with a long agent name" status="working" statusLabel="working" freshness="live" sidebarCollapsed onToggleSidebar={() => {}} sidebarSheet={{ open: false, id: 'agents-sheet' }} nativeActions={<><ChromeControl icon="person" label="Actions for Row projection" /><ChromeControl icon="gear" label="Conversation menu" /></>} terminalAvailable panelOpen={false} terminalOpen={false} onTogglePanel={() => {}} onToggleTerminal={() => {}} />
       </div>
-      : <ThreadHeader folder="fractal" title="Row projection" panelOpen={false} drawerOpen={false} onTogglePanel={() => {}} onToggleDrawer={() => {}} terminalDisabledReason={terminalDisabledReason} />}
+      : <ThreadHeader folder="fractal" title="Row projection" panelOpen={false} terminalAvailable={terminalAvailable} terminalOpen={terminalOpen} onTogglePanel={() => {}} onToggleTerminal={() => {}} terminalDisabledReason={terminalDisabledReason} />}
   </main>
 }
-const meta = { title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact terminal-disabled reason and fixed short/long titles isolate accessible control names, tooltip focus and constrained-lane/phone overflow; the working label is a fixed geometry probe rather than a catalog agent state.' }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Thread header', component: ThreadHeaderStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact terminal-disabled reason and fixed short/long titles isolate accessible control names, tooltip focus and constrained-lane/phone overflow; the working label is a fixed geometry probe rather than a catalog agent state.' }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThreadHeaderStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'ConstrainedLane:contract-fixture',
+  'ConstrainedLaneLight:contract-fixture',
+  'ConversationShown:contract-fixture',
+  'ConversationShownLight:contract-fixture',
+  'NarrowPhone:contract-fixture',
+  'NarrowPhoneLight:contract-fixture',
+  'TerminalDisabled:contract-fixture',
+  'TerminalDisabledLight:contract-fixture',
+  'TerminalHidden:contract-fixture',
+  'TerminalHiddenLight:contract-fixture',
+  'TerminalShown:contract-fixture',
+  'TerminalShownLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
+/** The main pane shows the conversation: the control names the terminal it would show, and has no fill. */
+export const ConversationShown: Story = { args: { terminalAvailable: true }, play: async ({ canvasElement }) => {
+  const toggle = within(within(canvasElement).getByTestId('thread-header')).getByRole('button', { name: 'Show terminal' })
+  await expect(toggle).not.toHaveAttribute('aria-pressed')
+  // The pointer crosses the header on its way to a control; the page's very first hover opens no tooltip.
+  await userEvent.hover(within(canvasElement).getByTestId('thread-header'))
+  await userEvent.hover(toggle)
+  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Show terminal'))
+} }
+export const ConversationShownLight: Story = { ...ConversationShown, args: { ...ConversationShown.args, scheme: 'light' } }
+/** The main pane shows the terminal: the control names the way back and keeps the fill. Its name carries the state, so `aria-pressed` stays off. */
+export const TerminalShown: Story = { args: { terminalAvailable: true, terminalOpen: true }, play: async ({ canvasElement }) => {
+  const toggle = within(within(canvasElement).getByTestId('thread-header')).getByRole('button', { name: 'Show conversation' })
+  await expect(toggle).not.toHaveAttribute('aria-pressed')
+  // The pointer crosses the header on its way to a control; the page's very first hover opens no tooltip.
+  await userEvent.hover(within(canvasElement).getByTestId('thread-header'))
+  await userEvent.hover(toggle)
+  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Show conversation'))
+} }
+export const TerminalShownLight: Story = { ...TerminalShown, args: { ...TerminalShown.args, scheme: 'light' } }
 /** The host knows why the terminal is unavailable: the toggle stays in place and in the tab order, disabled and described; focus shows the reason in the kit tooltip. */
 export const TerminalDisabled: Story = { tags: ['critical'], args: { terminalDisabledReason: terminalReason }, play: async ({ canvasElement }) => {
   const header = within(canvasElement).getByTestId('thread-header')
-  const toggle = within(header).getByRole('button', { name: 'Toggle terminal drawer' })
+  const toggle = within(header).getByRole('button', { name: 'Show terminal' })
   await expect(toggle).toBeVisible()
   await expect(toggle).toHaveAttribute('aria-disabled', 'true')
-  await expect(toggle).toHaveAccessibleName('Toggle terminal drawer')
+  await expect(toggle).toHaveAccessibleName('Show terminal')
   await expect(toggle).toHaveAccessibleDescription(terminalReason)
-  await expect(within(header).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Toggle terminal drawer', 'Toggle right panel'])
+  await expect(within(header).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(['Show terminal', 'Toggle right panel'])
   await expect(header.querySelector('[title]')).toBeNull()
   ;(document.activeElement as HTMLElement | null)?.blur()
   await userEvent.tab()
   await expect(toggle).toHaveFocus()
-  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent(`Toggle terminal drawer · ${terminalReason}`))
+  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent(`Show terminal · ${terminalReason}`))
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
 } }
@@ -40,7 +78,7 @@ export const TerminalDisabledLight: Story = { ...TerminalDisabled, args: { ...Te
 /** Without a reason the unavailable terminal leaves no toggle behind. The desktop header keeps its dense 28px controls. */
 export const TerminalHidden: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
   const header = within(canvasElement).getByTestId('thread-header')
-  await expect(within(header).queryByRole('button', { name: 'Toggle terminal drawer' })).toBeNull()
+  await expect(within(header).queryByRole('button', { name: 'Show terminal' })).toBeNull()
   const panel = within(header).getByRole('button', { name: 'Toggle right panel' })
   await expect(panel).toBeVisible()
   const { width, height } = panel.getBoundingClientRect()
@@ -62,26 +100,41 @@ export const ConstrainedLane: Story = { tags: ['critical'], args: { laneWidth: 3
   }
 } }
 export const ConstrainedLaneLight: Story = { ...ConstrainedLane, args: { ...ConstrainedLane.args, scheme: 'light' } }
-/**
- * A 390px phone: the header keeps the breadcrumb and status, drops the terminal toggle, and its two controls
- * (Expand sidebar, Agent details) are 44px touch targets that stay inside the header without overflowing it.
- */
-export const NarrowPhone: Story = { tags: ['critical'], args: { narrow: true }, play: async ({ canvasElement }) => {
+/** Every phone header control is a 44×44px target inside the 390px frame; none overlaps another or the breadcrumb, the breadcrumb keeps a readable share of the row, and the header never scrolls. */
+const assertPhoneHeaderFits = async (canvasElement: HTMLElement) => {
   const header = within(canvasElement).getByTestId('thread-header')
   const frame = within(canvasElement).getByTestId('phone-frame').getBoundingClientRect()
-  const buttons = within(header).getAllByRole('button')
-  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', 'Agent details'])
-  for (const button of buttons) {
-    const rect = button.getBoundingClientRect()
-    await expect(rect.width).toBeGreaterThanOrEqual(44)
-    await expect(rect.height).toBeGreaterThanOrEqual(44)
-    await expect(rect.left).toBeGreaterThanOrEqual(frame.left)
-    await expect(rect.right).toBeLessThanOrEqual(frame.right)
+  await expect(frame.width).toBe(390)
+  const controls = within(header).getAllByRole('button').map(button => button.getBoundingClientRect())
+  for (const a of controls) {
+    await expect(a.width).toBeGreaterThanOrEqual(44)
+    await expect(a.height).toBeGreaterThanOrEqual(44)
+    await expect(a.left).toBeGreaterThanOrEqual(frame.left)
+    await expect(a.right).toBeLessThanOrEqual(frame.right)
+    for (const b of controls) if (a !== b) await expect(a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top).toBe(false)
   }
+  const breadcrumb = within(header).getByRole('navigation', { name: 'Breadcrumb' })
+  await expect(breadcrumb).toBeVisible()
+  const crumb = breadcrumb.getBoundingClientRect()
+  await expect(crumb.width).toBeGreaterThan(0)
+  for (const control of controls) await expect(crumb.left < control.right && crumb.right > control.left).toBe(false)
+  // Four controls leave the breadcrumb at least a quarter of the frame; a labelled Terminal in the header would squeeze it below that.
+  await expect(crumb.width).toBeGreaterThanOrEqual(frame.width / 4)
+  await expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth)
+  return header
+}
+const phoneHeaderNames = ['Expand sidebar', 'Actions for Row projection', 'Conversation menu', 'Agent details']
+/**
+ * A 390px phone: the header keeps the breadcrumb and status beside the agent's actions, the conversation menu and
+ * Agent details, all 44px touch targets inside the header without overflowing it. The terminal toggle is not here:
+ * the phone workspace puts its labelled Terminal at the end of the tab row.
+ */
+export const NarrowPhone: Story = { tags: ['critical'], args: { narrow: true }, play: async ({ canvasElement }) => {
+  const header = await assertPhoneHeaderFits(canvasElement)
+  await expect(within(header).getAllByRole('button').map(button => button.getAttribute('aria-label'))).toEqual(phoneHeaderNames)
   await expect(within(header).getByRole('button', { name: 'Expand sidebar' })).toHaveAttribute('aria-expanded', 'false')
   await expect(within(header).getByRole('button', { name: 'Agent details' })).toHaveAttribute('aria-haspopup', 'dialog')
-  await expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth)
-  await expect(within(header).getByRole('navigation', { name: 'Breadcrumb' })).toBeVisible()
+  for (const name of ['Show terminal', 'Show conversation']) await expect(within(header).queryByRole('button', { name })).toBeNull()
 } }
 export const NarrowPhoneLight: Story = { ...NarrowPhone, args: { narrow: true, scheme: 'light' } }
 const styles = stylex.create({

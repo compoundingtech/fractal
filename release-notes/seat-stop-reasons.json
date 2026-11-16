@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Say why, by whom and when a seat that is not running stopped, and let a stop carry its reason",
+  "replay": { "status": "none", "detail": "The end reason is derived on read from existing reconcile decisions, runtime observations and stop declarations; no projection is rebuilt." },
+  "schema": { "status": "none", "detail": "No table or migration changes. A stop declaration may carry an optional reason in its existing desired body; a stop without one keeps the exact body and revision it always had." },
+  "rules": { "status": "none", "detail": "No checkpoint, retention or replication rule changes." },
+  "compatibility": { "status": "changed", "detail": "Client-v0 AgentEndReason.kind becomes an open enum and adds parked (actor daemon/runtime, st's reason) and stopped-by-mission (actor the owning run); Swift and Rust already read kind as a string, and the generated TypeScript accepts future strings. A stop by a person or agent now carries its reason. `stop SUBJECT { reason TEXT }` and `st agents stop --reason` are new: a daemon from before this change refuses a stop with a reason child, so publish one only to an upgraded host. `st agents show` adds a WHY line and `st agents ls` an indented line under each seat that is not running." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout." },
+  "manual": { "status": "none", "detail": "Nothing to do; parked seats show their reason as soon as the upgraded daemon serves them." },
+  "recovery": { "status": "none", "detail": "Rolling back removes the derived reasons from cards; a stop declaration that carries a reason still parses as data and keeps stopping its seat." }
+}

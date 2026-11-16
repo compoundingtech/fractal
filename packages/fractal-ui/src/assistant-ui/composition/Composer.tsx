@@ -76,10 +76,9 @@ function ComposerEditor({ agent, conversationLabel, running, folder, branch, onS
     void dispatch(message, onSend)
   }, [running, queued, onSend, storageKey, dispatching])
   React.useLayoutEffect(() => {
+    // `/` belongs to search; the message box is reached with Mod+L, or by clicking it.
     const focus = (event: KeyboardEvent) => {
-      const target = event.target
-      const editable = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
-      if ((event.key === '/' && !editable) || (event.key.toLowerCase() === 'l' && (event.metaKey || event.ctrlKey))) { event.preventDefault(); input.current?.focus() }
+      if (event.key.toLowerCase() === 'l' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); input.current?.focus() }
     }
     window.addEventListener('keydown', focus)
     return () => { window.removeEventListener('keydown', focus); clearTimeout(saveTimer.current); try { sessionStorage.setItem(`composition.draft.${storageKey}`, current.current) } catch {} }
@@ -110,6 +109,7 @@ function ComposerEditor({ agent, conversationLabel, running, folder, branch, onS
 const styles = stylex.create({
   spacer: { flexGrow: 1 },
   attach: { width: g.controlMd, height: g.controlMd, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent', borderWidth: 0, color: text.fgMuted, borderRadius: r.control, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
-  primary: { width: g.controlLg, height: g.controlLg, borderRadius: '50%', borderWidth: 0, backgroundColor: accent.primary, color: accent.onPrimary, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', ':disabled': { opacity: 0.64 }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } }, stop: { backgroundColor: status.danger },
+  // Unavailable reads as neutral, never as a paler primary (the kit-wide Send treatment).
+  primary: { width: g.controlLg, height: g.controlLg, borderRadius: '50%', borderWidth: 0, backgroundColor: { default: accent.primary, ':disabled': surface.rowActive }, color: { default: accent.onPrimary, ':disabled': text.fgMuted }, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: { default: 'pointer', ':disabled': 'not-allowed' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } }, stop: { backgroundColor: status.danger },
   context: { display: 'flex', alignItems: 'center', gap: s.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgMuted, backgroundColor: surface.controlFill, borderBottomLeftRadius: r.md, borderBottomRightRadius: r.md, marginInline: s.xl, paddingInline: s.lg, paddingBlock: s.xs }, banner: { display: 'flex', alignItems: 'center', gap: s.sm, fontSize: t.metaSize, color: text.fgMuted, padding: s.md },
 })

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve Markdown token coverage, diff insertion semantics and accessible command spacing",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persistent data changes." },
+  "rules": { "status": "none", "detail": "No coordinated upgrade changes." },
+  "compatibility": { "status": "none", "detail": "Markdown headings, emphasis and links select the existing semantic palette. Diff additions retain their inserted token identity. Unstyled source stays as text nodes so whitespace remains part of accessible command names." },
+  "downtime": { "status": "none", "detail": "No expected interruption." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Presentation only; reverting the web build requires no data recovery." }
+}

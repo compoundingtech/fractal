@@ -1,4 +1,4 @@
-//! Text typed into stui's inputs, edited at a cursor with the keys a shell's line editor has:
+//! Text typed into Fractal TUI's inputs, edited at a cursor with the keys a shell's line editor has:
 //! the arrows, Ctrl+A/E, Ctrl+B/F, Alt+B/F, Ctrl+W/U/K/D, Backspace and Delete.
 //!
 //! One input has the keyboard at a time, so one cursor serves them all. It remembers which

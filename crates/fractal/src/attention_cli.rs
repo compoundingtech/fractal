@@ -117,7 +117,7 @@ pub(super) async fn run_attention(
                 .attention_list(cursor.as_deref(), Some(limit), all)
                 .await?;
             let history = if all { " --all" } else { "" };
-            let command = format!("st alerts ls --as {actor}{history}");
+            let command = format!("fractal alerts ls --as {actor}{history}");
             if json_output {
                 print_value(&response, true)?;
             } else {
@@ -190,17 +190,19 @@ pub(super) async fn run_attention(
                     .context("this alert names no agent to talk to; pass --to AGENT")?,
             };
             let id = card_id.unwrap_or_else(|| item.subject.clone());
-            // The same words stui's "Chat about this" sends.
+            // The same words Fractal TUI's "Chat about this" sends.
             let mut body = format!("{}\n\n---\nThis is about {} ({id}", args.body, item.title);
             if let Some(mission) = &item.mission {
                 body.push_str(&format!(", mission {mission}"));
             }
             body.push(')');
+            preflight_message_recipient(client, &to, false).await?;
             let Some(receipt) = send_message(
                 client,
                 MessageSendArgs {
                     to,
-                    body,
+                    body: Some(body),
+                    body_file: None,
                     subject: Some(format!("About: {}", item.title)),
                     in_reply_to: None,
                     tags: Vec::new(),
@@ -209,6 +211,7 @@ pub(super) async fn run_attention(
                     wake: MessageWakeArgs::default(),
                     print_kdl: false,
                     idempotency_key: args.idempotency_key,
+                    allow_undeclared_recipient: false,
                 },
                 Vec::new(),
             )
@@ -217,12 +220,9 @@ pub(super) async fn run_attention(
                 return Ok(());
             };
             if let Err(error) = sync_message_projection(client).await {
-                eprintln!(
-                    "st: {} was sent (idempotency key {}), but the message projection was not refreshed: {}",
-                    receipt.message.subject,
-                    receipt.idempotency_key,
-                    plain_error(&error)
-                );
+                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
+                receipt.idempotency_key,
+                plain_error(&error)));
             }
             print_message_receipt(&receipt, json_output)
         }
@@ -290,16 +290,19 @@ pub(super) async fn run_attention(
         }
         AttentionCommand::Withdraw(args) => {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-            let response: AttentionRequestView = client
+            let response: StepRunView = client
                 .post(
                     &format!(
                         "/v1/attention/withdraw/{}",
                         urlencoding::encode(&args.subject)
                     ),
                     &AttentionWithdrawRequest {
+                        episode: args.episode,
                         reason: args.reason,
                         actor: args.actor,
-                        idempotency_key: format!("attention-withdraw:{}:{nonce}", args.subject),
+                        idempotency_key: args.idempotency_key.unwrap_or_else(|| {
+                            format!("attention-withdraw:{}:{nonce}", args.subject)
+                        }),
                     },
                 )
                 .await?;
@@ -331,5 +334,75 @@ pub(super) async fn run_attention(
             )
             .await
         }
+        AttentionCommand::Seen(target) => {
+            run_attention_control(endpoint, configured_person, target, AttentionControl::Seen, json_output).await
+        }
+        AttentionCommand::Snooze(args) => {
+            let until = if args.clear {
+                None
+            } else if let Some(until) = args.until {
+                Some(until)
+            } else {
+                let duration = args.duration.as_deref().context("name --for, --until or --clear")?;
+                let ms = fractal_daemon::graph::parse_duration(duration, true)?;
+                let until = i64::try_from(now_ms() + u128::from(ms)).ok()
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .context("--for reaches past the last representable time")?;
+                Some(until.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            };
+            run_attention_control(endpoint, configured_person, args.target, AttentionControl::Snooze(until), json_output).await
+        }
+        AttentionCommand::Dismiss(args) => {
+            run_attention_control(endpoint, configured_person, args.target, AttentionControl::Dismiss(args.text), json_output).await
+        }
     }
+}
+
+enum AttentionControl {
+    Seen,
+    Snooze(Option<String>),
+    Dismiss(Option<String>),
+}
+
+/// A person's own control over one of their alerts, as every client of theirs sees it.
+async fn run_attention_control(
+    endpoint: &Endpoint,
+    configured_person: Option<&str>,
+    target: AttentionControlArgs,
+    control: AttentionControl,
+    json_output: bool,
+) -> Result<()> {
+    let actor = configured_human(target.actor.as_deref(), configured_person, "alerts")?;
+    let attention_id = resolve_member_subject(
+        endpoint,
+        &target.subject,
+        "attention",
+        Entity::Attention,
+        completion::Matching::Fuzzy,
+    )
+    .await?;
+    let client = generated_client(endpoint, Some(&actor))?;
+    let fence = ClientFence { snapshot_id: client.capabilities().await?.snapshot.id, ..Default::default() };
+    let key = uuid::Uuid::now_v7();
+    let (id, idempotency_key) = (format!("action/attention-{key}"), format!("attention-control-{key}"));
+    let (verb, result) = match control {
+        AttentionControl::Seen => ("seen", client.attention_seen(id, idempotency_key, fence,
+            fractal_client::AttentionSeenParameters { attention_id: attention_id.clone() }).await?),
+        AttentionControl::Snooze(until) => (if until.is_some() { "snoozed" } else { "back" }, client.attention_snooze(id, idempotency_key, fence,
+            fractal_client::AttentionSnoozeParameters { attention_id: attention_id.clone(), until }).await?),
+        AttentionControl::Dismiss(text) => ("dismissed", client.attention_dismiss(id, idempotency_key, fence,
+            fractal_client::AttentionDismissParameters { attention_id: attention_id.clone(), text }).await?),
+    };
+    if json_output {
+        return print_value(&result.value, true);
+    }
+    match &result.value.attention_control {
+        Some(state) => println!(
+            "{verb}\t{attention_id}\tseen {}\tsnoozed until {}",
+            state.seen_at.as_deref().unwrap_or("never"),
+            state.snoozed_until.as_deref().unwrap_or("-"),
+        ),
+        None => println!("{verb}\t{attention_id}"),
+    }
+    Ok(())
 }

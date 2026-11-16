@@ -9,7 +9,7 @@ import {
   reservedSidebarSubject,
   sidebarCandidates,
   sidebarWinner,
-  st3InventoryGateway,
+  fractalInventoryGateway,
   type ArrangementInventoryGateway,
   type InventoryEvent,
 } from './arrangements.ts'
@@ -68,8 +68,11 @@ const harness = () => {
       const stream: CollectionStream = {
         subscribeGlasses: () => undefined,
         subscribeArrangements: (...args) => { socket.subscribed.push(args) },
+        subscribeOrderedMemberships: () => undefined,
+        subscribeReadPositions: () => undefined,
         subscribe: () => undefined,
         subscribeAgent: async () => undefined,
+        subscribeAgentsPublication: async () => undefined,
         subscribeTerminal: () => undefined,
         subscribeConversation: () => undefined,
         unsubscribe: () => undefined,
@@ -288,10 +291,13 @@ describe('owner-wide arrangement inventory', () => {
 
   it('binds the generated client request to the read signal', async () => {
     const requests: { url: string; signal: AbortSignal | null | undefined }[] = []
-    const gateway = st3InventoryGateway({
+    const clients: (string | null)[] = []
+    const gateway = fractalInventoryGateway({
       baseUrl: 'http://sidebar.test',
+      client: 'fractal-web test',
       fetchImpl: async (input, init) => {
         requests.push({ url: String(input), signal: init?.signal })
+        clients.push(new Headers(init?.headers).get('x-st3-client'))
         return Response.json(String(input).endsWith('/capabilities')
           ? envelope({ kind: 'capabilities', capabilities: [], event_cursor: 'cursor/1', oldest_event_cursor: 'cursor/1', schemas: [], session_actor: owner, transport: 'fabric-loopback', limits: { max_event_items: 200, max_page_items: 200, max_wait_ms: 30000, max_response_bytes: 1048576 } })
           : envelope(page([arrangement(1)])))
@@ -302,6 +308,7 @@ describe('owner-wide arrangement inventory', () => {
     await expect(readArrangementInventory(gateway, owner, read.signal)).resolves.toMatchObject({ items: [arrangement(1)] })
     expect(requests.map((request) => request.url)).toEqual(['http://sidebar.test/v1/client/capabilities', 'http://sidebar.test/v1/client/arrangements?person=person%2Fexample&limit=100'])
     expect(requests[1]!.signal).toBe(read.signal)
+    expect(clients).toEqual(['fractal-web test', 'fractal-web test'])
   })
 
   it('ignores other subscriptions and resync notices, and stops on a permanent refusal until refreshed', async () => {
@@ -354,6 +361,20 @@ describe('sidebarWinner', () => {
     expect(sidebarWinner([arrangement(2, 'Sidebar'), reserved], owner)).toEqual(reserved)
     expect(reservedSidebarSubject(owner)).toBe(reserved.id)
     expect(sidebarWinner([arrangement(2, 'Sidebar')], owner)?.id).toBe(arrangement(2).id)
+  })
+
+  it('ignores v2 layouts at both the reserved subject and a lower-id Sidebar candidate', () => {
+    const reserved = arrangement(1, 'Archive')
+    const named = arrangement(2, 'Sidebar')
+    const v2 = (item: Arrangement): Arrangement => ({
+      ...item,
+      body: { version: 2, name: item.body.name, folders: item.body.folders },
+    })
+    const legacy = arrangement(3, 'Sidebar')
+    const rows = [v2(reserved), v2(named), legacy]
+    expect(sidebarCandidates(rows, owner)).toEqual([legacy])
+    expect(sidebarWinner(rows, owner)).toEqual(legacy)
+    expect(sidebarWinner([v2(reserved), v2(named)], owner)).toBeUndefined()
   })
 
   it('selects the lowest UUIDv7 among exact-name live person-owned legacy candidates', () => {

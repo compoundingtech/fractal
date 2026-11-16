@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The evidence gate's decision line names a per-crate check's unlogged members: log_unlogged (how many), log_unlogged_crates (the first five as crate=record) and log_unlogged_observed_at (the oldest of their observed times); scripts/evidence-flip-ready explains such an unlogged_pass from that time, not from the aggregate's oldest member",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "Three more key=value fields on the shadow part of the decision line; readers parse fields by key."},
+  "rules": {"status": "changed", "detail": "evidence-flip-ready judges an aggregate's log=unlogged_pass by the oldest observed_at of the members the log does not list. Decisions are unchanged: the log view is shadow only."},
+  "compatibility": {"status": "none", "detail": "A line from an older gate has no log_unlogged_observed_at; evidence-flip-ready then reads observed_at, as before."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change; the added fields are shadow only."}
+}

@@ -278,7 +278,7 @@ fn revoked_terminal_starts_preserve_safety_with_one_registry_snapshot_per_pass()
     let mut results = Vec::new();
     for (count, provenance_matches) in [(7, false), (50, false), (7, true), (50, true)] {
         let scenario = if provenance_matches { "matched" } else { "mismatched" };
-        let directory = tempfile::tempdir().unwrap();
+        let directory = fractal_daemon::test_support::memory_tempdir();
         let path = directory.path().join("claims.sqlite3");
         let store = Store::open(&path, "test").unwrap();
         let mut runtime = seed_revoked_terminal_starts(&store, count);

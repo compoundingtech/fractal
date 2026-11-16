@@ -85,7 +85,7 @@ pub enum Body {
         state: ToolState,
         output: Vec<String>,
     },
-    /// A Small Talk message between agents or people, shown in the same stream.
+    /// A Fractal message between agents or people, shown in the same stream.
     Mail {
         from: String,
         to: String,

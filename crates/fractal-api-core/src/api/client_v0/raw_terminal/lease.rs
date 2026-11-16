@@ -63,20 +63,26 @@ fn epoch() -> &'static str {
     &EPOCH
 }
 
+type AuthorityClaim = (String, String, Option<String>, Value);
+
 fn latest(
     connection: &Connection,
     subject: &str,
     kind: &str,
-) -> anyhow::Result<Option<(String, Value)>> {
+) -> anyhow::Result<Option<AuthorityClaim>> {
+    if kind == "custom.client.pairing-completed" {
+        return Ok(fractal_store::pairing::latest_completion(connection, subject, None, client_now_ms())?
+            .map(|claim| (claim.id, claim.origin, claim.actor, claim.body)));
+    }
     let query = smallclaims::store::canonical_sql(
-        "SELECT origin,body FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+        "SELECT id,origin,actor,body FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
     );
-    let row: Option<(String, String)> = connection
-        .query_row(/* sqlite-large-value: allow-for-now lv-he7d3ed99394d owner=fractal_api_core::api::client_v0::raw_terminal::lease TODO=trace-statement-and-value-representation */ &query, params![subject, kind], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+    let row: Option<(String, String, Option<String>, String)> = connection
+        .query_row(/* sqlite-large-value: allow-for-now lv-he1b651b77786 owner=fractal_api_core::api::client_v0::raw_terminal::lease TODO=trace-statement-and-value-representation */ &query, params![subject, kind], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .optional()?;
-    row.map(|(origin, body)| Ok((origin, serde_json::from_str(&body)?)))
+    row.map(|(id, origin, actor, body)| Ok((id, origin, actor, serde_json::from_str(&body)?)))
         .transpose()
 }
 
@@ -113,7 +119,7 @@ fn authority(
     // authenticated session carries the exact grant subject instead of searching by actor.
     let subject = pairing_grant
         .ok_or_else(|| anyhow::anyhow!("the paired client session has no exact grant"))?;
-    let Some((issuer, paired)) = latest(connection, subject, "custom.client.pairing-completed")?
+    let Some((id, issuer, writer, paired)) = latest(connection, subject, "custom.client.pairing-completed")?
     else {
         anyhow::bail!("the paired session grant is absent");
     };
@@ -125,14 +131,9 @@ fn authority(
         paired.pointer("/fields/person_id").and_then(Value::as_str) == Some(person),
         "person changed"
     );
-    anyhow::ensure!(
-        paired
-            .pointer("/fields/expires_at_unix_ms")
-            .and_then(Value::as_u64)
-            .map(u128::from)
-            .is_some_and(|expiry| expiry > client_now_ms()),
-        "grant expired"
-    );
+    let deadline = fractal_store::pairing::completion_deadline(
+        connection, &id, &issuer, writer.as_deref(), &paired["fields"], client_now_ms(),
+    )?.ok_or_else(|| anyhow::anyhow!("pairing authority expired or requires a new pairing"))?;
     anyhow::ensure!(
         paired
             .pointer("/fields/scopes")
@@ -144,11 +145,11 @@ fn authority(
     );
     // A revoked exact grant is never reused, whatever other pairings share its actor.
     anyhow::ensure!(
-        latest(connection, subject, "custom.client.pairing-revoked")?.is_none(),
+        !fractal_store::pairing::completion_is_revoked(connection, subject, &id, &issuer)?,
         "pairing revoked"
     );
     Ok(
-        json!({"principal":principal,"pairing":subject,"grant":paired,"issuer":client_host_id(&issuer)}),
+        json!({"principal":principal,"pairing":subject,"grant":paired,"issuer":client_host_id(&issuer),"deadline_unix_ms":deadline}),
     )
 }
 
@@ -284,13 +285,15 @@ pub fn snapshot(
             .grant_digest
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("original grant digest missing"))?;
-        anyhow::ensure!(
-            latest(connection, grant_subject, "custom.client.pairing-revoked")?.is_none(),
-            "original pairing revoked on owner"
-        );
-        if let Some((_, grant)) =
+        if let Some((id, issuer, writer, grant)) =
             latest(connection, grant_subject, "custom.client.pairing-completed")?
         {
+            anyhow::ensure!(fractal_store::pairing::completion_deadline(
+                connection, &id, &issuer, writer.as_deref(), &grant["fields"], client_now_ms(),
+            )?.is_some(), "original pairing authority expired or requires a new pairing");
+            anyhow::ensure!(!fractal_store::pairing::completion_is_revoked(
+                connection, grant_subject, &id, &issuer,
+            )?, "original pairing revoked on owner");
             anyhow::ensure!(
                 credential_digest(&serde_json::to_string(&grant)?) == grant_digest,
                 "original pairing changed on owner"
@@ -352,10 +355,11 @@ impl Lease {
             .map_err(|error| forbidden(error.to_string()))?;
             let authorization_epoch = acquisition_epoch.to_owned();
             let absolute_deadline_unix_ms = authority
-                .pointer("/grant/fields/expires_at_unix_ms")
+                .get("deadline_unix_ms")
                 .and_then(Value::as_u64)
                 .map(u128::from)
                 .unwrap_or(u128::MAX)
+                .min(session.grant_expires_at.unwrap_or(u128::MAX))
                 .min(client_now_ms() + ABSOLUTE.as_millis());
             let view = state
                 .store

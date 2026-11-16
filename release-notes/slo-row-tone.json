@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Serve each slo row's tone, the one rule that says which rows need a person",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "The store schema is unchanged. The tone is computed per read from each row."},
+  "rules": {"status": "none", "detail": "Targets, windows and statuses are unchanged. The rule that a missed objective or a budget with 10% or less left is red moves from the terminal UI into fractal-ui-model, which the terminal UI now calls."},
+  "compatibility": {"status": "changed", "detail": "client-v0 slo rows gain an optional tone (red, green, yellow or quiet). Older clients ignore it; a newer client reading an older daemon finds it absent. It is a string, not a closed set: a client treats a word it does not know as quiet, so a later daemon can add one."},
+  "downtime": {"status": "none", "detail": "No data migration or restart ordering."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Binary swap-back needs no migration; the field simply disappears."}
+}

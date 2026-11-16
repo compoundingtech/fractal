@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { assertResponseEvidence } from "./response-evidence.mjs";
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 import { mock } from "node:test";
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -47,7 +48,7 @@ const api = {
     if (synchronousContext) await events.get("context")({messages:[{role:"user",content}]},ctx);
   },
 };
-const ctx = { isIdle:()=>true,sessionManager:{getSessionId:()=>nativeSession,getEntries:()=>[]},ui:{notify:()=>{}} };
+const ctx = { isIdle:()=>true,sessionManager:{getSessionId:()=>nativeSession,getSessionFile:()=>path.join(dir,`${nativeSession}.jsonl`),getEntries:()=>[]},ui:{notify:()=>{}} };
 const read = ()=>fs.existsSync(frames)?fs.readFileSync(frames,"utf8").trim().split("\n").filter(Boolean).map(JSON.parse).filter(frame=>frame.type!=="keepalive"):[];
 const send = (frame)=>fs.appendFileSync(outgoing,JSON.stringify(frame)+"\n");
 const until = async(predicate)=>{for(let i=0;i<200;i++){if(predicate())return;await new Promise(r=>setTimeout(r,20));}throw new Error("smoke deadline");};
@@ -55,6 +56,7 @@ const {default:extension}=await import(pathToFileURL(path.resolve(asset)));
 extension(api);
 await events.get("session_start")({},ctx);
 await until(()=>title==="Quartz[gen]");
+await assertResponseEvidence(events, ctx, read);
 assert.ok(events.has("session_switch"),"OMP /new uses session_switch");
 const meta={messageId:"message/quartz-1"};
 const titleChangesBeforeReplay = titleChanges.length;
@@ -104,7 +106,7 @@ if (driver === "omp") {
   extension({...api, on:(name,handler)=>subEvents.set(name,handler),
     setSessionName:(name)=>{subTitle=name;}, sendUserMessage:(text)=>subHandoffs.push(text)});
   const subCtx = {...ctx,agent:{kind:"sub",depth:0},isIdle:()=>false,
-    sessionManager:{getSessionId:()=>"sub-session",getEntries:()=>[]}};
+    sessionManager:{getSessionId:()=>"sub-session",getSessionFile:()=>undefined,getEntries:()=>[]}};
   const state = globalThis.__stOmpChannel;
   const child = state.child;
   const pending = {messageId:"message/sub-proof"};

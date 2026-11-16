@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The two mission cancellation tests that stop a gate ignoring SIGTERM run at the daemon helper's 600 passes a minute again, now that the start race behind their finally gate being killed is fixed; each takes about 9 s instead of about 24 s.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to pin the two tests to 30 passes a minute again."}
+}

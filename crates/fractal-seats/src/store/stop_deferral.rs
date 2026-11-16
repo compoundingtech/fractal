@@ -1,4 +1,4 @@
-//! The part of `store::stop_deferral` that moved up from st3-store.
+//! The part of `store::stop_deferral` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_missions::store::stop_deferral::*;
@@ -247,7 +247,9 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
-            let before = smallclaims::sqlite::work::total();
+            // Count this thread's statements only: both reads run on it, and the process-wide
+            // total also takes in other tests' SQL when they share the process.
+            let work = smallclaims::sqlite::work::SqliteWorkScope::start();
             let started = std::time::Instant::now();
             assert!(store.latest_stop_deferral(&subjects[0]).unwrap().is_none());
             assert!(
@@ -256,7 +258,7 @@ mod tests {
                     .unwrap()
                     .is_empty()
             );
-            let cost = smallclaims::sqlite::work::total() - before;
+            let cost = work.finish();
             eprintln!(
                 "unrelated diagnostics={count}, terminal-owner page=256: {cost:?}, wall={:?}",
                 started.elapsed()

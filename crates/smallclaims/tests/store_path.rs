@@ -3,9 +3,28 @@ use rusqlite::{Connection, OpenFlags};
 use smallclaims::{
     claim::ClaimInput,
     sqlite::ReadPool,
-    store::{Store, StoreCopy, runtime::Plain},
+    store::{AdmittedStore, Store, StoreCopy, runtime::Plain},
 };
 use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
+
+#[test]
+fn explicit_store_open_never_recreates_a_removed_parent_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("store");
+    std::fs::create_dir(&directory).unwrap();
+    let admitted = AdmittedStore::from_locked_directory(
+        &directory, std::fs::File::open(&directory).unwrap(),
+    ).unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+    assert!(Store::open_admitted(admitted, "alder", Arc::new(Plain)).is_err());
+    assert!(!directory.exists());
+    std::fs::create_dir(&directory).unwrap();
+    let admitted = AdmittedStore::from_locked_directory(
+        &directory, std::fs::File::open(&directory).unwrap(),
+    ).unwrap();
+    let store = Store::open_admitted(admitted, "alder", Arc::new(Plain)).unwrap();
+    assert!(store.path.exists());
+}
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut path = path.as_os_str().to_os_string();
@@ -27,6 +46,19 @@ fn append(store: &Store) {
 
 fn claims(connection: &Connection) -> i64 {
     connection.query_row("SELECT count(*) FROM claims", [], |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn open_memory_takes_a_write_while_a_reader_holds_a_snapshot() {
+    let store = Store::open_memory("reader-writer", Arc::new(Plain)).unwrap();
+    store.read_snapshot(|_| {
+        assert_eq!(claims(&store.readers.get()), 0);
+        // A concurrent writer owns another thread; the pinned reader never writes.
+        std::thread::scope(|scope| scope.spawn(|| append(&store)).join().unwrap());
+        assert_eq!(claims(&store.readers.get()), 0, "the held snapshot keeps its original cut");
+        Ok(())
+    }).unwrap();
+    assert_eq!(claims(&store.readers.get()), 1);
 }
 
 fn assert_opened_target(alias: &Path, target: &Path, scratch: &Path) {
@@ -121,7 +153,7 @@ fn fresh_relative_store_creates_parents_and_retains_the_opened_absolute_path() {
 
 #[test]
 fn shared_memory_uri_stays_shared_and_copies_in_full() {
-    let store = Store::open_memory("memory", Arc::new(Plain)).unwrap();
+    let store = Store::open_shared_memory("memory", Arc::new(Plain)).unwrap();
     assert!(store.shared_memory && store.readers.shared_memory);
     assert_eq!(store.path, store.readers.path);
     let uri = store.path.to_str().unwrap();

@@ -10,9 +10,9 @@ const partial = wholeText({ text: 'the start…', complete: false });
 assert.equal(partial.text, 'the start…');
 assert.match(partial.note, /Only the start of this message can be shown/);
 
-// st's own sentence for an expired body is kept; the others are worded here, with no codes and no "image".
+// Fractal's own sentence for an expired body is kept; the others are worded here, with no codes and no "image".
 assert.equal(wholeTextFailure(refused('blob-expired', 'the full text of this message expired and was removed from Juniper after its retention; only the preview remains')), 'the full text of this message expired and was removed from Juniper after its retention; only the preview remains');
 assert.match(wholeTextFailure(refused('blob-not-found')), /no longer on the machine that took it/);
 assert.match(wholeTextFailure(refused('remote-unavailable', 'owner host/Juniper is temporarily unavailable')), /^Juniper cannot be reached right now, so only the start/);
 for (const code of ['blob-expired', 'blob-not-found', 'remote-unavailable', 'not-found', 'forbidden']) assert.doesNotMatch(wholeTextFailure(refused(code)), /image/i, code);
-assert.equal(wholeTextFailure(new TypeError('Network request failed')), 'st cannot be reached right now');
+assert.equal(wholeTextFailure(new TypeError('Network request failed')), 'the connection to Fractal broke (Network request failed)');

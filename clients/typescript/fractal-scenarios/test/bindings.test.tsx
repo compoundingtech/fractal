@@ -108,6 +108,37 @@ describe('Storybook scenario binding', () => {
     expect(result.checks.find(({ check }) => check === 3)?._tag).toBe('Passed')
   })
 
+  it('passes an objectives story rendering visible labels', () => {
+    const Objectives = () => {
+      const objectives = useScenarioSlice('objectives')
+      return <ul>{objectives.state.list.rows.map(({ id, about }) => <li key={id}>{about}</li>)}</ul>
+    }
+    const story = {
+      parameters: { scenario: { _tag: 'slices', slices: ['objectives'] } },
+      render: () => <Objectives />,
+    }
+    const result = scenarioStoryCheck(story, meta, { scenarioNow: ANCHOR_MS, assert: true })
+    expect(result._tag).toBe('Passed')
+    expect(result.reads).toEqual(new Set(['objectives']))
+    expect(result.checks.find(({ check }) => check === 2)?._tag).toBe('Passed')
+  })
+
+  it('rejects an objectives story rendering only internal IDs', () => {
+    const ObjectiveIds = () => {
+      const objectives = useScenarioSlice('objectives')
+      return <ul>{objectives.state.list.rows.map(({ id }) => <li key={id}>{id}</li>)}</ul>
+    }
+    const result = scenarioStoryCheck({
+      parameters: { scenario: { _tag: 'slices', slices: ['objectives'] } },
+      render: () => <ObjectiveIds />,
+    }, meta, { scenarioNow: ANCHOR_MS })
+    expect(result._tag).toBe('Failed')
+    expect(result.failures).toContainEqual(expect.objectContaining({
+      _tag: 'DataDependence', check: 2, slice: 'objectives',
+      message: expect.stringContaining('does not render expected marker'),
+    }))
+  })
+
   it('reports both missing reads and missing data dependence for fixed text', () => {
     const result = scenarioStoryCheck(Fixed, meta)
     expect(result._tag).toBe('Failed')

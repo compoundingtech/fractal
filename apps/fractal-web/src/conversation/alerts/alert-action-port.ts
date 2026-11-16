@@ -1,16 +1,17 @@
-import { ClientError, plainError, type FractalClient } from '@fractal/client'
+import { ClientError, plainError, type AutoResolvedAsk, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
 
 /** One answer to an alert: sent, or refused in words a person reads. */
 export type AlertActionResult =
-  | { readonly _tag: 'Sent' }
+  /** `settled`: the source already holds this as done, and its feed will not say so (a replay). */
+  | { readonly _tag: 'Sent'; readonly settled?: boolean }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
 /** The alert as the person read it: what an answer names and is fenced on. */
 export type AlertAnswered = Pick<Native.Attention, 'id' | 'revision' | 'source_id' | 'episode'>
 
 /**
- * An answer to an alert, as stui and the phone send it:
+ * An answer to an alert, as the Fractal terminal UI and the phone send it:
  * `work.done` completes the waiting person step with a summary and, for a structured request,
  * the named answer; `review.*` decides a human gate, with the person's words as its reason;
  * `launch.*` approves the planner's current preview, sends it back with the person's words,
@@ -29,8 +30,20 @@ export type AlertAction =
   | { readonly type: 'launch.approve' | 'launch.cancel' }
   | { readonly type: 'launch.revise'; readonly feedback: string }
 
+/** The person's own named answer in place of the default that answered an ask at its deadline; a request for changes carries their words. */
+export type OverrideAction = { readonly type: 'work.override'; readonly answer: { readonly id: string; readonly text?: string } }
+
+/** The asks a default answered at their deadline, as Fractal serves them to the person they asked. */
+export type AutoResolvedRead =
+  | { readonly _tag: 'Observed'; readonly asks: readonly AutoResolvedAsk[]; readonly complete: boolean }
+  /** `absent`: this session has no asks of its own (not a person), or this Fractal serves no such read. */
+  | { readonly _tag: 'Unavailable'; readonly reason: 'absent' | 'failed'; readonly detail: string }
+
 export interface AlertActionPort {
   readonly act: (request: { readonly alert: AlertAnswered; readonly action: AlertAction }) => Promise<AlertActionResult>
+  /** Reads the auto-resolved asks again; never polled, only on open, attention changes and accepted overrides. */
+  readonly autoResolved: () => Promise<AutoResolvedRead>
+  readonly override: (request: { readonly ask: AutoResolvedAsk; readonly action: OverrideAction }) => Promise<AlertActionResult>
 }
 
 const refused = (detail: string): AlertActionResult => ({ _tag: 'Refused', detail })
@@ -71,7 +84,7 @@ const shownVariant = (items: readonly unknown[], item: AttentionRead): VariantRe
 }
 
 /**
- * Reads the alert again, then submits once, fenced on the revision the person read. An alert st
+ * Reads the alert again, then submits once, fenced on the revision the person read. An alert Fractal
  * no longer holds open, or that no longer offers this answer, is not answered; neither is one
  * that changed since it was read. A failure is never retried: the person sees why.
  */
@@ -89,9 +102,9 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
       }
       const item = current.value as AttentionRead
       if (item.kind !== 'attention' || item.state !== 'open') return refused('This was already answered or closed.')
-      // A launch is sent back to its planner while st offers to approve it.
+      // A launch is sent back to its planner while Fractal offers to approve it.
       const offers = action.type === 'launch.revise' ? 'launch.approve' : action.type
-      if (!(item.actions ?? []).includes(offers)) return refused('st no longer offers this answer here.')
+      if (!(item.actions ?? []).includes(offers)) return refused('Fractal no longer offers this answer here.')
       if (item.revision !== alert.revision) return refused('This changed since you read it. Read it again before answering.')
       const id = `action/${crypto.randomUUID()}`
       const seen = { [alert.id]: alert.revision }
@@ -121,7 +134,7 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
           case 'launch.approve':
           case 'launch.cancel':
           case 'launch.revise': {
-            // A launch is fenced on the launch as st holds it now, as stui fences it.
+            // A launch is fenced on the launch as Fractal holds it now, as the Fractal terminal UI fences it.
             const launchId = launchOf(item)
             const launch = await client.launchesGet(launchId)
             const read = launch.value as Read
@@ -156,16 +169,54 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
         }
       })()
       if (response === 'gone') return refused('This launch is gone.')
-      if (response === 'unnamed') return refused('This alert does not say which preview it shows, so it cannot be approved here. Review it in st.')
+      if (response === 'unnamed') return refused('This alert does not say which preview it shows, so it cannot be approved here. Review it in Fractal.')
       if (response === 'changed') return refused('The preview this alert shows has changed. Read it again before approving.')
       return (response.value as { status?: unknown }).status === 'rejected'
-        ? refused('st did not take this answer.')
+        ? refused('Fractal did not take this answer.')
         : { _tag: 'Sent' }
     } catch (error) {
       return refused(
         error instanceof ClientError
           ? `${plainError(error)}.`
           : 'The answer could not be confirmed; check the alert before answering again. It was not sent again.',
+      )
+    }
+  },
+  autoResolved: async () => {
+    try {
+      const read = await client.autoResolvedList()
+      return { _tag: 'Observed', asks: read.value.items, complete: read.value.complete }
+    } catch (error) {
+      // An agent session is refused (it asks nobody); an older Fractal has no such route or capability.
+      const absent = error instanceof ClientError && ['forbidden', 'not-found', 'unsupported', 'unsupported-capability'].includes(error.response.code)
+      return { _tag: 'Unavailable', reason: absent ? 'absent' : 'failed', detail: plainError(error) }
+    }
+  },
+  /**
+   * Reads the auto-resolved asks again for the snapshot the override is fenced on, then submits once. The episode is
+   * the fence: an ask whose window closed, that was answered since, or that no longer offers an override is not sent.
+   * The action id and idempotency key name the episode and answer, so a retry of the same choice replays it.
+   */
+  override: async ({ ask, action }) => {
+    try {
+      const read = await client.autoResolvedList()
+      const offered = read.value.items.find((each) => each.resolution_id === ask.resolution_id)?.action_parameters?.['work.override']
+      if (offered === undefined || offered.episode !== ask.episode) return refused('This can no longer be overridden.')
+      const key = `person-override:${offered.episode}:${action.answer.id}`
+      const response = await client.workOverride({
+        id: `action/${key}`,
+        idempotency_key: key,
+        fence: { snapshot_id: read.snapshot.id, subject_revisions: {} },
+        parameters: { target_id: offered.target_id, episode: offered.episode, answer: action.answer },
+      })
+      return response.value.status === 'rejected'
+        ? refused('Fractal did not take this answer.')
+        : { _tag: 'Sent' }
+    } catch (error) {
+      return refused(
+        error instanceof ClientError
+          ? `${plainError(error)}.`
+          : 'The answer could not be confirmed; check the ask before answering again. It was not sent again.',
       )
     }
   },

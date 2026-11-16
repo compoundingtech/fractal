@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use fractal_client::{Client, discover_unix_endpoint, set_client_name};
+use fractal_client::{Client, discover_unix_identity, set_client_name};
 use fractal_client_tui::{App, send};
 use std::{sync::mpsc, time::Duration};
 
@@ -9,26 +9,26 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--help") {
         println!(
-            "Usage: st3-client-tui person/NAME [UNIX_SOCKET]\n↑/↓ selects an agent; type then Enter sends; Esc clears; Ctrl-C quits."
+            "Usage: fractal-client-tui person/NAME [UNIX_SOCKET]\n↑/↓ selects an agent; type then Enter sends; Esc clears; Ctrl-C quits."
         );
         return Ok(());
     }
     if args.is_empty() || args.len() > 2 || !args[0].starts_with("person/") {
-        bail!("Use st3-client-tui person/NAME [UNIX_SOCKET]; --help shows keys");
+        bail!("Use fractal-client-tui person/NAME [UNIX_SOCKET]; --help shows keys");
     }
     let explicit = args
         .get(1)
         .map(Into::into)
         .or_else(|| std::env::var_os("ST3_ENDPOINT").map(Into::into));
-    let socket = discover_unix_endpoint(explicit)?;
+    let identity = discover_unix_identity(explicit)?;
     set_client_name(format!(
-        "smalltalk-example-tui {}",
+        "fractal-client-tui {}",
         env!("CARGO_PKG_VERSION")
     ));
     let (updates, incoming) = mpsc::channel();
     let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(fractal_feed::run(
-        Client::unix_as(socket, &args[0]),
+        Client::discovered_unix_as(identity, &args[0]),
         updates,
         receiver,
     ));

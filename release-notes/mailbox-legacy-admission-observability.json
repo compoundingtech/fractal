@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose legacy mailbox PTY admissions through a process counter and bounded structured logs",
+  "replay": { "status": "none", "detail": "No replay semantics change." },
+  "schema": { "status": "none", "detail": "No persistent schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules changes." },
+  "compatibility": { "status": "none", "detail": "Mailbox admission behavior is unchanged: legacy records still require a matching live daemon start token and primary identity checks remain authoritative." },
+  "downtime": { "status": "unknown", "detail": "No deployment or restart was performed; normal binary deployment is required." },
+  "manual": { "status": "changed", "detail": "The daemon exports fractal_mailbox_legacy_admissions_total through its existing OpenTelemetry metric provider. It counts every successful legacy identity observation, including repeated observations of the same PTY, and resets on process restart. No PTY or seat labels are attached. Query increases/rates to observe fallback use. A warning names fractal_pty_id and fractal_seat, limited to one admission log per minute process-wide; missing seat metadata is shown as <unattributed>. Logs are sampled evidence, not a complete admission inventory." },
+  "recovery": { "status": "none", "detail": "No runtime records or mailbox leases are rewritten." }
+}

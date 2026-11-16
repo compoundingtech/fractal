@@ -67,7 +67,7 @@ export class InventoryFeed {
     if (!('id' in frame) || typeof frame.id !== 'string') return false;
     const follow = this.held.get(frame.id);
     if (!follow || !this.granted) return false;
-    if (frame.kind === 'snapshot' || frame.kind === 'changes') {
+    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection !== 'ordered-memberships') {
       const next = applyWindow(follow.window, frame);
       if (!next) { this.subscribe(frame.id, follow); return true; }
       follow.window = next; follow.issue = '';

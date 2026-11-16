@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prepare a writer-transaction responsibility snapshot for agent review",
+  "replay": {"status": "none", "detail": "No answer append or fold uses the dormant snapshot loader."},
+  "schema": {"status": "none", "detail": "No accepted wire changes; public gate parsers still reject agent-review."},
+  "rules": {"status": "none", "detail": "The loader reuses the existing run responsibility traversal for mission, step and loop boundaries. It retains contributing descendants, carried workers and enclosing parent workers, excludes unrelated siblings, rejects incomplete history and resolves reviewer aliases. Agentlessness comes from persisted step values computed at run creation, including inherited selectors, not caller fields."},
+  "compatibility": {"status": "none", "detail": "The existing full-run reviewer entry points remain available. No production agent-answer caller is enabled."},
+  "downtime": {"status": "none", "detail": "No runtime cutover."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "No data migration or recovery is required."}
+}

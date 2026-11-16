@@ -1,8 +1,8 @@
-//! The part of `references` that moved up from st3-store.
+//! The part of `references` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::{BTreeMap, BTreeSet};
 use crate::model::{
-    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, St3Error, UsedMissionSpec,
+    DesiredSubject, MissionInputKind, MissionSpec, NormalizedIntent, FractalError, UsedMissionSpec,
     WorkSelector,
 };
 pub use fractal_delivery::references::*;
@@ -15,7 +15,7 @@ pub fn publication(
     intent: &NormalizedIntent,
     graph: &impl Graph,
     host: &str,
-) -> Result<Vec<String>, St3Error> {
+) -> Result<Vec<String>, FractalError> {
     let mut refusals = Vec::new();
     for desired in intent.subjects.values() {
         subject_references(

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: the fractal-test-test fixture for build-slot waits no longer depends on how fast a loaded host starts its commands. It writes its queue-log wait rounded outward, from before the check starts until a second after the sleep, so only the command's exit after the slot line counts against the 2 s limit (#4879).",
+  "replay": {"status": "none", "detail": "No stored data is read or written differently."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination version change."},
+  "compatibility": {"status": "none", "detail": "A test fixture only; st-test and ci-local are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "Nothing to do."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

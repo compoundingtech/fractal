@@ -10,7 +10,7 @@ harness's default login.
 
 ## Declare an account
 
-An `account` is a root declaration, applied like an agent: `st apply accounts.kdl --as person/ada`.
+An `account` is a root declaration, applied like an agent: `fractal apply accounts.kdl --as person/ada`.
 
 ```kdl
 version 2
@@ -32,11 +32,11 @@ account "ada/claude-2" {
 ```
 
 - `provider` is `anthropic` (Claude Code) or `openai` (Codex). Other providers can be declared but no
-  st harness uses them yet.
+  Fractal harness uses them yet.
 - `owner` is a person. A pool is the accounts one person owns.
 - `plan` is a label for people and reports.
 - `login` is the credential directory a harness is launched with: `CLAUDE_CONFIG_DIR` for Claude Code,
-  `CODEX_HOME` for Codex. It is a path, never a credential; st never reads, prints or stores what is
+  `CODEX_HOME` for Codex. It is a path, never a credential; Fractal never reads, prints or stores what is
   in it. A path is absolute or starts with `~/`, which is the home of the user the daemon runs as. A
   `host=` property gives a different directory per host; a login with no host serves every host. An
   account is only used on a host that has a login for it.
@@ -52,7 +52,7 @@ A seat refuses to start on a login directory that does not exist, instead of fal
 default login. The directory is the harness's whole home: Claude keeps its login, `settings.json`,
 plugins and `projects/` sessions there, Codex its `auth.json`, `config.toml` and `sessions/`. Copy
 into it the settings a seat should have. Signing in with the variable set, as above, is what ties
-the login to the directory on Linux and macOS alike; st only sets the variable.
+the login to the directory on Linux and macOS alike; Fractal only sets the variable.
 
 ## Bind a seat
 
@@ -80,10 +80,10 @@ A binding is also an authority fact, not only a choice of allowance. A bound acc
 pool's person) decides whose person the agent is: asks the agent raises and its own-ask authority
 are attributed to that person ahead of the declaration author or the mission requester. A mission
 agent that binds another person's account is therefore treated as acting for that person, exactly
-as a top-level seat is. st checks that the account exists, belongs to the harness's provider and
+as a top-level seat is. Fractal checks that the account exists, belongs to the harness's provider and
 has a login on the host; it does not check that the declarer owns it.
 
-Only `claude` and `codex` harness blocks take a binding. st sets the harness's login variable and
+Only `claude` and `codex` harness blocks take a binding. Fractal sets the harness's login variable and
 `ST3_ACCOUNT` on the seat, so an `env` entry for the same variable is refused. A restart on the same
 account continues the native session the driver last bound. The session binding records the
 account's name, so a switch to another account starts fresh and never copies the old account's
@@ -98,7 +98,7 @@ logins.
 ## Usage and limits per account
 
 A bound seat's limits readings carry the declared account's name (`account_ref`) next to the
-opaque account label, so `st usage` and the terminal UI name the account:
+opaque account label, so `fractal usage` and the terminal UI name the account:
 
 ```
 LIMITS  2 · the freshest reading of each account
@@ -118,11 +118,67 @@ a declared account's login directory on its host runs on that account: it is lau
 `ST3_ACCOUNT`, and its readings carry the declared name, whatever identity the provider shows. A
 re-login in that directory changes the provider's identity but not the account. When one seat has
 reported both under a provider identity and under a declared account, that identity's readings are
-the declared account's, so `st usage` and the pool show the account once, with the live reading.
+the declared account's, so `fractal usage` and the pool show the account once, with the live reading.
 Identity readings that share no seat with a declared account are never assigned to one.
 
+A seat that sets no login variable runs on the harness's default login (`~/.claude` for Claude Code,
+`~/.codex` for Codex), so when a declared account's login on that host is that directory the seat
+runs on the account too. A seat for a harness that reads a key file instead (`omp`) runs on the
+`api-key` account whose `login` is the key file its environment names (`ST_OMP_API_KEY_FILE`); with
+none named it reads `~/.config/anthropic/api-key`, so it runs on the account that declares that
+file, or on the only `api-key` account that names its `harness` and has a login on the host. A seat
+that names a key file no account declares runs on no account.
+
+### Every panel lists the declared accounts
+
+`fractal usage`, the terminal UI, the phone and the web monitor list the same accounts: every declared
+account, in name order, whether or not it spent or reported limits, then anything Fractal recorded that
+no declaration claims. Nothing is hidden to make the list tidy. Two more declaration children keep
+history and unrestarted seats attributed:
+
+```kdl
+account "ada/claude-1" {
+  provider "anthropic"
+  identity "claude/0123456789abcdef"      // the provider label older readings carried
+  login "~/.claude"
+}
+
+account "ada/api-key" {
+  provider "anthropic"
+  auth-type "api-key"
+  harness "omp"                            // the harness that reads the key
+  monthly-credits-usd 200                  // what it may spend each calendar month
+  login "~/.config/anthropic/api-key" host="alder"   // the key file's path, never the key
+}
+```
+
+- `identity` names a provider label (`claude/<digest>`, `codex/<digest>`) as this account's own. A
+  usage row or limits reading under it is read as the account, whichever seat produced it. It is the
+  one explicit exception to "identity readings that share no seat with a declared account are never
+  assigned to one": a person said so. The label is an opaque digest, never an email or a provider
+  account ID. Naming an account does not change whether it is exempt from the weekly stop: the
+  `[limits] exempt_accounts` entry that listed its provider label keeps matching.
+- A usage row that carries no account is read as the one declared account its seat's harness has on
+  the row's host, when there is exactly one. With two it stays unattributed.
+- `auth-type "api-key"` marks an account that pays per token. It has no weekly limits; with
+  `monthly-credits-usd` the panels show `credits used of $200 this month`: the account's spend in
+  the UTC calendar month of the period's end, at API-equivalent list prices, with a `+` when some
+  tokens had no price.
+
+These readings are made when the report is read, from today's declarations, so they are a view of
+spend and not an invoice. Declaring a second account for a harness on a host (or removing one)
+changes which account the past unlabelled rows there are read as, because "exactly one" no longer
+holds or now does. An unlabelled `omp` row is read as the only `api-key` account that names `omp` on
+its host, or, where two keys have a login there, as the one that declares the default key file
+(`~/.config/anthropic/api-key`); a seat launched with another key file recorded its account; credits used is therefore the spend of those seats at API list
+prices, not what the provider billed. A report reads its rows, limits and the month's rows in
+separate snapshots, which is harmless for a display.
+
+`fractal --json usage` and the client's `usage.period` return these as `accounts`, and each row carries
+`account_ref` when a declaration claims it.
+
 A limits reading older than the limits cadence (`[limits] fresh`, one hour unless configured) is the
-last known reading, not the current one. `st --json usage` marks it `stale: true`, and `st usage`
+last known reading, not the current one. `fractal --json usage` marks it `stale: true`, and `fractal usage`
 ends its row with `stale`. The pool chooses by the account's freshest reading.
 
 Limits include `identified`: true when the source names a provider identity or a declared account,
@@ -160,12 +216,12 @@ already stopped still overrides the stop for the remainder of that weekly window
 Missing, stale, future-dated, or already-reset weekly evidence is **unknown**, not below the limit.
 The policy leaves those seats running until fresh weekly evidence arrives, preserving `keep` and
 the once-per-window override. It reports the gap in the daemon log on each policy pass using
-`limits.fresh`; `st doctor` reports an `account-limits` warning for active accounts using a one-hour
+`limits.fresh`; `fractal doctor` reports an `account-limits` warning for active accounts using a one-hour
 freshness bound, even when the policy is disabled. This avoids stopping an account on an old or
 missing number while making the gap visible to operations. An account that has never reported
-quota has no fabricated row in `st usage`; its missing evidence is reported by doctor.
+quota has no fabricated row in `fractal usage`; its missing evidence is reported by doctor.
 
-External backstops must read `st --json usage` (`limits`), or the client-v0 usage endpoint, rather
+External backstops must read `fractal --json usage` (`limits`), or the client-v0 usage endpoint, rather
 than scanning driver directories, status-line files, or provider transcripts. Fresh harnesses
 commit observations through a SQLite outbox and need not produce those files; a relaunch
 can remove every source a file collector sees. For each account:
@@ -191,20 +247,61 @@ subcommands in its `args`. Codex configuration overrides (`-c`) are allowed.
 
 Token spend across the fleet is available by agent, mission, step, model, account, or host, with
 its API-equivalent cost: what the tokens would cost at the provider's list price, from a pricing
-table built into st. Tokens on a model the table does not price are counted as unpriced, and a
-cost that leaves them out ends in `+`. An account is a short digest of the harness's own login,
+table built into Fractal. Responses without a known price are counted independently of their
+observed token totals, and a cost that leaves them out ends in `+`. An account is a short digest of the harness's own login,
 never the login itself. The graph keeps hourly usage for about a week and each series' total
 after that; `[observations.otlp]` sends every response to OpenTelemetry for longer history. The
 period ends now:
 
 ```sh
-st usage --hours 24
-st usage --hours 24 --by step
-st usage --hours 24 --by account
+fractal usage --hours 24
+fractal usage --hours 24 --by step
+fractal usage --hours 24 --by account
 ```
 
-`st usage` also lists each account's 5-hour and weekly limits: the freshest reading any seat on
+`fractal usage` also lists each account's 5-hour and weekly limits: the freshest reading any seat on
 that account reported, with when it was measured and when the weekly window resets.
+
+### Historical step executions
+
+Native `Store::step_executions(step_subject)` returns one generic execution envelope for each
+durable agent `work.claimed` receipt. Its stable `id` is that claim's ID; `attempt`, `agent`, and
+`incarnation_id` distinguish retries and seat replacements. Reclaiming the same attempt creates
+another execution, even on the same incarnation. A claimed invocation remains visible when it
+fails or reports no usage. A process that fails before claiming work has no invocation receipt:
+its startup/readiness failure remains runtime evidence, and a never-claimed step has no executions.
+This is a work-invocation history, not an inventory of every agent process launch.
+
+`declared_model` is captured when new work is claimed, never borrowed from the seat's current
+declaration while reading history. `observed_models` contains the distinct models evidenced by
+that invocation's responses; a mismatch does not establish a fallback cause. `fallback` stays
+null without explicit evidence. `trace_id` is captured only from an actual valid propagated
+OpenTelemetry span at claim time, not generated from an execution ID. `exit_evidence`, when
+available, references the runtime observation carrying native exit evidence for that incarnation.
+Old receipts lacking this metadata keep null values, not reconstructed historical facts.
+
+Response accounting reuses the native response-source deduplication and reported-cost/list-price
+logic. It joins the claim and incarnation held at the response's observation time, so delayed
+responses cannot move into a later retry. Response rollups carry `execution_id` in their cumulative
+series key and retain their final totals through replication and timeline trimming. New exact
+partitions do not relabel earlier step-level aggregates; older usage without an invocation key
+remains generic spend and is not retroactively charged to a guessed execution. Held readings
+remain host-local until the existing hourly/end-of-work publication boundary.
+
+Ownership also requires an unexpired historical lease, including renewals and extensions known
+at response time. Missing expiry or overlapping live claims leaves the execution unknown;
+neither a future renewal nor a delayed ready receipt extends earlier ownership.
+
+`usage: null` means no response accounting evidence. A usage object carries input, output,
+cache-write (including one-hour writes), cache-read and total tokens, known `cost_microusd`,
+provider-reported cost, `unpriced_tokens` and `unpriced_responses`. Either nonzero unpriced count
+means the known cost is only a priced portion, never a full zero bill. `duration_ms` measures
+claim to the earliest applicable terminal work receipt or recorded native exit; later cleanup
+cannot lengthen an ended invocation. It stays null while the invocation has no ending evidence.
+Product values and worker reports
+remain independent of execution metadata.
+
+### Automatic stops
 
 A node can stop an account's seats as the account nears its weekly limit. It is off until its
 config enables it:
@@ -229,7 +326,7 @@ an agent; the legacy `ask` setting is accepted but never sends raw events to a p
 Each seat is stopped once per weekly window: start it again and it stays up until the reset. Give
 every node that hosts seats the same `[limits]`.
 
-An account that should never be stopped is exempt, by the name `st usage` shows (the declared
+An account that should never be stopped is exempt, by the name `fractal usage` shows (the declared
 account or the provider's label), and so is a whole harness:
 
 ```toml
@@ -241,5 +338,5 @@ exempt_harnesses = ["codex"]
 Exemption belongs to the account, not to the seat, so a seat started later on it is covered
 without listing it; `keep` still names single seats. The daemon reads `[limits]` again on every
 two-minute pass, so an edit (including enabling the policy) applies without a restart. A file that
-does not parse or validate leaves the last good policy running and is logged. `st usage` marks
+does not parse or validate leaves the last good policy running and is logged. `fractal usage` marks
 exempt accounts and prints an `EXEMPT` line for the policy.

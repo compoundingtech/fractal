@@ -18,6 +18,9 @@ fn sent_messages(state: &AppState, accepted_at: u128) {
             idempotency_key: None,
         }).unwrap();
     }
+    // A commit folds selectors for at most 10 ms of wall time; on a loaded host the last
+    // message can still be pending, and a page would be cut below the store's index.
+    while state.store.maintain_client_message_selectors().unwrap() {}
 }
 
 async fn first_page(state: &AppState, now: u128) -> (ClientSnapshot, ClientListQuery, String) {
@@ -181,18 +184,44 @@ async fn message_cursor_is_invalidated_by_claim_deletion() {
 
 #[tokio::test]
 async fn message_cursor_is_invalidated_by_desired_deletion() {
-    let root = tempfile::tempdir().unwrap();
-    let state = super::tests::state(root.path());
-    let intent = crate::graph::parse_test_intent(r#"version 2
-agent "cursor-legacy" { workspace "/tmp"; command "true" }
-message "cursor-legacy-0" { from "requester"; to "cursor-legacy"; content "zero" }
+    assert_desired_deletion_invalidates_cursor(false).await;
+}
+
+#[tokio::test]
+async fn message_cursor_deletion_test_waits_for_a_fold_its_apply_left_pending() {
+    // A commit folds at most BACKFILL_SUBJECTS pending subjects, in subject order. Declaring that many
+    // messages whose subjects sort first leaves the fixture's own pending, as an over-budget fold on a
+    // loaded host does; a first page read then is cut at the published marker and has no next cursor.
+    assert_desired_deletion_invalidates_cursor(true).await;
+}
+
+async fn assert_desired_deletion_invalidates_cursor(crowd_the_fold: bool) {
+    const AGENT: &str = "version 2\nagent \"cursor-legacy\" { workspace \"/tmp\"; command \"true\" }\n";
+    const FIXTURE: &str = r#"message "cursor-legacy-0" { from "requester"; to "cursor-legacy"; content "zero" }
 message "cursor-legacy-1" { from "requester"; to "cursor-legacy"; content "one" }
 message "cursor-legacy-2" { from "requester"; to "cursor-legacy"; content "two" }
-"#, "node").unwrap();
+"#;
+    let crowd: String = if crowd_the_fold {
+        (0..crate::store::client_messages::BACKFILL_SUBJECTS).map(|index| format!(
+            "message \"cursor-crowd-{index:02}\" {{ from \"requester\"; to \"cursor-legacy\"; content \"crowd\" }}\n"
+        )).collect()
+    } else {
+        String::new()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    let intent = crate::graph::parse_test_intent(&[AGENT, &crowd, FIXTURE].concat(), "node").unwrap();
     let mission = state.store.mission(&intent, crate::model::IntentInput {
         kdl: "cursor-desired-deletion".into(), source_name: None,
     }).unwrap();
     state.store.apply(&intent, &mission.subject_tokens, "cursor-desired-deletion").unwrap();
+    if crowd_the_fold {
+        assert!(state.store.client_message_selectors_pending().unwrap(),
+            "the crowded apply must leave the fixture's fold pending");
+    }
+    // A commit folds selectors for at most 10 ms of wall time; a first page read while the fixture is
+    // still pending is cut at the published marker and has no next cursor.
+    while state.store.maintain_client_message_selectors().unwrap() {}
     let now = client_now_ms();
     let (snapshot, query, cursor) = first_page(&state, now).await;
     let epoch = state.store.client_messages_cut_epoch().unwrap();

@@ -1,12 +1,12 @@
-//! Whether the stui before this one ended cleanly.
+//! Whether the Fractal TUI before this one ended cleanly.
 //!
-//! A stui that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
-//! window keeps its last picture and looks frozen (Nathan, 2026-10-05). Each running stui keeps
+//! A TUI that is killed from outside (SIGKILL) or aborts cannot restore the terminal, so its
+//! window keeps its last picture and looks frozen (Nathan, 2026-10-05). Each running Fractal TUI keeps
 //! a small file under `$XDG_CACHE_HOME/st3/stui/runs/` (the cache, not the state: a device
 //! with no st state must stay free of it), removed when it exits by any route that
 //! runs destructors: a quit, a signal it handles or an error. A panic preserves its marker
 //! for draft-recovery accounting on the next launch. A file whose process is
-//! gone is the trace of one that did not, and the next stui to start says so.
+//! gone is the trace of one that did not, and the next Fractal TUI to start says so.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -21,16 +21,16 @@ struct Mark {
     panicked: bool,
 }
 
-/// This stui's file, removed on drop.
+/// This Fractal TUI's file, removed on drop.
 pub struct Run {
     file: Option<PathBuf>,
     started: std::time::Instant,
 }
 
-/// Why this stui is ending, as the code that ends it knows. Said once; the first reason stands.
+/// Why this Fractal TUI is ending, as the code that ends it knows. Said once; the first reason stands.
 static EXIT_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// Record why this stui is ending, for `exits.log` (Nathan, 2026-10-13: "it crashed twice and I
+/// Record why this Fractal TUI is ending, for `exits.log` (Nathan, 2026-10-13: "it crashed twice and I
 /// cannot tell why"). A hard kill leaves no reason, and a run file that outlives its process.
 pub fn note_exit(reason: impl Into<String>) {
     if let Ok(mut said) = EXIT_REASON.lock()
@@ -72,7 +72,7 @@ impl Drop for Run {
     }
 }
 
-/// When this stui's own executable was last written, as it was at start.
+/// When this Fractal TUI's own executable was last written, as it was at start.
 static EXE_AT_START: std::sync::OnceLock<Option<std::time::SystemTime>> = std::sync::OnceLock::new();
 
 fn executable_written() -> Option<std::time::SystemTime> {
@@ -82,7 +82,7 @@ fn executable_written() -> Option<std::time::SystemTime> {
         .and_then(|meta| meta.modified().ok())
 }
 
-/// Whether the executable this stui runs from was replaced on disk since it started, once: a
+/// Whether the executable this Fractal TUI runs from was replaced on disk since it started, once: a
 /// deploy that writes over a running program can make the system stop it (macOS does for a
 /// binary whose signature no longer matches), which looks like a crash with no panic. The fact
 /// is written to `exits.log` before anything can stop it, so the cause is on record.
@@ -100,7 +100,7 @@ pub fn binary_replaced() -> bool {
         write_line(
             &file,
             &format!(
-                "{} pid {}: the program was replaced on disk while this stui ran (a deploy); the system may stop it",
+                "{} pid {}: the program was replaced on disk while this Fractal TUI ran (a deploy); the system may stop it",
                 now_unix(),
                 std::process::id()
             ),
@@ -111,14 +111,14 @@ pub fn binary_replaced() -> bool {
 
 /// The terminal is gone and the watch that sees it is about to end this process without running
 /// destructors: say so in `exits.log` (an exit with no line there is a silent one), take this
-/// run's marker away so the next stui does not count it as a crash, and keep what was typed.
+/// run's marker away so the next Fractal TUI does not count it as a crash, and keep what was typed.
 pub fn terminal_gone() {
     if let Some(runs) = directory() {
         if let Some(log) = runs.parent().map(|dir| dir.join("exits.log")) {
             write_line(
                 &log,
                 &format!(
-                    "{} pid {}: the terminal closed; the hangup watch ended this stui",
+                    "{} pid {}: the terminal closed; the hangup watch ended this Fractal TUI",
                     now_unix(),
                     std::process::id()
                 ),
@@ -150,6 +150,19 @@ pub fn note_slow(what: &str, context: &str, build: &str) {
     }
 }
 
+/// Retain non-successful attach outcomes even when no tracing subscriber is installed.
+#[cfg(not(test))]
+pub(crate) fn note_attach_outcome(attempt_id: uuid::Uuid, agent: &str, phase_reached: &str, outcome: &str, elapsed_ms: u128) {
+    if let Some(file) = directory().and_then(|runs| runs.parent().map(|dir| dir.join("attach.log"))) {
+        let event = serde_json::json!({
+            "service": "fractal-tui", "level": "INFO", "at_unix_ms": now_unix() * 1000,
+            "attempt_id": attempt_id.to_string(), "agent": agent,
+            "phase_reached": phase_reached, "outcome": outcome, "elapsed_ms": elapsed_ms,
+        });
+        write_line(&file, &event.to_string());
+    }
+}
+
 /// Append one line to a log in the cache that is cleared once it passes 100 KB.
 fn write_line(file: &Path, line: &str) {
     use std::io::Write as _;
@@ -162,7 +175,7 @@ fn write_line(file: &Path, line: &str) {
     }
 }
 
-/// Append one line to `exits.log`, which is cleared once it passes 100 KB: when this stui ended,
+/// Append one line to `exits.log`, which is cleared once it passes 100 KB: when this Fractal TUI ended,
 /// how long it had run, and why.
 fn write_exit(file: &Path, ran_seconds: u64, reason: &str) {
     use std::io::Write as _;
@@ -203,7 +216,7 @@ pub fn log_panics(build: &str) {
         super::slo::panic();
         let what = format!("{info}\n{}", std::backtrace::Backtrace::force_capture());
         // Beside the run files in the cache, and beside `connection.log` in the state
-        // directory, where a person looking at what stui left behind looks first.
+        // directory, where a person looking at what Fractal TUI left behind looks first.
         let state = super::prefs::path().and_then(|prefs| {
             prefs
                 .parent()
@@ -264,7 +277,7 @@ fn alive(pid: u32) -> bool {
     found == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Record that this stui is running, and say whether an earlier one left without exiting
+/// Record that this Fractal TUI is running, and say whether an earlier one left without exiting
 /// cleanly: its file is there and its process is gone. The newest such trace is returned
 /// (and every one is cleared), as "started 3h ago".
 pub fn begin(build: &str) -> (Run, Option<String>) {
@@ -278,8 +291,10 @@ pub fn begin(build: &str) -> (Run, Option<String>) {
             None,
         );
     };
-    let _ = std::fs::create_dir_all(&directory);
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let note = left_without_exiting(&directory, std::process::id(), now_unix());
+    // LIVE-MIGRATION END
+    let _ = std::fs::create_dir_all(&directory);
     let file = directory.join(format!("{}.json", std::process::id()));
     let mark = Mark {
         pid: std::process::id(),
@@ -300,6 +315,11 @@ pub fn begin(build: &str) -> (Run, Option<String>) {
 }
 
 fn left_without_exiting(directory: &Path, own: u32, now: u64) -> Option<String> {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    let read_directory = fractal_client::product_dirs::tui_read_path(directory);
+    let consume = read_directory.as_ref() == directory;
+    let directory = read_directory.as_ref();
+    // LIVE-MIGRATION END
     let mut newest: Option<Mark> = None;
     for entry in std::fs::read_dir(directory).ok()?.flatten() {
         let path = entry.path();
@@ -313,7 +333,7 @@ fn left_without_exiting(directory: &Path, own: u32, now: u64) -> Option<String> 
             continue;
         }
         // Only the process that successfully consumes a stale marker counts it.
-        if std::fs::remove_file(&path).is_ok() && !mark.panicked {
+        if consume && std::fs::remove_file(&path).is_ok() && !mark.panicked {
             super::slo::METRICS.add("silent_exits", 1);
         }
         if newest
@@ -325,7 +345,7 @@ fn left_without_exiting(directory: &Path, own: u32, now: u64) -> Option<String> 
     }
     newest.map(|mark| {
         format!(
-            "An earlier stui (pid {}, started {} ago, {}) ended without exiting cleanly: killed or crashed",
+            "An earlier Fractal TUI (pid {}, started {} ago, {}) ended without exiting cleanly: killed or crashed",
             mark.pid,
             elapsed(now.saturating_sub(mark.started_unix)),
             mark.build
@@ -424,8 +444,8 @@ mod tests {
 
     #[test]
     fn a_panic_is_written_to_the_log_and_the_log_stays_small() {
-        let root = std::env::temp_dir().join(format!("stui-panic-{}", std::process::id()));
-        let file = root.join("stui").join("panics.log");
+        let root = std::env::temp_dir().join(format!("fractal-tui-panic-{}", std::process::id()));
+        let file = root.join("tui").join("panics.log");
         write_panic(&file, "build-1", "panicked at src/x.rs:1:1: boom");
         let first = std::fs::read_to_string(&file).unwrap();
         assert!(
@@ -443,8 +463,8 @@ mod tests {
 
     #[test]
     fn an_exit_is_logged_with_when_how_long_and_why_and_the_log_stays_small() {
-        let root = std::env::temp_dir().join(format!("stui-exit-{}", std::process::id()));
-        let file = root.join("stui").join("exits.log");
+        let root = std::env::temp_dir().join(format!("fractal-tui-exit-{}", std::process::id()));
+        let file = root.join("tui").join("exits.log");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         write_exit(&file, 3725, "terminal closed (stdin hung up)");
         write_exit(&file, 4, "error: the daemon\nwent away");
@@ -461,8 +481,8 @@ mod tests {
 
     #[test]
     fn a_log_line_is_one_line_and_the_log_stays_small() {
-        let root = std::env::temp_dir().join(format!("stui-slow-{}", std::process::id()));
-        let file = root.join("stui").join("slow.log");
+        let root = std::env::temp_dir().join(format!("fractal-tui-slow-{}", std::process::id()));
+        let file = root.join("tui").join("slow.log");
         write_line(&file, "draw 300 ms, turn 400 ms; pane agent\nsecond");
         assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1);
         std::fs::write(&file, "x".repeat(100_001)).unwrap();

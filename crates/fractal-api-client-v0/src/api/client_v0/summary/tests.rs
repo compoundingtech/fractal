@@ -31,6 +31,7 @@ fn summary_home_working_machine_predicates_and_deadline() {
         assert!(!crate::model::attention_is_alert(kind, true));
     }
     assert!(!crate::model::attention_is_alert("unread-message", false));
+    assert!(!crate::model::attention_is_alert("model-drift", false));
     let agent = json!({"state":"running","harness_state":"working","fault":null,"delivery":{"state":"current"}});
     assert!(working(&agent));
     for changed in [
@@ -174,22 +175,10 @@ fn native_lean_mission_membership_matches_full_cards() {
                 .collect::<Result<_, _>>()?;
             let (lean, _) = store.client_summary_missions(now)?;
             let project = |rows: &Vec<fractal_client::Mission>| {
-                fractal_ui_model::missions::adapt(
-                    rows.iter(),
-                    std::iter::empty(),
-                    std::iter::empty(),
-                    "",
-                    &Display {
-                        mission_label: &|m| m.header.id.clone(),
-                        agent_label: &|a| a.name.clone(),
-                        age_label: &|_, _| String::new(),
-                        clean_text: &str::to_owned,
-                    },
-                )
-                .into_iter()
-                .filter(active)
-                .map(|m| m.id)
-                .collect::<BTreeSet<_>>()
+                rows.iter()
+                    .filter(|m| active(m))
+                    .map(|m| m.header.id.clone())
+                    .collect::<BTreeSet<_>>()
             };
             assert_eq!(project(&full), project(&lean));
             assert_eq!(
@@ -327,26 +316,18 @@ async fn summary_socket_tiny_snapshot_count_delta_silence_and_person_refusal() {
         ))
         .await
         .unwrap();
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(raw.to_text().unwrap().len() < 1024);
-    let first: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let raw = super::super::tests::data_text_within(&mut socket, Duration::from_secs(5)).await.expect("a data frame within 5 s");
+    assert!(raw.len() < 1024);
+    let first: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(first["kind"], "snapshot");
     assert_eq!(first["order"], json!(["summary/current"]));
     assert_eq!(first["has_more"], false);
     assert_eq!(first["items"][0]["active_missions"], 0);
     writer.store.set_step_state(&step, "working", None).unwrap();
     signal_changed(&writer);
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(raw.to_text().unwrap().len() < 1024);
-    let changed: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let raw = super::super::tests::data_text_within(&mut socket, Duration::from_secs(5)).await.expect("a data frame within 5 s");
+    assert!(raw.len() < 1024);
+    let changed: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(changed["kind"], "changes");
     assert_eq!(changed["upserts"][0]["active_missions"], 1);
     assert_eq!(changed["removes"], json!([]));
@@ -379,12 +360,8 @@ async fn summary_socket_tiny_snapshot_count_delta_silence_and_person_refusal() {
         "equal counts must stay silent"
     );
     socket.send(Message::Text(json!({"kind":"subscribe","id":"foreign","collection":"summary","person":"person/other"}).to_string().into())).await.unwrap();
-    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let refusal: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    let raw = super::super::tests::data_text_within(&mut socket, Duration::from_secs(5)).await.expect("a data frame within 5 s");
+    let refusal: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(refusal["kind"], "error");
     assert_eq!(refusal["id"], "foreign");
     assert_eq!(refusal["retryable"], false);
@@ -544,15 +521,49 @@ mission "summary-update-about" state="ready" {
                 evidence: vec![],
                 episode: None,
                 idempotency_key: "summary-update-read".into(),
-                answer: Some(crate::person_request::AnswerInput {
-                    id: Some("read".into()),
-                    text: None,
-                }),
+                answer: Some(crate::person_request::AnswerInput { id: Some("read".into()), text: None, option_notes: Vec::new() }),
             },
             false,
         )
         .unwrap();
     assert_eq!(count("person/avery"), 1);
+}
+
+/// An attention row is urgent exactly when its ask has priority `critical`; the row carries the
+/// ask's priority, `normal` without one.
+#[test]
+fn an_attention_row_is_urgent_only_for_a_critical_ask() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"summary-fixture.asker\" { workspace \"/tmp\"; command \"true\"; restart always; }\n";
+    let intent = crate::graph::parse_internal_intent(source, "summary-fixture").unwrap();
+    state.store.apply_internal(&intent, "summary-urgent-publication").unwrap();
+    let mut asks = Vec::new();
+    for priority in [None, Some("high"), Some("critical")] {
+        let name = priority.unwrap_or("unnamed");
+        let mut request = json!({
+            "person":"person/avery","actor":"agent/summary-fixture.asker",
+            "title":format!("A {name} question"),"reason":"Only the person can answer.",
+            "new_run":format!("urgent-{name}"),"idempotency_key":format!("urgent-{name}")
+        });
+        if let Some(priority) = priority {
+            request["priority"] = json!(priority);
+        }
+        asks.push(state.store.ask_person(&serde_json::from_value(request).unwrap()).unwrap().subject);
+    }
+    let attention = client_attention_resources_at(&state.store, Some("person/avery"), false, client_now_ms()).unwrap();
+    let rows = asks
+        .iter()
+        .map(|subject| {
+            let row = attention.iter().find(|row| row["source_id"] == *subject).unwrap();
+            (row["priority"].clone(), row["urgent"].clone(), row["alert"].clone())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows, [
+        (json!("normal"), json!(false), json!(true)),
+        (json!("high"), json!(false), json!(true)),
+        (json!("critical"), json!(true), json!(true)),
+    ]);
 }
 
 #[test]
@@ -593,7 +604,7 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
     state
         .store
         .read_snapshot(|_| {
-            // Inject the hypothetical stale gate only into the presentation adapter:
+            // Inject the hypothetical stale gate only into the mission word:
             // current native attention normally fences terminal owning work itself.
             let gate: fractal_client::Attention = serde_json::from_value(json!({
                 "id":"attention/summary-ended","kind":"attention","revision":"fixture",
@@ -602,23 +613,21 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
                 "mission_id":"mission/summary-ended","title":"Fixture gate","detail":"Fixture",
                 "priority":"normal","state":"open","requested_at":client_timestamp(at)
             }))?;
+            let gates = [fractal_ui_model::missions::Gate {
+                mission: gate.mission_id.clone().unwrap_or_default(),
+                step: Some(gate.source_id.clone()),
+                person: gate.person_id.clone(),
+            }];
             let project = |missions: &[fractal_client::Mission]| {
-                fractal_ui_model::missions::adapt(
-                    missions.iter(),
-                    std::iter::empty(),
-                    std::iter::once(&gate),
-                    "",
-                    &Display {
-                        mission_label: &|m| m.header.id.clone(),
-                        agent_label: &|a| a.name.clone(),
-                        age_label: &|_, _| String::new(),
-                        clean_text: &str::to_owned,
-                    },
-                )
-                .into_iter()
-                .filter(|m| !m.system && (active(m) || m.word == fractal_ui_model::missions::Word::Decision))
-                .map(|m| m.id)
-                .collect::<BTreeSet<_>>()
+                missions
+                    .iter()
+                    .filter(|m| {
+                        let word = fractal_ui_model::missions::row_word(m, &gates);
+                        !m.system
+                            && (word.is_active() || word == fractal_ui_model::missions::Word::Decision)
+                    })
+                    .map(|m| m.header.id.clone())
+                    .collect::<BTreeSet<_>>()
             };
             let current_ids = state.store.mission_collection_ids(false, 0, 1000)?;
             assert!(!current_ids.iter().any(|id| id == "mission/summary-ended"));

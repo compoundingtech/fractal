@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A refused send on the phone names Fractal's code when the phone has no words of its own for it, and an internal refusal names its fault",
+  "replay": {"status": "none", "detail": "Phone-only wording; no replay change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Reads the existing error code and message; nothing new is sent."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Revert this change or install the previous phone build."}
+}

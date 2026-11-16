@@ -22,8 +22,16 @@ function NarrowSheetStory({ scheme = 'dark', side = 'end' }: { scheme?: Scheme; 
     </NarrowSheet>}
   </main>
 }
-const meta = { title: 'Fractal UI/Narrow sheet', component: NarrowSheetStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises sheet placement, dismissal and focus restoration without domain data." }, layout: 'fullscreen' }, args: { scheme: 'dark', side: 'end' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, side: { options: ['start', 'end'], control: 'radio' } } } satisfies Meta<typeof NarrowSheetStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Narrow sheet', component: NarrowSheetStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises sheet placement, dismissal and focus restoration without domain data." }, layout: 'fullscreen' }, args: { scheme: 'dark', side: 'end' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, side: { options: ['start', 'end'], control: 'radio' } } } satisfies Meta<typeof NarrowSheetStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AgentsStart:primitive',
+  'AgentsStartLight:primitive',
+  'DetailsEnd:primitive',
+  'DetailsEndLight:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 /**

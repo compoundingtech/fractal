@@ -7,9 +7,16 @@ pub fn latest_handoff(
     connection: &Connection,
     view: &StepRunView,
     at: u128,
-) -> Result<Option<ClaimRecord>, St3Error> {
-    connection.query_row(/* sqlite-large-value: allow-for-now lv-hdf17be72f35e owner=fractal_store::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.released' AND json_extract(body,'$.fields.handoff_message') IS NOT NULL AND json_extract(body,'$.fields.attempt')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-        params![view.subject, view.attempt, at as i64], claim_from_row).optional().map_err(internal)
+) -> Result<Option<ClaimRecord>, FractalError> {
+    let handoff = connection.query_row(/* sqlite-large-value: allow-for-now lv-hdf17be72f35e owner=fractal_store::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='work.released' AND json_extract(body,'$.fields.handoff_message') IS NOT NULL AND json_extract(body,'$.fields.attempt')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+        params![view.subject, view.attempt, at as i64], claim_from_row).optional().map_err(internal)?;
+    if let Some(handoff) = &handoff {
+        let resolved: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.handoff-returned' AND json_extract(body,'$.fields.handoff_claim')=?2 AND CAST(accepted_at_unix_ms AS INTEGER)<=?3)",
+            params![view.subject, handoff.id, at as i64], |row| row.get(0)).map_err(internal)?;
+        if resolved { return Ok(None); }
+    }
+    Ok(handoff)
 }
 
 pub fn acknowledged(
@@ -24,15 +31,62 @@ pub fn acknowledged(
 pub fn pending_handoff(
     connection: &Connection,
     view: &StepRunView,
-) -> Result<bool, St3Error> {
-    latest_handoff(connection, view, now_ms())?
-        .map(|handoff| {
-            acknowledged(connection, &handoff, now_ms())
-                .map(|ack| !ack)
-                .map_err(internal)
-        })
+) -> Result<bool, FractalError> {
+    let handoff = latest_handoff(connection, view, now_ms())?;
+    handoff_pending(connection, handoff, now_ms())
+}
+
+fn handoff_pending(
+    connection: &Connection,
+    handoff: Option<ClaimRecord>,
+    at: u128,
+) -> Result<bool, FractalError> {
+    handoff
+        .map(|handoff| acknowledged(connection, &handoff, at).map(|ack| !ack).map_err(internal))
         .transpose()
         .map(|pending| pending.unwrap_or(false))
+}
+
+impl Store {
+    /// Ready demand for declared seats. Call only while pinned to the publication's graph cut.
+    pub fn ready_work_cohort_count<'a>(
+        &self,
+        work: impl IntoIterator<Item = &'a StepRunView>,
+        cohort: &[String],
+        at: u128,
+    ) -> Result<Option<usize>> {
+        use super::identities::{IdentityKind, resolve_identity_conn};
+
+        let connection = self.readers.get();
+        let mut seats = BTreeSet::new();
+        for agent in cohort {
+            let Ok(identity) = resolve_identity_conn(&connection, IdentityKind::Agent, agent) else {
+                return Ok(None);
+            };
+            if !person_work::declaration_live(&connection, &identity.identity)? {
+                return Ok(None);
+            }
+            seats.insert(identity.identity);
+        }
+        let mut count = 0;
+        for step in work {
+            if step.status != "ready"
+                || step.agentless
+                || step.claimant.is_some()
+                || step.blocked_reason.is_some()
+                || !step.blockers.is_empty()
+                || step.not_before_unix_ms.is_some_and(|due| due > at)
+                || !step.assigned_to.iter().chain(&step.available_to).any(|agent| seats.contains(agent))
+            {
+                continue;
+            }
+            let handoff = latest_handoff(&connection, step, at)?;
+            if !handoff_pending(&connection, handoff, at)? {
+                count += 1;
+            }
+        }
+        Ok(Some(count))
+    }
 }
 
 pub fn enrich_handoff(
@@ -54,7 +108,7 @@ pub fn enrich_handoff(
     Ok(())
 }
 
-pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), St3Error> {
+pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), FractalError> {
     let fields = &claim.body["fields"];
     let mission: MissionSpec =
         serde_json::from_value(fields["mission_spec"].clone()).map_err(internal)?;
@@ -62,7 +116,7 @@ pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), St
     let generation = fields["current_generation"]
         .as_str()
         .ok_or_else(|| {
-            St3Error::new(
+            FractalError::new(
                 "invalid-mission-run-claim",
                 "a minimal run needs a generation",
             )
@@ -79,7 +133,7 @@ pub fn project_start(tx: &Transaction<'_>, claim: &ClaimRecord) -> Result<(), St
     )?;
     let subject = format!("step-run/{generation}/work");
     let step = mission.steps.get("work").ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "invalid-mission-run-claim",
             "a minimal work run needs its work step",
         )

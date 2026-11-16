@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Separate retained-directory helpers from catalog transactions.",
+  "replay": {
+    "status": "none",
+    "detail": "Moves retained-directory path resolution and no-follow traversal into a private shared-driver module and points message and lock consumers there. Function bodies, platform branches, flags, errors and existing tests are unchanged; the old catalog-transaction public and crate-internal paths remain re-exported. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Moves retained-directory path resolution and no-follow traversal into a private shared-driver module and points message and lock consumers there. Function bodies, platform branches, flags, errors and existing tests are unchanged; the old catalog-transaction public and crate-internal paths remain re-exported. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Moves retained-directory path resolution and no-follow traversal into a private shared-driver module and points message and lock consumers there. Function bodies, platform branches, flags, errors and existing tests are unchanged; the old catalog-transaction public and crate-internal paths remain re-exported. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Moves retained-directory path resolution and no-follow traversal into a private shared-driver module and points message and lock consumers there. Function bodies, platform branches, flags, errors and existing tests are unchanged; the old catalog-transaction public and crate-internal paths remain re-exported. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Moves retained-directory path resolution and no-follow traversal into a private shared-driver module and points message and lock consumers there. Function bodies, platform branches, flags, errors and existing tests are unchanged; the old catalog-transaction public and crate-internal paths remain re-exported. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Moves retained-directory path resolution and no-follow traversal into a private shared-driver module and points message and lock consumers there. Function bodies, platform branches, flags, errors and existing tests are unchanged; the old catalog-transaction public and crate-internal paths remain re-exported. No runtime, authority, schema, protocol or recovery behavior changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Moves retained-directory path resolution and no-follow traversal into a private shared-driver module and points message and lock consumers there. Function bodies, platform branches, flags, errors and existing tests are unchanged; the old catalog-transaction public and crate-internal paths remain re-exported. No runtime, authority, schema, protocol or recovery behavior changes."
+  }
+}

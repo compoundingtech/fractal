@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A lane burst granted before a daemon restart is restored by its holder's renewal, and its lane is not lowered meanwhile; a holder whose grant is lost says so and the run fails clearly",
+  "replay": {"status": "none", "detail": "No graph replay: bursts live in the daemon's memory, and the new daemon reads the seats' slices."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "changed", "detail": "Before it judges any room, a new daemon reads each laned seat's slice once: one raised above the seat's own counts as held at once (other lanes' room and the burst reserve) and stays raised for one burst lease (90 s) after the start. A holder's renewal says it holds the burst, and a daemon with no record of it restores the grant while the slice still holds the burst lane; a raise nobody renews within the lease goes back to what the seat's steps hold. A granted holder answered anything but granted prints `lost` and why, gives the burst back and exits non-zero; scripts/st-test then fails the run with a `lane-burst LOST` row."},
+  "compatibility": {"status": "changed", "detail": "The burst request gains an optional `held` flag (default false), so an older daemon ignores it and an older holder is treated as asking anew. The holder renews at a third of the `lease_secs` the daemon answers (30 s for today's 90 s lease). An older holder told `waiting` after a grant goes on as before; st-test reads that line as a lost burst too."},
+  "downtime": {"status": "none", "detail": "One read of each laned seat's memory.max and cpu.max at the daemon's first pass."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert: a restart again lowers a granted burst's lane at its first pass, and the renewal asks again at the back of the line."}
+}

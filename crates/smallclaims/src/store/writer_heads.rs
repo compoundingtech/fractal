@@ -135,6 +135,57 @@ mod tests {
     }
 
     #[test]
+    fn a_writers_high_water_never_falls_when_adoption_withdraws_its_trimmed_tombstones() {
+        // A removal records this as the member's high water and a rejoin under the name floors
+        // at it, so it must not fall below a sequence peers already hold.
+        let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
+        let tombstones_only = |connection: &Connection| -> Option<u64> {
+            connection
+                .query_row(
+                    "SELECT MAX(sequence) FROM (
+                         SELECT MAX(sequence) AS sequence FROM replica_envelopes WHERE writer='oak'
+                         UNION ALL SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer='oak')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let writer = store.connection.write();
+            // A trim dropped oak's envelopes 2 to 5 and kept their tombstones.
+            for sequence in 2..=5 {
+                writer
+                    .execute(
+                        "INSERT INTO checkpoint_envelopes VALUES('oak', ?1, ?2, 1, 'checkpoint/old')",
+                        params![sequence, format!("{sequence:064x}")],
+                    )
+                    .unwrap();
+            }
+        }
+        assert_eq!(writer_high_water(&store.readers.get(), "oak").unwrap(), Some(5));
+        // Adoption keeps only a manifest that lacks them.
+        store
+            .connection
+            .write()
+            .execute("DELETE FROM checkpoint_envelopes WHERE writer='oak'", [])
+            .unwrap();
+        let connection = store.readers.get();
+        assert_eq!(tombstones_only(&connection), None, "tombstones alone forget the trim");
+        assert_eq!(writer_high_water(&connection, "oak").unwrap(), Some(5));
+        drop(connection);
+        // A trimmed batch head from before the retired ledger raises it too.
+        store
+            .connection
+            .write()
+            .execute("INSERT INTO writer_heads VALUES('oak', 7, 'hash')", [])
+            .unwrap();
+        let connection = store.readers.get();
+        assert_eq!(tombstones_only(&connection), None);
+        assert_eq!(writer_high_water(&connection, "oak").unwrap(), Some(7));
+        assert_eq!(writer_high_water(&connection, "elm").unwrap(), None);
+    }
+
+    #[test]
     fn heads_only_rise_whatever_order_batches_arrive_or_leave() {
         let connection = Connection::open_in_memory().unwrap();
         connection

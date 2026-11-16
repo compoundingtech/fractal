@@ -13,7 +13,7 @@ test('native adapter uses provisioned APNs environment rather than release type'
   }
   globalThis.testPushApplicationNative = { environment: async () => { throw new Error('native unavailable'); } };
   assert.equal(await ports.environment(), undefined);
-  assert.equal(ports.bundleId, 'com.example.smalltalk'); assert.equal(ports.version, '1.0');
+  assert.equal(ports.bundleId, 'com.example.fractal'); assert.equal(ports.version, '1.0');
 });
 
 test('ordinary builds cannot capture APNs even with an APNs-capable provisioning profile', async () => {

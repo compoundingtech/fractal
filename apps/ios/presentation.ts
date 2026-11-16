@@ -1,6 +1,6 @@
 import { ago, alertsHeading } from '@fractal/views';
 export { ago } from '@fractal/views';
-import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep, WorkState } from '../../clients/typescript/fractal-client';
+import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep } from '../../clients/typescript/fractal-client';
 
 // The daemon annotates every resource with its operational layer. It is not part of the
 // generated resource types, so read it at the UI boundary.
@@ -9,7 +9,7 @@ function operational(resource: object): Operational | undefined {
   return (resource as { operational?: Operational }).operational;
 }
 
-const acronyms: Record<string, string> = { st3: 'ST', cos: 'COS', ios: 'iOS', tui: 'TUI', pty: 'PTY', api: 'API' };
+const acronyms: Record<string, string> = { st3: 'ST', fractal: 'Fractal', cos: 'COS', ios: 'iOS', tui: 'TUI', pty: 'PTY', api: 'API' };
 export function words(slug: string): string {
   return slug.split('-').map(word => acronyms[word.toLowerCase()] ?? word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
 }
@@ -53,7 +53,7 @@ export function attentionKindLabel(kind: string): string {
 
 function leaf(path: string): string { return path.split('/').pop() || path; }
 
-// st joins each agent's queue into its row: the step it works on, the next one, and the rest.
+// Fractal joins each agent's queue into its row: the step it works on, the next one, and the rest.
 type QueueAgent = Pick<Agent, 'next_work' | 'next_work_id' | 'upcoming_work' | 'queued_work_count'>;
 export function queuedWorkSummary(agent: QueueAgent, now = Date.now()): string | null {
   const next = agent.next_work ?? null;
@@ -73,41 +73,6 @@ export function currentWorkSummary(agent: Pick<Agent, 'current_work'>): string |
 // A mission row carries its runs with their steps: every open run, and the latest run.
 export function missionSteps(mission: Pick<Mission, 'run_details'>): MissionStep[] {
   return (mission.run_details ?? []).flatMap(run => run.steps ?? []);
-}
-
-export const missionGroups = ['Blocked', 'Waiting', 'Running', 'Drafts', 'Archive'] as const;
-export type MissionGroup = typeof missionGroups[number];
-// All contract states have a presentation; held and verifying steps take precedence
-// over dependent steps that are still waiting. Keep aliases for cached older projections.
-const stepGroups: Record<WorkState, MissionGroup | null> = {
-  'waiting-person': 'Waiting', waiting: 'Waiting', ready: 'Running', claimed: 'Running', blocked: 'Blocked',
-  verifying: 'Running', completed: null, failed: 'Blocked', cancelled: null,
-};
-function stepGroup(state: string): MissionGroup | null {
-  if (state === 'working' || state === 'running') return 'Running';
-  if (state === 'pending') return 'Waiting';
-  return stepGroups[state as WorkState] ?? null;
-}
-export function missionGroup(mission: Pick<Mission, 'run_details' | 'state'>): MissionGroup {
-  if (['completed', 'failed', 'cancelled', 'retired'].includes(mission.state)) return 'Archive';
-  const groups = missionSteps(mission).map(step => stepGroup(step.state));
-  if (groups.includes('Blocked')) return 'Blocked';
-  if (groups.includes('Running')) return 'Running';
-  if (groups.includes('Waiting')) return 'Waiting';
-  if (mission.state === 'running' || mission.state === 'standing') return 'Running';
-  if (mission.state === 'ready' || mission.state === 'draft') return 'Drafts';
-  return 'Archive';
-}
-
-export function missionDetail(mission: Pick<Mission, 'run_details' | 'runs' | 'visualization'>): string {
-  const planned = mission.visualization?.nodes.filter(node => node.kind === 'step').length;
-  const steps = missionSteps(mission);
-  const current = steps.find(step => step.state === 'blocked') ?? steps.find(step => stepGroup(step.state) === 'Running') ?? steps[0];
-  // Someone set the latest run's outcome after it finished: say what, who, and why.
-  const runs = mission.run_details ?? [];
-  const outcome = runs[runs.length - 1]?.outcome;
-  const set = outcome ? ` · set ${outcome.status}${outcome.previous_status ? ` (was ${outcome.previous_status})` : ''} by ${outcome.actor}: ${outcome.reason}` : '';
-  return `${mission.runs.length} runs${planned === undefined ? '' : ` · ${planned} planned steps`}${current ? ` · ${current.path} (${current.state})` : ''}${set}`;
 }
 
 type HealthAgent = Pick<Agent, 'state' | 'harness_state'>;
@@ -151,7 +116,7 @@ export function clientDetail(item: ClientConnection, now = Date.now()): string {
   const follows = item.follows.length ? ` · follows ${item.follows.join(', ')}` : '';
   return `${who} · ${item.via} · ${item.member} · ${when}${follows}`;
 }
-// Only st's own builds share the member's version line ("stui 0.1.0+ab12cd3"); another client,
+// Only Fractal's own builds share the member's version line ("fractal 0.1.0+ab12cd3"); another client,
 // or a build that does not parse, is never called older. The note is quiet: nothing else changes.
 export function olderThanMember(client: string | null | undefined, member: string | null | undefined): boolean {
   const version = (build: string) => {
@@ -159,7 +124,7 @@ export function olderThanMember(client: string | null | undefined, member: strin
     return parts.every(Number.isInteger) ? parts : null;
   };
   const [name, build] = (client ?? '').split(' ', 2);
-  if (!build || !member || (name !== 'stui' && name !== 'st')) return false;
+  if (!build || !member || !['fractal', 'fractal-tui', 'stui', 'st'].includes(name)) return false;
   const a = version(build), b = version(member);
   if (!a || !b) return false;
   for (let i = 0; i < Math.max(a.length, b.length); i++) {
@@ -205,8 +170,8 @@ export function pingPresentation(text: string): { from: string | null; text: str
   return ping ? { from: senderName(ping[1]), text: ping[2].trim() } : { from: null, text: withoutReference };
 }
 
-// st joins Small Talk to or from an agent into its conversation: who wrote to whom, and the title.
-export function smallTalkPresentation(body: unknown): { from: string; text: string } {
+// Fractal joins messages to or from an agent into its conversation: who wrote to whom, and the title.
+export function fractalPresentation(body: unknown): { from: string; text: string } {
   const message = (body && typeof body === 'object' ? body : {}) as { from?: unknown; to?: unknown; title?: unknown };
   const name = (id: unknown) => typeof id === 'string' ? senderName(id) : 'someone';
   return { from: `${name(message.from)} → ${name(message.to)}`, text: typeof message.title === 'string' && message.title.trim() ? message.title : 'Fractal' };

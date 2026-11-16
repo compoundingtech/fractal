@@ -1,9 +1,9 @@
 //! Period reads seek the last snapshot at each reporting boundary, not every historical rollup.
 use super::*;
 
-pub const INDEX: &str = "claims_usage_period_boundary_index";
+pub const INDEX: &str = "claims_usage_execution_period_boundary_index";
 pub const PREDICATE: &str = "kind='harness.usage' AND json_extract(body,'$.fields.semantics')='response_rollup'";
-const SERIES_FIELDS: [&str; 6] = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host"];
+const SERIES_FIELDS: [&str; 7] = ["incarnation_id", "model", "account", "owner_run", "owner_step", "host", "execution_id"];
 
 pub fn series_sql() -> String {
     let fields = SERIES_FIELDS.map(|field| format!(
@@ -28,6 +28,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
         series_sql(), observed_sql()
     ))?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3686c9ce2155 owner=fractal_store::store::usage_period TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX IF EXISTS claims_usage_rollup_index")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2f4f49b6bb1e owner=fractal_store::store::usage_period TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX IF EXISTS claims_usage_period_boundary_index")?;
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-//! The part of `store::work_list` that moved up from st3-store.
+//! The part of `store::work_list` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_delivery::store::work_list::*;
@@ -42,12 +42,14 @@ pub trait WorkListStore {
     /// it, revision proposals for that run, the person asks that block it, which their
     /// requesters' declarations and runtime decide, and the seats it owns with their usage. A
     /// claim about any other subject changes no row. `seats` names the step each seat shown on
-    /// a row belonged to when that row was folded.
+    /// a row belonged to when that row was folded. With `origin`, only the claims that node wrote
+    /// are read.
     fn work_list_changes(
             &self,
             after: u64,
             through: u64,
             seats: &HashMap<String, String>,
+            origin: Option<&str>,
         ) -> Result<WorkChanges>;
     /// The steps whose worker lease ended after `after` and by `through`: their rows show them
     /// ready again with no new claim.
@@ -92,6 +94,7 @@ impl WorkListStore for Store {
             after: u64,
             through: u64,
             seats: &HashMap<String, String>,
+            origin: Option<&str>,
         ) -> Result<WorkChanges> {
         let connection = self.readers.get();
         let mut steps = BTreeSet::new();
@@ -103,7 +106,7 @@ impl WorkListStore for Store {
         let mut tree_roots = BTreeSet::new();
         let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd9f7e7a219ce owner=fractal_missions::store::work_list TODO=trace-statement-and-value-representation */ published_list::CLAIMS_SINCE)?;
         let claims = statement
-            .query_map(params![after, through], |row| {
+            .query_map(params![after, through, origin], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -258,8 +261,8 @@ impl WorkListStore for Store {
     fn seat_queues_of(&self, seats: &BTreeSet<String>) -> Result<HashMap<String, SeatQueue>> {
         #[cfg(any(test, feature = "test-support"))]
         {
-            self.smalltalk.seat_order_reads.fetch_add(seats.len(), std::sync::atomic::Ordering::Relaxed);
-            *self.smalltalk.last_seats_read.lock().unwrap() = seats.clone();
+            self.fractal.seat_order_reads.fetch_add(seats.len(), std::sync::atomic::Ordering::Relaxed);
+            *self.fractal.last_seats_read.lock().unwrap() = seats.clone();
         }
         if seats.is_empty() {
             return Ok(HashMap::new());
@@ -295,18 +298,18 @@ impl WorkListStore for Store {
 
     fn count_seat_lookups(&self, count: usize) {
         #[cfg(any(test, feature = "test-support"))]
-        self.smalltalk.seat_lookups.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.seat_lookups.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(test))]
         let _ = count;
     }
 
     fn count_direct_work_read(&self) {
         #[cfg(any(test, feature = "test-support"))]
-        self.smalltalk.direct_work_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.direct_work_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn published_work_list(&self) -> &published_list::PublishedList<WorkRows> {
-        &self.smalltalk.published_work
+        &self.fractal.published_work
     }
 }
 

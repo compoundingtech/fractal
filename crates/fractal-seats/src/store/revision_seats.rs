@@ -1,4 +1,4 @@
-//! The part of `store::revision_seats` that moved up from st3-store.
+//! The part of `store::revision_seats` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_missions::store::revision_seats::*;
@@ -11,7 +11,7 @@ pub trait RevisionSeatsStore {
             &self,
             current: &MissionRunView,
             next: &MissionSpec,
-        ) -> Result<(), St3Error>;
+        ) -> Result<(), FractalError>;
 }
 
 impl RevisionSeatsStore for Store {
@@ -20,7 +20,7 @@ impl RevisionSeatsStore for Store {
             &self,
             current: &MissionRunView,
             next: &MissionSpec,
-        ) -> Result<(), St3Error> {
+        ) -> Result<(), FractalError> {
         let old = self
             .mission_spec(
                 current.mission.trim_start_matches("mission/"),
@@ -28,7 +28,7 @@ impl RevisionSeatsStore for Store {
             )
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-mission-revision",
                     "the current mission revision is unavailable",
                 )

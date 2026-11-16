@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The scan for signatures missing on admitted envelopes runs in the daemon's maintenance instead of inside every replication export and summary, so those requests no longer do work that grows with the store",
+  "replay": {"status": "none", "detail": "No claim replay or projection changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers or schema digest changes."},
+  "rules": {"status": "none", "detail": "Admission, membership and checkpoint rules are unchanged; only where the backfill scan runs changes."},
+  "compatibility": {"status": "none", "detail": "Exchanges carry the same signature requests as before, at most 512. Peers of any version answer them as they did."},
+  "downtime": {"status": "none", "detail": "Ordinary rolling deployment. A maintenance task scans up to 4096 envelope rows every five seconds while exchanges are taking its findings, and stops when a pass finds nothing missing."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Binary swap-back needs no migration."}
+}

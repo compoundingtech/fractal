@@ -1,4 +1,4 @@
-//! The part of `store::mission_ivm` that moved up from st3-store.
+//! The part of `store::mission_ivm` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 
 use crate::MissionsStore;
@@ -265,7 +265,7 @@ mod tests {
         }
         smallclaims::store::set_thread_clock(Some(deadline + 1));
         store
-            .retire_mission("mission/orchard", "person/avery", "retire")
+            .retire_mission("mission/orchard", "person/avery", "retire", None)
             .unwrap();
         parity(&store, &views, deadline + 1);
         assert!(

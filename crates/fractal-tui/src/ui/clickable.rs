@@ -1,9 +1,100 @@
 //! Pointer instructions describe the painted target and use the menu's own resolver.
+//!
+//! In the TUI, middle-click closes or dismisses an item in any closable list.
+//! Destructive actions and answering decisions are excluded.
 
 use super::context::PointMenu;
 use super::*;
 
+#[derive(PartialEq, Eq)]
+pub(super) enum CloseTarget {
+    Tab(usize, usize),
+    InboxRow(String),
+    InboxCard(String),
+}
+
+pub(super) enum MiddleClose<T> {
+    Ignored,
+    Consumed,
+    Released(T),
+}
+
+/// A closable list owns its middle press through release, including drags outside it.
+pub(super) fn middle_close<T: PartialEq>(
+    pressed: &mut Option<T>,
+    kind: MouseEventKind,
+    target: Option<T>,
+) -> MiddleClose<T> {
+    match kind {
+        MouseEventKind::Down(button) => {
+            *pressed = if button == MouseButton::Middle { target } else { None };
+            if pressed.is_some() { MiddleClose::Consumed } else { MiddleClose::Ignored }
+        }
+        MouseEventKind::Drag(MouseButton::Middle) if pressed.is_some() => MiddleClose::Consumed,
+        MouseEventKind::Up(MouseButton::Middle) => match pressed.take() {
+            Some(pressed) if target.as_ref() == Some(&pressed) => MiddleClose::Released(pressed),
+            Some(_) => MiddleClose::Consumed,
+            None => MiddleClose::Ignored,
+        },
+        _ => MiddleClose::Ignored,
+    }
+}
+
 impl Ui {
+    fn inbox_row_at<'a>(&self, frame: &'a FrameInfo, x: u16, y: u16) -> Option<&'a str> {
+        frame.context_rows.iter().rev()
+            .find(|(rect, _, _)| contains(*rect, x, y))
+            .map(|(_, id, _)| id.as_str())
+            .filter(|id| self.world.attention.items().iter().any(|item| item.id == *id))
+    }
+
+    /// Resolve the painted Inbox target, independently of keyboard focus or selection.
+    pub(super) fn close_target(&self, x: u16, y: u16) -> Option<CloseTarget> {
+        let frame = self.frame.borrow();
+        let (_, hit) = frame.hits.iter().rev().find(|(rect, _)| contains(*rect, x, y))?;
+        match hit {
+            Hit::GlassTab(group, tab) => Some(CloseTarget::Tab(*group, *tab)),
+            Hit::Row(_) => self.inbox_row_at(&frame, x, y)
+                .map(|id| CloseTarget::InboxRow(id.to_owned())),
+            Hit::Key('x') => frame.panes.iter().rev()
+                .find(|pane| contains(pane.rect, x, y))
+                .and_then(|pane| pane.key.strip_prefix("home:"))
+                .map(|id| CloseTarget::InboxCard(id.to_owned())),
+            _ => None,
+        }
+    }
+
+    pub(super) fn dismiss_inbox(&mut self, id: String) {
+        let Some(item) = self.world.attention.items().iter().find(|item| item.id == id) else {
+            return;
+        };
+        if item.actions.iter().any(|action| action == "custom.reply") {
+            self.flash("Reply with c using this source's declared fields");
+            return;
+        }
+        if self.closed.remove(&id) {
+            self.acted.insert(id.clone());
+            if let Load::Ready(items) = &mut self.world.attention {
+                items.retain(|item| item.id != id);
+            }
+            if self.tab() == 0 {
+                self.select(self.selected[0]);
+            }
+            return;
+        }
+        match item.kind.word() {
+            "request" => self.act_attention(id, 'r'),
+            "update" => self.read_update_id(id),
+            "message" => self.act_attention(id, 'm'),
+            "fault" => self.flash(
+                "A fault clears when the agent that owns it retries or cancels; open it with g",
+            ),
+            word => self.flash(format!(
+                "A {word} waits on your decision, so x cannot dismiss it: answer it with the keys on its card"
+            )),
+        }
+    }
+
     pub(super) fn draw_click_hint(
         &self,
         buf: &mut Buffer,
@@ -41,7 +132,7 @@ impl Ui {
             Hit::Answer(_) => "choose answer; Enter sends".into(),
             Hit::Alert(_, AlertTap::Answer(_)) => "answer this alert".into(),
             Hit::Alert(_, AlertTap::Choose(..)) => "choose this answer".into(),
-            Hit::Alert(_, AlertTap::Open) => "open this alert in Now".into(),
+            Hit::Alert(_, AlertTap::Open) => "open this alert in Inbox".into(),
             Hit::Alert(_, AlertTap::Toggle) => "show or hide the alerts".into(),
             Hit::Voice => "start voice input".into(),
             Hit::NewTerminal => "new terminal".into(),
@@ -51,17 +142,16 @@ impl Ui {
             Hit::ResourceAdd(_) => "find a resource to add".into(),
             Hit::ResourceFolderMenu(_) => "rename or delete folder".into(),
             Hit::ResourceFolderDrag(_) => "drag to reorder folder".into(),
+            Hit::SidebarToggle => "show/hide sidebar · Ctrl+S".into(),
             Hit::SidebarRow(_) => "open item in tab".into(),
-            Hit::SidebarSection(_) | Hit::Tab(_) => format!("show {label}"),
+            Hit::SidebarSection(_) => format!("show {label}"),
             Hit::Usage => "show/hide Usage".into(),
             Hit::Connection => "connection details".into(),
             Hit::Row(_) => "select row".into(),
             Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
-            Hit::Key('s') if self.glasses.is_none() && self.popover.is_none() => {
-                "show/hide list [s]".into()
-            }
-            Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
+            Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
+            Hit::Key(_) | Hit::Availability(_) | Hit::Enter | Hit::ChatEnter | Hit::Escape | Hit::Menu(_) => label,
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
@@ -70,7 +160,7 @@ impl Ui {
             Hit::Pane(PaneIntent::Send(_)) => "send message".into(),
             Hit::Pane(PaneIntent::LoadOlder) => "load older messages".into(),
             Hit::JumpLatest => "jump to latest [End]".into(),
-            Hit::Composer => "edit message [c]".into(),
+            Hit::Composer | Hit::ChatComposer => "edit message [c]".into(),
             Hit::Help => "show/hide help [F1]".into(),
             Hit::Peek(id) if self.popover.as_deref() == Some(id) && rect.height > 1 => {
                 "card already open".into()
@@ -79,19 +169,27 @@ impl Ui {
             Hit::Actions(_) => "agent actions".into(),
             Hit::Field(_) => "focus field [Tab]".into(),
             Hit::Revoke(_) => "ask to revoke; y confirms".into(),
-            Hit::Attach => "attach terminal [Ctrl+]]".into(),
+            Hit::Attach => "attach terminal [Enter on a detached terminal pane]".into(),
             Hit::Detach => "leave terminal [Ctrl+\\ c or Ctrl+T twice]".into(),
             Hit::GlassMenu => "spaces [Ctrl+G]".into(),
             Hit::PaletteSection(1) => "agents [Ctrl+2]".into(),
             Hit::PaletteSection(2) => "missions [Ctrl+3]".into(),
-            Hit::PaletteSection(3) => "fleet [Ctrl+4]".into(),
+            Hit::PaletteSection(3) => "fleet [palette: fleet]".into(),
             Hit::PaletteSection(_) => format!("open {label}"),
-            Hit::Home => "show/hide Now [Ctrl+H]".into(),
+            Hit::Home => "open Inbox [Ctrl+H]".into(),
+            Hit::Link(url) if super::documents::openable(url).is_some() => "open document".into(),
             Hit::Link(_) => "copy link".into(),
+            Hit::Document(super::documents::Tap::Back) => "back one document [b]".into(),
+            Hit::Document(super::documents::Tap::Retry) => "read it again [r]".into(),
+            Hit::Document(super::documents::Tap::More) => "more documents [m]".into(),
             Hit::Split(true) => "split right [Ctrl+V]".into(),
             Hit::Split(false) => "split below [Ctrl+X]".into(),
-            Hit::GlassTab(..) => "show tab; drag to move/split; middle-click closes".into(),
-            Hit::GlassTabMore(..) => "more tabs: show the next hidden tab [Tab]".into(),
+            Hit::GlassTab(..) => {
+                "show tab; wheel scrolls tabs; drag to move/split; middle-click closes".into()
+            }
+            Hit::GlassTabMore(..) => {
+                "more tabs: show the next hidden tab [Tab]; wheel scrolls without selecting".into()
+            }
             Hit::GlassAdd(_) => "new tab [Ctrl+T]".into(),
             Hit::PaletteChoice(_) => format!("open {label}"),
         };
@@ -100,7 +198,7 @@ impl Ui {
             && self.context.is_none()
             && !self.home_open()
             && !self.palette_open()
-            && !matches!(hit, Hit::Composer | Hit::Resize)
+            && !matches!(hit, Hit::Composer | Hit::ChatComposer | Hit::Resize | Hit::SidebarResize)
             && self.click_focuses_split(point.0, point.1)
         {
             left = "focus split; click again to act".into();
@@ -116,6 +214,17 @@ impl Ui {
                 None => "no menu".into(),
             }
         };
+        let middle = if match hit {
+            Hit::Row(_) => self.inbox_row_at(&self.frame.borrow(), point.0, point.1).is_some(),
+            Hit::Key('x') => self.frame.borrow().panes.iter().any(|pane| {
+                contains(pane.rect, point.0, point.1) && pane.key.starts_with("home:")
+            }),
+            _ => false,
+        } {
+            " · Middle: dismiss"
+        } else {
+            ""
+        };
         let build = self
             .build
             .then(|| format!(" {} ", crate::version::short(crate::version::now())));
@@ -124,9 +233,9 @@ impl Ui {
             .map_or(0, |build| text::width(build) as u16 + 1);
         let width = area.width.saturating_sub(reserved + 2) as usize;
         // Keep both operations visible on narrow terminals, even when the labels are long.
-        let allowance = width.saturating_sub(text::width("Click:  · Right: ")) / 2;
+        let allowance = width.saturating_sub(text::width("Click:  · Right: ") + text::width(middle)) / 2;
         let hint = format!(
-            "Click: {} · Right: {}",
+            "Click: {} · Right: {}{middle}",
             text::truncate(&left, allowance),
             text::truncate(&right, allowance)
         );
@@ -176,6 +285,14 @@ impl Ui {
 mod tests {
     use super::*;
 
+    #[test]
+    fn another_button_disarms_a_middle_press() {
+        let mut pressed = None;
+        assert!(matches!(middle_close(&mut pressed, MouseEventKind::Down(MouseButton::Middle), Some(1)), MiddleClose::Consumed));
+        assert!(matches!(middle_close(&mut pressed, MouseEventKind::Down(MouseButton::Left), Some(1)), MiddleClose::Ignored));
+        assert!(matches!(middle_close(&mut pressed, MouseEventKind::Up(MouseButton::Middle), Some(1)), MiddleClose::Ignored));
+    }
+
     fn draw(ui: &Ui) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
         for _ in 0..2 {
@@ -210,92 +327,61 @@ mod tests {
 
     #[test]
     fn pointer_footer_names_both_operations_and_keeps_status_and_keyboard_hints() {
-        for spaces in [false, true] {
-            let mut ui = Ui::new(demo::world());
-            ui.build = true;
-            if spaces {
-                ui.glasses = Some(glass::Glasses::open(None, None));
-            }
-            let before = draw(&ui);
-            assert!(line(&before, 47).contains("Keys:"));
-            let rect = target(&ui, |hit| matches!(hit, Hit::Connection));
-            let focus = ui.focus();
-            pointer(&mut ui, MouseEventKind::Moved, rect.x, rect.y);
-            let buf = draw(&ui);
-            let footer = line(&buf, 47);
-            assert!(
-                footer.contains("Click: connection details · Right: actions menu"),
-                "{footer}"
-            );
-            assert!(
-                !footer.contains("ctrl+w") && !footer.contains("↑↓"),
-                "{footer}"
-            );
-            assert!(footer.contains(crate::version::short(crate::version::now()).as_str()));
-            assert_eq!(ui.focus(), focus);
-            assert!(ui.effects.is_empty());
-            assert_eq!(
-                buf[(rect.x, rect.y)].bg,
-                theme::hover_background(before[(rect.x, rect.y)].bg)
-            );
-            ui.flash("A useful status");
-            assert!(line(&draw(&ui), 47).contains("A useful status"));
-            ui.flash = None;
-            ui.world.link = Link::Offline("Connection interrupted".into());
-            assert!(line(&draw(&ui), 47).contains("Connection interrupted"));
-            ui.world.link = Link::Live;
-            ui.confirm = Some('x');
-            assert!(!line(&draw(&ui), 47).contains("Click:"));
-            ui.confirm = None;
-            ui.input_event(Event::FocusLost);
-            assert!(line(&draw(&ui), 47).contains("Keys:"));
-            if spaces {
-                let agent = ui.world.agents.items()[0].id.clone();
-                ui.open(&agent);
-                draw(&ui);
-                let tab = target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 0)));
-                pointer(&mut ui, MouseEventKind::Moved, tab.x, tab.y);
-                assert!(line(&draw(&ui), 47).contains("Right: tab/split menu"));
-                pointer(
-                    &mut ui,
-                    MouseEventKind::Down(MouseButton::Right),
-                    tab.x,
-                    tab.y,
-                );
-                assert!(matches!(&ui.context.as_ref().unwrap().items[0].1,
-                    glass::MenuAction::Activate { hit, .. } if **hit == Hit::GlassTab(0, 0)));
-            } else {
-                let agent = ui.world.agents.items()[0].id.clone();
-                if let Load::Ready(agents) = &mut ui.world.agents {
-                    agents[0].state = AgentState::Stopped;
-                }
-                ui.popover = Some(format!("actions:{agent}"));
-                draw(&ui);
-                let start = target(&ui, |hit| matches!(hit, Hit::Key('s')));
-                pointer(&mut ui, MouseEventKind::Moved, start.x, start.y);
-                let footer = line(&draw(&ui), 47);
-                assert!(
-                    footer.contains("Start") && !footer.contains("show/hide list"),
-                    "{footer}"
-                );
-                let sidebar = ui.sidebar;
-                pointer(
-                    &mut ui,
-                    MouseEventKind::Down(MouseButton::Left),
-                    start.x,
-                    start.y,
-                );
-                assert_eq!(ui.sidebar, sidebar);
-                assert!(ui.flash.as_ref().unwrap().0.contains("Start"));
-            }
-        }
+        let mut ui = Ui::new(demo::test_world());
+        ui.build = true;
+        let before = draw(&ui);
+        assert!(line(&before, 47).contains("Keys:"));
+        let rect = target(&ui, |hit| matches!(hit, Hit::Connection));
+        let focus = ui.focus();
+        pointer(&mut ui, MouseEventKind::Moved, rect.x, rect.y);
+        let buf = draw(&ui);
+        let footer = line(&buf, 47);
+        assert!(
+            footer.contains("Click: connection details · Right: actions menu"),
+            "{footer}"
+        );
+        assert!(
+            !footer.contains("ctrl+w") && !footer.contains("↑↓"),
+            "{footer}"
+        );
+        assert!(footer.contains(crate::version::short(crate::version::now()).as_str()));
+        assert_eq!(ui.focus(), focus);
+        assert!(ui.effects.is_empty());
+        assert_eq!(
+            buf[(rect.x, rect.y)].bg,
+            theme::hover_background(before[(rect.x, rect.y)].bg)
+        );
+        ui.flash("A useful status");
+        assert!(line(&draw(&ui), 47).contains("A useful status"));
+        ui.flash = None;
+        ui.world.link = Link::Offline("Connection interrupted".into());
+        assert!(line(&draw(&ui), 47).contains("Connection interrupted"));
+        ui.world.link = Link::Live;
+        ui.confirm = Some('x');
+        assert!(!line(&draw(&ui), 47).contains("Click:"));
+        ui.confirm = None;
+        ui.input_event(Event::FocusLost);
+        assert!(line(&draw(&ui), 47).contains("Keys:"));
+        let agent = ui.world.agents.items()[0].id.clone();
+        ui.open(&agent);
+        draw(&ui);
+        let tab = target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 0)));
+        pointer(&mut ui, MouseEventKind::Moved, tab.x, tab.y);
+        assert!(line(&draw(&ui), 47).contains("Right: tab/split menu"));
+        pointer(
+            &mut ui,
+            MouseEventKind::Down(MouseButton::Right),
+            tab.x,
+            tab.y,
+        );
+        assert!(matches!(&ui.context.as_ref().unwrap().items[0].1,
+            glass::MenuAction::Activate { hit, .. } if **hit == Hit::GlassTab(0, 0)));
     }
 
     #[test]
     fn unattached_terminal_button_hovers_and_runs_the_keyboard_attach_action() {
         for shell in [false, true] {
-            let mut ui = Ui::new(demo::world());
-            ui.glasses = Some(glass::Glasses::open(None, None));
+            let mut ui = Ui::new(demo::test_world());
             let id = if shell {
                 "terminal/example-shell".to_owned()
             } else {
@@ -304,7 +390,7 @@ mod tests {
             ui.open_in_glass(Pane::Terminal(id.clone()), glass::Open::Tab);
             let before = draw(&ui);
             assert!(ui.terminal.is_none());
-            assert!((0..48).any(|row| line(&before, row).contains("Not attached. Ctrl+] attaches")));
+            assert!((0..48).any(|row| line(&before, row).contains("Not attached. Enter attaches")));
             let button = target(&ui, |hit| matches!(hit, Hit::Attach));
             assert!(line(&before, button.y).contains("Attach"));
             pointer(&mut ui, MouseEventKind::Moved, button.x, button.y);
@@ -315,7 +401,7 @@ mod tests {
             );
             assert!(line(&hovered, 47).contains("Click: attach terminal"));
             ui.live = true;
-            ui.key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+            ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             let keyboard = ui.effects.drain(..).collect::<Vec<_>>();
             pointer(&mut ui, MouseEventKind::Down(MouseButton::Left), button.x, button.y);
             assert!(matches!(keyboard.as_slice(), [Effect::OpenTerminal { agent }] if agent == &id));
@@ -325,8 +411,7 @@ mod tests {
 
     #[test]
     fn middle_click_closes_only_on_release_over_the_pressed_tab() {
-        let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(glass::Glasses::open(None, None));
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         let other = ui.world.agents.items()[1].id.clone();
@@ -350,9 +435,133 @@ mod tests {
             .any(|(_, hit)| matches!(hit, Hit::GlassTab(0, 1))));
     }
 
+    fn inbox(kind: &str) -> (Ui, String) {
+        let mut world = demo::test_world();
+        let mut item = world.attention.items()[0].clone();
+        item.id = "attention/middle-target".into();
+        item.kind = match kind {
+            "request" | "named" => AttentionKind::Request {
+                from: "Planner".into(), from_id: "agent/example/planner".into(),
+                question: "Choose a runner".into(), images: Vec::new(),
+                structured: (kind == "named").then(|| Box::new(fractal_client::StructuredRequest {
+                    version: 1, entry_type: "decision".into(), question: "Choose a runner".into(),
+                    answers: vec![fractal_client::RequestAnswerOption {
+                        id: "yes".into(), label: "Yes".into(), ..Default::default()
+                    }], ..Default::default()
+                })),
+            },
+            "update" => AttentionKind::Update {
+                from: "Planner".into(), body: "Finished".into(), about: String::new(), subjects: Vec::new(),
+            },
+            "prompt" => AttentionKind::Prompt {
+                seat: "Builder".into(), seat_id: "agent/example/builder".into(), text: "Allow?".into(),
+                question: false, answers: Vec::new(), episode: String::new(), call: None,
+                calls: Ok(Vec::new()), allow: false,
+            },
+            "closed" => item.kind.clone(),
+            word => world.attention.items().iter().find(|item| item.kind.word() == word).unwrap().kind.clone(),
+        };
+        item.actions = vec!["work.done".into(), "message.read".into()];
+        let id = item.id.clone();
+        let mut other = item.clone();
+        other.id = "attention/other".into();
+        world.attention = Load::Ready(vec![item, other]);
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.open_home();
+        if kind == "closed" {
+            ui.closed.insert(id.clone());
+        }
+        (ui, id)
+    }
+
+    #[test]
+    fn middle_click_inbox_releases_only_over_the_pressed_item_for_every_kind() {
+        for kind in ["request", "named", "update", "message", "closed", "review",
+            "feedback", "launch", "revision", "prompt", "fault"] {
+            let (mut ui, id) = inbox(kind);
+            let index = ui.listing_for(0, 40).ids.iter().position(|candidate| candidate == &id).unwrap();
+            ui.select(1 - index);
+            draw(&ui);
+            let row = target(&ui, |hit| *hit == Hit::Row(index));
+            let other = target(&ui, |hit| *hit == Hit::Row(1 - index));
+            pointer(&mut ui, MouseEventKind::Moved, row.x, row.y);
+            let footer = line(&draw(&ui), 47);
+            assert!(footer.contains("Middle: dismiss"), "{kind}: {footer}; close target: {:?}", ui.close_target(row.x, row.y).is_some());
+            pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), row.x, row.y);
+            assert!(ui.effects.is_empty() && ui.confirm.is_none() && ui.flash.is_none(), "{kind}");
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), other.x, other.y);
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), row.x, row.y);
+            assert!(ui.effects.is_empty() && ui.flash.is_none(), "{kind}");
+            pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), row.x, row.y);
+            pointer(&mut ui, MouseEventKind::Drag(MouseButton::Middle), other.x, other.y);
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), row.x, row.y);
+            assert!(ui.confirm.is_none(), "{kind}");
+            match kind {
+                // Requests follow main's dismissal semantics: the person's own dismissal
+                // (`attention.dismiss`), not a work.done answer.
+                "request" | "named" => {
+                    assert!(matches!(ui.effects.as_slice(), [Effect::Dismiss { id: sent, .. }]
+                        if sent == &id), "{kind}: {:?}", ui.effects);
+                }
+                "update" | "message" => {
+                    let expected = if kind == "message" { "message.read" } else { "work.done" };
+                    assert!(matches!(ui.effects.as_slice(), [Effect::Attention { id: sent, action, reason, answer, .. }]
+                        if sent == &id && action == expected && match kind {
+                            "update" => reason.as_deref() == Some("Read") && answer.as_deref() == Some("read"),
+                            _ => answer.is_none(),
+                        }), "{kind}: {:?}", ui.effects);
+                }
+                "closed" => {
+                    assert!(!ui.closed.contains(&id));
+                    assert!(!ui.world.attention.items().iter().any(|item| item.id == id));
+                    assert!(ui.effects.is_empty());
+                }
+                _ => {
+                    assert!(ui.effects.is_empty(), "{kind}");
+                    let flash = &ui.flash.as_ref().unwrap().0;
+                    assert!(flash.contains(if kind == "fault" { "A fault clears" } else { "x cannot dismiss it" }), "{flash}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn middle_click_inbox_card_x_dismisses_its_card() {
+        let (mut ui, id) = inbox("request");
+        let index = ui.listing_for(0, 40).ids.iter().position(|candidate| candidate == &id).unwrap();
+        ui.select(index);
+        draw(&ui);
+        let button = target(&ui, |hit| *hit == Hit::Key('x'));
+        ui.select(1 - index); // The painted card, not the keyboard selection, owns the action.
+        pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), button.x, button.y);
+        assert!(ui.effects.is_empty() && ui.confirm.is_none());
+        pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), button.x, button.y);
+        assert!(matches!(ui.effects.as_slice(), [Effect::Dismiss { id: sent, .. }]
+            if sent == &id), "{:?}", ui.effects);
+        assert!(ui.confirm.is_none());
+    }
+
+    #[test]
+    fn inbox_middle_click_respects_popover_and_palette_guards() {
+        for palette in [false, true] {
+            let (mut ui, _) = inbox("request");
+            draw(&ui);
+            let row = target(&ui, |hit| *hit == Hit::Row(0));
+            if palette {
+                ui.open_palette(None, glass::Open::Here);
+            } else {
+                ui.popover = Some("agent/example/planner".into());
+            }
+            pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), row.x, row.y);
+            pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), row.x, row.y);
+            assert!(ui.effects.is_empty() && ui.confirm.is_none());
+        }
+    }
+
     #[test]
     fn message_hover_still_allows_text_selection_and_more_precise_links() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.world.conversations.insert(
             agent.clone(),
@@ -411,8 +620,7 @@ mod tests {
 
     #[test]
     fn popover_links_take_clicks_without_focusing_or_resizing_an_underlying_split() {
-        let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(glass::Glasses::open(None, None));
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         if let Load::Ready(agents) = &mut ui.world.agents {
             agents[0].details.progress = Some("https://example.com/notes".into());
@@ -460,8 +668,7 @@ mod tests {
 
     #[test]
     fn subject_text_and_dividers_show_their_gestures_and_unfocused_buttons_name_focus() {
-        let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(glass::Glasses::open(None, None));
+        let mut ui = Ui::new(demo::test_world());
         let mission = ui.world.missions.items()[0].id.clone();
         ui.open_in_glass(Pane::Mission(Some(mission)), glass::Open::Right);
         draw(&ui);
@@ -498,8 +705,8 @@ mod tests {
     }
 
     #[test]
-    fn classic_host_and_person_are_status_and_inert_references_are_plain() {
-        let mut ui = Ui::new(demo::world());
+    fn host_and_person_are_status_and_inert_references_are_plain() {
+        let mut ui = Ui::new(demo::test_world());
         let buf = draw(&ui);
         let word = target(&ui, |hit| matches!(hit, Hit::Connection));
         assert!(!ui.frame.borrow().hits.iter().any(|(rect, _)| contains(
@@ -515,7 +722,7 @@ mod tests {
         );
         assert!(!ui.help);
         assert!(
-            ui.tab == 3 || ui.flash.is_some(),
+            ui.tab() == 3 || ui.flash.is_some(),
             "connection shows the machine or connection status"
         );
         assert!(line(&buf, 0).contains("live"));
@@ -552,10 +759,9 @@ mod tests {
 
     #[test]
     fn sweeping_the_pointer_over_every_cell_of_a_busy_conversation_never_panics() {
-        // Nathan, 2026-10-07: hovering messages seemed to crash stui.
+        // Nathan, 2026-10-07: hovering messages seemed to crash the terminal UI.
         for (width, height) in [(60, 20), (100, 30), (160, 48)] {
-            let mut ui = Ui::new(demo::world());
-            ui.glasses = Some(super::glass::Glasses::open(None, None));
+            let mut ui = Ui::new(demo::test_world());
             ui.live = true;
             ui.open_in_glass(
                 Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
