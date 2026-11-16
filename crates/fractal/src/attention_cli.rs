@@ -211,6 +211,7 @@ pub(super) async fn run_attention(
                     wake: MessageWakeArgs::default(),
                     print_kdl: false,
                     idempotency_key: args.idempotency_key,
+                    at: None,
                     allow_undeclared_recipient: false,
                 },
                 Vec::new(),
@@ -218,6 +219,9 @@ pub(super) async fn run_attention(
             .await?
             else {
                 return Ok(());
+            };
+            let fractal_daemon::model::MessageSendResponse::Sent(receipt) = receipt else {
+                anyhow::bail!("attention discussions require immediate message delivery");
             };
             if let Err(error) = sync_message_projection(client).await {
                 crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,

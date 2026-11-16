@@ -428,3 +428,17 @@ added. Versions 1 through 32 remain byte-identical. Generate it with
 do not hand-edit it. The simulation and audit reports select v33. Ordinary effect
 draws retain their explicit immutable binding and confirmation-evidence mapping;
 human resolution is exercised by focused effect API and reconciliation tests.
+
+`claims-v34.json` registers the immutable native timed-message claims
+`message-schedule.requested`, `message-schedule.cancelled`, and
+`message-schedule.delivered`. All three are fully durable, preserving the audit
+trail and stable-key tombstones. Requests bind the recipient declaration and
+original message evidence; delivery receipts bind the original request and
+notice-owner declaration. Checkpoint citation guards retain those dependencies.
+Versions 1 through 33 remain frozen. Generate the new corpus from the merged
+registry with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v34.json`
+and regenerate the schema reference with
+`cargo run --locked -p fractal-schema --example schema_markdown -- docs/st3/schema.md`.
+The simulation and its audit reports select v34; regenerate the corpus before
+compiling those consumers.

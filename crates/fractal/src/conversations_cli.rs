@@ -194,6 +194,27 @@ pub(super) async fn run_message(
 ) -> Result<()> {
     sync_message_projection(client).await?;
     match command {
+        MessageCommand::Scheduled { command } => {
+            match command {
+                ScheduledMessageCommand::Ls => {
+                    let scheduled = client.scheduled_messages().await?;
+                    if json_output {
+                        print_value(&scheduled, true)
+                    } else {
+                        for item in &scheduled {
+                            print_scheduled_message(item, false)?;
+                        }
+                        Ok(())
+                    }
+                }
+                ScheduledMessageCommand::Show { handle } => {
+                    print_scheduled_message(&client.scheduled_message(&handle).await?, json_output)
+                }
+                ScheduledMessageCommand::Cancel { handle, reason } => {
+                    print_scheduled_message(&client.cancel_scheduled_message(&handle, &reason).await?, json_output)
+                }
+            }
+        }
         MessageCommand::Send(mut args) => {
             args.body = Some(read_message_body(args.body.take(), args.body_file.take(), std::io::stdin().lock())?);
             if !args.print_kdl {
@@ -207,6 +228,12 @@ pub(super) async fn run_message(
             };
             let Some(receipt) = send_message(client, args, attachments).await? else {
                 return Ok(());
+            };
+            let receipt = match receipt {
+                fractal_daemon::model::MessageSendResponse::Sent(receipt) => receipt,
+                fractal_daemon::model::MessageSendResponse::Scheduled { scheduled } => {
+                    return print_scheduled_message(&scheduled, json_output);
+                }
             };
             // The message has landed. A projection that misses it catches up on the next command;
             // failing here would invite a resend of a message that was sent.
@@ -429,6 +456,7 @@ pub(super) async fn run_message(
                     wake: args.wake,
                     print_kdl: args.print_kdl,
                     idempotency_key: args.idempotency_key,
+                    at: None,
                     // The original message, not a fresh roster lookup, resolves a reply.
                     allow_undeclared_recipient: true,
                 },
@@ -438,7 +466,10 @@ pub(super) async fn run_message(
             let Some(receipt) = receipt else {
                 return Ok(());
             };
-            print_message_receipt(&receipt, json_output)
+            match receipt {
+                fractal_daemon::model::MessageSendResponse::Sent(receipt) => print_message_receipt(&receipt, json_output),
+                fractal_daemon::model::MessageSendResponse::Scheduled { scheduled } => print_scheduled_message(&scheduled, json_output),
+            }
         }
         MessageCommand::Wait(args) => {
             let actor = message_list_identity(args.actor, fractal_drivers::contracts::env("ST_AGENT"))?;
@@ -673,6 +704,27 @@ pub(super) async fn run_message(
             }
         }
     }
+}
+
+fn print_scheduled_message(item: &fractal_daemon::model::ScheduledMessageView, json_output: bool) -> Result<()> {
+    if json_output {
+        return print_value(item, true);
+    }
+    println!("{}  {}  {} -> {}  due {}  key {}", item.id, item.state, item.from, item.to, item.at, item.key);
+    if let Some(owner) = &item.owner {
+        println!("  delivery owner: {owner}");
+    }
+    println!("  content: {}", item.content);
+    if let Some(message) = &item.message_id {
+        println!("  mailbox message: {message} (delivery is not proof of a read)");
+    }
+    if let Some(blocker) = &item.blocker {
+        println!("  blocker: {blocker}");
+    }
+    if let Some(reason) = &item.cancel_reason {
+        println!("  cancelled: {reason}");
+    }
+    Ok(())
 }
 
 async fn message_delivery(client: &Client, reference: &str) -> Result<Value> {

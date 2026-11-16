@@ -467,8 +467,7 @@ read -r _
     let sent: MessageView = client
         .post(
             "/v1/messages",
-            &MessageSendRequest {
-            owner: None,
+            &MessageSendRequest { at: None, owner: None,
             idempotency_key: "mail".into(),
             from: "person/avery".into(),
             to: SEAT.into(),
@@ -476,8 +475,7 @@ read -r _
             title: None,
             in_reply_to: None,
             tags: vec![],
-            attachments: vec![],
-            },
+            attachments: vec![], },
         )
         .await
         .unwrap();

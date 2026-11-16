@@ -179,7 +179,7 @@ impl Harness {
 
     async fn message(&self, to: &str, key: &str) -> ActionRequest {
         ActionRequest::message_send(format!("action/{key}"), format!("native-test-{key}"), self.fence().await,
-            MessageSendParameters { to: to.into(), content: "Native assistant message".into(), title: None,
+            MessageSendParameters { at: None, to: to.into(), content: "Native assistant message".into(), title: None,
                 in_reply_to: None, session_id: None, tags: vec![], kind: MessageKind::Wake,
                 attachments: vec![], signature: None }).unwrap()
     }

@@ -4319,6 +4319,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.reconcile_provider_capacity_retries(&desired)
         });
         self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
+        self.isolate("stage/scheduled-messages", &daemon, || self.reconcile_scheduled_messages());
         self.isolate("stage/ask-digest", &daemon, || self.reconcile_ask_digests());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
@@ -16828,6 +16829,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(deadline) = pass.next_deadline {
             self.arm_deadline_at(
                 "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
+    }
+
+    /// Fold durable seat-message requests on every pass, including startup. A timer only wakes
+    /// this fold: delivery always checks the current wall clock again before publishing.
+    fn reconcile_scheduled_messages(&self) -> Result<bool> {
+        let pass = self.store.reconcile_scheduled_messages_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "seat-message-deadline",
                 deadline,
                 crate::reconcile_telemetry::WakeCause::Deadline,
             );

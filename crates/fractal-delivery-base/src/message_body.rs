@@ -348,9 +348,10 @@ impl Bodies {
     /// - A body older than `retention` is expired: its text is removed and a marker left, so
     ///   the message reads as its preview with a typed "expired" state.
     /// - A marker whose message no longer exists is removed.
+    /// Retention is chosen per file; `None` keeps a named body regardless of its age.
     pub fn reconcile(
         &self,
-        retention: Option<Duration>,
+        retention: impl Fn(&BodyFile) -> Option<Duration>,
         names_a_body: impl Fn(&BodyFile) -> bool,
     ) -> usize {
         let mut changed = 0;
@@ -371,7 +372,7 @@ impl Bodies {
             } else if old && !names_a_body(&file) {
                 let _ = fs::remove_file(path.join(&file.id));
                 changed += 1;
-            } else if retention.is_some_and(|keep| age.is_some_and(|age| age > keep)) {
+            } else if retention(&file).is_some_and(|keep| age.is_some_and(|age| age > keep)) {
                 self.expire(&file);
                 changed += 1;
             }

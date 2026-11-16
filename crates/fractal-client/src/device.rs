@@ -1119,17 +1119,15 @@ mod tests {
                     .repeat(body["repeat"].as_u64().unwrap() as usize),
                 None => fields["content"].as_str().unwrap().to_owned(),
             };
-            let parameters = MessageSendParameters {
-                to: fields["to"].as_str().unwrap().into(),
-                content,
-                title: serde_json::from_value(fields["title"].clone()).unwrap(),
-                in_reply_to: serde_json::from_value(fields["in_reply_to"].clone()).unwrap(),
-                session_id: serde_json::from_value(fields["session_id"].clone()).unwrap(),
-                tags: serde_json::from_value(fields["tags"].clone()).unwrap(),
-                kind: crate::MessageKind::Wake,
-                attachments: vec![],
-                signature: None,
-            };
+            let parameters = MessageSendParameters { at: None, to: fields["to"].as_str().unwrap().into(),
+            content,
+            title: serde_json::from_value(fields["title"].clone()).unwrap(),
+            in_reply_to: serde_json::from_value(fields["in_reply_to"].clone()).unwrap(),
+            session_id: serde_json::from_value(fields["session_id"].clone()).unwrap(),
+            tags: serde_json::from_value(fields["tags"].clone()).unwrap(),
+            kind: crate::MessageKind::Wake,
+            attachments: vec![],
+            signature: None, };
             let signed = device
                 .sign_message_at(
                     case["idempotency_key"].as_str().unwrap(),

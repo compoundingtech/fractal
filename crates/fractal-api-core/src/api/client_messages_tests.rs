@@ -458,8 +458,7 @@ async fn sql_message_pages_preserve_local_body_references_without_inlining_text(
     ] {
         let receipt = accept_message_receipt(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: format!("sql-body-{size}"),
             from: "person/alex".into(),
             to: "agent/worker".into(),
@@ -467,8 +466,7 @@ async fn sql_message_pages_preserve_local_body_references_without_inlining_text(
             title: Some("local body".into()),
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
             None,
             None,
         ).unwrap();
