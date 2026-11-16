@@ -91,8 +91,9 @@ fn mission_supersession_answered_human_gates_retain_sources_and_owned_descendant
             let owner = if descendant {
                 store.create_child_mission_run(&MissionRunRequest {
                     mission: "retry-work".into(), revision: Some(source.revision.clone()),
-                    workspace: source.workspace.clone(), requester: source.requester.clone(),
-                    mode: source.mode.clone(), inputs: source.inputs.clone(),
+                    workspace: source.workspace.clone(), requester: Some(source.requester.clone()),
+                    mode: Some(source.mode.clone()),
+                    inputs: source.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
                     idempotency_key: "human-gate-child".into(),
                 }, &source, &source.steps[0].subject, None).unwrap()
             } else { source.clone() };
@@ -224,8 +225,9 @@ fn mission_supersession_owned_descendant_completion_requires_review() {
     let parent_step = source.steps.iter().find(|step| step.step == "prepare").unwrap();
     let child = store.create_child_mission_run(&MissionRunRequest {
         mission: "retry-work".into(), revision: Some(source.revision.clone()),
-        workspace: source.workspace.clone(), requester: source.requester.clone(),
-        mode: source.mode.clone(), inputs: source.inputs.clone(),
+        workspace: source.workspace.clone(), requester: Some(source.requester.clone()),
+        mode: Some(source.mode.clone()),
+        inputs: source.inputs.iter().map(|(name, input)| (name.clone(), input.value.clone())).collect(),
         idempotency_key: "descendant-run".into(),
     }, &source, &parent_step.subject, None).unwrap();
     let work = child.steps.iter().find(|step| step.step == "prepare").unwrap();
