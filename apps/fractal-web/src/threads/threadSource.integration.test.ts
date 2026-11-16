@@ -36,7 +36,7 @@ it.each(['missing', 'ungranted'] as const)('does not infer current metadata when
   const fetchImpl = vi.fn(async () => Response.json({
     ...base, value: { ...base.value, capabilities: [
       ...base.value.capabilities,
-      { id: 'threads-v1', version: 2, state: 'granted' },
+      { id: 'threads-v1', version: 3, state: 'granted' },
       { id: 'thread.start', version: 0, state: 'granted' },
       ...(state === 'missing' ? [] : [{ id: 'thread-summary-feed', version: 1, state: 'ungranted' }]),
     ] },
@@ -62,7 +62,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
       ...base,
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 2, state: 'granted' },
+        { id: 'threads-v1', version: 3, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.close', version: 0, state: 'granted' },
       ] },
@@ -116,7 +116,7 @@ it('starts with the exact ask episode and retries the same first message after a
       ...base,
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 2, state: 'granted' },
+        { id: 'threads-v1', version: 3, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.start', version: 0, state: 'granted' },
       ] },
@@ -163,7 +163,7 @@ it('offers metadata edits but omits the unsigned composer on paired web transpor
     ...base,
     value: { ...base.value, capabilities: [
       ...base.value.capabilities,
-      { id: 'threads-v1', version: 2, state: 'granted' },
+      { id: 'threads-v1', version: 3, state: 'granted' },
       { id: 'thread-summary-feed', version: 1, state: 'granted' },
       ...['thread.start', 'thread.reply', 'thread.close'].map(id => ({ id, version: 0, state: 'granted' })),
     ] },
@@ -188,7 +188,7 @@ it('keeps access unknown while capabilities are unanswered and reads them again 
     if (!reachable) throw new TypeError('Failed to fetch')
     return Response.json({ ...base, value: { ...base.value, transport: 'local-web', capabilities: [
       ...base.value.capabilities,
-      { id: 'threads-v1', version: 2, state: 'granted' },
+      { id: 'threads-v1', version: 3, state: 'granted' },
       { id: 'thread-summary-feed', version: 1, state: 'granted' },
     ] } })
   })
@@ -243,7 +243,7 @@ it('observes exact summary receipt updates without a write grant or a follow-up 
       ...base,
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 2, state: 'granted' },
+        { id: 'threads-v1', version: 3, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
       ] },
     })
@@ -288,7 +288,7 @@ it('sends the same typed actions for approved browsers and blocks writes if the 
     if (String(input).endsWith('/capabilities')) return Response.json({
       ...base, value: { ...base.value, capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 2, state: 'granted' },
+        { id: 'threads-v1', version: 3, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread-browser-send', version: 1, state: browserGrant ? 'granted' : 'ungranted' },
         { id: 'thread.start', version: 0, state: 'granted' },
@@ -335,7 +335,7 @@ it('retains the exact rename intent across malformed receipt, denial and a chang
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
     if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, capabilities: [
       ...base.value.capabilities,
-      ...['threads-v1', 'thread-summary-feed', 'thread.rename'].map(id => ({ id, version: id === 'threads-v1' ? 2 : 1, state: 'granted' })),
+      ...['threads-v1', 'thread-summary-feed', 'thread.rename'].map(id => ({ id, version: id === 'threads-v1' ? 3 : 1, state: 'granted' })),
     ] } })
     const action = JSON.parse(String(init?.body)) as Record<string, unknown>
     writes.push(action)
@@ -399,7 +399,7 @@ it('discovers original first sends by source across changed episodes and retries
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
     if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, session_actor: actor, transport: 'local-web', capabilities: [
       ...base.value.capabilities,
-      ...['threads-v1', 'thread-summary-feed', 'thread.start'].map(id => ({ id, version: 2, state: 'granted' })),
+      ...['threads-v1', 'thread-summary-feed', 'thread.start'].map(id => ({ id, version: id === 'threads-v1' ? 3 : 2, state: 'granted' })),
     ] } })
     const action = JSON.parse(String(init?.body)) as typeof writes[number]
     writes.push(action)
@@ -474,7 +474,7 @@ it('discovers original first sends by source across changed episodes and retries
 const readable = () => Response.json({
   ...base, value: { ...base.value, transport: 'local-web', capabilities: [
     ...base.value.capabilities,
-    { id: 'threads-v1', version: 2, state: 'granted' },
+    { id: 'threads-v1', version: 3, state: 'granted' },
     { id: 'thread-summary-feed', version: 1, state: 'granted' },
   ] },
 })
@@ -599,7 +599,7 @@ const actionSource = (reply: () => Response) => {
     if (state.down) return actionReply(502, 'Bad gateway')
     if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, transport: 'local-web', capabilities: [
       ...base.value.capabilities,
-      { id: 'threads-v1', version: 2, state: 'granted' },
+      { id: 'threads-v1', version: 3, state: 'granted' },
       { id: 'thread-summary-feed', version: 1, state: 'granted' },
       ...['thread.start', 'thread.reply', 'thread.rename', 'thread.close', 'thread.reopen'].map(id => ({ id, version: 1, state: 'granted' })),
     ] } })

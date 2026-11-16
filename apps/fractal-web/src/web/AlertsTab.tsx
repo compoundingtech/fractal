@@ -13,6 +13,7 @@ import { useAutoResolved, type Override } from '../conversation/alerts/useAutoRe
 import { useAttentionDecode, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
 import { LivePendingInboxStarts, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
+import { LiveMarkedUnreadThreads } from '../threads/MarkedUnreadThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 import { AutoResolvedSection } from './AutoResolvedAsks.tsx'
 import { DecodeNotice } from './LiveRoster.tsx'
@@ -25,8 +26,8 @@ const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a questi
 
 /**
  * The Alerts tab over the active source: its attention feed, without answers on their way, its clock and its
- * auto-resolved asks. Thread starts whose Inbox item has left the list, and recently closed threads, stay reachable
- * below it.
+ * auto-resolved asks. Private unread reminders, thread starts whose Inbox item has left the list, and recently
+ * closed threads stay reachable below it.
  */
 export const AlertsTab = ({ onOpen, selected, onSelect }: {
   readonly onOpen: (ref: string) => void
@@ -43,7 +44,7 @@ export const AlertsTab = ({ onOpen, selected, onSelect }: {
       decode={useAttentionDecode()}
       now={now}
       onOpen={onOpen}
-      footer={<><LivePendingInboxStarts items={currentItems} onOpenThread={onOpen} /><LiveRecentlyClosedThreads onOpenThread={onOpen} /></>}
+      footer={<><LiveMarkedUnreadThreads onOpenThread={onOpen} /><LivePendingInboxStarts items={currentItems} onOpenThread={onOpen} /><LiveRecentlyClosedThreads onOpenThread={onOpen} /></>}
       {...(selected === undefined ? {} : { selected })}
       {...(onSelect === undefined ? {} : { onSelect })}
       {...(read === undefined ? {} : { autoResolved: read })}
@@ -70,7 +71,7 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
   readonly autoResolved?: AutoResolvedRead
   /** Replaces a default with the person's own answer; absent without control access. */
   readonly onOverride?: Override
-  /** Shown after the rows: thread recovery and recently closed threads. */
+  /** Shown after the rows: private reminders, thread recovery and recently closed threads. */
   readonly footer?: React.ReactNode
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
