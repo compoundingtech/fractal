@@ -3,6 +3,9 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { isRequest } from '@fractal/views';
+import { autoResolvedRows, closedOverride, needsWords, OVERRIDE_TITLE, overrideAnswer, overrideCopy } from './autoResolved.ts';
+import { agentName } from './agentsView.ts';
+import { markdownSource, optionalSource } from '../../clients/typescript/fractal-client/markdown-text.ts';
 
 // Execute the production JSX entry points without booting React Native. The element
 // factory records the tree, including which branch mounted the real InboxThread gate.
@@ -27,12 +30,30 @@ const find = (element, type) => !element || typeof element !== 'object' ? undefi
 function render(item, enabled = true, start = true) {
   const navigated = [];
   const navigation = { navigate: (...args) => navigated.push(args), goBack() {} };
+  const useStore = () => ({
+    data: { attention: [item], agents: [], missions: [] }, actions: {},
+    autoResolved: { items: [], issue: '', complete: true }, overridePending: new Set(),
+    status: 'online', busy: false,
+  });
+  const nativeCalls = [];
+  const unexpectedNativeCall = name => (...args) => {
+    nativeCalls.push({ name, args });
+    assert.fail(`Unexpected native call: ${name}`);
+  };
+  const hookDeps = {
+    useStore, useMemo: f => f(), autoResolvedRows, agentName, needsWords, OVERRIDE_TITLE, overrideAnswer, overrideCopy,
+    Alert: { alert: unexpectedNativeCall('Alert.alert'), prompt: unexpectedNativeCall('Alert.prompt') },
+    ActionSheetIOS: { showActionSheetWithOptions: unexpectedNativeCall('ActionSheetIOS.showActionSheetWithOptions') },
+  };
   const InboxThread = component('./screens/Threads.tsx', 'InboxThread', 'InboxThreadStart', {
     useStore: () => ({ threadClient: enabled ? {} : null, threadActions: new Set(start ? ['thread.start'] : []) }),
     InboxThreadStart: 'InboxThreadStart', T: 'T', threadStartScope: origin => JSON.stringify([origin.sourceId, origin.episode]),
   });
   const dependencies = {
-    useStore: () => ({ data: { attention: [item], agents: [], missions: [] }, actions: {} }),
+    useStore,
+    useAutoResolvedRows: component('./screens/AutoResolved.tsx', 'useAutoResolvedRows', undefined, hookDeps),
+    useOverride: component('./screens/AutoResolved.tsx', 'useOverride', undefined, hookDeps),
+    closedOverride, OVERRIDE_TITLE, markdownSource, optionalSource,
     useRefresh: () => 'RefreshControl', useMissionsOnFocus() {}, useFocusEffect() {}, useHeaderHeight: () => 0, useCallback: callback => callback, useRef: current => ({ current }), detailRow: () => ({}),
     spaced: text => text, attentionKindLabel: kind => kind, attentionActionLabel: action => action, cleanMessageText: text => text, blockedLine: () => undefined, theme: {},
     Screen: 'Screen', Banners: 'Banners', ScrollView: 'ScrollView', KeyboardAvoidingView: 'KeyboardAvoidingView', T: 'Text',
