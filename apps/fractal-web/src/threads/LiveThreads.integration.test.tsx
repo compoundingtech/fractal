@@ -541,9 +541,10 @@ it.each([
   const view = await mount(<LiveThreadPane threadId="thread/one" />, {
     agents: [seat(id, name)],
     reply: url => url.pathname.endsWith('/timeline') ? page([
+      { kind: 'thread.renamed', id: 'event/renamed-again', actor_id: id, previous_title: 'Release checklist', title: 'Final checklist', accepted_at_unix_ms: Date.parse('2026-11-01T11:05:00Z') },
       { kind: 'thread.renamed', id: 'event/renamed', actor_id: id, previous_title: 'Checklist', title: 'Release checklist', accepted_at_unix_ms: Date.parse('2026-11-01T11:04:00Z') },
       { kind: 'message', id: 'message/first', actor_id: id, content: 'The checklist is complete.', accepted_at_unix_ms: Date.parse('2026-11-01T11:03:00Z'), thread_quote_id: null },
-    ]) : Response.json({ ...base, value: { ...row('thread/one', 'Release checklist'), agent_id: id } }),
+    ]) : Response.json({ ...base, value: { ...row('thread/one', 'Final checklist'), agent_id: id } }),
   })
   try {
     await vi.waitFor(() => expect(view.host.querySelector('[data-thread-origin]')?.textContent).toBe(`With ${inSentence}`))
@@ -552,7 +553,15 @@ it.each([
     const sender = view.host.querySelector('ol > li > div > strong')
     expect(sender?.textContent).toBe(shown)
     expect(sender?.getAttribute('title')).toBe(id)
-    expect(view.host.querySelector('[data-thread-event="thread.renamed"]')?.textContent).toMatch(new RegExp(`^${shown} renamed it to`))
+    const renames = [...view.host.querySelectorAll('[data-thread-event="thread.renamed"]')]
+    expect(renames.map(event => event.querySelector('span')?.textContent)).toEqual([
+      `${shown} renamed “Checklist” to “Release checklist”`,
+      `${shown} renamed “Release checklist” to “Final checklist”`,
+    ])
+    expect(renames.map(event => event.querySelector('time')?.dateTime)).toEqual([
+      '2026-11-01T11:04:00.000Z',
+      '2026-11-01T11:05:00.000Z',
+    ])
     expect(view.host.textContent).not.toContain(hidden)
   } finally { await view.dispose() }
 })
