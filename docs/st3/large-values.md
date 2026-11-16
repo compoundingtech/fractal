@@ -938,3 +938,50 @@ an incremental causal projection. Preserve complete frontier ancestry, repaired
 intermediates, canonical concurrent ties, effective field selection, missing-parent
 refusal and snapshot CAS under replication, restart and reclamation. This review
 changes no schema declarations, logical limits, claim formats or authority rules.
+
+### Thread unread reminder routing headers
+
+`fractal_store::store::thread_reading` owns `lv-h47f366444514` and
+`lv-he08523974536`. The first selects signed reminder operation IDs, owner/actor,
+anchor IDs and observed operation references for one indexed thread subject. The
+second point-selects only signed message routing headers (actor/from/to/thread
+and batch), never returning message content. It requires current eligible routing
+for a new mark, while retained reminders may use admitted historical routing
+solely to prove owner/thread scope after the anchor becomes unavailable. Both retain existing claim JSON and TEXT
+identity representations and use the existing subject/kind and operation indexes;
+no new persisted columns or keys are added. Header work is independent of message
+body history, but reminder history and reference bytes remain variable inline
+values. The owning store maintainer retains the
+`trace-statement-and-value-representation` follow-up: a future prepared/reference
+representation must preserve exact observed operation identity, owner/thread
+validation, pending dependency resolution, and canonical anchor selection.
+
+The existing `flow-h1f241b496964` admission flow now also validates the named
+reminder person against its signed actor before append; its producer, dependency
+and inline body/predecessor representation are unchanged.
+
+### Marked thread collection and anchor windows
+
+`fractal_store::store::thread_metadata` owns `lv-h94fc80261c45`, replacing
+`lv-h60845d471cc3`, and `lv-h73dc5806dc06`. The added partial owner/time index keeps
+existing actor, accepted-time TEXT, and thread subject keys for unread-mark claims.
+Its bounded candidate reader finds original equivalent operation receipts through
+the existing operation index and rechecks the owner-scoped overlay before serving
+a thread. It includes old Closed threads independently of ordinary/recent pages.
+Keys and inline claim JSON remain variable; no physical byte bound is claimed.
+
+`fractal_store::store::thread_reading` owns `lv-hc5e92b33924f`: it reads the earliest
+unrepaired equivalent receipt time for an active stable operation ID, using the
+existing operation index. It never stores a new authored clock or presents a retry
+as a new manual mark. `trace-statement-and-value-representation` must preserve
+operation identity/digest equivalence, repair exclusion and deterministic ordering.
+
+`fractal_store::store::thread_message_window` owns `lv-hbc0b493bd9e2` and the retained
+`lv-he5a2848d26a3`. An anchor point lookup verifies current canonical message
+membership before returning a bounded window. Both timeline directions seek the
+thread routing/accepted-time index, return at most the requested bounded neighbors,
+and derive adjacent cursors from the returned edges. The original inline bodies,
+predecessors and routing keys remain unchanged, with their existing variable-value
+debt. Missing/unavailable anchors return only an owner-authorized private intent
+state and no body. The follow-up must preserve snapshot cuts, current read authority,
+unknown causal dependencies and separate immutable receipt behavior.

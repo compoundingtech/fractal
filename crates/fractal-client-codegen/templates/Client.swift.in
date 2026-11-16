@@ -169,6 +169,7 @@ public actor FractalClient {
         case .inbox(let source, let episode): context = ["origin_source": .string(source), "origin_episode": .string(episode)]
         case .mission(let id): context = ["mission_id": .string(id)]
         case .recentlyClosed: context = ["recently_closed": .bool(true)]
+        case .markedUnread: context = ["marked_unread": .bool(true)]
         }
         return threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "thread_context": .object(context), "limit": .number(Double(limit))])
     }

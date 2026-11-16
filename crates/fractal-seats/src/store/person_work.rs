@@ -224,13 +224,13 @@ pub mod tests {
         assert_eq!(created.body["fields"]["mission"], mission);
         assert_eq!(list_context(&store, person, ThreadContext::Mission(&mission), None, 20).unwrap().items[0].id, "thread/worker");
 
-        let read = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
+        let read = mixed_timeline(&store, person, "thread/worker", None, None, 1).unwrap();
         assert_eq!(read.items.len(), 1);
         let TimelineItem::Message(first) = &read.items[0] else { panic!("expected the first message") };
         assert_eq!(first.id, message.subject);
         assert_eq!(first.content, "Could we check worker tests first?");
         assert!(read.next_cursor.is_none());
-        assert!(mixed_timeline(&store, "person/other", "thread/worker", None, 1).is_err());
+        assert!(mixed_timeline(&store, "person/other", "thread/worker", None, None, 1).is_err());
         let (closed, _) = crate::store::thread_metadata::apply(
             &store, person, "thread/worker", "close-worker",
             crate::store::thread_metadata::Edit::Close { revision: &crate::store::thread_metadata::summary(&store, person, "thread/worker").unwrap().revision },
@@ -259,15 +259,15 @@ pub mod tests {
                 "status":"sent","in_reply_to":message.subject}}),
             &[], None, "seed-ordinary-reply",
         )).unwrap().unwrap();
-        let first_page = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
+        let first_page = mixed_timeline(&store, person, "thread/worker", None, None, 1).unwrap();
         let TimelineItem::Message(reply) = &first_page.items[0] else { panic!("expected the reply") };
         assert_eq!(reply.thread_quote_id.as_deref(), Some(message.subject.as_str()));
         let lifecycle = mixed_timeline(
-            &store, person, "thread/worker", first_page.next_cursor.as_deref(), 1,
+            &store, person, "thread/worker", first_page.next_cursor.as_deref(), None, 1,
         ).unwrap();
         let TimelineItem::Lifecycle(event) = &lifecycle.items[0] else { panic!("expected the close") };
         assert_eq!(event.operation_id, closed.operation_id.unwrap());
-        let tail = mixed_timeline(&store, person, "thread/worker", lifecycle.next_cursor.as_deref(), 1).unwrap();
+        let tail = mixed_timeline(&store, person, "thread/worker", lifecycle.next_cursor.as_deref(), None, 1).unwrap();
         assert!(matches!(&tail.items[0], TimelineItem::Message(item) if item.id == message.subject));
         assert!(tail.next_cursor.is_none());
         let foreign_quote = crate::store::thread_delivery::append_reply(
@@ -518,7 +518,7 @@ pub mod tests {
         assert!(crate::store::thread_delivery::append_reply(
             &store, &incoming, PersonAuthority::TrustedLocal, None,
         ).unwrap().1);
-        let page = mixed_timeline(&store, person, thread, None, 4).unwrap();
+        let page = mixed_timeline(&store, person, thread, None, None, 4).unwrap();
         assert!(matches!(&page.items[..], [
             TimelineItem::Message(received), TimelineItem::Lifecycle(event),
             TimelineItem::Message(quoted_item), TimelineItem::Message(first),
