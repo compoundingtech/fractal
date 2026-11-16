@@ -76,7 +76,7 @@ it('a conversation switch traces subscribe -> first frame -> painted transcript 
     parentSpan: ux.activeSpan,
     fetch: async (_input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       headers.push(new Headers(init?.headers).get('traceparent'))
-      return new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: {} }))
+      return new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: { capabilities: [] } }))
     },
   }
 

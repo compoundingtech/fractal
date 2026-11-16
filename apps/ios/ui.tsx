@@ -50,6 +50,11 @@ export function SystemScreen({ children }: { children: ReactNode }) {
   return <AppearanceScope.Provider value="system"><View style={{ flex: 1, backgroundColor: colors.background }}>{children}</View></AppearanceScope.Provider>;
 }
 
+/** System text and appearance for one part of a screen (an embedded thread group), without a view of its own. */
+export function SystemText({ children }: { children: ReactNode }) {
+  return <AppearanceScope.Provider value="system">{children}</AppearanceScope.Provider>;
+}
+
 /** The Fractal terminal UI's look in the system appearance: Mocha when dark, its light palette when light, switching live. */
 export function SchemeScreen({ children }: { children: ReactNode }) {
   const palette = useScheme() === 'light' ? lightTheme : theme;
@@ -108,9 +113,9 @@ export function Note({ children, tone = 'dim' }: { children: ReactNode; tone?: '
   return <T style={styles.note} color={tone === 'warning' ? theme.waiting : tone === 'fault' ? theme.fault : theme.overlay0}>{children}</T>;
 }
 
-export function Button({ label, onPress, disabled = false, color = theme.accent, style }: { label: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
+export function Button({ label, accessibilityLabel = label, hint, onPress, disabled = false, color = theme.accent, style }: { label: string; accessibilityLabel?: string; hint?: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
   const appearance = useTextAppearance();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityHint={hint} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
     <T bold color={color}>{label}</T>
   </Pressable>;
 }
@@ -118,10 +123,13 @@ export function Button({ label, onPress, disabled = false, color = theme.accent,
 /** A text input. Prose (messages, titles, requests) gets iOS's autocorrect and spell check;
  *  a field for an identifier (a URL, a code, a path) turns them off. */
 export function Field(props: TextInputProps & { ref?: Ref<TextInput> }) {
-  const { palette } = useTextAppearance();
+  const { system, colors, palette } = useTextAppearance();
   const keyHandler = useRef(props.onKeyPress); keyHandler.current = props.onKeyPress;
   const onKeyPress = useCallback<NonNullable<TextInputProps['onKeyPress']>>(event => { quality.key(); keyHandler.current?.(event); }, []);
-  return <TextInput placeholderTextColor={palette.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, { color: palette.text, backgroundColor: palette.mantle, borderColor: palette.surface1 }, props.multiline && styles.fieldMultiline, props.style]} />;
+  const fieldLook = system
+    ? { color: colors.text, backgroundColor: colors.grouped, borderColor: colors.separator, fontFamily: 'System', fontSize: 17 }
+    : { color: palette.text, backgroundColor: palette.mantle, borderColor: palette.surface1 };
+  return <TextInput placeholderTextColor={system ? colors.secondary : palette.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, fieldLook, props.multiline && styles.fieldMultiline, props.style]} />;
 }
 
 /** A banner under the header: a problem to read, tap to dismiss when it can be. */
@@ -197,7 +205,7 @@ export const styles = StyleSheet.create({
   legend: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12, paddingVertical: 12, rowGap: 2 },
   legendEntry: { flexDirection: 'row', width: '33%' },
   note: { paddingHorizontal: 12, paddingVertical: 6 },
-  button: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4, backgroundColor: theme.surface0, marginTop: 8 },
+  button: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 4, backgroundColor: theme.surface0, marginTop: 8 },
   disabled: { opacity: 0.4 },
   field: { fontFamily: fonts.regular, fontSize: SIZE, color: theme.text, backgroundColor: theme.mantle, borderColor: theme.surface1, borderWidth: StyleSheet.hairlineWidth * 2, borderRadius: 4, paddingHorizontal: 10, paddingVertical: 8, marginTop: 8 },
   fieldMultiline: { minHeight: 88, textAlignVertical: 'top' },
