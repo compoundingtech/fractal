@@ -1,7 +1,7 @@
 // The opt-in tailnet publisher, separate from the daemon web listener; see docs/fractal-web.md.
 import { readHostConfig, startHost } from './host.mts'
 
-const served = startHost(readHostConfig(process.env))
+const served = await startHost(readHostConfig(process.env))
 served.listen()
 served.server.once('listening', () => console.log('fractal-web listening', served.server.address()))
 const stop = () => { void served.close().then(() => process.exit(0)) }
