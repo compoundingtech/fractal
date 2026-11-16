@@ -95,13 +95,17 @@ def daemon_round(binary, root, phase, env):
             if not ready.wait(timeout=60) or not ready_line:
                 raise RuntimeError(f"{phase} daemon did not announce readiness; see {log.name}")
             request(socket_path, "GET", "/v1/health")
-            # A real old/new CLI request must append through its matching daemon.
-            subprocess.run(
-                [str(binary), "--endpoint", str(socket_path), "--daemon-wait", "0",
-                 "--json", "claim", f"custom/rollback/{phase}-write",
-                 "custom.rollback.observed", "--actor", OWNER, "--field", f"phase={phase}"],
-                env=env, check=True, timeout=30,
-            )
+            # This exact PID is the daemon's enrolled replication worker.
+            # Its native request uses production peer-generation authorization;
+            # an unrelated CLI child cannot inherit that authority.
+            appended = request(socket_path, "POST", "/v1/claims", {
+                "subject": f"custom/rollback/{phase}-write",
+                "kind": "custom.rollback.observed", "actor": OWNER,
+                "fields": {"phase": phase}, "evidence": [],
+                "expected_subject": None, "idempotency_key": None,
+            })
+            (root / f"{phase}-write-response.json").write_text(
+                json.dumps(appended, indent=2) + "\n")
             if phase == "old":
                 # Generic claims intentionally cannot impersonate native grants.
                 # Use the old binary's actual trusted-local owner revocation route
