@@ -6,7 +6,7 @@ import { DateTime, Option } from 'effect'
 import type { MissionEta } from '@fractal/ui/assistant-ui/shell'
 
 const data = vi.hoisted(() => ({ missions: { _tag: 'Waiting' } as unknown, agents: { _tag: 'Observed', value: [], freshness: 'live' } as unknown, attention: { _tag: 'Observed', value: [], freshness: 'live' } as unknown, missionsDecode: { undecodable: [], decodeStale: false } as unknown }))
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'test-animation', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 vi.mock('@effect/atom-react', () => ({ useAtomValue: (atom: unknown) => atom }))
 vi.mock('../data/react.tsx', () => ({
   useDataSource: () => ({ missions: data.missions, agents: data.agents, attention: data.attention }),

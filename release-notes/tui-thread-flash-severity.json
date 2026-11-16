@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show thread failures and refusals in red or yellow, never success green, and keep the footer note from garbling the key hints",
+  "replay": { "status": "none", "detail": "Only how the TUI footer draws a passing note changes; no durable data is replayed." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes." },
+  "rules": { "status": "none", "detail": "Thread authority and mutation rules are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Footer notes now carry a severity: Info (neutral), Success (green), Warn (yellow) or Error (red). Thread call sites state theirs; every other note keeps the existing words rule. A note no longer draws over the key hints: hints that do not fit before it are left out whole, and a note wider than the row ends in an ellipsis." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "changed", "detail": "In fractal tui at 80 columns, send a thread action while disconnected (Reconnect to send this thread action) or one Fractal rejects: the note is red, ends in … when long, and no key hint shows in pieces beside it." },
+  "recovery": { "status": "none", "detail": "Presentation only; no daemon state, pairings or drafts change." }
+}

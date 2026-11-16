@@ -25,6 +25,26 @@ are explicitly unavailable because the kit does not model them (the live graph a
 has no worktree collection). Clients and Usage remain loading: these screens do not
 yet have a scenario-backed projection.
 
+### Durable thread preview (fixture/preliminary)
+
+`fractal tui --demo` also hydrates the existing world's optional attention
+`topic_threads` inventory into the ordinary native thread windows. Open Inbox's
+**Worker typecheck fails after the rename** item to see several threads on one
+item. Expand a thread's row or use its **Open in tab** action to inspect the
+same durable resource. The inventory includes open and closed history, a
+read-only discussion, and replies whose authoritative server order differs
+from timestamp order. The renderer never sorts those replies by clock.
+
+These are **fixture/preliminary**, not connected-daemon evidence. The whole
+demo uses `ThreadAccess::default()`, so histories and navigation work but no
+thread mutations are enabled or sent. The writable composer, reply and
+lifecycle controls are deliberately not demonstrated: those require the live
+client's mutation receipt driver. Closed history remains readable.
+
+Thread summaries and timeline events share the attention slice's existing
+strict decoding and timestamp-pointer rebasing. No separate runtime world or
+feature-specific renderer is used.
+
 `fixtures/clients/demo-world.json` is only a derived client contract, not demo input.
 Regenerate it and the text capture `tests/fixtures/scenario-demo.golden` with
 `FRACTAL_TUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.
@@ -32,6 +52,13 @@ The contract uses the kit anchor clock and omits local conversation clock labels
 normal demo mode rebases to the current clock. Without the update flag, contract
 and rendered-frame tests fail on scenario/adapter drift. Invented per-feature inputs
 remain test-only fixtures, never a second runtime demo world.
+
+For a color reference capture, launch the paired client with
+`env -u NO_COLOR TERM=xterm-256color fractal tui --client`, using the intended
+private profile. Agent shells may export `NO_COLOR`; inheriting it makes
+selection/background captures monochrome even inside a color-capable tmux pane.
+Capture with `tmux capture-pane -p -e` to preserve SGR styling. Also inspect a
+separate `NO_COLOR=1` run: selection must remain identifiable without color.
 
 The TUI library connects through the generated Rust `st3.client.v0` client, the same typed data boundary
 used by the CLI. Its subscriptions, reconnects, snapshot model and cache come from
@@ -170,6 +197,10 @@ answers, the row says `sending your answer…` and `o` offers no second answer. 
 once Fractal no longer takes an override or the ask has no other answer. The list is read when
 Inbox opens, when the alerts change and after an override is accepted, never on a timer; a read
 that stopped at its limit says so, even when it found none.
+The override chooser and an embedded thread never share the keyboard: opening the chooser
+puts the thread input away without losing its draft, and choosing thread Compose or Reply
+closes the chooser while keeping unsent override words. In the override's words box,
+`t`, `n` and `z` are text, not thread shortcuts. Esc keeps both drafts.
 
 On a request card, `c` writes a note on the highlighted answer; every answer with a note shows
 `✎ note`, and notes stay with their answers as the highlight moves. Sending an answer also sends
