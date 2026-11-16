@@ -599,6 +599,21 @@ fn run_liveness_uncached(
     }
 }
 
+pub fn episode_owner(connection: &Connection, ask: &ClaimRecord) -> Result<Option<(String, Option<String>)>> {
+    let fields = &ask.body["fields"];
+    if fields.get("owner_run").is_some() {
+        return Ok(fields["owner_run"].as_str().map(|run| (
+            run.to_owned(), fields["owner_generation"].as_str().map(str::to_owned),
+        )));
+    }
+    let requester = ask.actor.as_deref().unwrap_or_default();
+    if !requester.starts_with("agent/") {
+        return Ok(None);
+    }
+    Ok(canonical_desired_row_at_claim(connection, requester, &ask.id)?.and_then(|desired|
+        desired.owner_run.map(|run| (run, desired.owner_generation))))
+}
+
 pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Result<bool> {
     if ask.accepted_at_unix_ms > as_of {
         return Ok(false);
@@ -623,11 +638,27 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         return Ok(false);
     }
     let requester = ask.actor.as_deref().unwrap_or_default();
-    // Independent asks belong to the agent, not its current work or runtime turn.
-    // This also preserves asks written before owner-run fencing was removed.
+    // Unowned asks survive runtime turns; an episode-owned ask keeps its original fence.
+    if let Some((owner, generation)) = episode_owner(connection, ask)?
+        && !run_live(connection, &owner, generation.as_deref(), false)?
+    {
+        return Ok(false);
+    }
+    if is_update(ask) {
+        let about = fields["request"]["about"].as_str().unwrap_or_default();
+        if about.starts_with("mission-run/") && !run_live(connection, about, None, false)? {
+            return Ok(false);
+        }
+        if about.starts_with("step-run/")
+            && let Some(origin) = step(connection, about)?
+            && (matches!(origin.status.as_str(), "completed" | "cancelled" | "failed")
+                || !run_live(connection, &origin.run, Some(&origin.generation), false)?)
+        {
+            return Ok(false);
+        }
+    }
     let independent = view.run.starts_with("mission-run/person-ask/") && fields["origin_step"].is_null();
-    // A daemon asks for its own policy, not for a seat, so no declaration fences it. An update
-    // waits for nobody, so it stays until the person reads it, even after its poster stops.
+    // Updates need no live poster, but their owning episode still fences them.
     let unfenced = requester.starts_with("daemon/") || is_update(ask);
     if !matches!(view.status.as_str(), "pending" | "ready")
         || (!independent && !run_live(connection, &view.run, Some(&view.generation), false)?)
