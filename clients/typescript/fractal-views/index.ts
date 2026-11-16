@@ -13,3 +13,4 @@ export * from './inventoryView.ts';
 export * from './sidebarView.ts';
 export * from './syncNotice.ts';
 export * from './documentView.ts';
+export * from './thread.ts';
