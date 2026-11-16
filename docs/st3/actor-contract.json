@@ -669,6 +669,33 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st conversations scheduled cancel": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st conversations scheduled ls": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st conversations scheduled show": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st conversations search": {
         "actor": "optional",
         "accepts_person": true,
@@ -2980,6 +3007,9 @@
       ],
       "st changes list": [
         "ls"
+      ],
+      "st conversations": [
+        "messages"
       ],
       "st ui": [
         "tui"

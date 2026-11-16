@@ -39,6 +39,7 @@ export type ActionCommon = {
   | "message.send"
   | "message.read"
   | "message.close"
+  | "message.cancel-scheduled"
   | "launch.create"
   | "launch.revise"
   | "launch.preview"
@@ -3890,7 +3891,7 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
+export type Resource = (ScheduledMessage | ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | Operation | History | Session | Glass | Arrangement | OwnedSet | HarnessQuestion);
 
 export type ResourceCollectionName = 
   "missions"
@@ -3915,6 +3916,7 @@ export type ResourceHeader = {
   kind: (
   "attention"
   | "message"
+  | "scheduled-message"
   | "launch"
   | "launch-variant"
   | "launch-decision"
@@ -4089,6 +4091,26 @@ export type ScheduleUnheardHost = {
   last_exchange_at: string | null;
   reason: ("older-than-threshold" | "never-recorded" | "clock-unknown" | string);
   [key: string]: unknown;
+};
+
+export type ScheduledMessage = ResourceHeader & {
+  at: Timestamp;
+  at_unix_ms: number;
+  blocker?: string;
+  cancel_reason?: string;
+  content: string;
+  from: Id;
+  key: string;
+  kind: "scheduled-message";
+  message_id?: Id;
+  owner?: string;
+  state: "pending" | "delivered" | "cancelled";
+  to: Id;
+};
+
+export type ScheduledMessageCancelParameters = {
+  reason: string;
+  target_id: Id;
 };
 
 export type SchedulesPage = {
@@ -5401,9 +5423,11 @@ export type ActionRequest =
   feedback: string;
   launch_id: Id;
 }; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'message.cancel-scheduled'; parameters: ScheduledMessageCancelParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'message.close'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'message.read'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'message.send'; parameters: {
+  at?: string;
   attachments?: Array<AttachmentInput>;
   content: string;
   in_reply_to?: Id;

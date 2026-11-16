@@ -604,8 +604,7 @@ async fn delivery_recovery_control(
     let receipt: fractal_daemon::model::MessageSendReceipt = client
         .post(
             "/v1/messages",
-            &fractal_daemon::model::MessageSendRequest {
-            owner: None,
+            &fractal_daemon::model::MessageSendRequest { at: None, owner: None,
             idempotency_key: "delayed-handoff".into(),
             from: "person/eval".into(),
             to: SUBJECT.into(),
@@ -613,8 +612,7 @@ async fn delivery_recovery_control(
             title: None,
             in_reply_to: None,
             tags: vec![],
-            attachments: vec![],
-            },
+            attachments: vec![], },
         )
         .await
         .unwrap();

@@ -200,7 +200,14 @@ pub async fn send_message(
     session: Option<Extension<client_v0::ClientSession>>,
     local_peer: Option<Extension<LocalPeer>>,
     Json(request): Json<MessageSendRequest>,
-) -> Result<Json<MessageSendReceipt>, ApiError> {
+) -> Result<Json<crate::model::MessageSendResponse>, ApiError> {
+    if request.at.is_some() {
+        let caller = scheduled_caller(&state, bound.as_ref(), peer.as_ref(), session.as_ref())?;
+        if !is_bound_actor(&state.store, &request.from, &caller)? {
+            return Err(ApiError::bad(FractalError::new("scheduled-message-authority-refused",
+                "a scheduled message must be sent by its authenticated sender")));
+        }
+    }
     let effect_caller = if let Some(owner) = request.owner.as_ref() {
         let actor = bound.as_ref().map(BoundActor::actor)
             .or_else(|| peer.as_ref().map(|Extension(peer)| peer.agent.as_str()))
@@ -225,8 +232,62 @@ pub async fn send_message(
         }
         Some(actor.to_owned())
     } else { None };
-    blocking_api(move || accept_message_receipt_authorized(
+    blocking_api(move || accept_message_response_authorized(
         &state, request, None, None, None, None, effect_caller.as_deref()).map(Json)).await
+}
+
+fn scheduled_caller(
+    state: &AppState,
+    bound: Option<&BoundActor>,
+    peer: Option<&Extension<NativeDeliveryPeer>>,
+    session: Option<&Extension<client_v0::ClientSession>>,
+) -> Result<String, ApiError> {
+    let refused = || ApiError::bad(FractalError::new("scheduled-message-authority-refused",
+        "scheduled message changes require an authenticated sender or target"));
+    if matches!(bound, Some(BoundActor::Run(_))) {
+        return Err(refused());
+    }
+    let actor = bound.map(BoundActor::actor)
+        .or_else(|| peer.map(|Extension(peer)| peer.agent.as_str()))
+        .or_else(|| session.map(|Extension(session)| session.authority_actor.as_str()))
+        .ok_or_else(refused)?;
+    for other in [
+        peer.map(|Extension(peer)| peer.agent.as_str()),
+        session.map(|Extension(session)| session.authority_actor.as_str()),
+    ].into_iter().flatten() {
+        if !is_bound_actor(&state.store, other, actor)? { return Err(refused()); }
+    }
+    message_party_identity(&state.store, actor)
+}
+
+pub async fn scheduled_messages(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::model::ScheduledMessageView>>, ApiError> {
+    blocking_store(move || state.store.scheduled_messages()).await.map(Json)
+}
+
+pub async fn scheduled_message(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<crate::model::ScheduledMessageView>, ApiError> {
+    blocking_api(move || state.store.scheduled_message(&id).map_err(ApiError::internal)?
+        .map(Json).ok_or_else(|| ApiError::not_found(format!("scheduled message `{id}` does not exist")))).await
+}
+
+pub async fn cancel_scheduled_message(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    bound: Option<BoundActor>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    session: Option<Extension<client_v0::ClientSession>>,
+    Json(request): Json<crate::model::ScheduledMessageCancelRequest>,
+) -> Result<Json<crate::model::ScheduledMessageView>, ApiError> {
+    let actor = scheduled_caller(&state, bound.as_ref(), peer.as_ref(), session.as_ref())?;
+    let write = state.clone();
+    let view = blocking_action(move || write.store.cancel_scheduled_message(
+        &id, &actor, &request.reason)).await?;
+    signal_changed(&state);
+    Ok(Json(view))
 }
 
 #[derive(Deserialize)]

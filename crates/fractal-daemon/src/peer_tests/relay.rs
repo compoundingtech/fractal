@@ -1890,8 +1890,7 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
         .value;
     assert_eq!(uploaded.blob, format!("blob/{hash}"));
     let message = crate::client::Client::unix(&owner_socket)
-        .send_message(&crate::model::MessageSendRequest {
-        owner: None,
+        .send_message(&crate::model::MessageSendRequest { at: None, owner: None,
         idempotency_key: "pasted-image".into(),
         from: "person/avery".into(),
         to: "agent/gateway-node.seat".into(),
@@ -1903,8 +1902,7 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
             blob: uploaded.blob.clone(),
             media_type: "image/png".into(),
             name: Some("paste.png".into()),
-        }],
-        })
+        }], })
         .await
         .unwrap()
         .message;
@@ -2079,8 +2077,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     }
     let hash = hex::encode(Sha256::digest(body.as_bytes()));
     let message = crate::client::Client::unix(&owner_socket)
-        .send_message(&crate::model::MessageSendRequest {
-        owner: None,
+        .send_message(&crate::model::MessageSendRequest { at: None, owner: None,
         idempotency_key: "pasted-notes".into(),
         from: "person/avery".into(),
         to: "agent/gateway-node.seat".into(),
@@ -2088,8 +2085,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
         title: None,
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .await
         .unwrap()
         .message;
@@ -2144,8 +2140,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     }
     let smaller = &body[..end];
     let sent = crate::client::Client::unix(&owner_socket)
-        .send_message(&crate::model::MessageSendRequest {
-        owner: None,
+        .send_message(&crate::model::MessageSendRequest { at: None, owner: None,
         idempotency_key: "pasted-notes-64".into(),
         from: "person/avery".into(),
         to: "agent/gateway-node.seat".into(),
@@ -2153,8 +2148,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
         title: None,
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .await
         .unwrap()
         .message;

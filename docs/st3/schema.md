@@ -36,6 +36,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `lane` | `lane/RUN/LOCAL_ID` | no | A mission-run lane: an ordered line of entries its run works through front first. |
 | `loop-run` | `loop-run/GENERATION/PATH` | no | One bounded loop execution. |
 | `message` | `message/ID` | yes | A Fractal message. |
+| `message-schedule` | `message-schedule/ID` | no | An immutable timed native message request and its permanent cancellation or delivery receipts. |
 | `mission` | `mission/ID` | no | An immutable mission revision lineage. |
 | `mission-run` | `mission-run/ID` | no | A mission execution. |
 | `notice-owner` | `notice-owner/fleet` | no | The fleet's single notice owner: one admitted member incarnation, declared always on, whose daemon writes notice snapshots. |
@@ -162,6 +163,9 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `loop.round-result` | `loop-run` | `system-only` | `append` | `durable` | `candidate:integer`, `feedback:subject-reference(doc)`, `item:any`, `metrics:object`, `mission_run!:subject-reference(mission-run)`, `reason:string`, `round!:integer`, `status!:string`, `token_usage:integer` | `loop`, `round` |
 | `loop.state` | `loop-run` | `system-only` | `state-transition` | `durable` | `best_metrics:object`, `best_round:integer`, `feedback:subject-reference(doc)`, `items:array`, `reason:string`, `round:integer`, `status!:string`, `winner:integer` | `loop` |
 | `member.admission-override` | `host` | `authorized-requester` | `append` | `durable` | `peers!:array`, `reason!:string`, `start!:string` |  |
+| `message-schedule.cancelled` | `message-schedule` | `authorized-participant` | `once` | `durable` | `owner_claim:string immutable`, `reason!:string immutable`, `request!:string immutable` |  |
+| `message-schedule.delivered` | `message-schedule` | `system-only` | `once` | `durable` | `message!:subject-reference(message) immutable`, `owner_claim!:string immutable`, `request!:string immutable` |  |
+| `message-schedule.requested` | `message-schedule` | `authorized-requester` | `once` | `durable` | `at_unix_ms!:integer immutable`, `evidence!:array immutable`, `from!:subject-reference immutable`, `key!:string immutable`, `message!:object immutable`, `recipient_declaration!:string immutable`, `to!:subject-reference immutable` |  |
 | `message.closed` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acted_for:subject-reference(person)`, `acting_for:subject-reference(agent)`, `delegation:object`, `status!:string` |  |
 | `message.delivered` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `message.expired` | `message` | `system-only` | `once` | `durable` | `reason!:string`, `status!:string` |  |

@@ -764,8 +764,7 @@ agent "example/bridge" {
         let send = |from: &str, to: &str, key: &str, blob: String| {
             accept_message(
                 &state,
-                MessageSendRequest {
-                owner: None,
+                MessageSendRequest { at: None, owner: None,
                 idempotency_key: key.into(),
                 from: from.into(),
                 to: to.into(),
@@ -777,8 +776,7 @@ agent "example/bridge" {
                     blob,
                     media_type: "image/png".into(),
                     name: Some("/Users/example/Screen Shot.png".into()),
-                }],
-                },
+                }], },
                 None,
                 None,
             )
@@ -818,8 +816,7 @@ agent "example/bridge" {
         };
         let refused = accept_message(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: "many".into(),
             from: "person/alex".into(),
             to: "agent/robin".into(),
@@ -832,8 +829,7 @@ agent "example/bridge" {
                     blob: format!("blob/{}", hex::encode(Sha256::digest([index]))),
                     ..too_many.clone()
                 })
-                .collect(),
-            },
+                .collect(), },
             None,
             None,
         );

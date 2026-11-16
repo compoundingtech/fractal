@@ -857,6 +857,9 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
         .route("/v1/messages/recipient", get(messages::recipient))
+        .route("/v1/messages/scheduled", get(messages::scheduled_messages))
+        .route("/v1/messages/scheduled/{*id}", get(messages::scheduled_message))
+        .route("/v1/messages/scheduled-cancel/{*id}", post(messages::cancel_scheduled_message))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/harness-events", post(harness_events::publish))
@@ -11867,13 +11870,47 @@ pub fn accept_message_receipt_with_upload_owner(
 #[allow(clippy::too_many_arguments)]
 fn accept_message_receipt_authorized(
     state: &AppState,
-    mut request: MessageSendRequest,
+    request: MessageSendRequest,
     session_id: Option<String>,
     device_signature: Option<smallclaims::principal::ClaimSignature>,
     upload_owner: Option<&str>,
     assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
     effect_caller: Option<&str>,
 ) -> Result<MessageSendReceipt, ApiError> {
+    if request.at.is_some() {
+        return Err(ApiError::bad(FractalError::new("scheduled-message-route-required",
+            "use the timed message endpoint to schedule a message")));
+    }
+    match accept_message_response_authorized(state, request, session_id, device_signature,
+        upload_owner, assistant_authorization, effect_caller)? {
+        crate::model::MessageSendResponse::Sent(receipt) => Ok(*receipt),
+        crate::model::MessageSendResponse::Scheduled { .. } => unreachable!("immediate request"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn accept_message_response_authorized(
+    state: &AppState,
+    mut request: MessageSendRequest,
+    session_id: Option<String>,
+    device_signature: Option<smallclaims::principal::ClaimSignature>,
+    upload_owner: Option<&str>,
+    assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
+    effect_caller: Option<&str>,
+) -> Result<crate::model::MessageSendResponse, ApiError> {
+    let at = request.at.as_deref().map(|at| {
+        chrono::DateTime::parse_from_rfc3339(at)
+            .ok().and_then(|time| u128::try_from(time.timestamp_millis()).ok())
+            .ok_or_else(|| ApiError::bad(FractalError::new("invalid-scheduled-message-time",
+                "at must be an absolute RFC 3339 timestamp on or after the Unix epoch")))
+    }).transpose()?;
+    if at.is_some() && (request.owner.is_some() || device_signature.is_some()
+        || assistant_authorization.is_some() || request.from.starts_with("mission-run/")
+        || request.from.starts_with("external/"))
+    {
+        return Err(ApiError::bad(FractalError::new("scheduled-message-authority-refused",
+            "deferred sends cannot retain run, effect, device-signature or external authority")));
+    }
     let effect_digest = if let Some(owner) = request.owner.as_ref() {
         if effect_caller.is_none() || device_signature.is_some() || assistant_authorization.is_some() {
             return Err(ApiError::bad(FractalError::new("effect-caller-refused",
@@ -11989,8 +12026,13 @@ fn accept_message_receipt_authorized(
         }
         _ => None,
     };
-    let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
-    let subject = format!("message/{id}");
+    let key_hash = Sha256::digest(request.idempotency_key.as_bytes());
+    let subject = if at.is_some() {
+        // Stage the body under the mailbox identity used by due delivery.
+        format!("message/scheduled-{key_hash:x}")
+    } else {
+        format!("message/{}", &hex::encode(key_hash)[..16])
+    };
     let previous = state
         .store
         .operation_claim(&request.idempotency_key)
@@ -12184,6 +12226,18 @@ fn accept_message_receipt_authorized(
         expected_subject: None,
         idempotency_key: Some(request.idempotency_key.clone()),
     };
+    if let Some(at) = at {
+        let scheduled = state.store.schedule_message(&input, at, &request.idempotency_key)
+            .map_err(|error| {
+                if let Some(staged) = staged.as_ref() { staged.discard(); }
+                ApiError::bad(error)
+            })?;
+        if let Some(staged) = staged {
+            staged.commit().map_err(ApiError::internal)?;
+        }
+        signal_changed(state);
+        return Ok(crate::model::MessageSendResponse::Scheduled { scheduled: Box::new(scheduled) });
+    }
     // A repeated key returns the first claim and says it appended nothing.
     let sent = if let Some(record) = recovered {
         let operation = smallclaims::store::claim_operation(&input).map_err(ApiError::bad)?;
@@ -12273,7 +12327,7 @@ fn accept_message_receipt_authorized(
     } else {
         "wake"
     };
-    Ok(MessageSendReceipt {
+    Ok(crate::model::MessageSendResponse::Sent(Box::new(MessageSendReceipt {
         requested_recipient,
         recipient,
         recipient_identity,
@@ -12304,7 +12358,7 @@ fn accept_message_receipt_authorized(
         idempotency_key: request.idempotency_key,
         already_sent: !appended,
         sent_at: Some(client_timestamp(record.accepted_at_unix_ms)),
-    })
+    })))
 }
 
 fn receipt_recipient(store: &Store, requested: &str) -> Result<(String, String), ApiError> {
@@ -12344,59 +12398,9 @@ fn settle_answered_message(
     reply: &str,
     reply_claim: &str,
 ) -> Result<(), ApiError> {
-    let parent = message_subject(parent);
-    let Some(message) = store.message(&parent).map_err(ApiError::internal)? else {
-        return Ok(());
-    };
-    // A thread participant can send a follow-up without consuming the other party's inbox.
-    if message.to != from || message.from != to {
-        return Ok(());
-    }
-    for lifecycle in ["delivered", "read", "closed"] {
-        let current = store
-            .message(&parent)
-            .map_err(ApiError::internal)?
-            .ok_or_else(|| ApiError::not_found(format!("message `{parent}` does not exist")))?;
-        let needed = match lifecycle {
-            "delivered" => matches!(current.status.as_str(), "sent" | "staged"),
-            "read" => current.status == "delivered",
-            "closed" => current.status == "read",
-            _ => unreachable!(),
-        };
-        if !needed {
-            continue;
-        }
-        let input = ClaimInput {
-            subject: parent.clone(),
-            kind: format!("message.{lifecycle}"),
-            actor: Some(from.into()),
-            fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
-            evidence: vec![reply_claim.into()],
-            expected_subject: None,
-            idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
-        };
-        if current.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
-            // The parent lives in the stream even though its reply cites a graph claim.
-            // The shard writer validates the step and makes a concurrent/repeated step a no-op.
-            crate::store::retirements::admit_mail_claim_to(
-                &store.readers.get(), &input, &current,
-            )
-            .map_err(ApiError::bad)?;
-            crate::store::messages_shard::record_lifecycle(
-                store,
-                &input.subject,
-                &input.kind,
-                input.actor.as_deref(),
-                &input.fields,
-            )
-            .map_err(ApiError::bad)?;
-            continue;
-        }
-        store
-            .append_claim(&input)
-            .map_err(ApiError::bad)?;
-    }
-    Ok(())
+    store
+        .settle_answered_message(parent, from, to, reply, reply_claim)
+        .map_err(ApiError::bad)
 }
 
 #[derive(Deserialize)]
