@@ -32,10 +32,50 @@ pub fn fold(
             return Ok(None);
         }
         let time_unix_ms = store.projection_time_at(index)?;
-        let status = store.status_for_claim_kind_for_generic_reads_at(
-            "runtime.observed", Some(index), false, crate::store::ClaimsReduction::Runtime,
-        )?;
-        let items = runtime_resources_from_status_access(store, "runtime-publication", &client_timestamp(time_unix_ms), status, true, true)?;
+        let affected = base.map(|base| store.runtime_list_changes(base.cut, index)).transpose()?;
+        if affected.as_ref().is_some_and(BTreeSet::is_empty) {
+            let base = base.expect("an incremental fold has a base");
+            return Ok(Some((Publication {
+                cut: index, published_at_unix_ms: client_now_ms(), valid_until_unix_ms: None,
+                rows: RuntimeRows { items: Arc::clone(&base.rows.items),
+                    digest: base.rows.digest.clone(), time_unix_ms },
+            }, false)));
+        }
+        let status = if let Some(affected) = &affected {
+            store.status_for_subject_names_for_generic_reads_at(
+                affected.clone(), index, false, crate::store::ClaimsReduction::Runtime,
+            )?
+        } else {
+            store.status_for_claim_kind_for_generic_reads_at(
+                "runtime.observed", Some(index), false, crate::store::ClaimsReduction::Runtime,
+            )?
+        };
+        let updated = runtime_resources_from_status_access(store, "runtime-publication", &client_timestamp(time_unix_ms), status, true, true)?;
+        if let (Some(base), Some(affected)) = (base, &affected)
+            && base.rows.items.iter()
+                .filter(|row| affected.contains(row["owner_id"].as_str().expect("runtime owner")))
+                .eq(updated.iter())
+        {
+            return Ok(Some((Publication {
+                cut: index, published_at_unix_ms: client_now_ms(), valid_until_unix_ms: None,
+                rows: RuntimeRows { items: Arc::clone(&base.rows.items),
+                    digest: base.rows.digest.clone(), time_unix_ms },
+            }, false)));
+        }
+        let items = if let (Some(base), Some(affected)) = (base, &affected) {
+            // Both inputs are in owner order. Merge without re-folding unaffected subjects.
+            let mut updated = updated.into_iter().peekable();
+            let mut items = Vec::with_capacity(base.rows.items.len() + updated.len());
+            for item in base.rows.items.iter() {
+                let owner = item["owner_id"].as_str().expect("runtime owner");
+                while updated.peek().is_some_and(|row| row["owner_id"].as_str().expect("runtime owner") < owner) {
+                    items.push(updated.next().expect("peeked row"));
+                }
+                if !affected.contains(owner) { items.push(item.clone()); }
+            }
+            items.extend(updated);
+            items
+        } else { updated };
         let digest = hex::encode(Sha256::digest(serde_json::to_vec(&items)?));
         Ok(Some((Publication {
             cut: index,
