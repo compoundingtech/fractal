@@ -728,7 +728,7 @@ async fn thread_request_history_returns_store_page_and_preserves_opaque_cursor()
     use crate::store::thread_metadata::{self, Edit, InboxOrigin, StartFromInbox};
     use crate::store::thread_links::{self, AttachAsk, DecisionHistory};
 
-    let mut fixture = fixture_principal(&["read.assistant.conversation"], true, MCP_PRINCIPAL).await;
+    let mut fixture = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
     fixture.state.store.configure_thread_write_rollout([]);
     let intent = crate::graph::parse_internal_intent(
         r#"version 2
