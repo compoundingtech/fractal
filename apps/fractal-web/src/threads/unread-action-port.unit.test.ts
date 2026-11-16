@@ -1,7 +1,7 @@
 import { FractalClient } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import type { ThreadTimelinePage } from '@fractal/client/schema/read'
-import { Option, Schema } from 'effect'
+import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -30,10 +30,9 @@ const observation: ThreadObservation = {
   snapshotId: fixture.capabilities.snapshot.id,
 }
 const message = { kind: 'message', id: anchor, actor_id: 'person/example', accepted_at_unix_ms: 1, content: 'Real body', thread_quote_id: null } satisfies Native.ThreadTimelineEventEncoded
-const page = (state: Native.ThreadTimelineAnchor['state'] = 'current', items: readonly Native.ThreadTimelineEventEncoded[] = state === 'current' ? [message] : []) =>
-  Schema.encodeSync(Native.ThreadTimelinePage)(Native.decodeUnknownSync(Native.ThreadTimelinePage)({
-    items, next_cursor: null, anchor: { message_id: anchor, state },
-  }))
+const page = (state: Native.ThreadTimelineAnchor['state'] = 'current', items: readonly Native.ThreadTimelineEventEncoded[] = state === 'current' ? [message] : []) => ({
+  items, next_cursor: null, anchor: { message_id: anchor, state },
+} satisfies Native.ThreadTimelinePageEncoded)
 
 const harness = ({
   response = page(),

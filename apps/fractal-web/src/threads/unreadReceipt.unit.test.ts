@@ -11,7 +11,7 @@ const receipt = (affected_ids: string[]): EnvelopeOf<ActionResult> => {
     kind: 'action-result', action_id: 'action/unread', operation_id: 'operation/transport-only',
     status: 'completed', affected_ids, snapshot_id: fixture.capabilities.snapshot.id,
   }))
-  return { ...envelope, value: {
+  return { ...envelope, snapshot: { ...envelope.snapshot, published_at: envelope.snapshot.published_at ?? undefined }, value: {
     kind: value.kind, action_id: value.action_id, operation_id: value.operation_id,
     status: value.status, affected_ids: [...value.affected_ids], snapshot_id: value.snapshot_id,
   } }

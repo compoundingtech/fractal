@@ -161,6 +161,16 @@ it('rejects a composer even when its cover is pointer-transparent', async () => 
 
 it('shares one cancellable timer across all message bodies and bounds the result to fifty IDs', async () => {
   const view = placement()
+  // Count only the placement's 500ms timers, not AtomRegistry's own scheduler.
+  const schedule = window.setTimeout.bind(window), cancel = window.clearTimeout.bind(window)
+  const pending = new Set<number>()
+  vi.spyOn(window, 'setTimeout').mockImplementation((handler, delay, ...args) => {
+    const id = schedule(() => { pending.delete(id); if (typeof handler === 'function') handler(...args) }, delay)
+    if (delay === 500) pending.add(id)
+    return id
+  })
+  vi.spyOn(window, 'clearTimeout').mockImplementation(id => { if (id !== undefined) pending.delete(id); cancel(id) })
+  view.layout()
   const bodies: HTMLElement[] = [view.body]
   for (let index = 1; index <= 60; index++) {
     const row = view.row.cloneNode(true)
@@ -177,11 +187,11 @@ it('shares one cancellable timer across all message bodies and bounds the result
   })
   view.hit((x) => bodies[Math.floor(x / 3)] ?? null)
   await Promise.resolve()
-  expect(vi.getTimerCount()).toBe(1)
+  expect(pending.size).toBe(1)
   vi.advanceTimersByTime(500)
   expect(view.snapshot().visibleMessageIds).toHaveLength(50)
-  expect(vi.getTimerCount()).toBe(0)
+  expect(pending.size).toBe(0)
   view.container.remove(); await Promise.resolve()
   expect(view.snapshot().visibleMessageIds).toEqual([])
-  expect(vi.getTimerCount()).toBe(0)
+  expect(pending.size).toBe(0)
 })
