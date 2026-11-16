@@ -11,7 +11,7 @@ use crate::{ValidationError, error};
 
 /// The person saw `attention_id`; the earliest accepted claim is when.
 pub const SEEN_KIND: &str = "person.attention-seen";
-/// The person put `attention_id` off until `until_unix_ms`, or null to bring it back.
+/// The person put `attention_id` off until `until_unix_ms`, indefinitely, or null to bring it back.
 pub const SNOOZED_KIND: &str = "person.attention-snoozed";
 pub const KINDS: [&str; 2] = [SEEN_KIND, SNOOZED_KIND];
 /// The client the person acted from: its pairing grant, or the local member.
@@ -56,15 +56,24 @@ pub fn validate_fields(kind: &str, fields: &BTreeMap<String, Value>) -> Result<(
     {
         return Err(error("invalid-attention-control", "source is nonblank and at most 256 bytes"));
     }
-    if kind == SNOOZED_KIND
-        && !fields
-            .get("until_unix_ms")
-            .is_some_and(|until| until.is_null() || until.as_u64().is_some_and(|until| until > 0 && i64::try_from(until).is_ok()))
-    {
-        return Err(error(
-            "invalid-attention-control",
-            "until_unix_ms is positive Unix milliseconds, or null to end the snooze",
-        ));
+    if kind == SNOOZED_KIND {
+        let indefinite = fields.get("indefinite");
+        if indefinite.is_some_and(|value| !value.is_boolean()) {
+            return Err(error("invalid-attention-control", "indefinite must be a boolean when present"));
+        }
+        let valid_until = fields.get("until_unix_ms").is_some_and(|until| {
+            if indefinite.and_then(Value::as_bool) == Some(true) {
+                until.is_null()
+            } else {
+                until.is_null() || until.as_u64().is_some_and(|until| until > 0 && i64::try_from(until).is_ok())
+            }
+        });
+        if !valid_until {
+            return Err(error(
+                "invalid-attention-control",
+                "until_unix_ms is positive Unix milliseconds or null; indefinite requires null",
+            ));
+        }
     }
     Ok(())
 }
@@ -90,6 +99,8 @@ mod tests {
             (SEEN_KIND, json!({"attention_id": ROW, "source": "custom/client/pairing-1"})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "host/alder", "until_unix_ms": 5})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "host/alder", "until_unix_ms": null})),
+            (SNOOZED_KIND, json!({"attention_id": ROW, "source": "host/alder", "until_unix_ms": null, "indefinite": true})),
+            (SNOOZED_KIND, json!({"attention_id": ROW, "source": "host/alder", "until_unix_ms": null, "indefinite": false})),
         ] {
             assert!(registry().validate_claim(person, kind, &fields(body.clone())).is_ok(), "{kind} {body}");
         }
@@ -105,6 +116,8 @@ mod tests {
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s", "until_unix_ms": 0})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s", "until_unix_ms": -1})),
             (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s", "until_unix_ms": "soon"})),
+            (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s", "until_unix_ms": 5, "indefinite": true})),
+            (SNOOZED_KIND, json!({"attention_id": ROW, "source": "s", "until_unix_ms": null, "indefinite": "yes"})),
         ] {
             assert!(registry().validate_claim(person, kind, &fields(body.clone())).is_err(), "{kind} {body}");
         }

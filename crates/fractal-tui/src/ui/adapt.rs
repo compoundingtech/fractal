@@ -645,6 +645,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                 age: age(&item.requested_at, now),
                 requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
                 snoozed_until: item.snoozed_until.as_deref().and_then(|until| chrono::DateTime::parse_from_rfc3339(until).ok()),
+                snoozed_indefinitely: item.snoozed_indefinitely.unwrap_or(false),
                 episode: (!item.episode.is_empty()).then(|| item.episode.clone()),
                 deadline: item.deadline_at.as_deref().map(|deadline| {
                     ask_deadline(
@@ -2567,6 +2568,7 @@ mod tests {
         for row in [
             row("attention/later", "human-gate", serde_json::json!({"snoozed_until": "2026-10-15T13:00:00Z"})),
             row("attention/ended", "human-gate", serde_json::json!({"snoozed_until": "2026-10-15T11:00:00Z"})),
+            row("attention/manual", "human-gate", serde_json::json!({"snoozed_until": null, "snoozed_indefinitely": true})),
             row("attention/open", "human-gate", serde_json::json!({})),
         ] {
             model.now.items.push(serde_json::from_value(row).unwrap());
@@ -2578,7 +2580,7 @@ mod tests {
         let at = chrono::DateTime::parse_from_rfc3339("2026-10-15T12:00:00Z").unwrap();
         let world = world_at(&model, "person/example", &Extras::default(), at);
         let snoozed = world.attention.items().iter().map(|item| (item.id.as_str(), item.snoozed(world.at))).collect::<Vec<_>>();
-        assert_eq!(snoozed, [("attention/later", true), ("attention/ended", false), ("attention/open", false)]);
+        assert_eq!(snoozed, [("attention/later", true), ("attention/ended", false), ("attention/manual", true), ("attention/open", false)]);
         assert_eq!(world.snooze_ends(), chrono::DateTime::parse_from_rfc3339("2026-10-15T13:00:00Z").ok());
     }
 

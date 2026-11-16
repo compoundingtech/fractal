@@ -5280,6 +5280,7 @@ impl Ui {
                 && let Some(item) = items.iter_mut().find(|item| item.id == id)
             {
                 item.snoozed_until = until.map(|until| until.fixed_offset());
+                item.snoozed_indefinitely = false;
             }
             self.refresh_tab_statuses();
             let index = self.selected[0];
@@ -7914,6 +7915,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: "attention/garden".into(),
@@ -8205,6 +8207,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: id.into(),
@@ -8258,6 +8261,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: id.into(),
@@ -8572,6 +8576,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: "attention/pick".into(),
@@ -8660,6 +8665,7 @@ mod tests {
                 deadline: None,
                 requested_at: None,
                 snoozed_until: None,
+                snoozed_indefinitely: false,
                 episode: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
@@ -8802,6 +8808,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: "attention/shipped".into(),
@@ -8909,6 +8916,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: "attention/choose".into(),
@@ -9005,6 +9013,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: "attention/decide".into(),
@@ -9084,6 +9093,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: "attention/capacity".into(),
@@ -9139,6 +9149,7 @@ mod tests {
             deadline: None,
             requested_at: None,
             snoozed_until: None,
+            snoozed_indefinitely: false,
             episode: None,
             conversations: vec![],
             id: "attention/update".into(),
@@ -9397,6 +9408,7 @@ mod tests {
                     deadline: None,
                     requested_at: None,
                     snoozed_until: None,
+                    snoozed_indefinitely: false,
                     episode: None,
                     conversations: vec![],
                     id: "attention/request".into(),

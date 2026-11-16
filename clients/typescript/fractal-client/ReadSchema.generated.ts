@@ -1567,6 +1567,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   /** When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls. */
   "seen_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When the row's person first saw it on any of their clients (attention.seen), or null. Absent on daemons that predate attention controls." }),
+  /** True when the person put this row off until they explicitly bring it back. Clients hide it from the active inbox regardless of snoozed_until. Absent on older daemons means false. A snooze never moves a deadline. */
+  "snoozed_indefinitely": optionalKey(Schema.Boolean).annotate({ description: "True when the person put this row off until they explicitly bring it back. Clients hide it from the active inbox regardless of snoozed_until. Absent on older daemons means false. A snooze never moves a deadline." }),
   /** Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls. */
   "snoozed_until": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Until when the row's person put it off (attention.snooze), or null. Clients hide the row while now is before it; the row stays open and a snooze never moves its deadline. Absent on daemons that predate attention controls." }),
   "source_id": Id,
