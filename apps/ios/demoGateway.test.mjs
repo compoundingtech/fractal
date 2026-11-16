@@ -525,7 +525,7 @@ test('fixture reset restores mutations, receipts, scenarios and live windows wit
   const reset = await controlThreads(baseUrl, { reset: true });
   assert.equal(reset.state, 'ready');
   const restored = await resetWindow;
-  assert.deepEqual(restored.items, [initial.value]);
+  assert.deepEqual(restored.items, [decodeUnknownSync(ThreadSummary)(initial.value)]);
   assert.ok(restored.snapshot.store_index > changed.snapshot.store_index);
   assert.deepEqual((await client.threadTimeline(initial.value.id)).value, initialTimeline);
   assert.deepEqual((await client.threadGet('thread/older-page')).value, initialOlder);
