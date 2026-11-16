@@ -1,4 +1,4 @@
-import { ThreadViewport } from '../threadViewport';
+import { threadViewportChanged, ThreadViewport } from '../threadViewport';
 import { ThreadGroup } from './Threads';
 import { markdownSource } from '../../../clients/typescript/fractal-client/markdown-text';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -123,7 +123,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const waiting = homeRows(data.attention.filter(item => item.mission_id === mission.id), caps?.session_actor);
   return <Screen>
     <Banners />
-    <ScrollView ref={threadViewport} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ paddingBottom: 32 }}>
+    <ScrollView ref={threadViewport} onLayout={() => threadViewportChanged(threadViewport)} onScroll={() => threadViewportChanged(threadViewport)} scrollEventThrottle={16} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" refreshControl={refresh} contentContainerStyle={{ paddingBottom: 32 }}>
       <StatusLine />
       <View style={{ padding: 12, gap: 4 }}>
         <T><T bold color={wordStyle(word).color}>{wordStyle(word).glyph} {missionLabel(mission)}</T><T dim>  {mission.state} · {mission.runs.length} run{mission.runs.length === 1 ? '' : 's'}</T></T>

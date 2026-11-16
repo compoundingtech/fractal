@@ -64,7 +64,10 @@ Expanded threads (including those hosted by Conversation and Inbox) acknowledge 
 measured message text stably visible for 500 ms in the focused, foreground view.
 The body must have full width, its trailing end visible, and at least two lines.
 Visibility, focus, AppState and layout changes reset the timer. Collapsed rows,
-background tabs, clipped edges and author labels never count. Natural read history
+background tabs, clipped edges and author labels never count. A mission screen's
+outer scroll view reports its scroll and layout too, so its clipping participates.
+Rerenders such as the shared second tick keep a message's laid-out lines; only new
+layout or the message leaving the timeline replaces them. Natural read history
 remains forward-only and separate from the private unread reminder.
 
 `unreadVisit.ts` owns visit capture and observed-remove intent logic. A reminder
@@ -78,9 +81,12 @@ pending seek metadata shows no body and cannot activate a badge.
 `unreadActions.ts` is the typed action boundary; `unreadClient.ts` binds canonical
 generated `threadMarkUnread`, `threadClearUnread`, `threadTimeline({around})`, and
 `threadList({marked_unread:true})`. Store delivery retains the existing bound request,
-fence refresh, receipt shim and original-request retry. Action operation IDs never
-become reminder mark IDs. Read-only clients have no mark controls. Reminders are
-canonically decoded from the summary; seek metadata cannot create a badge.
+fence refresh, receipt shim and original-request retry. A mark or clear whose receipt
+was lost stays held for its thread: a remounted body shows Retry original change for
+that exact request, ahead of a held rename/close/reopen, and new edits wait until it
+is confirmed. Action operation IDs never become reminder mark IDs. Read-only clients
+have no mark controls. Reminders are canonically decoded from the summary; seek
+metadata cannot create a badge.
 Generic `thread-unavailable` seek refusal maps to unavailable, not Pending. Only an
 explicit Pending response can show that state; neither exposes an unrelated body.
 Seeking itself never acknowledges a message.
@@ -100,7 +106,9 @@ evidence counts whole rendered Markdown lines (two, including the last), never
 paragraph spacing. Loading wrappers (detail, Inbox start, expanded rows) start the
 visit entry with the same placement key before the body mounts, so a reminder that
 loads after entry is never captured. Focused node coverage lives beside the visit
-reducer, native lifecycle, client adapter, list UI and paging helper.
+reducer, native lifecycle, client adapter, list UI and paging helper; a mounted shared
+thread body (`threadBodyMount.test.mjs`) covers rerendered line evidence and recovered
+unread deliveries through the store's own delivery code.
 
 
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.

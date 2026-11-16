@@ -702,8 +702,15 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
   const [editResult, setEditResult] = useState<ThreadEditResult>();
   const [renameTitle, setRenameTitle] = useState<string>();
   const editDelivery = thread ? threadDeliveries?.get(threadEditScope(thread.id)) : undefined;
-  const editFeedback = editDelivery?.retry ? { how: 'unconfirmed' as const, retry: editDelivery.retry } : editResult;
-  const editable = status === 'online' && !editing && !editDelivery && editFeedback?.how !== 'unconfirmed';
+  // The store retains a bound unread mark or clear under `unread/<thread>`, as it retains metadata
+  // edits under threadEditScope, so a remount recovers either original request. Explicit
+  // precedence: the unread delivery's retry is offered first; the metadata edit's retry follows
+  // once that is confirmed. Any retained delivery blocks new edits until it is resolved.
+  const unreadDelivery = thread ? threadDeliveries?.get(`unread/${thread.id}`) : undefined;
+  const heldDeliveries = [unreadDelivery, editDelivery].filter(delivery => delivery !== undefined);
+  const recovered = heldDeliveries.find(delivery => delivery.retry)?.retry;
+  const editFeedback = recovered ? { how: 'unconfirmed' as const, retry: recovered } : editResult;
+  const editable = status === 'online' && !editing && !heldDeliveries.length && editFeedback?.how !== 'unconfirmed';
   const runEdit = async (send: () => Promise<ThreadEditResult>, retained = false) => {
     setEditing(true);
     setEditResult(undefined);
@@ -720,6 +727,23 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
     event.kind === 'message' && !!event.content.trim() && !ownMessage(event.actor_id)) : [];
   // Rendered body lines, as laid out; a body without them is never visible evidence.
   const bodyLines = useRef(new Map<string, readonly MarkdownLine[]>());
+  // One ref callback per message for as long as it is listed. React detaches and re-attaches a
+  // callback whose identity changes, so an inline callback would discard the laid-out lines on
+  // every rerender (the shared clock ticks each second); Markdown reports lines only on layout.
+  const messageRefs = useRef(new Map<string, (view: View | null) => void>());
+  for (const messageId of messageRefs.current.keys()) if (!messages.has(messageId)) messageRefs.current.delete(messageId);
+  const messageRef = (messageId: string) => {
+    let attach = messageRefs.current.get(messageId);
+    if (!attach) {
+      attach = view => {
+        if (view) { messageViews.current.set(messageId, view); return; }
+        messageViews.current.delete(messageId);
+        bodyLines.current.delete(messageId);
+      };
+      messageRefs.current.set(messageId, attach);
+    }
+    return attach;
+  };
   const visit = useUnreadVisit({
     scope: client, placementKey: placement, threadId: id, actor, summary: thread, api: unreadAPI,
     canRead: canMarkRead && status === 'online', canEdit: canClearReminder && status === 'online',
@@ -778,10 +802,7 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
         {returnHere ? <T color={theme.accent}>Marked unread · return here</T> : null}
         <T bold>{name}<Text accessibilityElementsHidden importantForAccessibility="no"> · {age}</Text></T>
         {event.thread_quote_id ? <T dim numberOfLines={1}>{quoted ? `Reply to ${actorLabel(quoted.actor_id)} · ${quoted.content}` : 'Reply to an earlier message'}</T> : null}
-        <View collapsable={false} onLayout={visit.refresh} ref={view => {
-          if (view) messageViews.current.set(event.id, view);
-          else { messageViews.current.delete(event.id); bodyLines.current.delete(event.id); }
-        }}><Markdown text={event.content} selectable={!reply} onLines={lines => linesLaidOut(event.id, lines)} /></View>
+        <View collapsable={false} onLayout={visit.refresh} ref={messageRef(event.id)}><Markdown text={event.content} selectable={!reply} onLines={lines => linesLaidOut(event.id, lines)} /></View>
       </Pressable>;
       return <ContextMenu key={event.id} title={exactTime} actions={readHere ? [
         ...(reply ? [{ id: 'reply', title: 'Reply to this message', run: reply }] : []),
@@ -814,8 +835,8 @@ function ThreadBody({ client, thread, start, placement, around, onOpen, revealCo
       <Button label="Cancel rename" onPress={() => setRenameTitle(undefined)} />
     </View>
   </View> : null;
-  const editStatus = <ThreadActionFeedback result={editFeedback} busy={editing || !!editDelivery && !editDelivery.retry || status !== 'online'} onRetry={() => {
-    if (editFeedback?.how === 'unconfirmed') void runEdit(editFeedback.retry, !!editDelivery);
+  const editStatus = <ThreadActionFeedback result={editFeedback} busy={editing || heldDeliveries.some(delivery => !delivery.retry) || status !== 'online'} onRetry={() => {
+    if (editFeedback?.how === 'unconfirmed') void runEdit(editFeedback.retry, !!recovered);
   }} />;
   const threadButtons = thread ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
     {threadActions.has('thread.rename') ? <Button label="Rename" hint={`Renames ${displayed!.title}`} onPress={() => setRenameTitle(displayed!.title)} disabled={!editable} /> : null}
