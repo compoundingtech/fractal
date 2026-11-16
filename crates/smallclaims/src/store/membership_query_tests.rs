@@ -5,6 +5,7 @@ use std::cell::Cell;
 
 thread_local! {
     static STATEMENTS: Cell<usize> = const { Cell::new(0) };
+    pub(super) static SIGNATURE_VERIFICATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn fixture() -> Connection {
@@ -354,5 +355,300 @@ fn sealed_fleet_cache_tracks_batch_signers_after_envelope_identity_changes() {
             crate::fleet::FleetView::from_membership(&fleet_membership_tx(&connection).unwrap()),
             "{sql}",
         );
+    }
+}
+
+#[test]
+fn sealed_membership_cache_reuses_cold_folds_and_recomputes_on_generation_changes() {
+    let mut connection = fixture();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf348da4e378d owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ &fleet_generation_schema()).unwrap();
+    let anchor = admitted("anchor", "birch", "anchor-key", "anchor", "birch", 3);
+    insert_claim(&connection, &anchor);
+    let mut cache = None;
+    connection.trace(Some(|sql| {
+        if sql.starts_with("SELECT claims.id, claims.kind, claims.subject, claims.body,") {
+            STATEMENTS.with(|count| count.set(count.get() + 1));
+        }
+    }));
+    STATEMENTS.with(|count| count.set(0));
+    // Even an empty fold with local unsealed claims must be cached.
+    for _ in 0..8 {
+        assert!(!sealed_membership_tx(&connection, &mut cache).unwrap().counts("anchor"));
+    }
+    STATEMENTS.with(|count| assert_eq!(count.get(), 1));
+    let unsealed_generation = cache.as_ref().unwrap().0;
+    envelope(&connection, &anchor, "sealed", &["anchor-key"]);
+    for _ in 0..8 {
+        assert!(sealed_membership_tx(&connection, &mut cache).unwrap().counts("anchor"));
+    }
+    assert!(cache.as_ref().unwrap().0 > unsealed_generation);
+    STATEMENTS.with(|count| assert_eq!(count.get(), 2));
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hbea4b67b6a13 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures", []).unwrap();
+    for _ in 0..8 {
+        assert!(!sealed_membership_tx(&connection, &mut cache).unwrap().counts("anchor"));
+    }
+    STATEMENTS.with(|count| assert_eq!(count.get(), 3));
+    connection.trace(None);
+}
+
+#[test]
+fn sealed_membership_request_cache_does_not_bypass_local_batch_sealing() {
+    let store = Store::open_memory("birch", Arc::new(super::runtime::Plain)).unwrap();
+    store.bind_fleet("3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58").unwrap();
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    store.load_member_key(Some(key.clone())).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    let mut anchor = admitted("anchor", "birch", key.public(), "anchor", "birch", 1);
+    anchor.fields.insert(
+        "fleet_id".into(),
+        serde_json::json!("3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58"),
+    );
+    let claim = store.append_claim(&ClaimInput {
+        subject: anchor.subject,
+        kind: anchor.kind,
+        actor: None,
+        fields: anchor.fields,
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(store.membership_cache.lock().unwrap().is_none());
+    assert!(store.sealed_membership_cache.lock().unwrap().is_none());
+    for _ in 0..3 {
+        assert!(!store.fleet_membership_sealed().unwrap().counts(&claim.id));
+    }
+    assert!(store.sealed_membership_cache.lock().unwrap().is_some());
+    assert!(store.membership_cache.lock().unwrap().is_none());
+    assert!(store.fleet_membership().unwrap().counts(&claim.id));
+    assert!(store.fleet_membership_sealed().unwrap().counts(&claim.id));
+}
+
+fn cache_member_window(store: &Store, key: &str, start: u64) {
+    let mut anchor = admitted("anchor", "birch", key, "anchor", "birch", start.max(1));
+    anchor.fields.insert("writer_floor".into(), serde_json::json!(start.saturating_sub(1)));
+    anchor.signers.insert(key.into());
+    let membership = Membership::fold(Some(key), &[anchor]);
+    assert!(membership.counts("anchor"), "the synthetic keyed window must have a valid anchor");
+    let generation = fleet_generation(&store.readers.get()).unwrap();
+    *store.membership_cache.lock().unwrap() = Some((generation, membership));
+}
+
+fn authenticated_member_fixture() -> (Store, String, Arc<crate::fleet::MemberKey>) {
+    const FLEET: &str = "3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58";
+    let source = Store::open_memory("birch", Arc::new(super::runtime::Plain)).unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    source.load_member_key(Some(key.clone())).unwrap();
+    let claim = source.append_claim(&ClaimInput {
+        subject: "note/provenance".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let target = Store::open_memory("cedar", Arc::new(super::runtime::Plain)).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    let exchange = source.export_replication_exchange(
+        FLEET, &target.replication_inventory().unwrap(),
+    ).unwrap();
+    target.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+    assert_eq!(target.validate_replication_backlog().unwrap().valid, 1);
+    target.project_replication_backlog().unwrap();
+    assert!(target.claim_by_id(&claim.id).unwrap().is_some());
+    // Membership folding is tested above. Pin a sealed keyed window so these controls
+    // exercise provenance itself, including its warm request-path cache.
+    cache_member_window(&target, key.public(), 0);
+    (target, claim.id, key)
+}
+
+#[test]
+fn authenticated_member_writer_accepts_a_foreign_origin_from_sealed_membership() {
+    let (store, claim, _) = authenticated_member_fixture();
+    assert!(!store.claim_has_authenticated_self_writer(&claim).unwrap());
+    for _ in 0..3 {
+        assert!(store.claim_has_authenticated_member_writer(&claim).unwrap());
+    }
+    assert!(!store.claim_has_authenticated_member_writer("missing").unwrap());
+}
+
+#[test]
+fn authenticated_member_writer_accepts_valid_records_in_a_degraded_envelope() {
+    let (store, claim, key) = authenticated_member_fixture();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h6d03218a7182 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_envelopes SET receipt_state='degraded'", [],
+    ).unwrap();
+    cache_member_window(&store, key.public(), 0);
+    assert!(store.claim_has_authenticated_member_writer(&claim).unwrap());
+    assert_eq!(
+        store.claim_ids_with_authenticated_member_writers(std::slice::from_ref(&claim)).unwrap(),
+        BTreeSet::from([claim.clone()]),
+    );
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h9e7e7a841384 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_envelope_signatures SET signature='invalid'", [],
+    ).unwrap();
+    cache_member_window(&store, key.public(), 0);
+    assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+    assert!(store.claim_ids_with_authenticated_member_writers(&[claim]).unwrap().is_empty());
+}
+
+#[test]
+fn authenticated_member_writer_rejects_legacy_wrong_key_and_outside_window() {
+    let (store, claim, key) = authenticated_member_fixture();
+    assert!(store.claim_has_authenticated_member_writer(&claim).unwrap());
+    let generation = fleet_generation(&store.readers.get()).unwrap();
+    *store.membership_cache.lock().unwrap() = Some((generation, Membership::default()));
+    assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+    let other = crate::fleet::MemberKey::generate().unwrap().0;
+    cache_member_window(&store, other.public(), 0);
+    assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+    cache_member_window(&store, key.public(), u64::MAX);
+    assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+}
+
+#[test]
+fn authenticated_member_writer_requires_origin_valid_record_admitted_envelope_and_signature() {
+    for sql in [
+        /* sqlite-large-value: allow-for-now lv-h908d794ad3e8 owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */
+        "UPDATE claims SET origin='forged-origin'",
+        /* sqlite-large-value: allow-for-now lv-h6ff49ec4f026 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_records SET state='invalid'",
+        /* sqlite-large-value: allow-for-now lv-h98f2eff88ab2 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_records SET state='pending'",
+        /* sqlite-large-value: allow-for-now lv-ha41272fe6b10 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_envelopes SET receipt_state='pending'",
+        /* sqlite-large-value: allow-for-now lv-h93f4bed1c2b4 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "DELETE FROM replica_envelope_signatures",
+        /* sqlite-large-value: allow-for-now lv-h1c91a0dec004 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_envelope_signatures SET signature='invalid'",
+        /* sqlite-large-value: allow-for-now lv-hc8361ab9b858 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_envelope_signatures SET envelope_hash='other-envelope'",
+    ] {
+        let (store, claim, key) = authenticated_member_fixture();
+        store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h622f4fdd0f6d owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+        cache_member_window(&store, key.public(), 0);
+        assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap(), "{sql}");
+        assert!(
+            store.claim_ids_with_authenticated_member_writers(&[claim]).unwrap().is_empty(),
+            "{sql}",
+        );
+    }
+}
+
+#[test]
+fn authenticated_member_writer_rejects_wrong_fleet_and_shard_signature_domains() {
+    for shard in [None, Some("another-shard")] {
+        let (store, claim, key) = authenticated_member_fixture();
+        let connection = store.connection.write();
+        let (sequence, hash): (u64, String) = connection.query_row(
+            "SELECT sequence, envelope_hash FROM replica_records WHERE claim_id=?1",
+            [&claim], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+            shard,
+            if shard.is_some() {
+                "3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58"
+            } else {
+                "another-fleet"
+            },
+            "birch", sequence, &hash,
+        ));
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hf3e2d678372b owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+            "UPDATE replica_envelope_signatures SET signature=?1", [&signature],
+        ).unwrap();
+        drop(connection);
+        cache_member_window(&store, key.public(), 0);
+        assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+        assert!(store.claim_ids_with_authenticated_member_writers(&[claim]).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn batch_authenticated_member_writers_match_scalar_keyed_and_legacy_windows() {
+    let (store, claim, key) = authenticated_member_fixture();
+    let requested = vec![claim.clone(), "missing".into(), claim.clone()];
+    let assert_parity = |expected: bool| {
+        let batch = store.claim_ids_with_authenticated_member_writers(&requested).unwrap();
+        assert_eq!(
+            batch,
+            if expected { BTreeSet::from([claim.clone()]) } else { BTreeSet::new() },
+        );
+        for id in &requested {
+            assert_eq!(batch.contains(id), store.claim_has_authenticated_member_writer(id).unwrap());
+        }
+    };
+    assert_parity(true);
+    // The same signed envelope is legacy before its incarnation's floor.
+    cache_member_window(&store, key.public(), u64::MAX);
+    assert_parity(false);
+    let generation = fleet_generation(&store.readers.get()).unwrap();
+    *store.membership_cache.lock().unwrap() = Some((generation, Membership::default()));
+    assert_parity(false);
+    let other = crate::fleet::MemberKey::generate().unwrap().0;
+    cache_member_window(&store, other.public(), 0);
+    assert_parity(false);
+    cache_member_window(&store, key.public(), 0);
+    assert_parity(true);
+    assert!(store.claim_ids_with_authenticated_member_writers(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn batch_authenticated_member_writers_verify_shared_envelope_signatures_once() {
+    let (store, claim, key) = authenticated_member_fixture();
+    let sibling = store.append_claim(&ClaimInput {
+        subject: "note/provenance-sibling".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    // Invent a second admitted record in the same envelope: only the signed envelope
+    // identity matters to this query, not the record's retained payload.
+    {
+        let connection = store.connection.write();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hb5e52f377f02 owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */
+            "UPDATE claims SET origin='birch' WHERE id=?1", [&sibling.id],
+        ).unwrap();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-he6cdb35f9041 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+            "INSERT INTO replica_records(
+                record_ref, writer, sequence, envelope_hash, position, raw, state,
+                claim_id, updated_at_unix_ms
+             ) SELECT record_ref || '-sibling', writer, sequence, envelope_hash,
+                      position + 1, raw, state, ?1, updated_at_unix_ms
+               FROM replica_records WHERE claim_id=?2",
+            params![sibling.id, claim],
+        ).unwrap();
+    }
+    let requested = vec![claim.clone(), sibling.id.clone(), claim.clone(), sibling.id.clone()];
+    for valid in [true, false] {
+        if !valid {
+            store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h85da58ff0363 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+                "UPDATE replica_envelope_signatures SET signature='invalid'", [],
+            ).unwrap();
+        }
+        cache_member_window(&store, key.public(), 0);
+        SIGNATURE_VERIFICATIONS.with(|count| count.set(0));
+        let batch = store.claim_ids_with_authenticated_member_writers(&requested).unwrap();
+        SIGNATURE_VERIFICATIONS.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(
+            batch,
+            if valid {
+                BTreeSet::from([claim.clone(), sibling.id.clone()])
+            } else {
+                BTreeSet::new()
+            },
+        );
+        for id in &requested {
+            assert_eq!(batch.contains(id), store.claim_has_authenticated_member_writer(id).unwrap());
+        }
     }
 }

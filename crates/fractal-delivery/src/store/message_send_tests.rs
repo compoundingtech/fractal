@@ -445,8 +445,8 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
     store.apply(&crate::graph::parse_test_intent(
         "version 2\nagent \"example-recipient.local\" { workspace \"/tmp/st-test\"; command \"true\"; restart always; }", "node").unwrap(),
         &BTreeMap::from([("agent/example-recipient.local".to_string(), Vec::new())]), "assistant-recipient").unwrap();
-    let grant_subject = "custom/client/assistant-v1-native-fixture";
-    let grant_id = "assistant-grant/native-fixture";
+    let grant_subject = "custom/client/assistant-v1-0123456789abcdef01234567";
+    let grant_id = "assistant-grant/0123456789abcdef01234567";
     let session_actor = format!("{principal}/session/{grant_id}");
     store.append_claim(&ClaimInput {
         subject: grant_subject.into(), kind: "custom.client.assistant.v1.granted".into(),
@@ -454,12 +454,15 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
         fields: serde_json::from_value(json!({
             "principal":principal, "session_actor":session_actor,
             "issuer":"person/robin", "disclosure_consent":true, "policy_revision":1,
+            "credential_hash":"a".repeat(64), "minimal_read_mode":"approval-once",
             "expires_at_unix_ms":now_ms() as u64 + 60_000,
             "scopes":["write.assistant.messages"], "recipient_allowlist":["agent/example-recipient.local"],
             "grant_id":grant_id
         })).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
+    // Complete fixture authority maintenance before exercising the writer recheck.
+    while !store.advance_assistant_grant_authority_backfill().unwrap() {}
     let authorization = assistant_write::AssistantWriteAuthorization {
         grant_subject: grant_subject.into(), actor: session_actor.clone(),
         owner: "person/robin".into(), policy_revision: 1, scope: "write.assistant.messages".into(),
@@ -490,4 +493,53 @@ fn assistant_provenance_stamps_authenticated_grant_and_preserves_replica_admissi
     wrong_actor.actor = Some("person/other".into());
     assert_eq!(store.append_assistant_claim_outcome(&wrong_actor, &authorization).unwrap_err().code, "forbidden");
     }
+}
+
+#[test]
+fn writer_recheck_fences_dirty_subject_without_exposing_projection_state() {
+    let store = Store::open_memory("node").unwrap();
+    store.apply(&crate::graph::parse_test_intent(
+        "version 2\nagent \"example-recipient.local\" { workspace \"/tmp/st-test\"; command \"true\"; restart always; }", "node").unwrap(),
+        &BTreeMap::from([("agent/example-recipient.local".to_string(), Vec::new())]), "assistant-recipient").unwrap();
+    let grant_subject = "custom/client/assistant-v1-0123456789abcdef01234567";
+    let grant_id = "assistant-grant/0123456789abcdef01234567";
+    let session_actor = format!("assistant/chatgpt/session/{grant_id}");
+    let granted = store.append_claim(&ClaimInput {
+        subject: grant_subject.into(), kind: "custom.client.assistant.v1.granted".into(),
+        actor: Some("person/robin".into()),
+        fields: serde_json::from_value(json!({
+            "principal":"assistant/chatgpt", "session_actor":session_actor,
+            "issuer":"person/robin", "disclosure_consent":true, "policy_revision":1,
+            "credential_hash":"a".repeat(64), "minimal_read_mode":"approval-once",
+            "expires_at_unix_ms":u64::MAX, "scopes":["write.assistant.messages"],
+            "grant_id":grant_id
+        })).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    // Settle the valid fixture before injecting dirty state; the writer must not repair it.
+    while !store.advance_assistant_grant_authority_backfill().unwrap() {}
+    let authorization = assistant_write::AssistantWriteAuthorization {
+        grant_subject: grant_subject.into(), actor: session_actor,
+        owner: "person/robin".into(), policy_revision: 1,
+        scope: "write.assistant.messages".into(),
+        recipient: Some("agent/example-recipient.local".into()),
+    };
+    let mut input = request();
+    input.actor = Some("assistant/chatgpt".into());
+    input.fields.insert("from".into(), json!("assistant/chatgpt"));
+    input.fields.insert("to".into(), json!("agent/example-recipient.local"));
+    // An unrelated pending claim must not prevent the actual mutation transaction.
+    store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-hb8891f8aff3c owner=fractal_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES('unrelated-claim')", [],
+    ).unwrap();
+    assert!(store.append_assistant_claim_outcome(&input, &authorization).unwrap().1);
+    input.subject = "message/assistant-dirty-subject-denied".into();
+    input.idempotency_key = Some("assistant-dirty-subject-denied".into());
+    store.connection.lock().unwrap().execute(
+        /* sqlite-large-value: allow-for-now lv-he8ff1a0f8ec1 owner=fractal_delivery::store::message_send_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&granted.id],
+    ).unwrap();
+    let error = store.append_assistant_claim_outcome(&input, &authorization).unwrap_err();
+    assert_eq!(error.code, "forbidden");
+    assert_eq!(error.message, "assistant write authorization changed or expired before commit");
+    assert!(store.latest_claim(&input.subject, None).unwrap().is_none());
 }

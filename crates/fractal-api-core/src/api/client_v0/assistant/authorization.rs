@@ -120,12 +120,11 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
     validate_trust(&trust)?;
     let _transition = TRANSITIONS.lock().await;
     let subject = subject(&id)?;
-    let granted = latest(&state, &subject, GRANTED)?
-        .ok_or_else(|| ApiError::not_found("assistant grant does not exist"))?;
-    if granted.origin != state.store.origin() || latest(&state, &subject, REVOKED)?.is_some() {
+    let granted = super::super::external_grants::owner_grant(&state,&id)?;
+    if granted.origin != state.store.origin() || super::super::external_grants::owner_revoked(&state, &granted)? {
         return Err(forbidden("read trust requires the active grant's authoritative issuer"));
     }
-    let previous = effective(&state, &granted)?;
+    let previous = super::super::external_grants::owner_effective(&state, &granted)?;
     let mut value = fields(&previous)?.clone();
     value["principal"] = json!(principal(fields(&granted)?)?);
     value["read_trust"] = serde_json::to_value(trust).map_err(ApiError::internal)?;
@@ -137,7 +136,7 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
     audit(&state, "pin-read-attestor", &session.actor, session.transport, Some(&id), None, &result)?;
     result?;
     signal_changed(&state);
-    Ok(Json(projection(&state, &granted)?))
+    Ok(Json(super::super::external_grants::owner_projection(&state, &granted)?))
 }
 
 pub fn parameters(uri: &axum::http::Uri) -> Result<BTreeMap<String,String>, ApiError> {

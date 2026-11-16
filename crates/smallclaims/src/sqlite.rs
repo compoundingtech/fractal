@@ -2042,7 +2042,7 @@ pub mod histogram {
 #[cfg(any(test, feature = "test-support"))]
 pub mod work {
     use std::collections::BTreeMap;
-    use std::ffi::{c_int, c_uint, c_void};
+    use std::ffi::{CStr, c_int, c_uint, c_void};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, PoisonError};
 
@@ -2121,6 +2121,33 @@ pub mod work {
         }
     }
 
+    static STATEMENT_WORK: Mutex<Option<BTreeMap<String, SqliteWork>>> = Mutex::new(None);
+
+    /// Opt-in, process-global statement detail for serial request-cost tests.
+    /// Like `total`, this includes work on blocking and receipt-writer threads.
+    /// This module exists only in tests or with the `test-support` feature.
+    pub struct SqliteStatementWorkScope;
+
+    impl SqliteStatementWorkScope {
+        pub fn start() -> Self {
+            let mut work = STATEMENT_WORK.lock().unwrap_or_else(PoisonError::into_inner);
+            assert!(work.is_none(), "statement-work collection cannot overlap");
+            *work = Some(BTreeMap::new());
+            Self
+        }
+
+        pub fn finish(self) -> BTreeMap<String, SqliteWork> {
+            STATEMENT_WORK.lock().unwrap_or_else(PoisonError::into_inner)
+                .take().expect("statement-work collection is active")
+        }
+    }
+
+    impl Drop for SqliteStatementWorkScope {
+        fn drop(&mut self) {
+            *STATEMENT_WORK.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        }
+    }
+
     /// Count `connection`'s statements. SQLite reports each one when it starts and when it
     /// finishes, also when a trigger or a foreign-key check did the work inside it.
     pub(super) fn count(connection: &Connection) {
@@ -2180,12 +2207,45 @@ pub mod work {
             next.autoindex_rows = next.autoindex_rows.saturating_add(spent(3));
             total.set(next);
         });
+        let mut statements = STATEMENT_WORK.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(statements) = statements.as_mut() {
+            // SAFETY: SQLite owns this statement and its SQL until the callback returns.
+            let sql = unsafe { ffi::sqlite3_sql(statement) };
+            if !sql.is_null() {
+                let sql = unsafe { CStr::from_ptr(sql) }.to_string_lossy().into_owned();
+                let work = statements.entry(sql).or_default();
+                work.statements += 1;
+                work.vm_steps += spent(0);
+                work.fullscan_steps += spent(1);
+                work.sorts += spent(2);
+                work.autoindex_rows += spent(3);
+            }
+        }
         0
     }
 
     #[cfg(test)]
     mod scope_tests {
         use super::*;
+
+        #[test]
+        fn assistant_grant_statement_work_groups_actual_vm_and_releases_scope() {
+            let connection = Connection::open_in_memory().unwrap();
+            count(&connection);
+            let scope = SqliteStatementWorkScope::start();
+            let mut statement = connection.prepare("SELECT 42").unwrap();
+            for _ in 0..2 {
+                assert_eq!(statement.query_row([], |row| row.get::<_, u64>(0)).unwrap(), 42);
+            }
+            connection.query_row("SELECT 43", [], |row| row.get::<_, u64>(0)).unwrap();
+            let actual_vm = statement.get_status(rusqlite::StatementStatus::VmStep) as u64;
+            let work = scope.finish();
+            assert_eq!(work["SELECT 42"].statements, 2);
+            assert_eq!(work["SELECT 42"].vm_steps, actual_vm);
+            assert_eq!(work["SELECT 43"].statements, 1);
+            drop(SqliteStatementWorkScope::start());
+            drop(SqliteStatementWorkScope::start());
+        }
 
         #[test]
         fn scoped_vm_is_actual_statement_work_and_excludes_other_threads() {
