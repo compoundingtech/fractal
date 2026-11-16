@@ -30,9 +30,12 @@ extension InboxActivity {
     case unclassifiedClaims
   }
 
-  public init(period: Period, arrivals: Series, resolutions: Series, askType: String, updateType: String) throws {
+  public init(
+    period: Period, arrivals: Series, resolutions: Series, askType: String, updateType: String
+  ) throws {
     guard arrivals.from == resolutions.from, arrivals.to == resolutions.to,
-      arrivals.bucketSeconds == period.bucketSeconds, resolutions.bucketSeconds == period.bucketSeconds,
+      arrivals.bucketSeconds == period.bucketSeconds,
+      resolutions.bucketSeconds == period.bucketSeconds,
       arrivals.groupBy == resolutions.groupBy, arrivals.buckets.count == resolutions.buckets.count
     else { throw SeriesError.inconsistentBuckets }
     func counts(_ bucket: Series.Bucket) throws -> Counts {
@@ -49,7 +52,9 @@ extension InboxActivity {
       return counts
     }
     let buckets = try zip(arrivals.buckets, resolutions.buckets).map { incoming, outgoing in
-      guard incoming.start == outgoing.start, incoming.end == outgoing.end, incoming.end > incoming.start else {
+      guard incoming.start == outgoing.start, incoming.end == outgoing.end,
+        incoming.end > incoming.start
+      else {
         throw SeriesError.inconsistentBuckets
       }
       return Bucket(

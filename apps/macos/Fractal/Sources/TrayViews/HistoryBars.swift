@@ -8,6 +8,7 @@ struct HistoryBars: View {
   }
   let buckets: [[Segment]]
   let maximum: Double
+  var minimumBarHeight: CGFloat = 0
   var diverging = false
   var hovered: Int?
 
@@ -18,15 +19,17 @@ struct HistoryBars: View {
       let baseline = diverging ? size.height / 2 : size.height
       let scale = baseline / max(1, maximum)
       if diverging {
-        context.fill(Path(CGRect(x: 0, y: baseline - 0.5, width: size.width, height: 1)), with: .color(.secondary.opacity(0.3)))
+        context.fill(
+          Path(CGRect(x: 0, y: baseline - 0.5, width: size.width, height: 1)),
+          with: .color(.secondary.opacity(0.3)))
       }
       for (index, segments) in buckets.enumerated() {
         var positive: CGFloat = 0
         var negative: CGFloat = 0
-        for segment in segments where segment.value != 0 {
-          let height = CGFloat(abs(segment.value)) * scale
+        for segment in segments where segment.value != 0 || minimumBarHeight > 0 {
+          let height = max(minimumBarHeight, CGFloat(abs(segment.value)) * scale)
           let y: CGFloat
-          if segment.value > 0 {
+          if segment.value >= 0 {
             positive += height
             y = baseline - positive
           } else {
@@ -34,7 +37,9 @@ struct HistoryBars: View {
             negative += height
           }
           let rect = CGRect(x: CGFloat(index) * step, y: y, width: max(1, step - 1), height: height)
-          context.fill(Path(rect), with: .color(segment.color.opacity(hovered.map { $0 == index ? 1 : 0.35 } ?? 1)))
+          context.fill(
+            Path(rect),
+            with: .color(segment.color.opacity(hovered.map { $0 == index ? 1 : 0.35 } ?? 1)))
         }
       }
     }
