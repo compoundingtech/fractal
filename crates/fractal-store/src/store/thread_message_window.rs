@@ -25,6 +25,18 @@ pub enum TimelineItem {
 pub struct TimelinePage {
     pub items: Vec<TimelineItem>,
     pub next_cursor: Option<String>,
+    // COMPILE-ONLY CONTRACT STUB: root patch supplies both fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<TimelineAnchor>,
+}
+
+// COMPILE-ONLY CONTRACT STUB: root patch supplies seek semantics.
+#[derive(serde::Serialize)]
+pub struct TimelineAnchor {
+    pub message_id: String,
+    pub state: &'static str,
 }
 
 /// Count admitted messages and determine whether a person still has an incoming reply to read.
@@ -212,8 +224,14 @@ pub fn mixed_timeline(
     person: &str,
     thread: &str,
     cursor: Option<&str>,
+    around: Option<&str>,
     limit: usize,
 ) -> Result<TimelinePage, FractalError> {
+    if around.is_some() {
+        return Err(FractalError::new(
+            "unread-store-not-linked", "compile-only stub: root unread store patch is not linked",
+        ));
+    }
     store
         .graph
         .read_snapshot(|index| {
@@ -366,7 +384,7 @@ fn read(
     let next_cursor = last
         .filter(|_| has_more)
         .map(|last| format!("{scope}:{through}:{last}"));
-    Ok(TimelinePage { items, next_cursor })
+    Ok(TimelinePage { items, next_cursor, previous_cursor: None, anchor: None })
 }
 
 /// Resolve the same canonical admitted message from a previously issued content handle.
