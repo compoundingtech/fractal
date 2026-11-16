@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -60,7 +60,13 @@ export const prepareChangelogBuild = async ({ privateBuild, deployment, registri
     deployment: selected,
     entryIds: entries.map(({ id }) => id),
     privateEntries,
-    privateDirectory: hasPrivate ? dirname(registries.private).replaceAll('\\', '/') : undefined,
+    // Protect configured and native paths, including a registry file symlinked
+    // outside its directory. Vite may retain or resolve either identity.
+    privateDirectories: hasPrivate ? [...new Set([
+      dirname(registries.private),
+      realpathSync.native(dirname(registries.private)),
+      dirname(realpathSync.native(registries.private)),
+    ].map((directory) => directory.replaceAll('\\', '/')))] : [],
     compile: (build) => compileChangelog({ build, sources, audience, inventory }),
   }
 }
@@ -81,12 +87,14 @@ export const evaluateBuildIdentityModule = async (code) => {
  * from the private changelog directory, and no private entry id, title, summary or link in any
  * emitted chunk or asset.
  */
-export const assertPublicChangelogBoundary = ({ manifest, privateEntries, privateDirectory, modules, texts }) => {
+export const assertPublicChangelogBoundary = ({ manifest, privateEntries, privateDirectories, modules, texts }) => {
   const privateInManifest = manifest?.entries.filter(({ visibility }) => visibility !== 'public') ?? []
   if (privateInManifest.length > 0)
     throw new Error(`${leak} entries into its manifest: ${privateInManifest.map(({ id }) => id).join(', ')}`)
-  const privateModules = privateDirectory === undefined ? []
-    : modules.filter((id) => id.replaceAll('\\', '/').startsWith(`${privateDirectory}/`))
+  const privateModules = modules.filter((id) => {
+    const path = id.replace(/^\0/u, '').replace(/^\/@fs(?=\/)/u, '').replaceAll('\\', '/')
+    return privateDirectories.some((directory) => path.startsWith(`${directory}/`))
+  })
   if (privateModules.length > 0) throw new Error(`${leak} modules: ${privateModules.join(', ')}`)
   const body = texts.join('\n')
   for (const entry of privateEntries)
