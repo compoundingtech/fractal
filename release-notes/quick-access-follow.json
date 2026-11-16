@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Only matching completed receipts settle repeated checks. Source reads and replay refusals cannot settle original ambiguity. State is in memory only, not a durable outbox. No application controls or active writes are enabled by this helper."
+    "detail": "Only matching completed receipts settle ambiguous stages. A definite first-attempt create race may instead validate the reserved live owner/v2 identity; failed validation retains explicit GET-only recovery. Source reads and replay refusals never settle an ambiguous original. State is in memory only, not a durable outbox. No application controls or active writes are enabled by this helper."
   }
 }

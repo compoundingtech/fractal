@@ -155,7 +155,9 @@ Refresh explicitly reopens an interrupted stream without polling or edit replay.
 Retain the same follow instance across ordinary disconnects. Its `unconfirmed`
 phase blocks fresh edits through reads and reconnects. **Check delivery** calls
 `checkEdit()` with the same original request stage; matching completed receipts
-settle it. Other statuses are not inferred to guarantee nonapplication. A replay
+settle ambiguous writes. First-attempt canonical create-race refusal may instead
+validate the exact live owner/v2 identity; failed validation retains an explicit
+GET-only recovery step. Other statuses do not guarantee nonapplication. A replay
 refusal cannot settle an originally ambiguous attempt. Recovery is in memory only;
 closing the follow or exiting the process discards it.
 

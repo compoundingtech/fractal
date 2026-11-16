@@ -191,3 +191,20 @@ test('an explicit retired refusal remains terminal even if this client never saw
   assert.equal(h.states.at(-1).editable, false);
   assert.match(h.states.at(-1).detail, /Restoring removed Pins/); follow.close();
 });
+
+
+test('create-race validation recovery is explicit GET-only and truthfully described', async () => {
+  const h = setup({ absent: true, actionReply: action => action.type === 'arrangement.edit'
+    ? Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'arrangement-exists', message: 'already exists', retryable: false }, { status: 409 }) : 'completed' });
+  const follow = await followQuickAccess({ gateway: h.client, onState: h.onState, v2ReadersReady: true });
+  const original = h.client.arrangementsGet.bind(h.client); let lost = false;
+  h.client.arrangementsGet = async (...args) => { if (!lost) { lost = true; throw new TypeError('adoption GET lost'); } return original(...args); };
+  await assert.rejects(follow.edit(identity, [{ op: 'place', member: 'agent/example', bucket: null, key: 'a0' }], { ...identity, id: 'action/create', idempotency_key: 'pins-create-00001' }));
+  assert.equal(h.states.at(-1).phase, 'unconfirmed'); assert.equal(h.states.at(-1).editable, false);
+  assert.match(h.states.at(-1).detail, /create request was not applied/);
+  await follow.refresh(); assert.equal(h.actions.length, 1, 'Refresh never sends the retained member');
+  assert.equal(h.states.at(-1).phase, 'unconfirmed');
+  await follow.checkEdit();
+  assert.deepEqual(h.actions.map(a => a.type), ['arrangement.edit', 'arrangement.membership.edit']);
+  assert.equal(h.actions[1].id, identity.id); assert.equal(h.states.at(-1).editable, true); follow.close();
+});
