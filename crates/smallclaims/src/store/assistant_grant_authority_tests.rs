@@ -317,6 +317,10 @@ fn raw_claims(store: &Store) -> Vec<ClaimRecord> {
 // This intentionally knows the fixture's wire contract, not the projection's validator,
 // pending table, or authority rows. Authentication goes through the public raw-provenance API.
 fn reference(store: &Store) -> Vec<(String, String, bool)> {
+    reference_for(store, OWNER, &["read.assistant.summary"])
+}
+
+fn reference_for(store: &Store, owner: &str, scopes: &[&str]) -> Vec<(String, String, bool)> {
     let claims = raw_claims(store);
     let trusted = |claim: &ClaimRecord| {
         claim.origin == store.origin
@@ -324,8 +328,8 @@ fn reference(store: &Store) -> Vec<(String, String, bool)> {
     };
     let identity = |claim: &ClaimRecord| {
         let f = &claim.body["fields"];
-        claim.subject == SUBJECT && claim.actor.as_deref() == Some(OWNER)
-            && f["issuer"] == OWNER && f["grant_id"] == fields()["grant_id"]
+        claim.subject == SUBJECT && claim.actor.as_deref() == Some(owner)
+            && f["issuer"] == owner && f["grant_id"] == fields()["grant_id"]
             && f["principal"] == "assistant/chatgpt" && f["profile"] == "assistant"
     };
     let policy = |claim: &ClaimRecord| {
@@ -333,7 +337,7 @@ fn reference(store: &Store) -> Vec<(String, String, bool)> {
         identity(claim) && f["session_actor"] == fields()["session_actor"]
             && f["minimal_read_mode"] == "approval-once" && f["disclosure_consent"] == true
             && f["expires_at_unix_ms"].as_u64().is_some()
-            && f["scopes"] == json!(["read.assistant.summary"])
+            && f["scopes"] == json!(scopes)
             && f.get("credential").is_none() && f.get("code").is_none()
             && f["credential_hash"].as_str().is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
     };
@@ -358,7 +362,10 @@ fn reference(store: &Store) -> Vec<(String, String, bool)> {
 }
 
 fn assert_reference_and_rebuild(store: &Store) {
-    let expected = reference(store);
+    assert_reference_and_rebuild_expected(store, reference(store));
+}
+
+fn assert_reference_and_rebuild_expected(store: &Store, expected: Vec<(String, String, bool)>) {
     let mut connection = store.connection.write();
     let actual: Vec<(String, String, bool)> = connection.prepare(
         "SELECT claim_id,expires_at,revoked FROM assistant_grant_effective ORDER BY claim_id"
@@ -2943,7 +2950,11 @@ fn assistant_grant_authority_cross_version_fixture() {
             let revoke = authority::latest(&store.readers.get(),SUBJECT,REVOKED).unwrap().unwrap();
             assert!(store.claim_has_authenticated_member_writer(&revoke.id).unwrap(),
                 "old append must authenticate through genuine signed membership after re-upgrade");
-            assert_reference_and_rebuild(&store);
+            let expected = reference_for(&store, "person/owner", &[
+                "read.assistant.summary","read.assistant.attention",
+                "read.assistant.missions","read.assistant.agents",
+            ]);
+            assert_reference_and_rebuild_expected(&store, expected);
         }
     } else {
         panic!("unknown AUTHORITY_CROSS_VERSION_PHASE: {phase}");
