@@ -14,6 +14,10 @@ struct Acquire {
     capacity: Option<fractal_runtime::Capacity>,
     coverage: Coverage,
     admission_timeout: Option<String>,
+    #[serde(default)]
+    class: fractal_runtime::RequestClass,
+    disk: Option<fractal_runtime::DiskRequest>,
+    io: Option<fractal_runtime::IoClass>,
 }
 fn one() -> u32 { 1 }
 
@@ -214,13 +218,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let lane = LaneRequest {
                     id: request.idempotency_key(), name: options.name, host: options.host,
                     max_members: options.max_members, capacity: options.capacity, coverage: options.coverage,
+                    class: options.class, disk: options.disk, io: options.io,
                     admission_timeout_ms: options.admission_timeout.as_deref()
                         .map(|duration| crate::declaration_syntax::parse_duration(duration, true)).transpose()?,
                     owner: Owner { run: run.subject.clone(), step: request.step.clone(), attempt: request.attempt,
                         invocation: Some(format!("program:{}", request.key)) },
                 };
-                let fit = self.resource_lane_fit(&lane.id, lane.capacity)?;
+                let fit = self.resource_lane_fit(&lane)?;
                 let admission = self.store.request_resource_membership(&lane, fit, now)?;
+                if !matches!(&admission, Admission::Queued { .. }) {
+                    self.seat_admission.status.state().lane_waits.retain(|wait| wait.subject != lane.id);
+                }
                 if cancelled {
                     self.store.withdraw_resource_membership(&lane.id, &lane.owner, now)?;
                     let record = self.store.resource_membership_record(&lane.id, &lane.owner)?;
@@ -430,6 +438,7 @@ mission "retry-lane" state="ready" {{
                 let old = LaneRequest {
                     id: "failed-attempt".into(), name: "heavy-gate".into(), host: "node".into(),
                     max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+                    class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
                     owner: Owner { run: run.subject.clone(), step: view.subject.clone(), attempt: view.attempt,
                         invocation: Some("program:heavy-gate".into()) },
                 };
@@ -506,6 +515,7 @@ mission "retry-child" state="ready" {{
         let old = LaneRequest {
             id: "parent-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
             capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: parent.subject.clone(), step: parent.steps[0].subject.clone(), attempt: 1,
                 invocation: Some("program:scope".into()) },
         };
@@ -585,6 +595,7 @@ mission "window-child" state="ready" {{
             let old = LaneRequest {
                 id: "uncertain-scope".into(), name: "heavy-gate".into(), host: "node".into(), max_members: 1,
                 capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+                class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
                 owner: Owner { run: run.subject.clone(), step: subject.clone(), attempt: 1,
                     invocation: Some("program:scope".into()) },
             };
@@ -726,6 +737,7 @@ mission "resource-child" state="ready" {
         let lane = LaneRequest {
             id: "scope-holder".into(), name: "child-scope".into(), host: "node".into(),
             max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: "mission-run/parent".into(), step: "step-run/parent/work".into(),
                 attempt: 1, invocation: None },
         };
@@ -769,6 +781,7 @@ mission "resource-child" state="ready" {
         let lane = LaneRequest {
             id: "unknown-scope".into(), name: "child-scope".into(), host: "node".into(),
             max_members: 1, capacity: None, coverage: Coverage::Logical, admission_timeout_ms: None,
+            class: fractal_runtime::RequestClass::Agent, disk: None, io: None,
             owner: Owner { run: "mission-run/parent".into(), step: "step-run/parent/work".into(),
                 attempt: 1, invocation: None },
         };
