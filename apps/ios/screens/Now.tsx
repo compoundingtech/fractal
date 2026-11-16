@@ -111,6 +111,7 @@ export function NowScreen() {
         <AutoResolvedSection rows={autoRows} />
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
         <ThreadViewport viewport={threadViewport}>
+          <ThreadGroup title="Marked unread" context={{ marked_unread: true }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
           <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={(id, title) => navigation.navigate('Thread', { id, title })} />
         </ThreadViewport>
       </View>}

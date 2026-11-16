@@ -61,9 +61,11 @@ Thread action failures, validation issues, changed read errors and quote selecti
 Timeline relative ages are visual-only: message and lifecycle accessibility labels use the stable sender, exact date/time and content, so the shared second tick does not repeatedly change VoiceOver's focused label.
 
 Expanded threads (including those hosted by Conversation and Inbox) acknowledge only
-measured message text in the focused, foreground view. Collapsed rows and background
-tabs never count. A clipped edge or an author label is not text visibility. Natural
-read history remains forward-only and separate from the private unread reminder.
+measured message text stably visible for 500 ms in the focused, foreground view.
+The body must have full width, its trailing end visible, and at least two lines.
+Visibility, focus, AppState and layout changes reset the timer. Collapsed rows,
+background tabs, clipped edges and author labels never count. Natural read history
+remains forward-only and separate from the private unread reminder.
 
 `unreadVisit.ts` owns visit capture and observed-remove intent logic. A reminder
 created or first observed during a visit is sticky until a later visit; automatic
@@ -73,19 +75,32 @@ marks. IDs enter only through `Summary.unread_reminder`, never action receipts,
 timestamps or locally generated identifiers. Unavailable anchors keep their reminder;
 pending seek metadata shows no body and cannot activate a badge.
 
-`unreadActions.ts` is the typed client-API seam. The current client has natural
-`thread.read`, but no generated reminder edits/around seek. Mark unread is disabled
-until that seam is bound, even with `control.messages`; read-only clients have no
-mark controls. The reminder indicator uses only the authoritative summary, never
-natural unread or guessed seek state. The new lifecycle and domain tests run with
-`node --experimental-transform-types --import ./testHooks.mjs --test unreadVisit.test.mjs unreadVisitNative.test.mjs`.
+`unreadActions.ts` is the typed action boundary; `unreadClient.ts` binds canonical
+generated `threadMarkUnread`, `threadClearUnread`, `threadTimeline({around})`, and
+`threadList({marked_unread:true})`. Store delivery retains the existing bound request,
+fence refresh, receipt shim and original-request retry. Action operation IDs never
+become reminder mark IDs. Read-only clients have no mark controls. Reminders are
+canonically decoded from the summary; seek metadata cannot create a badge.
+Generic `thread-unavailable` seek refusal maps to unavailable, not Pending. Only an
+explicit Pending response can show that state; neither exposes an unrelated body.
+Seeking itself never acknowledges a message.
 
-The future owner-wide `thread.list(marked_unread=true)` adapter uses
-`readMarkedUnread` in `unreadPaging.ts`. Empty pages may still have a continuation;
-only cursor exhaustion permits the empty state. The injected fetch port is local,
-not a proposed wire shape. Repeated cursors, fetch failures, and the 20-page default
-bound return typed errors (with partial rows), never a misleading empty/complete
-list. `unreadPaging.test.mjs` covers those cases and empty-page prefixes.
+The owner-wide Marked unread section uses `readMarkedUnread` in `unreadPaging.ts`.
+Empty pages may still have a continuation; only cursor exhaustion permits an empty
+state. Repeated cursors, fetch failures, and the 20-page default bound return typed
+errors (with partial rows), never a misleading empty/complete list. Only rows whose
+summary carries an authoritative reminder are listed; natural unread alone never is.
+Its private reminder marker is distinct from natural unread and does not change the
+count, and the section header adds no count of its own (visually or for VoiceOver).
+Opening a marked row seeks its return anchor. The section sits on Now above Recently
+closed threads and is read on focus and refresh, not followed. A current anchor opens
+the shared thread body on that page (older history continues from it; Open thread
+shows the latest); unavailable and pending anchors show only their notice. Visible
+evidence counts whole rendered Markdown lines (two, including the last), never
+paragraph spacing. Loading wrappers (detail, Inbox start, expanded rows) start the
+visit entry with the same placement key before the body mounts, so a reminder that
+loads after entry is never captured. Focused node coverage lives beside the visit
+reducer, native lifecycle, client adapter, list UI and paging helper.
 
 
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.

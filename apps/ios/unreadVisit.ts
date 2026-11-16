@@ -1,11 +1,8 @@
-// Frozen unread-store-contract-frozen-2. These are domain types, not client-v0
-// request shapes. Replace their declarations with generated types when available.
-export type ThreadUnreadMark = { readonly mark_id: string; readonly anchor_message_id: string };
-export type ThreadUnreadReminder = { readonly marks: readonly ThreadUnreadMark[]; readonly anchor_message_id: string };
-// unread is deliberately not used here: old clients expose a boolean; the frozen
-// store exposes the natural count. Neither is the private reminder.
-export type UnreadSummary = { readonly unread?: boolean | number; readonly unread_reminder?: ThreadUnreadReminder | null };
-export type Anchor = { readonly message_id: string; readonly state: 'current' | 'unavailable' | 'pending' };
+import type { ThreadSummary, ThreadTimelineAnchor, ThreadUnreadMark, ThreadUnreadReminder } from '../../clients/typescript/fractal-client';
+import { decodeUnknownSync, ThreadUnreadReminder as ReminderSchema } from '../../clients/typescript/fractal-client/Schema.generated.ts';
+export type { ThreadUnreadMark, ThreadUnreadReminder };
+export type UnreadSummary = Pick<ThreadSummary, 'unread' | 'unread_reminder'>;
+export type Anchor = ThreadTimelineAnchor;
 
 /** Seek metadata alone is never content, read evidence, or badge authority. */
 export const anchorPresentation = (anchor: Anchor): { body: boolean; notice?: string } => {
@@ -15,8 +12,15 @@ export const anchorPresentation = (anchor: Anchor): { body: boolean; notice?: st
     case 'pending': return { body: false, notice: 'The return message is not known yet.' };
   }
 };
-export const reminderFromSummary = (summary: UnreadSummary | undefined): ThreadUnreadReminder | undefined =>
-  summary?.unread_reminder?.marks.length ? summary.unread_reminder : undefined;
+export const reminderFromSummary = (summary: UnreadSummary | undefined): ThreadUnreadReminder | undefined => {
+  const reminder = summary?.unread_reminder;
+  if (!reminder) return undefined;
+  // Canonical decoding is mandatory even for summaries arriving over the feed.
+  // Preserve the generated wire DTO rather than its decoded Option fields.
+  try { decodeUnknownSync(ReminderSchema, 'strict')(reminder); }
+  catch { return undefined; }
+  return reminder.marks.length ? reminder : undefined;
+};
 
 export type UnreadEdit =
   | { readonly kind: 'mark'; readonly anchor_message: string; readonly observed_marks: readonly string[] }
@@ -63,8 +67,11 @@ export const visitControl = (state: VisitState, event: VisitEvent): VisitTransit
   const quiet = (next = state): VisitTransition => ({ state: next, effects: [] });
   switch (event.kind) {
     case 'start':
-      // Idempotent focus/foreground notifications must not recapture this visit's marks.
-      return quiet(state.visit ? state : { ...state, visit: {
+      // Entry is the only capture point, including Unknown entry summaries.
+      // A remount/refocus may restore visibility but must never recapture marks.
+      return quiet(state.visit ? { ...state, visit: { ...state.visit,
+        foreground: event.foreground, visible: event.visible,
+      } } : { ...state, visit: {
         foreground: event.foreground, visible: event.visible,
         captured: state.reminder?.marks.slice() ?? [], viewed: [], read: [], clearing: [],
       } });

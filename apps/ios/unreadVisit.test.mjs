@@ -144,3 +144,15 @@ test('property: every subset/permutation clears exactly the captured, still-acti
     assert.ok(!actual.includes(concurrent.mark_id));
   }
 });
+
+test('Unknown entry stays uncaptured until a real navigation exit, while start restores visibility', () => {
+  const control = new UnreadVisitController(unreadVisit(true, true));
+  control.send({ kind: 'start', foreground: true, visible: true });
+  control.observe(summary(mark('opaque/late', 'message/a')));
+  control.send({ kind: 'visibility', value: false });
+  control.send({ kind: 'start', foreground: true, visible: true });
+  assert.deepEqual(clears(view(control, ['message/a'])), []);
+  control.send({ kind: 'end' });
+  control.send({ kind: 'start', foreground: true, visible: true });
+  assert.deepEqual(clears(view(control, ['message/a'])), ['opaque/late']);
+});

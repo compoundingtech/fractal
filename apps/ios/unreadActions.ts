@@ -1,17 +1,17 @@
-import { visitControl, type Anchor, type UnreadEdit, type UnreadSummary, type VisitEffect, type VisitEvent, type VisitState, type VisitTransition } from './unreadVisit.ts';
+import { visitControl, type UnreadEdit, type UnreadSummary, type VisitEffect, type VisitEvent, type VisitState, type VisitTransition } from './unreadVisit.ts';
 import type { ThreadEditResult } from './threadEdits.ts';
+import type { UnreadSeek } from './unreadClient.ts';
 
 /** Domain ports, NOT proposed client-v0 wire parameters or action-result shapes. */
 export interface UnreadActions {
   read(messageIds: readonly string[]): Promise<UnreadActionResult>;
   edit(edit: UnreadEdit): Promise<UnreadActionResult>;
-  seek(anchorMessageId: string): Promise<Anchor>;
+  seek(anchorMessageId: string): Promise<UnreadSeek>;
 }
 export type UnreadActionResult = ThreadEditResult;
 export type UnreadAPI = { readonly state: 'pending-api' } | { readonly state: 'ready'; readonly actions: UnreadActions };
-/** TODO(client-v0): bind generated mark/clear/around calls and their bound retries here.
- * Never reuse thread.read as a clear, mint mark IDs, or use action-result.operation_id.
- * The adapter must retain the original signed request for unknown-outcome retries.
+/** Unbound ports are retained for clients without the thread capability. Production
+ * clients bind generated calls in unreadClient, with the store's bound retries.
  */
 export const pendingUnreadAPI: UnreadAPI = { state: 'pending-api' };
 
