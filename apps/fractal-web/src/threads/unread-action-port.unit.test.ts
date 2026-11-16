@@ -49,6 +49,7 @@ const harness = ({
     baseUrl: 'https://gateway.invalid',
     fetchImpl: async input => {
       requests.push(new URL(String(input)))
+      if (requests.at(-1)?.pathname.endsWith('/capabilities')) return Response.json(fixture.capabilities)
       const value = await response
       return value instanceof Response ? value : Response.json({ ...fixture.capabilities, value })
     },
@@ -58,10 +59,15 @@ const harness = ({
     send: async (thread, edit) => { sent.push({ thread, edit }); return sendResult },
     onFound: (id, found) => { hydrated.push({ threadId: id, page: found }) },
   })
-  return { port, registry, access, detail, sent, hydrated, requests }
+  return { port, client, registry, access, detail, sent, hydrated, requests }
 }
 
 describe('gateway unread reminders', () => {
+  it('serves canonical timeline fixtures through the actual client transport', async () => {
+    const { client } = harness()
+    const response = await client.threadTimeline(threadId, { around: anchor, limit: 40 })
+    expect(Native.decodeUnknownSync(Native.ThreadTimelinePage)(response.value).anchor?.state).toBe('current')
+  })
   it('reads only authoritative reminder marks, independently of natural unread', () => {
     const { port, registry, detail, requests } = harness()
     const reminder = port.reminder(threadId)
@@ -120,10 +126,11 @@ describe('gateway unread reminders', () => {
   it('seeks using the exact around API and hydrates only its real current message', async () => {
     const { port, requests, hydrated } = harness()
     await expect(port.seek({ threadId, anchor_message_id: anchor })).resolves.toEqual({ _tag: 'Found', messageId: anchor })
-    expect(requests).toHaveLength(1)
-    expect(requests[0]?.pathname).toBe('/v1/client/threads/example/timeline')
-    expect(requests[0]?.searchParams.get('around')).toBe(anchor)
-    expect(requests[0]?.searchParams.has('cursor')).toBe(false)
+    expect(requests).toHaveLength(2)
+    expect(requests[0]?.pathname).toBe('/v1/client/capabilities')
+    expect(requests[1]?.pathname).toBe('/v1/client/threads/example/timeline')
+    expect(requests[1]?.searchParams.get('around')).toBe(anchor)
+    expect(requests[1]?.searchParams.has('cursor')).toBe(false)
     expect(hydrated).toHaveLength(1)
     expect(hydrated[0]?.threadId).toBe(threadId)
     expect(hydrated[0]?.page.items[0]).toMatchObject({ kind: 'message', id: anchor, content: 'Real body' })
