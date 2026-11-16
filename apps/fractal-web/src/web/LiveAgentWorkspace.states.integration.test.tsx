@@ -104,6 +104,44 @@ const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const retry = (within: ParentNode) => [...within.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.trim() === 'Retry')
 const transcript = () => host.querySelector('[data-testid="transcript-scroll"], [data-testid="transcript-unavailable"]')!
+it.each(['/', '/w/inbox', '/w/thread/example'])('offers ordinary pairing from %s even when reads and control grants are unknown', async path => {
+  const status = vi.fn(async () => ({ status: 'unpaired' as const }))
+  const start = vi.fn(async () => ({ requestId: 'request/shared', displayCode: 'ABC-123' }))
+  source = { ...source, pairing: { status, start, forget: vi.fn(async () => {}) },
+    grants: Atom.make({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted', unread: true }) }
+  window.history.replaceState(null, '', path)
+  registry.set(agents, unavailable({ reason: 'unauthorized', detail: 'Read access has not been granted' }))
+  await mount()
+  const control = host.querySelector('[data-testid="browser-pairing"]')!
+  expect(control.textContent).toContain('Pair this browser to request access.')
+  expect(control.textContent).not.toContain('can read')
+  expect(host.querySelectorAll('[data-testid="browser-pairing"]')).toHaveLength(1)
+  await act(async () => control.querySelector('button')!.click())
+  expect(host.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('ABC-123')
+  expect(start).toHaveBeenCalledOnce()
+})
+
+it('keeps the shared code mounted but hidden while Settings manages pairing, including a drawer breakpoint change', async () => {
+  const status = vi.fn(async () => ({ status: 'pending' as const, displayCode: 'PAIR-123' }))
+  source = { ...source, pairing: { status, start: vi.fn(async () => ({ requestId: 'request/shared', displayCode: 'PAIR-123' })), forget: vi.fn(async () => {}) } }
+  await mount()
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click())
+  const controls = [...host.querySelectorAll('[data-testid="browser-pairing"]')]
+  expect(controls).toHaveLength(2)
+  expect(controls.filter(control => control.closest('[hidden]') === null)).toHaveLength(1)
+  expect(host.querySelector('[role="dialog"] [data-testid="pairing-code"]')?.textContent).toBe('PAIR-123')
+  expect(status).toHaveBeenCalledOnce()
+  await act(async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 440 })
+    window.dispatchEvent(new Event('resize'))
+  })
+  expect(host.querySelector('[role="dialog"][aria-label="Settings"]')).toBeNull()
+  const shared = host.querySelector('[data-testid="browser-pairing"]')!
+  expect(shared.closest('[hidden]')).toBeNull()
+  expect(shared.textContent).toContain('PAIR-123')
+  expect(status).toHaveBeenCalledOnce()
+})
+
 describe('RM1 workspace source states', () => {
   it('replaces loading with a quiet access-revoked notice and no ineffective retry', async () => {
     registry.set(agents, waiting)
