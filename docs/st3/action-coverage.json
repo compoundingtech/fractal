@@ -241,6 +241,13 @@
       "behavior": "stale fence refused; accepted after restart; replay after restart has no duplicate writes"
     },
     {
+      "action": "message.cancel-scheduled",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::scheduled_message_cancellation_survives_stale_fences_and_restarts"
+      ],
+      "behavior": "stale fence refused; pending delivery survives restart; cancellation and replay after restart do not insert mailbox messages or duplicate writes"
+    },
+    {
       "action": "message.close",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::messages_survive_stale_fences_and_restarts"
@@ -257,7 +264,8 @@
     {
       "action": "message.send",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::messages_survive_stale_fences_and_restarts"
+        "crates/fractal/tests/action_coverage.rs::messages_survive_stale_fences_and_restarts",
+        "crates/fractal/tests/action_coverage.rs::scheduled_message_cancellation_survives_stale_fences_and_restarts"
       ],
       "behavior": "stale fence refused; accepted after restart; replay after restart has no duplicate writes"
     },
@@ -1049,6 +1057,30 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st conversations scheduled cancel",
+      "description": "Cancel a durable timed delivery with a reason",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_scheduled_messages_list_show_and_cancel_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; unrelated actor refused; cancelled state preserved after reopening disk store"
+    },
+    {
+      "command": "st conversations scheduled ls",
+      "description": "List durable scheduled deliveries and their current blockers",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_scheduled_messages_list_show_and_cancel_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; pending and cancelled deliveries read after disk store restarts"
+    },
+    {
+      "command": "st conversations scheduled show",
+      "description": "Show one scheduled delivery handle",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_scheduled_messages_list_show_and_cancel_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; pending and cancelled deliveries read after disk store restarts"
+    },
+    {
       "command": "st conversations search",
       "description": "Search readable messages and normalized agent transcripts, newest first",
       "tests": [
@@ -1061,7 +1093,8 @@
       "description": "Send one durable normalized message to an agent",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::cli_silent_kinds_and_count_reads_survive_restart",
-        "crates/fractal/tests/action_coverage.rs::cli_send_reply_read_archive_search_and_attachments_survive_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_send_reply_read_archive_search_and_attachments_survive_restart",
+        "crates/fractal/tests/action_coverage.rs::cli_scheduled_messages_list_show_and_cancel_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },

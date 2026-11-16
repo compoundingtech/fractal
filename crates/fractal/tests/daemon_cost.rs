@@ -996,6 +996,11 @@ const PROBES: &[Probe] = &[
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
     get("GET /v1/client/messages", "/v1/client/messages"),
+    get("GET /v1/client/scheduled-messages", "/v1/client/scheduled-messages"),
+    get(
+        "GET /v1/client/scheduled-messages/{*id}",
+        "/v1/client/scheduled-messages/{scheduled}",
+    ),
     get(
         "GET /v1/client/messages/{*id}",
         "/v1/client/messages/{message}",
@@ -1141,6 +1146,13 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
     get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
+    get("GET /v1/messages/scheduled", "/v1/messages/scheduled"),
+    get("GET /v1/messages/scheduled/{*id}", "/v1/messages/scheduled/{scheduled}"),
+    post(
+        "POST /v1/messages/scheduled-cancel/{*id}",
+        "/v1/messages/scheduled-cancel/{scheduled}",
+        |_, _| json!({"reason": "The cost fixture check is no longer needed."}),
+    ),
     get(
         "GET /v1/messages/by-key",
         "/v1/messages/by-key?key=cost-fixture-message",
@@ -1875,6 +1887,8 @@ struct Fixture {
     custom_replies: Vec<Value>,
     /// A message sent for the lifecycle writes.
     sent: String,
+    /// A fresh pending delivery per cancellation sample, including the warm-up.
+    scheduled: Vec<String>,
     /// Person asks the done probe answers, one per attempt.
     asks: Vec<String>,
     /// Fresh claimed steps and incarnation fences, one per handoff measurement.
@@ -1897,6 +1911,9 @@ impl Fixture {
                 "{held_step}",
                 self.subjects.held.first().map_or("", |(_, step, _)| step),
             );
+        if path.contains("{scheduled}") {
+            path = path.replace("{scheduled}", &urlencoding::encode(&self.scheduled[attempt]));
+        }
         if path.contains("{acknowledge_step}") {
             path = path.replace("{acknowledge_step}", &self.acknowledgments[attempt].0);
         }
@@ -3729,13 +3746,15 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
+                } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/")
+                    || path.starts_with("/v1/messages/scheduled-cancel/") {
                     person.clone()
                 } else {
                     client.clone()
                 };
                 let expected_publication = &publication;
                 let expected_retry_source = fixture.items.get("retry_subject");
+                let expected_scheduled = fixture.scheduled[attempt].as_str();
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
@@ -3753,6 +3772,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route == "POST /v1/messages/scheduled-cancel/{*id}" {
+                                anyhow::ensure!(
+                                    value["state"] == "cancelled"
+                                        && value["id"] == expected_scheduled,
+                                    "the cancellation probe must cancel its fresh pending delivery",
+                                );
+                            }
                             if probe.route.contains("/v1/effects/") {
                                 anyhow::ensure!(
                                     value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
@@ -4180,6 +4206,18 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         .expect("the fixture message must send")
         .message
         .subject;
+    let mut scheduled = Vec::new();
+    for attempt in 0..4 {
+        let response: Value = person.post("/v1/messages", &json!({
+            "idempotency_key": format!("cost-fixture-scheduled-{attempt}"),
+            "from": "person/bench-operator",
+            "to": subjects.seats[0],
+            "content": "An invented future check.",
+            "at": "2100-01-02T03:04:05Z",
+        })).await.expect("the fixture must create a pending scheduled delivery");
+        assert_eq!(response["scheduled"]["state"], "pending");
+        scheduled.push(response["scheduled"]["id"].as_str().unwrap().to_owned());
+    }
     // A person ask needs an agent with a live declaration: a standing agent the generator did
     // not retire.
     let ask = |actor: String, attempt: usize| {
@@ -4223,6 +4261,7 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
     Fixture {
         subjects,
         items,
+        scheduled,
         sent,
         asks,
         handoffs: Vec::new(),

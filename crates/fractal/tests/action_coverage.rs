@@ -905,6 +905,7 @@ async fn dispatch(
         "lane.mark" => lane_mark, "lane.move" => lane_move,
         "launch.approve" => launch_approve, "launch.cancel" => launch_cancel,
         "launch.create" => launch_create, "launch.preview" => launch_preview, "launch.revise" => launch_revise,
+        "message.cancel-scheduled" => message_cancel_scheduled,
         "message.close" => message_close, "message.read" => message_read, "message.send" => message_send,
         "mission.approve-revision" => mission_approve_revision, "mission.cancel" => mission_cancel,
         "mission.cancel-revision" => mission_cancel_revision, "mission.revise" => mission_revise,
@@ -1372,6 +1373,77 @@ async fn messages_survive_stale_fences_and_restarts() {
             daemon.store().message(&message).unwrap().unwrap().status,
             lifecycle
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_message_cancellation_survives_stale_fences_and_restarts() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    let fence = daemon.fence(PERSON).await;
+    let sent = daemon.exercise(
+        PERSON, "message.send",
+        json!({"to": WORKER, "content": "A future copper kite.", "at": "2100-01-02T03:04:05Z"}),
+        fence,
+    ).await;
+    let id = sent["affected_ids"][0].as_str().unwrap();
+    assert!(id.starts_with("scheduled-message/"), "{sent}");
+    assert_eq!(daemon.store().scheduled_message(id).unwrap().unwrap().state, "pending");
+    assert!(daemon.store().messages(Some(WORKER), true).unwrap().is_empty());
+    let listed: Value = daemon.transport().get("/v1/client/scheduled-messages").await.unwrap();
+    assert_eq!(listed["value"]["items"][0]["id"], id);
+    let shown: Value = daemon.transport().get(&format!("/v1/client/scheduled-messages/{id}")).await.unwrap();
+    assert_eq!(shown["value"]["id"], id);
+    assert_eq!(shown["value"]["state"], "pending");
+    let fence = daemon.fence(PERSON).await;
+    let cancelled = daemon.exercise(
+        PERSON, "message.cancel-scheduled",
+        json!({"target_id": id, "reason": "The future check is no longer needed."}), fence,
+    ).await;
+    assert_eq!(cancelled["affected_ids"][0], id);
+    assert_eq!(daemon.store().scheduled_message(id).unwrap().unwrap().state, "cancelled");
+    assert!(daemon.store().messages(Some(WORKER), true).unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_scheduled_messages_list_show_and_cancel_survive_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    let sent = cli_value(daemon.cli(PERSON, &[
+        "messages", "send", WORKER, "--from", PERSON, "--body", "A future CLI kite.",
+        "--at", "2100-01-02T03:04:05Z", "--idempotency-key", "coverage-cli-scheduled",
+    ]).await);
+    let id = sent["id"].as_str().unwrap();
+    assert_eq!(sent["state"], "pending");
+    daemon.restart().await;
+    for expected in ["pending", "cancelled"] {
+        let listed = cli_value(daemon.cli(PERSON, &["messages", "scheduled", "ls"]).await);
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["id"], id);
+        assert_eq!(listed[0]["state"], expected);
+        let shown = cli_value(daemon.cli(PERSON, &["messages", "scheduled", "show", id]).await);
+        assert_eq!(shown["id"], id);
+        assert_eq!(shown["state"], expected);
+        assert!(daemon.store().messages(Some(WORKER), true).unwrap().is_empty());
+        if expected == "pending" {
+            let refused = daemon.cli(READER, &[
+                "messages", "scheduled", "cancel", id, "--reason", "Not my reminder",
+            ]).await;
+            assert!(!refused.status.success());
+            assert_eq!(daemon.store().scheduled_message(id).unwrap().unwrap().state, "pending");
+            let cancelled = cli_value(daemon.cli(PERSON, &[
+                "messages", "scheduled", "cancel", id, "--reason", "No longer needed",
+            ]).await);
+            assert_eq!(cancelled["id"], id);
+            assert_eq!(cancelled["state"], "cancelled");
+            daemon.restart().await;
+        }
     }
 }
 

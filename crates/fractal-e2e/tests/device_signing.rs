@@ -677,17 +677,15 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
                         snapshot_id: snapshot,
                         ..Fence::default()
                     },
-                    MessageSendParameters {
-                        to: "agent/alder".into(),
-                        content: "a/b \"quoted\"\nhello Ω".into(),
-                        title: Some("CLI proof".into()),
-                        in_reply_to: None,
-                        session_id: None,
-                        tags: vec!["zeta".into(), "alpha".into()],
-                        kind: fractal_client::MessageKind::Wake,
-                        attachments: vec![],
-                        signature: None,
-                    },
+                    MessageSendParameters { at: None, to: "agent/alder".into(),
+                    content: "a/b \"quoted\"\nhello Ω".into(),
+                    title: Some("CLI proof".into()),
+                    in_reply_to: None,
+                    session_id: None,
+                    tags: vec!["zeta".into(), "alpha".into()],
+                    kind: fractal_client::MessageKind::Wake,
+                    attachments: vec![],
+                    signature: None, },
                 )
                 .await
                 .unwrap();
@@ -726,17 +724,15 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
                         snapshot_id: snapshot,
                         ..Fence::default()
                     },
-                    MessageSendParameters {
-                        to: "agent/alder".into(),
-                        content: long_text.clone(),
-                        title: None,
-                        in_reply_to: None,
-                        session_id: None,
-                        tags: vec![],
-                        kind: fractal_client::MessageKind::Wake,
-                        attachments: vec![],
-                        signature: None,
-                    },
+                    MessageSendParameters { at: None, to: "agent/alder".into(),
+                    content: long_text.clone(),
+                    title: None,
+                    in_reply_to: None,
+                    session_id: None,
+                    tags: vec![],
+                    kind: fractal_client::MessageKind::Wake,
+                    attachments: vec![],
+                    signature: None, },
                 )
                 .await
                 .unwrap();
@@ -1550,17 +1546,15 @@ async fn send(
                 snapshot_id: snapshot,
                 ..Fence::default()
             },
-            MessageSendParameters {
-                to: to.into(),
-                content: content.into(),
-                title: None,
-                in_reply_to: None,
-                session_id: None,
-                tags: vec![],
-                kind: fractal_client::MessageKind::Wake,
-                attachments: Vec::new(),
-                signature: Some(signature),
-            },
+            MessageSendParameters { at: None, to: to.into(),
+            content: content.into(),
+            title: None,
+            in_reply_to: None,
+            session_id: None,
+            tags: vec![],
+            kind: fractal_client::MessageKind::Wake,
+            attachments: Vec::new(),
+            signature: Some(signature), },
         )
         .await
         .map(|_| ())

@@ -379,17 +379,15 @@ async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_witho
                 snapshot_id: snapshot,
                 ..Fence::default()
             },
-            MessageSendParameters {
-                to: "agent/alder".into(),
-                content: "Signed after Fractal TUI pairing".into(),
-                title: None,
-                in_reply_to: None,
-                session_id: None,
-                tags: vec![],
-                kind: fractal_client::MessageKind::Wake,
-                attachments: vec![],
-                signature: None,
-            },
+            MessageSendParameters { at: None, to: "agent/alder".into(),
+            content: "Signed after Fractal TUI pairing".into(),
+            title: None,
+            in_reply_to: None,
+            session_id: None,
+            tags: vec![],
+            kind: fractal_client::MessageKind::Wake,
+            attachments: vec![],
+            signature: None, },
         )
         .await
         .unwrap();

@@ -307,8 +307,7 @@ fi
     let sent: MessageView = client
         .post(
             "/v1/messages",
-            &MessageSendRequest {
-            owner: None,
+            &MessageSendRequest { at: None, owner: None,
             idempotency_key: "mail".into(),
             from: "person/avery".into(),
             to: SEAT.into(),
@@ -316,8 +315,7 @@ fi
             title: None,
             in_reply_to: None,
             tags: vec![],
-            attachments: vec![],
-            },
+            attachments: vec![], },
         )
         .await
         .unwrap();
@@ -602,8 +600,7 @@ async fn successor_keeps_the_mailbox(
     let sent: MessageView = client
         .post(
             "/v1/messages",
-            &MessageSendRequest {
-            owner: None,
+            &MessageSendRequest { at: None, owner: None,
             idempotency_key: "successor-mail".into(),
             from: "person/avery".into(),
             to: SEAT.into(),
@@ -611,8 +608,7 @@ async fn successor_keeps_the_mailbox(
             title: None,
             in_reply_to: None,
             tags: vec![],
-            attachments: vec![],
-            },
+            attachments: vec![], },
         )
         .await
         .unwrap();

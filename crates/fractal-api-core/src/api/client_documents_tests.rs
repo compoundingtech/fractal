@@ -131,8 +131,7 @@ async fn a_message_names_its_content_document_and_the_links_in_its_text() {
     let send = |key: &str, content: String| {
         accept_message_receipt(
             &state,
-            MessageSendRequest {
-            owner: None,
+            MessageSendRequest { at: None, owner: None,
             idempotency_key: key.into(),
             from: "person/alex".into(),
             to: "agent/garden/worker".into(),
@@ -140,8 +139,7 @@ async fn a_message_names_its_content_document_and_the_links_in_its_text() {
             title: None,
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            },
+            attachments: Vec::new(), },
             None,
             None,
         )

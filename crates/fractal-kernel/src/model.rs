@@ -2637,6 +2637,9 @@ pub struct MessageSendRequest {
     pub from: String,
     pub to: String,
     pub content: String,
+    /// Absolute RFC 3339 delivery time. Absence sends immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -2656,7 +2659,7 @@ mod message_send_request_tests {
     use serde_json::json;
 
     #[test]
-    fn unbound_owner_is_omitted_and_preserves_the_original_wire_shape() {
+    fn absent_schedule_and_owner_are_omitted_for_immediate_requests() {
         let wire = json!({
             "idempotency_key": "message-example",
             "from": "agent/example/sender",
@@ -2669,6 +2672,7 @@ mod message_send_request_tests {
         let request: MessageSendRequest = serde_json::from_value(wire.clone()).unwrap();
 
         assert!(request.owner.is_none());
+        assert!(request.at.is_none());
         assert_eq!(serde_json::to_value(request).unwrap(), wire);
     }
 
@@ -2860,6 +2864,40 @@ pub struct MessageSendReceipt {
     /// When this daemon first accepted the message, in RFC 3339.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<String>,
+}
+
+/// A durable timed send, not a message inserted into a mailbox.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScheduledMessageView {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub at: String,
+    pub at_unix_ms: u128,
+    pub key: String,
+    pub state: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MessageSendResponse {
+    Scheduled { scheduled: Box<ScheduledMessageView> },
+    Sent(Box<MessageSendReceipt>),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledMessageCancelRequest {
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

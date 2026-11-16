@@ -51,16 +51,14 @@ mission "example/report" state="ready" {
         }).unwrap();
         let sender = claimed.claimant.unwrap();
         runtime(&state, &sender, INCARNATION);
-        let request = MessageSendRequest {
-            idempotency_key: "caller-key-is-not-the-effect-key".into(),
-            from: sender, to: "agent/example/reader".into(), content: "The report is ready.".into(),
-            title: Some("Example report".into()), in_reply_to: None, tags: vec![], attachments: vec![],
-            owner: Some(EffectOwner {
-                mission: run.mission.strip_prefix("mission/").unwrap().into(),
-                key: "report-ready".into(), step: step.clone(), attempt: claimed.attempt,
-                incarnation: INCARNATION.into(),
-            }),
-        };
+        let request = MessageSendRequest { at: None, idempotency_key: "caller-key-is-not-the-effect-key".into(),
+        from: sender, to: "agent/example/reader".into(), content: "The report is ready.".into(),
+        title: Some("Example report".into()), in_reply_to: None, tags: vec![], attachments: vec![],
+        owner: Some(EffectOwner {
+            mission: run.mission.strip_prefix("mission/").unwrap().into(),
+            key: "report-ready".into(), step: step.clone(), attempt: claimed.attempt,
+            incarnation: INCARNATION.into(),
+        }), };
         Self { root, state, request }
     }
 
