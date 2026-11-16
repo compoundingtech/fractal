@@ -828,7 +828,7 @@ function useAppStore(proof?: FabricProfile) {
     return () => { for (const stop of stops) stop(); };
   }, [feed, inventoryGranted]);
 
-  /** A fence on a snapshot read just now: one read seconds ago has nearly always moved on a busy host. */
+  /** A fresh same-host snapshot for initial reads and retries; subject revisions stay exact. */
   async function fence(revisions: Record<string, string> = {}) {
     if (!client) throw new Error('Still connecting; try again in a moment.');
     const capability = await client.capabilities();
@@ -1160,11 +1160,12 @@ function useAppStore(proof?: FabricProfile) {
       setBusy(true);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
       let qualityAccepted = false;
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
       try {
         // An answer that landed is an answer, however the reply came back (Cos, 2026-10-10: the app
         // said it failed for a decision that was recorded, and Nathan answered it again).
         const outcome = await submitAnswer({
-          build: async () => { const id = actionId(); return { id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id, episode: item.episode || item.revision, summary, ...(typed ? { answer: typed } : {}) } }; },
+          build: async () => { const id = actionId(); return { id, idempotency_key: id, fence: await fences(), parameters: { target_id: item.source_id, episode: item.episode || item.revision, summary, ...(typed ? { answer: typed } : {}) } }; },
           send: request => client.workDone(request),
           stillWaiting: async () => {
             try { const current = (await client.attentionGet(item.id)).value; return current.kind !== 'attention' || current.state === 'open'; }
@@ -1201,7 +1202,8 @@ function useAppStore(proof?: FabricProfile) {
     async markRead(item: Attention) {
       if (!client) return false;
       acted.current.add(item.id);
-      return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: item.source_id } }); });
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
+      return runAction(async () => { const id = actionId(); return client.messageRead({ id, idempotency_key: id, fence: await fences(), parameters: { target_id: item.source_id } }); });
     },
     /** Change the person's own availability; Fractal answers with all of it. */
     async changeAvailability(change: AvailabilitySet) {
@@ -1224,7 +1226,8 @@ function useAppStore(proof?: FabricProfile) {
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
       const qualityToken = proof ? 0 : quality.answerSent(item.id);
-      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
+      const fences = sendFences(lastSnapshot.current, fence, { [item.id]: item.revision });
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fences(), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer: sent } }); }, [], error => notApplied(error) && !promptGone(error));
       if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
       return accepted;
     },

@@ -44,6 +44,10 @@ void cancellationClient.publicationDefinition('mission/example', cancellationOpt
 void cancellationClient.conversationContentChunk('session/example', 'reference', 0, cancellationOptions);
 void cancellationClient.availabilityList(undefined, cancellationOptions);
 void cancellationClient.availabilityList('person/ada', cancellationOptions);
+void cancellationClient.availabilityHistory({ from: '2026-11-12T09:00:00Z', to: '2026-11-12T11:00:00Z', bucket_seconds: 3600 }, cancellationOptions);
+void cancellationClient.availabilityHistory({ from: '2026-11-12T09:00:00Z', to: '2026-11-12T11:00:00Z', bucket_seconds: 3600, person: 'person/ada' });
+// @ts-expect-error a history read names its bucket length
+void cancellationClient.availabilityHistory({ from: '2026-11-12T09:00:00Z', to: '2026-11-12T11:00:00Z' });
 void cancellationClient.autoResolvedList(cancellationOptions);
 void cancellationClient.workOverride({
     id: 'action/person-override:episode:accept',

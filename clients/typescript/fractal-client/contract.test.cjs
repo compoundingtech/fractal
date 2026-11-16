@@ -13,7 +13,7 @@ for (const name of ['Models.generated', 'Client.generated', 'errors', 'fetch-rec
     fs.writeFileSync(path.join(temporary, `${name}.js`), output);
 }
 const { FractalClient, ClientError, applyWindow } = require(path.join(temporary, 'Client.generated.js'));
-const { plainMessage, plainError } = require(path.join(temporary, 'errors.js'));
+const { plainMessage, plainError, appliedAnswer, notApplied, outcomeUnknown } = require(path.join(temporary, 'errors.js'));
 require(path.join(temporary, 'fetch-receiver.test.js'));
 fs.rmSync(temporary, { recursive: true, force: true });
 
@@ -511,6 +511,26 @@ test('availability reads select a person and writes send the session person noth
     assert.equal(sent[3][1].headers.Authorization, 'Bearer test-credential');
 });
 
+test('availabilityHistory sends its range and an older daemon is unsupported', async () => {
+    const fixture = require('../../../docs/st3/client-v0/fixtures/availability-history.json');
+    const requests = [];
+    let old = false;
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async input => {
+        const url = String(input);
+        requests.push(url);
+        if (new URL(url).pathname === '/v1/client/capabilities') return response(capabilityFixture);
+        return old ? new Response(null, { status: 404 }) : response(fixture);
+    }});
+    const range = { from: '2026-11-12T09:00:00Z', to: '2026-11-12T11:00:00Z', bucket_seconds: 3600 };
+    assert.deepEqual(await client.availabilityHistory({ ...range, person: 'person/ada' }), fixture);
+    old = true;
+    await assert.rejects(client.availabilityHistory(range), error => error instanceof ClientError && error.response.code === 'unsupported-capability');
+    assert.deepEqual(requests.filter(url => new URL(url).pathname === '/v1/client/availability/history'), [
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600&person=person%2Fada',
+        'https://example.test/v1/client/availability/history?from=2026-11-12T09%3A00%3A00Z&to=2026-11-12T11%3A00%3A00Z&bucket_seconds=3600',
+    ]);
+});
+
 test('notesSet sends only the text and expiry and a clear as null', async () => {
     const written = require('../../../docs/st3/client-v0/fixtures/directive-note-set-result.json');
     const set = require('../../../docs/st3/client-v0/fixtures/directive-note-set.json');
@@ -717,6 +737,53 @@ test('structured HTTP errors keep their complete server envelope', async () => {
         assert.equal(error.retryAfterMs, 3000);
         return true;
     });
+});
+
+test('applied outcome merges outer and details flags before legacy refusal shortcuts', () => {
+    const cases = [
+        [{}, {}, undefined],
+        [{ applied: 'none' }, {}, 'none'],
+        [{ applied: 'unknown' }, {}, 'unknown'],
+        [{}, { applied: 'none' }, 'none'],
+        [{}, { applied: 'unknown' }, 'unknown'],
+        [{ applied: 'none' }, { applied: 'none' }, 'none'],
+        [{ applied: 'unknown' }, { applied: 'none' }, 'unknown'],
+        [{ applied: 'none' }, { applied: 'unknown' }, 'unknown'],
+        [{ applied: 'unknown' }, { applied: 'unknown' }, 'unknown'],
+        ...[null, false, 0, '', 'future-state'].flatMap(value => [
+            [{ applied: value }, { applied: 'none' }, 'unknown'],
+            [{ applied: 'none' }, { applied: value }, 'unknown'],
+        ]),
+    ];
+    for (const code of ['stale-fence', 'rate-limited', 'internal']) {
+        for (const [outer, details, expected] of cases) {
+            const wire = { api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/outcome', code, message: 'm', retryable: false, ...outer, details };
+            const before = JSON.stringify(wire), error = new ClientError(wire, 409);
+            const label = JSON.stringify({ code, outer, details });
+            assert.equal(appliedAnswer(error), expected, label);
+            assert.equal(outcomeUnknown(error), expected === 'unknown', label);
+            assert.equal(notApplied(error), expected !== 'unknown' && (expected === 'none' || code !== 'internal'), label);
+            assert.equal(JSON.stringify(error.response), before, 'classification never rewrites the wire envelope');
+        }
+    }
+    assert.equal(outcomeUnknown(new TypeError('Network request failed')), true);
+    assert.equal(notApplied(new TypeError('Network request failed')), false);
+    assert.equal(appliedAnswer(new Error('not an API error')), undefined);
+});
+
+test('outer uncertainty survives real HTTP decoding and forbids a fresh request', async () => {
+    for (const applied of ['unknown', null, 'future-state']) for (const details of [{}, { applied: 'none' }]) {
+        const wire = { ...cursorGapFixture, code: 'stale-fence', applied, retryable: false, details };
+        const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async () => Response.json(wire, { status: 409 }) });
+        await assert.rejects(client.uploadBlob(new Uint8Array([1]), 'image/png'), error => {
+            assert.ok(error instanceof ClientError);
+            assert.deepEqual(error.response, wire);
+            assert.equal(appliedAnswer(error), 'unknown');
+            assert.equal(outcomeUnknown(error), true);
+            assert.equal(notApplied(error), false);
+            return true;
+        });
+    }
 });
 
 test('successful malformed JSON and failed body reads are not HTTP rejections', async () => {
