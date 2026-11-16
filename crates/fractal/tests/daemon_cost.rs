@@ -996,6 +996,11 @@ const PROBES: &[Probe] = &[
         json!({ "all": true, "older_than_ms": 1, "dry_run": true })
     }),
     get("GET /v1/client/messages", "/v1/client/messages"),
+    get("GET /v1/client/scheduled-messages", "/v1/client/scheduled-messages"),
+    get(
+        "GET /v1/client/scheduled-messages/{*id}",
+        "/v1/client/scheduled-messages/{scheduled}",
+    ),
     get(
         "GET /v1/client/messages/{*id}",
         "/v1/client/messages/{message}",
@@ -1141,6 +1146,13 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
     get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
+    get("GET /v1/messages/scheduled", "/v1/messages/scheduled"),
+    get("GET /v1/messages/scheduled/{*id}", "/v1/messages/scheduled/{scheduled}"),
+    post(
+        "POST /v1/messages/scheduled-cancel/{*id}",
+        "/v1/messages/scheduled-cancel/{scheduled}",
+        |_, _| json!({"reason": "The cost fixture check is no longer needed."}),
+    ),
     get(
         "GET /v1/messages/by-key",
         "/v1/messages/by-key?key=cost-fixture-message",
@@ -1875,6 +1887,8 @@ struct Fixture {
     custom_replies: Vec<Value>,
     /// A message sent for the lifecycle writes.
     sent: String,
+    /// A fresh pending delivery per cancellation sample, including the warm-up.
+    scheduled: Vec<String>,
     /// Person asks the done probe answers, one per attempt.
     asks: Vec<String>,
     /// Fresh claimed steps and incarnation fences, one per handoff measurement.
@@ -1897,6 +1911,9 @@ impl Fixture {
                 "{held_step}",
                 self.subjects.held.first().map_or("", |(_, step, _)| step),
             );
+        if path.contains("{scheduled}") {
+            path = path.replace("{scheduled}", &urlencoding::encode(&self.scheduled[attempt]));
+        }
         if path.contains("{acknowledge_step}") {
             path = path.replace("{acknowledge_step}", &self.acknowledgments[attempt].0);
         }
@@ -3203,6 +3220,15 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     store.pin_fleet_anchor(anchor.public()).unwrap();
     store.set_member_key(Some(anchor.clone())).unwrap();
     store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+    let source = format!(
+        "version 2\nnotice-owner {{ member {NODE:?}; member-key {:?}; always-on }}\nagent \"bench/cost/scheduled-sender\" {{ workspace \"/tmp\"; command \"true\"; restart never }}\n",
+        anchor.public(),
+    );
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
+    let preview = store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source, source_name: None,
+    }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, "cost-scheduled-owner", Some("person/bench-operator")).unwrap();
     store.append_claim(&ClaimInput {
         subject:format!("host/{PEER}"), kind:"fleet.member-admitted".into(), actor:None,
         fields:serde_json::from_value(json!({
@@ -3330,6 +3356,26 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     tokio::time::timeout(Duration::from_secs(120),
         fractal_daemon::api::wait_published_lists_at_least(&store, seeded_cut))
         .await.expect("cost census lists publish the seeded store cut").unwrap();
+    // Only the process-ancestry witness is deterministic; binding, actor admission,
+    // HTTP routing and the signed scheduled-message writes use the production boundary.
+    fn scheduled_ancestor(_: u32, _: Option<&fractal_runtime::PeerProcessIdentity>) -> fractal_daemon::api::HarnessAncestry {
+        fractal_daemon::api::HarnessAncestry::Bound("agent/bench/cost/scheduled-sender".into())
+    }
+    let scheduled_socket = root.join("scheduled.sock");
+    let scheduled_state = state.clone();
+    let serving_scheduled_socket = scheduled_socket.clone();
+    let scheduled_server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix_with_ancestor(
+            &serving_scheduled_socket, None,
+            fractal_daemon::api::router(scheduled_state.clone()),
+            Some(scheduled_state.store), scheduled_ancestor,
+        ).await
+    });
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while UnixStream::connect(&scheduled_socket).is_err() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("scheduled seat listener must become ready");
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
@@ -3390,7 +3436,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .insert("incarnation_id".into(), json!(SEAT_RUNTIME));
         store.append_claim(&running).unwrap();
     }
-    let mut fixture = fixture(&person, &client, subjects).await;
+    let scheduled_sender = Client::unix_agent(&scheduled_socket, "agent/bench/cost/scheduled-sender").unwrap();
+    let mut fixture = fixture(&person, &client, &scheduled_sender, subjects).await;
     fixture.items.insert("service_claim",service_claim);
     fixture.items.insert(
         "harness_question",
@@ -3729,6 +3776,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
+                } else if path.starts_with("/v1/messages/scheduled-cancel/") {
+                    scheduled_sender.clone()
                 } else if path.starts_with("/v1/client/") || path.starts_with("/v1/effects/") {
                     person.clone()
                 } else {
@@ -3736,6 +3785,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 };
                 let expected_publication = &publication;
                 let expected_retry_source = fixture.items.get("retry_subject");
+                let expected_scheduled = fixture.scheduled[attempt].as_str();
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
@@ -3753,6 +3803,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }
                     answer
                         .and_then(|value| {
+                            if probe.route == "POST /v1/messages/scheduled-cancel/{*id}" {
+                                anyhow::ensure!(
+                                    value["state"] == "cancelled"
+                                        && value["id"] == expected_scheduled,
+                                    "the cancellation probe must cancel its fresh pending delivery",
+                                );
+                            }
                             if probe.route.contains("/v1/effects/") {
                                 anyhow::ensure!(
                                     value["state"] == if probe.body.is_some() { "abandoned" } else { "unresolved" },
@@ -4012,6 +4069,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     }
     costs.insert(SUMMARY.to_owned(), Cost::least(&samples));
     server.abort();
+    scheduled_server.abort();
     owner_server.abort();
 
     // Last, as it deletes most of the store: a checkpoint trim, per row it deletes.
@@ -4084,7 +4142,7 @@ fn prepare_custom_fixture(store: &Store, fixture: &mut Fixture, scale: f64) {
 }
 
 /// Ids from the store's own lists, a sent message, and a person ask per attempt.
-async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixture {
+async fn fixture(person: &Client, client: &Client, scheduled_sender: &Client, subjects: Subjects) -> Fixture {
     let mut items = BTreeMap::new();
     for (name, list) in [
         ("agent", "/v1/client/agents"),
@@ -4180,6 +4238,18 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
         .expect("the fixture message must send")
         .message
         .subject;
+    let mut scheduled = Vec::new();
+    for attempt in 0..4 {
+        let response: Value = scheduled_sender.post("/v1/messages", &json!({
+            "idempotency_key": format!("cost-fixture-scheduled-{attempt}"),
+            "from": "agent/bench/cost/scheduled-sender",
+            "to": subjects.seats[0],
+            "content": "An invented future check.",
+            "at": "2100-01-02T03:04:05Z",
+        })).await.expect("the fixture must create a pending scheduled delivery");
+        assert_eq!(response["scheduled"]["state"], "pending");
+        scheduled.push(response["scheduled"]["id"].as_str().unwrap().to_owned());
+    }
     // A person ask needs an agent with a live declaration: a standing agent the generator did
     // not retire.
     let ask = |actor: String, attempt: usize| {
@@ -4223,6 +4293,7 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
     Fixture {
         subjects,
         items,
+        scheduled,
         sent,
         asks,
         handoffs: Vec::new(),

@@ -1211,8 +1211,19 @@ public enum HarnessInvalidAnswerReason: String, Codable, Sendable { case unknown
 public struct HarnessInvalidAnswerDetails: Codable, Sendable { public let reason: HarnessInvalidAnswerReason }
 public enum HarnessNotAnswerableReason: String, Codable, Sendable { case adapterMissing = "adapter_missing", adapterUnavailable = "adapter_unavailable" }
 public struct HarnessNotAnswerableDetails: Codable, Sendable { public let reason: HarnessNotAnswerableReason }
+/// Durable timed mail. Delivered confirms insertion, not recipient consumption.
+public struct ScheduledMessageResource: Codable, Sendable, Identifiable {
+    public let kind, id, revision, updatedAt, from, to, content, at, key, state: String
+    public let atUnixMS: UInt64
+    public let owner, messageID, blocker, cancelReason: String?
+    enum CodingKeys: String, CodingKey {
+        case kind, id, revision, from, to, content, at, key, state, owner, blocker
+        case updatedAt = "updated_at", atUnixMS = "at_unix_ms", messageID = "message_id", cancelReason = "cancel_reason"
+    }
+}
 public enum Resource: Codable, Sendable, Identifiable {
     case harnessQuestion(HarnessQuestionResource)
+    case scheduledMessage(ScheduledMessageResource)
     case connectedClient(ConnectedClientResource), usage(UsageResource)
     case summary(SummaryResource)
     case deviceCommand(DeviceCommand)
@@ -1225,6 +1236,7 @@ public enum Resource: Codable, Sendable, Identifiable {
     public init(from decoder: Decoder) throws {
         switch try Discriminator(from: decoder).kind {
         case "harness-question": self = .harnessQuestion(try HarnessQuestionResource(from: decoder))
+        case "scheduled-message": self = .scheduledMessage(try ScheduledMessageResource(from: decoder))
         case "connected-client": self = .connectedClient(try ConnectedClientResource(from: decoder))
         case "usage": self = .usage(try UsageResource(from: decoder))
         case "summary": self = .summary(try SummaryResource(from: decoder))
@@ -1256,6 +1268,7 @@ public enum Resource: Codable, Sendable, Identifiable {
     public func encode(to encoder: Encoder) throws {
         switch self {
         case .harnessQuestion(let v): try v.encode(to: encoder)
+        case .scheduledMessage(let v): try v.encode(to: encoder)
         case .connectedClient(let v): try v.encode(to: encoder)
         case .usage(let v): try v.encode(to: encoder)
         case .summary(let v): try v.encode(to: encoder)
@@ -1284,7 +1297,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .unknown(let v): try v.encode(to: encoder)
         }
     }
-    public var id: String { switch self { case .harnessQuestion(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .deviceCommand(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
+    public var id: String { switch self { case .scheduledMessage(let v): v.id; case .harnessQuestion(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .deviceCommand(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
 }
 /// A resource of a kind this client does not model: its header, and every field as sent.
 public struct UnknownResource: Codable, Sendable, Identifiable {
@@ -1481,6 +1494,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func launchCreate(id: String, idempotencyKey: String, fence: Fence, parameters: LaunchCreateParameters) throws -> Self { try .init(id: id, type: .launchCreate, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func launchPreview(id: String, idempotencyKey: String, fence: Fence, parameters: LaunchVariantParameters) throws -> Self { try .init(id: id, type: .launchPreview, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func launchRevise(id: String, idempotencyKey: String, fence: Fence, parameters: LaunchReviseParameters) throws -> Self { try .init(id: id, type: .launchRevise, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func messageCancelScheduled(id: String, idempotencyKey: String, fence: Fence, parameters: ScheduledMessageCancelParameters) throws -> Self { try .init(id: id, type: .messageCancelScheduled, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func messageClose(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .messageClose, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func messageRead(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) throws -> Self { try .init(id: id, type: .messageRead, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func messageSend(id: String, idempotencyKey: String, fence: Fence, parameters: MessageSendParameters) throws -> Self { try .init(id: id, type: .messageSend, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1591,9 +1605,15 @@ public struct AgentSuspendParameters: Codable, Sendable { public var agent: Stri
 public struct AgentResumeParameters: Codable, Sendable { public var agent: String; public var host: String?; public init(agent: String, host: String? = nil) { self.agent = agent; self.host = host } }
 public struct WorkRetryParameters: Codable, Sendable { public var targetID: String; public var reason: String; public init(targetID: String, reason: String) { self.targetID = targetID; self.reason = reason }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason } }
 public struct AttentionResolveParameters: Codable, Sendable { public var attentionID: String; public var outcome: String; public var reason: String?; public init(attentionID: String, outcome: String, reason: String? = nil) { self.attentionID = attentionID; self.outcome = outcome; self.reason = reason }; enum CodingKeys: String, CodingKey { case attentionID = "attention_id", outcome, reason } }
+public struct ScheduledMessageCancelParameters: Codable, Sendable {
+    public var targetID: String
+    public var reason: String
+    public init(targetID: String, reason: String) { self.targetID = targetID; self.reason = reason }
+    enum CodingKeys: String, CodingKey { case targetID = "target_id", reason }
+}
 public enum MessageKind: String, Codable, Sendable { case silent, wake }
-public struct MessageSendParameters: Codable, Sendable { public var to: String; public var content: String; public var title: String?; public var inReplyTo: String?; public var sessionID: String?; public var tags: [String]; public var kind: MessageKind?; public var attachments: [AttachmentInput]; public var signature: DeviceSignature?; public init(to: String, content: String, title: String? = nil, inReplyTo: String? = nil, sessionID: String? = nil, tags: [String] = [], kind: MessageKind = .wake, attachments: [AttachmentInput] = [], signature: DeviceSignature? = nil) { self.to = to; self.content = content; self.title = title; self.inReplyTo = inReplyTo; self.sessionID = sessionID; self.tags = tags; self.kind = kind; self.attachments = attachments; self.signature = signature }; enum CodingKeys: String, CodingKey { case to, content, title, inReplyTo = "in_reply_to", sessionID = "session_id", tags, kind, attachments, signature }
-    public func encode(to encoder: Encoder) throws { var container = encoder.container(keyedBy: CodingKeys.self); try container.encode(to, forKey: .to); try container.encode(content, forKey: .content); try container.encodeIfPresent(title, forKey: .title); try container.encodeIfPresent(inReplyTo, forKey: .inReplyTo); try container.encodeIfPresent(sessionID, forKey: .sessionID); try container.encode(tags, forKey: .tags); try container.encode(kind ?? .wake, forKey: .kind); if !attachments.isEmpty { try container.encode(attachments, forKey: .attachments) }; try container.encodeIfPresent(signature, forKey: .signature) } }
+public struct MessageSendParameters: Codable, Sendable { public var to: String; public var content: String; public var at: String?; public var title: String?; public var inReplyTo: String?; public var sessionID: String?; public var tags: [String]; public var kind: MessageKind?; public var attachments: [AttachmentInput]; public var signature: DeviceSignature?; public init(to: String, content: String, at: String? = nil, title: String? = nil, inReplyTo: String? = nil, sessionID: String? = nil, tags: [String] = [], kind: MessageKind = .wake, attachments: [AttachmentInput] = [], signature: DeviceSignature? = nil) { self.to = to; self.content = content; self.at = at; self.title = title; self.inReplyTo = inReplyTo; self.sessionID = sessionID; self.tags = tags; self.kind = kind; self.attachments = attachments; self.signature = signature }; enum CodingKeys: String, CodingKey { case to, content, at, title, inReplyTo = "in_reply_to", sessionID = "session_id", tags, kind, attachments, signature }
+    public func encode(to encoder: Encoder) throws { var container = encoder.container(keyedBy: CodingKeys.self); try container.encode(to, forKey: .to); try container.encode(content, forKey: .content); try container.encodeIfPresent(at, forKey: .at); try container.encodeIfPresent(title, forKey: .title); try container.encodeIfPresent(inReplyTo, forKey: .inReplyTo); try container.encodeIfPresent(sessionID, forKey: .sessionID); try container.encode(tags, forKey: .tags); try container.encode(kind ?? .wake, forKey: .kind); if !attachments.isEmpty { try container.encode(attachments, forKey: .attachments) }; try container.encodeIfPresent(signature, forKey: .signature) } }
 
 public struct DeviceSignature: Codable, Sendable { public var signer: String; public var key: String; public var chain: [String]; public var nonce: String; public var signedAtUnixMS: UInt64; public var signature: String; public var format: String; public var signedFields: [String]; public init(signer: String, key: String, chain: [String], nonce: String, signedAtUnixMS: UInt64, signature: String, format: String = "fields-v1", signedFields: [String]) { self.signer = signer; self.key = key; self.chain = chain; self.nonce = nonce; self.signedAtUnixMS = signedAtUnixMS; self.signature = signature; self.format = format; self.signedFields = signedFields }; enum CodingKeys: String, CodingKey { case signer, key, chain, nonce, signedAtUnixMS = "signed_at_unix_ms", signature, format, signedFields = "signed_fields" } }
 public struct LaunchTarget: Codable, Sendable {

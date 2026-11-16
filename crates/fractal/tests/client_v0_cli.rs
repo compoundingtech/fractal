@@ -320,17 +320,15 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
                         snapshot_id: snapshot,
                         ..Fence::default()
                     },
-                    MessageSendParameters {
-                        to: "agent/alder".into(),
-                        content: "CLI signature proof".into(),
-                        title: None,
-                        in_reply_to: None,
-                        session_id: None,
-                        tags: vec![],
-                        kind: fractal_client::MessageKind::Wake,
-                        attachments: vec![],
-                        signature: None,
-                    },
+                    MessageSendParameters { at: None, to: "agent/alder".into(),
+                    content: "CLI signature proof".into(),
+                    title: None,
+                    in_reply_to: None,
+                    session_id: None,
+                    tags: vec![],
+                    kind: fractal_client::MessageKind::Wake,
+                    attachments: vec![],
+                    signature: None, },
                 )
                 .await
                 .unwrap();

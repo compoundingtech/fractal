@@ -84,10 +84,15 @@ impl Default for SendGate {
 /// sends never wait on each other's second stripe. The locks are not reentrant: `write` must
 /// not send another message itself, or a send whose stripe it already holds waits forever.
 pub fn gated<R>(graph: &Store, input: &ClaimInput, write: impl FnOnce() -> R) -> R {
+    gated_by_key(graph, &input.subject, input.idempotency_key.as_deref(), write)
+}
+
+/// The same send gate for a durable operation whose mailbox subject is not allocated yet.
+pub(super) fn gated_by_key<R>(graph: &Store, subject: &str, key: Option<&str>, write: impl FnOnce() -> R) -> R {
     let gate = graph.extension::<SendGate>();
     let stripe = |value: &str| usize::from(Sha256::digest(value.as_bytes())[0]) % GATE_STRIPES;
-    let mut stripes = vec![stripe(&input.subject)];
-    if let Some(key) = &input.idempotency_key {
+    let mut stripes = vec![stripe(subject)];
+    if let Some(key) = key {
         stripes.push(stripe(&operation_id_for_key(key)));
     }
     stripes.sort_unstable();
@@ -133,6 +138,7 @@ pub fn sent_to_stream(graph: &Store, input: &ClaimInput) -> Result<Option<ClaimR
 /// there.
 pub fn sent_to_graph(graph: &Store, input: &ClaimInput) -> Result<Option<ClaimRecord>, FractalError> {
     let connection = graph.readers.get();
+    super::scheduled_messages::refuse_immediate_key(&connection, input)?;
     if let Some((operation_id, request_digest)) = smallclaims::store::claim_operation(input)? {
         let stored: Option<(String, String)> = connection
             .query_row(

@@ -21,6 +21,7 @@ use crate::model::ApiResponse;
 use crate::model::{
     ApiErrorResponse, AttachRequest, Attachment, LocalTerminal, MessageSendReceipt,
     MessageSendRequest,
+    MessageSendResponse, ScheduledMessageView,
 };
 
 #[derive(Clone, Debug)]
@@ -648,6 +649,7 @@ impl Client {
     /// error is a [`MessageSendUnconfirmed`]: keep this request for a later retry, and ask
     /// [`Client::sent_message`] whether it landed.
     pub async fn send_message(&self, request: &MessageSendRequest) -> Result<MessageSendReceipt> {
+        anyhow::ensure!(request.at.is_none(), "use schedule_message for timed delivery");
         anyhow::ensure!(
             !request.idempotency_key.trim().is_empty(),
             "a message send needs a nonempty idempotency key"
@@ -694,6 +696,31 @@ impl Client {
             Err(error) if api_error_code(&error) == Some("message-not-sent") => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Persist a timed delivery request, not a delivered mailbox message.
+    pub async fn schedule_message(&self, request: &MessageSendRequest) -> Result<ScheduledMessageView> {
+        anyhow::ensure!(request.at.is_some(), "a scheduled message needs an absolute delivery time");
+        anyhow::ensure!(!request.idempotency_key.trim().is_empty(), "a scheduled message needs a nonempty key");
+        match self.post("/v1/messages", request).await? {
+            MessageSendResponse::Scheduled { scheduled } => Ok(*scheduled),
+            MessageSendResponse::Sent(_) => anyhow::bail!("daemon returned an immediate receipt for a timed delivery"),
+        }
+    }
+
+    pub async fn scheduled_messages(&self) -> Result<Vec<ScheduledMessageView>> {
+        self.get("/v1/messages/scheduled").await
+    }
+
+    pub async fn scheduled_message(&self, id: &str) -> Result<ScheduledMessageView> {
+        self.get(&format!("/v1/messages/scheduled/{}", urlencoding::encode(id))).await
+    }
+
+    pub async fn cancel_scheduled_message(&self, id: &str, reason: &str) -> Result<ScheduledMessageView> {
+        self.post(
+            &format!("/v1/messages/scheduled-cancel/{}", urlencoding::encode(id)),
+            &serde_json::json!({ "reason": reason }),
+        ).await
     }
 
     pub async fn request<I: Serialize, O: DeserializeOwned>(

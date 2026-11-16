@@ -4497,8 +4497,7 @@ async fn only_work_wake_messages_wake_the_reconciler() {
     let _ = woke().await;
     let mut events = state.event_notify.subscribe();
     let send = |key: &str, tags: &[&str]| {
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: key.into(),
         from: "person/example".into(),
         to: "agent/receiver".into(),
@@ -4506,8 +4505,7 @@ async fn only_work_wake_messages_wake_the_reconciler() {
         title: None,
         in_reply_to: None,
         tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap()
     };
     // A conversation and its lifecycle reach clients but never wake the reconciler.
@@ -8529,6 +8527,98 @@ version 2
     assert_eq!(stale["code"], "stale-launch-generation");
 }
 
+fn timed_message_request(at: Option<&str>) -> MessageSendRequest {
+    serde_json::from_value(json!({
+        "idempotency_key": "example-timed-send",
+        "from": "agent/example/sender", "to": "agent/example/target",
+        "content": "Check the result", "at": at,
+    })).unwrap()
+}
+
+#[tokio::test]
+async fn timed_message_rejects_malformed_and_relative_timestamps_without_writing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for at in ["tomorrow", "2030-01-02", "2030-01-02T03:04:05", "-1"] {
+        let error = messages::send_message(State(state.clone()),
+            Some(BoundActor::Agent("agent/example/sender".into())), None, None, None,
+            Json(timed_message_request(Some(at)))).await.unwrap_err();
+        assert_eq!(error.code, "invalid-scheduled-message-time");
+    }
+    assert!(state.store.scheduled_messages().unwrap().is_empty());
+}
+
+#[test]
+fn timed_message_refuses_deferred_owner_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let mut request = timed_message_request(Some("2030-01-02T03:04:05Z"));
+    request.owner = Some(crate::model::EffectOwner {
+        mission: "example/reminder".into(), key: "reminder".into(), step: "notify".into(),
+        attempt: 1, incarnation: "example-incarnation".into(),
+    });
+    let error = accept_message_response_authorized(&state, request,
+        None, None, None, None, Some("agent/example/sender")).unwrap_err();
+    assert_eq!(error.code, "scheduled-message-authority-refused");
+    assert!(state.store.scheduled_messages().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn timed_message_requires_authenticated_sender_and_cancel_ignores_no_claimed_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for bound in [None, Some(BoundActor::Agent("agent/example/unrelated".into()))] {
+        let error = messages::send_message(State(state.clone()), bound, None, None, None,
+            Json(timed_message_request(Some("2030-01-02T03:04:05Z")))).await.unwrap_err();
+        assert_eq!(error.code, "scheduled-message-authority-refused");
+    }
+    let error = messages::cancel_scheduled_message(State(state.clone()), AxumPath("example".into()),
+        None, None, None, Json(crate::model::ScheduledMessageCancelRequest {
+            reason: "No longer needed".into(),
+        })).await.unwrap_err();
+    assert_eq!(error.code, "scheduled-message-authority-refused");
+    assert!(serde_json::from_value::<crate::model::ScheduledMessageCancelRequest>(
+        json!({"actor":"agent/example/sender","reason":"spoofed"})).is_err());
+    assert!(state.store.scheduled_messages().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn immediate_message_keeps_flattened_receipt_without_scheduled_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let response = messages::send_message(State(state.clone()), None, None, None, None,
+        Json(timed_message_request(None))).await.unwrap().0;
+    let wire = serde_json::to_value(response).unwrap();
+    assert!(wire["subject"].as_str().unwrap().starts_with("message/"));
+    assert_eq!(wire["status"], "sent");
+    assert!(wire.get("scheduled").is_none());
+    assert!(state.store.scheduled_messages().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn timed_message_returns_inspectable_schedule_without_claiming_mailbox_insertion() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = parse_intent("version 2\nagent \"example/target\" { command \"true\"; workspace \"/tmp\"; }", &state.node).unwrap();
+    state.store.apply_as(&intent,&BTreeMap::from([("agent/example/target".into(),vec![])]),
+        "timed-target",Some("person/example")).unwrap();
+    let response = messages::send_message(State(state.clone()),
+        Some(BoundActor::Agent("agent/example/sender".into())),None,None,None,
+        Json(timed_message_request(Some("2030-01-02T03:04:05Z")))).await.unwrap().0;
+    let wire = serde_json::to_value(response).unwrap();
+    assert!(wire.get("subject").is_none());
+    let id = wire["scheduled"]["id"].as_str().unwrap();
+    assert_eq!(wire["scheduled"]["state"],"pending");
+    assert_eq!(state.store.messages(None,true).unwrap().len(),0);
+    let shown = messages::scheduled_message(State(state.clone()),AxumPath(id.into())).await.unwrap().0;
+    assert_eq!(shown.key,"example-timed-send");
+    assert_eq!(messages::scheduled_messages(State(state.clone())).await.unwrap().0.len(),1);
+    let error = messages::cancel_scheduled_message(State(state.clone()),AxumPath(id.into()),
+        Some(BoundActor::Agent("agent/example/unrelated".into())),None,None,
+        Json(crate::model::ScheduledMessageCancelRequest {reason:"Not my reminder".into()})).await.unwrap_err();
+    assert_eq!(error.code,"scheduled-message-forbidden");
+}
+
 #[tokio::test]
 async fn message_ingress_rejects_empty_content_before_it_enters_the_fifo() {
     let root = tempfile::tempdir().unwrap();
@@ -8536,8 +8626,7 @@ async fn message_ingress_rejects_empty_content_before_it_enters_the_fifo() {
     let (status, body) = json_request(
         app,
         "/v1/messages",
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: "empty-message".into(),
         from: "agent/sender".into(),
         to: "agent/receiver".into(),
@@ -8545,8 +8634,7 @@ async fn message_ingress_rejects_empty_content_before_it_enters_the_fifo() {
         title: None,
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap(),
     )
     .await;
@@ -8561,8 +8649,7 @@ async fn a_runtime_work_message_uses_a_valid_daemon_sender() {
     let (status, body) = json_request(
         app,
         "/v1/messages",
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: "runtime-work-message".into(),
         from: "daemon/runtime".into(),
         to: "agent/worker".into(),
@@ -8570,8 +8657,7 @@ async fn a_runtime_work_message_uses_a_valid_daemon_sender() {
         title: Some("Mission step ready".into()),
         in_reply_to: None,
         tags: vec!["st3-work:step-run/run/build@1@1@incarnation".into()],
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap(),
     )
     .await;
@@ -8587,8 +8673,7 @@ async fn a_requester_message_uses_a_full_person_subject() {
     let (status, body) = json_request(
         app,
         "/v1/messages",
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: "requester-message".into(),
         from: "requester".into(),
         to: "agent/worker".into(),
@@ -8596,8 +8681,7 @@ async fn a_requester_message_uses_a_full_person_subject() {
         title: None,
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap(),
     )
     .await;
@@ -8619,8 +8703,7 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
         let (status, original) = json_request(
             app.clone(),
             "/v1/messages",
-            serde_json::to_value(MessageSendRequest {
-            owner: None,
+            serde_json::to_value(MessageSendRequest { at: None, owner: None,
             idempotency_key: format!("replay-original-{transport}"),
             from: "agent/sender".into(),
             to: "agent/receiver".into(),
@@ -8628,8 +8711,7 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
             title: None,
             in_reply_to: None,
             tags: Vec::new(),
-            attachments: Vec::new(),
-            })
+            attachments: Vec::new(), })
             .unwrap(),
         )
         .await;
@@ -8658,8 +8740,7 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
             .await;
             assert_eq!(status, StatusCode::OK, "{claim}");
         }
-        let reply = serde_json::to_value(MessageSendRequest {
-        owner: None,
+        let reply = serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: format!("replay-reply-{transport}"),
         from: "agent/receiver".into(),
         to: "agent/sender".into(),
@@ -8667,8 +8748,7 @@ async fn replying_settles_the_original_across_native_delivery_transports() {
         title: None,
         in_reply_to: Some(subject.into()),
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap();
         let (status, sent) = json_request(app.clone(), "/v1/messages", reply.clone()).await;
         assert_eq!(status, StatusCode::OK, "{sent}");
@@ -8827,8 +8907,7 @@ async fn reading_a_persons_message_says_who_signed_it_and_an_agents_says_nothing
     let root = tempfile::tempdir().unwrap();
     let app = router(state(root.path()));
     let send = |key: &str, from: &str| {
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: key.into(),
         from: from.into(),
         to: "agent/receiver".into(),
@@ -8836,8 +8915,7 @@ async fn reading_a_persons_message_says_who_signed_it_and_an_agents_says_nothing
         title: None,
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap()
     };
     let read = |subject: &str| {
@@ -8858,8 +8936,7 @@ async fn a_sender_followup_does_not_settle_the_recipient_message() {
     let root = tempfile::tempdir().unwrap();
     let app = router(state(root.path()));
     let send = |key: &str, from: &str, to: &str, parent: Option<String>| {
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: key.into(),
         from: from.into(),
         to: to.into(),
@@ -8867,8 +8944,7 @@ async fn a_sender_followup_does_not_settle_the_recipient_message() {
         title: None,
         in_reply_to: parent,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap()
     };
     let (_, first) = json_request(
@@ -8907,8 +8983,7 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
     let state = state(root.path());
     let app = router(state.clone());
     let message = |key: &str, from: &str, to: &str, in_reply_to: Option<&str>| {
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: key.into(),
         from: from.into(),
         to: to.into(),
@@ -8916,8 +8991,7 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
         title: None,
         in_reply_to: in_reply_to.map(str::to_owned),
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap()
     };
     // An agent, and a person writing to an agent, are unchanged.
@@ -8987,8 +9061,7 @@ async fn message_lifecycle_requires_the_exact_recipient_actor() {
     let (status, message) = json_request(
         app.clone(),
         "/v1/messages",
-        serde_json::to_value(MessageSendRequest {
-        owner: None,
+        serde_json::to_value(MessageSendRequest { at: None, owner: None,
         idempotency_key: "recipient-authority-message".into(),
         from: "agent/sender".into(),
         to: "agent/receiver".into(),
@@ -8996,8 +9069,7 @@ async fn message_lifecycle_requires_the_exact_recipient_actor() {
         title: None,
         in_reply_to: None,
         tags: Vec::new(),
-        attachments: Vec::new(),
-        })
+        attachments: Vec::new(), })
         .unwrap(),
     )
     .await;
@@ -13450,8 +13522,7 @@ fn silent_send_retry_keeps_original_kind_and_rejects_changed_input() {
         .store
         .apply(&intent, &planned.subject_tokens, "seat-retry")
         .unwrap();
-    let request = || MessageSendRequest {
-    owner: None,
+    let request = || MessageSendRequest { at: None, owner: None,
     idempotency_key: "silent-retry".into(),
     from: "agent/example/writer".into(),
     to: "agent/example/reader".into(),
@@ -13459,8 +13530,7 @@ fn silent_send_retry_keeps_original_kind_and_rejects_changed_input() {
     title: None,
     in_reply_to: None,
     tags: vec![crate::silent::SILENT_TAG.into()],
-    attachments: vec![],
-    };
+    attachments: vec![], };
     let first = accept_message(&state, request(), None, None).unwrap().0;
     assert!(crate::silent::is_held(&first));
     let retry = accept_message(&state, request(), None, None).unwrap().0;
