@@ -201,13 +201,13 @@ impl PtyRuntime {
             ensure!(row.tags.get("st3.isolation").is_some_and(|mode| mode == "scope")
                 && !recorded_scopes.is_empty(), unit_proof_error(
                     "scope-provenance", id, anyhow::anyhow!("legacy scope isolation is unproved")));
-            let units = manager_units().map_err(|error| unit_proof_error("manager-enumeration", "user-manager", error))?;
+            let (units, captured_at) = manager_units().map_err(|error| unit_proof_error("manager-enumeration", "user-manager", error))?;
             let matching_units = matching_units(id, &units)?;
             if !matching_units.is_empty() {
                 return Ok(None);
             }
             for scope in &recorded_scopes {
-                if !scope_not_loaded(scope).map_err(|error| unit_proof_error("recorded-scope", scope, error))? {
+                if !scope_not_loaded(scope, &units, captured_at).map_err(|error| unit_proof_error("recorded-scope", scope, error))? {
                     return Ok(None);
                 }
             }
@@ -264,12 +264,11 @@ struct ManagerUnit {
 }
 
 #[cfg(target_os = "linux")]
-fn manager_units() -> Result<Vec<ManagerUnit>> {
-    let mut command = crate::isolate::systemctl();
-    command.args(["--user", "list-units", "--all", "--full", "--no-pager", "--output=json"]);
-    let output = output_within(command, PTY_COMMAND_TIMEOUT)?;
-    ensure!(output.status.success(), "legacy scope manager enumeration failed");
-    serde_json::from_slice(&output.stdout).context("read complete legacy scope enumeration")
+fn manager_units() -> Result<(Vec<ManagerUnit>, std::time::Instant)> {
+    let snapshot = crate::systemd::snapshot()?;
+    Ok((snapshot.units.iter().map(|(name, unit)| ManagerUnit {
+        unit: name.clone(), load: unit.load.clone(), active: unit.active.clone(), sub: unit.sub.clone(),
+    }).collect(), snapshot.captured_at))
 }
 
 #[cfg(target_os = "linux")]
@@ -307,20 +306,15 @@ fn runtime_unit_matches(unit: &str, safe: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn scope_not_loaded(scope: &str) -> Result<bool> {
+fn scope_not_loaded(scope: &str, units: &[ManagerUnit], captured_at: std::time::Instant) -> Result<bool> {
     ensure!(scope.ends_with(".scope") && scope.len() <= 256
         && scope.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')),
         "invalid recorded legacy scope");
-    let mut command = crate::isolate::systemctl();
-    command.args(["--user", "show", "--property=LoadState", "--", scope]);
-    let output = output_within(command, PTY_COMMAND_TIMEOUT)?;
-    ensure!(output.status.success(), "recorded scope manager query failed");
-    let text = std::str::from_utf8(&output.stdout)?;
-    match text.trim() {
-        "LoadState=not-found" => Ok(true),
-        "LoadState=loaded" => Ok(false),
-        _ => anyhow::bail!("recorded scope load state is unknown"),
+    if units.iter().any(|unit| unit.unit == scope) {
+        return Ok(false);
     }
+    crate::isolate::verify_scope_absence(scope, captured_at)?;
+    Ok(true)
 }
 
 #[cfg(target_os = "linux")]
