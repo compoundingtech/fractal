@@ -38,7 +38,7 @@ export const OwnedAlert: Pick<typeof Alert, 'alert' | 'prompt'> = {
   prompt: (title, message, callbackOrButtons, type, defaultValue, keyboardType) => {
     const release = ownedPresentations.acquire();
     const buttons: AlertButton[] = typeof callbackOrButtons === 'function'
-      ? [{ text: 'Cancel', style: 'cancel' }, { text: 'OK', onPress: callbackOrButtons }]
+      ? [{ text: 'Cancel', style: 'cancel' }, { text: 'OK', onPress: (...[value]: Extract<AlertPressArgs, [value?: string]>) => callbackOrButtons(value ?? '') }]
       : callbackOrButtons?.length ? callbackOrButtons : [{ text: 'Cancel', style: 'cancel' }, { text: 'OK' }];
     try {
       Alert.prompt(title, message, buttons.map(button => releasingButton(button, release)), type, defaultValue, keyboardType);
