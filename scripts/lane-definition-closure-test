@@ -239,6 +239,21 @@ class OtherForms(Fixture):
 
 
 class Executed(Fixture):
+    def test_explicit_dynamic_check_entry_follows_its_inputs(self):
+        old = ldc.EXTRA
+        ldc.EXTRA = {**old, 'demo': {'executed_files': {'nix/install.nix': 'dynamically selected check'}}}
+        self.addCleanup(lambda: setattr(ldc, 'EXTRA', old))
+        closure = self.closure(['bash', 'scripts/demo'], {
+            'scripts/demo': SH + 'true\n',
+            'nix/install.nix': '{ }: builtins.readFile ./deps.hash + builtins.readFile ../inputs.json\n',
+            'nix/deps.hash': 'pinned inputs\n',
+            'inputs.json': '{}\n',
+            'nix/unrelated.nix': '{ }: null\n',
+        })
+        for path in ('nix/install.nix', 'nix/deps.hash', 'inputs.json'):
+            self.assertIn(path, closure.paths())
+        self.assertNotIn('nix/unrelated.nix', closure.paths())
+
     """What a lane executes is its definition; what it only reads is the tree under test unless declared as verdict data."""
 
     def test_code_is_executed_and_data_it_names_outside_the_code_directories_is_read(self):
