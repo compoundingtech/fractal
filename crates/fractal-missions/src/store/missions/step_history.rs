@@ -13,6 +13,16 @@ use serde_json::Value;
 use super::{Connection, FractalError};
 use fractal_store::store::thread_metadata::request_history::{RequestHistoryItem, SourceEpisode};
 
+fn lifecycle_attempt(kind: &str, fields: &Value, current: &mut u64) -> u64 {
+    let explicit = fields.get("attempt").and_then(Value::as_u64);
+    if matches!(kind, "step-run.state" | "step-run.carried" | "step-run.retried")
+        && let Some(attempt) = explicit
+    {
+        *current = attempt;
+    }
+    explicit.unwrap_or(*current)
+}
+
 /// Only durable openings that retain their recipient participate in discussion history.
 /// Authored `step-run.state`/`step-run.carried` claims retain an epoch but not that recipient;
 /// neither today's assignment nor the retained definition can substitute for that evidence.
