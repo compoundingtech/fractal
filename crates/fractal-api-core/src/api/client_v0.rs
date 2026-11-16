@@ -195,6 +195,8 @@ fn collection_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CollectionRevision {
     Owner(u64),
+    /// Full authorized compatible attention content, independent of the visible prefix.
+    Attention([u8; 32]),
     Membership(fractal_schema::ordered_membership::State),
 }
 

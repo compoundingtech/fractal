@@ -42,7 +42,7 @@ pub struct Cached {
     pub valid_until: Option<u128>,
     pub items: Vec<Value>,
     pub has_more: bool,
-    pub membership: Option<fractal_schema::ordered_membership::State>,
+    pub pinned: Option<CollectionRevision>,
 }
 
 #[derive(Default)]
@@ -362,8 +362,8 @@ impl Windows {
         session: &ClientSession,
         request: &CollectionSubscribe,
         fence: ReadFence,
-        compute: impl FnOnce() -> anyhow::Result<(Vec<Value>, bool, Option<u128>, Option<fractal_schema::ordered_membership::State>)>,
-    ) -> anyhow::Result<(Vec<Value>, bool, Option<fractal_schema::ordered_membership::State>)> {
+        compute: impl FnOnce() -> anyhow::Result<(Vec<Value>, bool, Option<u128>, Option<CollectionRevision>)>,
+    ) -> anyhow::Result<(Vec<Value>, bool, Option<CollectionRevision>)> {
         let ReadFence {
             index,
             now,
@@ -425,7 +425,7 @@ impl Windows {
                 .and_then(|v| v["evaluated_at"].as_str()).and_then(|s| s.parse::<u128>().ok())
                 .is_some_and(|evaluated| evaluated <= now))
         {
-            return Ok((cached.items.clone(), cached.has_more, cached.membership));
+            return Ok((cached.items.clone(), cached.has_more, cached.pinned));
         }
         let (items, has_more, valid_until, membership) = compute()?;
         let valid_until = if request.collection == "agents" {
@@ -444,7 +444,7 @@ impl Windows {
                 valid_until,
                 items: items.clone(),
                 has_more,
-                membership,
+                pinned: membership,
             })
         });
         *prepared

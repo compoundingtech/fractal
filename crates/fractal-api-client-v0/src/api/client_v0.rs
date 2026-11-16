@@ -838,13 +838,17 @@ async fn collection_items_with_windows(
                 // A daemon's windows never fold attention or read glasses and arrangements:
                 // they serve the newest published view under that view's own cut, and wake its
                 // refresher when it is older.
+                let attention_revision = std::cell::Cell::new(None);
                 let published_rows = if store.published_view_serving(&collection) {
-                    use super::published_attention::{published_attention_rows, published_owner_rows};
+                    use super::published_attention::{published_attention_window, published_owner_rows};
                     use crate::store::owner_lists::OwnerView;
                     let rows = match collection.as_str() {
-                        "attention" => Some(published_attention_rows(
-                            &store, index, person.as_deref(), limit.saturating_add(1),
-                        )),
+                        "attention" => Some(published_attention_window(
+                            &store, index, person.as_deref(), limit.saturating_add(1), attention_compatibility,
+                        ).map(|(cut, at, rows, token)| {
+                            attention_revision.set(Some(CollectionRevision::Attention(token)));
+                            (cut, at, rows)
+                        })),
                         "summary" => {
                             use crate::store::summary_list::PublishedSummary;
                             match store.published_summary(person.as_deref()) {
@@ -1023,6 +1027,10 @@ async fn collection_items_with_windows(
                     if let Some(status) = &status {
                         items.retain(|item| item["state"].as_str() == Some(status.as_str()));
                     }
+                    if collection == "attention" && attention_revision.get().is_none() {
+                        attention_revision.set(Some(CollectionRevision::Attention(
+                            super::published_attention::attention_cohort_fingerprint(&items)?)));
+                    }
                     let has_more = items.len() > projection_limit;
                     items.truncate(projection_limit);
                     Ok((items, has_more, valid_until))
@@ -1032,11 +1040,11 @@ async fn collection_items_with_windows(
                 let compute_membership = || {
                     let (items, has_more, valid_until) = compute()?;
                     let membership = if collection == "ordered-memberships" {
-                        Some(store.ordered_membership_state(
+                        Some(CollectionRevision::Membership(store.ordered_membership_state(
                             subject.as_deref().expect("selected arrangement subject"),
-                        )?)
+                        )?))
                     } else {
-                        None
+                        attention_revision.get()
                     };
                     Ok((items, has_more, valid_until, membership))
                 };
@@ -1083,7 +1091,7 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
-                let pinned = owner_revision.or(membership.map(CollectionRevision::Membership));
+                let pinned = owner_revision.or(membership);
                 Ok(Ok(Some((snapshot, items, has_more, pinned))))
             });
             Ok::<_, anyhow::Error>((result?, read_permit, admission))
