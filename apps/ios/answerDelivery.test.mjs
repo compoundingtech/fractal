@@ -70,12 +70,14 @@ function world(steps, waiting) {
   assert.equal(stuck.log.sent.length, 8, 'a stuck race gives up after eight requests');
 }
 
-// A refusal while it still waits is shown as it is, once.
+// A refusal without documented applied:none metadata does not prove non-application.
+// Keep its original error and identity uncertain rather than authorize a fresh answer.
 {
   const { ports, log } = world([refused('forbidden')], true);
   const outcome = await submitAnswer(ports);
   assert.equal(outcome.ok, false);
   assert.equal(outcome.error.response.code, 'forbidden');
+  assert.equal(outcome.how, 'unconfirmed');
   assert.deepEqual(log.sent, ['action/1']);
 }
 
