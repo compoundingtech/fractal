@@ -234,6 +234,32 @@ For an upgrade, `fractal service install` refreshes definitions and restarts ser
 Coordinate that restart with active work and any continuous health checks. Replacing
 archive files alone does not restart running services.
 
+On Linux, service aliases, worker PIDs and execution-scope retirement share a
+loaded-unit snapshot instead of querying absent names individually. Each process
+admits at most one refresh every two seconds: one filtered `list-units` call,
+then property batches of at most 128 actually enumerated units. Request traffic
+and historical scope count do not add manager calls. Completed execution scopes
+retain their generation-bound terminal evidence for the lifetime of the process;
+they are never queried again.
+Local user-unit search paths also establish installation, including unloaded or
+masked aliases, so loaded-only observation does not hide service conflicts.
+A failed optional removal remains an error when an installed unit file exists.
+
+Actual scope creation or service control invalidates the snapshot, without
+bypassing refresh admission. Missing, stale or incomplete observations fail
+closed rather than proving absence. In particular, a snapshot predating a scope's
+creation or completed join cannot prove that new scope has ended.
+Systemd commands share one in-flight owner and a three-second invocation
+deadline, then kill and reap on timeout. Failed observations back off from two
+seconds up to one minute. Unresponsive-manager diagnostics are recorded before
+cleanup, which may take longer than the invocation deadline; cleanup retains
+single-flight ownership. `/v1/health` reports `status: degraded` with supervisor
+reason `systemd-unresponsive` and `since_unix_ms`, without probing the manager.
+Worker authority validates the process-generation witness pinned with its
+snapshot, so an exited worker's reused PID cannot inherit its authority.
+Explicit controls still execute once, never replaying a cached command result;
+administrative failure verification waits for fresh snapshot admission when needed.
+
 On macOS every `launchctl` RPC has a three-second deadline, including installation
 and migration commands. This is a local supervisor RPC, not a network operation;
 three seconds allows transient scheduling delays without letting a stalled GUI
