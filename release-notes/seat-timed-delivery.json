@@ -10,6 +10,7 @@
     "detail": "Adds durable timed-message request, cancellation and delivery records with a pending deadline index. Immutable keys and terminal receipts remain graph audit; terminal requests leave the pending index."
   },
   "rules": {
+    "transitions": [[26, 27]],
     "status": "changed",
     "detail": "Timed requests insert no ordinary mailbox message before due. Due delivery and pending cancellation serialize at the notice-owner's writer and require its current admitted member-key fence. Nonowners refuse cancellation rather than promising it raced delivery. Retirement cancels at due time. Ownership blockers are visible; delivered means mailbox insertion, not proof of reading."
   },
