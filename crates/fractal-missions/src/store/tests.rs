@@ -3084,7 +3084,7 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
         controller.replay_replication_graph().unwrap();
         assert_eq!(incremental, graph_digest_of(&controller), "{operation}");
 
-        // A conflicting identity still requires canonical replay and names its work claim.
+        // A conflicting identity refolds only its affected tree and names its work claim.
         body["_operation"]["request_digest"] = json!("different-digest");
         let incoming = {
             let mut connection = controller.connection.lock().unwrap();
@@ -3110,7 +3110,7 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
                 .project_replication_backlog_with_log("test", |line| lines.push(line.to_owned()))
                 .unwrap()
         );
-        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 1);
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
         let detail: Value = serde_json::from_str(
             lines
                 .iter()
