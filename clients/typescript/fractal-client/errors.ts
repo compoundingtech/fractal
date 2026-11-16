@@ -44,14 +44,16 @@ export function plainMessage(code: Code | string | undefined, message: string): 
 }
 
 /**
- * What st said of whether it applied the request, when it said: 'none' (nothing was queued, so a
- * fresh request is safe) or 'unknown' (it may still complete: send the identical request again,
- * with the same key). Any other answer, or none, says nothing. The Rust client has `applied()`.
+ * Interpret the supported outer and details applied flags without rewriting the envelope.
+ * UNKNOWN in either location dominates NONE. A malformed present value also means uncertainty,
+ * not proof of nonapplication. NONE requires an explicit none and no contradictory present flag;
+ * absent flags return undefined. This response cannot settle an earlier ambiguous delivery.
  */
 export function appliedAnswer(error: unknown): 'none' | 'unknown' | undefined {
   if (!(error instanceof ClientError)) return undefined;
-  const applied = (error.response.details as Record<string, unknown> | undefined)?.applied;
-  return applied === 'none' || applied === 'unknown' ? applied : undefined;
+  const flags = [error.response.applied, (error.response.details as Record<string, unknown> | undefined)?.applied];
+  if (flags.some(flag => flag !== undefined && flag !== 'none')) return 'unknown';
+  return flags.some(flag => flag === 'none') ? 'none' : undefined;
 }
 
 /**
@@ -98,9 +100,11 @@ export function isTransient(error: unknown): boolean {
   return error instanceof TypeError || (error instanceof Error && /network|fetch|timed? ?out|deadline/i.test(error.message));
 }
 
-/** Whether st refused in a way that guarantees nothing was applied, so a fresh request is safe. */
+/** Whether this response guarantees nonapplication. A replay refusal cannot settle an earlier ambiguous delivery. */
 export function notApplied(error: unknown): boolean {
-  return error instanceof ClientError && (error.response.code === 'stale-fence' || error.response.code === 'rate-limited' || appliedAnswer(error) === 'none');
+  if (!(error instanceof ClientError)) return false;
+  const applied = appliedAnswer(error);
+  return applied !== 'unknown' && (error.response.code === 'stale-fence' || error.response.code === 'rate-limited' || applied === 'none');
 }
 
 /**
