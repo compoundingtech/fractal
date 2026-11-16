@@ -448,12 +448,17 @@ fn collection_delivery_was_requested_tx(
 /// Seek the stable mission/scope/resource frontier, including finished requests and
 /// earlier subscription incarnations. Its primary key bounds this read independently
 /// of lifetime delivery history and preserves separate frontiers when missions change.
-pub(super) const LATEST_RELEVANT_DELIVERY_SQL: &str =
-    "SELECT json_extract(claims.body, '$.fields.delivery_key'),
+pub(super) fn prepare_latest_relevant_delivery(
+    connection: &Connection,
+) -> rusqlite::Result<rusqlite::Statement<'_>> {
+    connection.prepare(
+        "SELECT json_extract(claims.body, '$.fields.delivery_key'),
             json_extract(claims.body, '$.fields.change_identity')
      FROM local_subscription_admission_frontier AS frontier
      JOIN claims ON claims.id=frontier.claim_id
-     WHERE frontier.mission=?1 AND frontier.scope=?2 AND frontier.resource=?3";
+     WHERE frontier.mission=?1 AND frontier.scope=?2 AND frontier.resource=?3",
+    )
+}
 
 fn latest_relevant_delivery_tx(
     transaction: &rusqlite::Transaction<'_>,
@@ -461,11 +466,11 @@ fn latest_relevant_delivery_tx(
     scope: &str,
     resource: &str,
 ) -> rusqlite::Result<Option<(String, String)>> {
-    transaction.query_row(
-        LATEST_RELEVANT_DELIVERY_SQL,
+    let mut statement = prepare_latest_relevant_delivery(transaction)?;
+    statement.query_map(
         params![format!("mission/{mission}"), scope, resource],
         |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()
+    )?.next().transpose()
 }
 
 /// The seat that registered a comment or review, by its GitHub ID, never by login.

@@ -1,13 +1,15 @@
 //! Rebuildable all-status relevant-change frontier. Finishing a request never removes its
 //! fence: only a canonically newer snapshot can replace it. Reconciliation reads one indexed
 //! row per subscription/resource, not the subscription's lifetime delivery history.
+//! Rows retain existing claim identities and one canonical sortable key, never a growing
+//! request/body aggregate. Variable identity/index components remain explicitly inventoried.
 use super::*;
 use smallclaims::store::canonical;
 
 const RELEVANT: &str = "kind='subscription.mission-requested' AND json_extract(body,'$.fields.admission')='relevant-changes'";
 
 pub fn open(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch("
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-ha198675caea7 owner=fractal_store::store::subscription_request_frontier TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS local_subscription_request_frontier (
  subject TEXT NOT NULL, resource TEXT NOT NULL, claim_id TEXT NOT NULL, head_key BLOB NOT NULL,
  PRIMARY KEY(subject,resource)
@@ -50,7 +52,7 @@ CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_insert AFTER INSERT O
         // Metadata triggers select existing relevant claims; claim triggers guard OLD and NEW.
         let filter = if name.starts_with("claim_") { String::new() } else { format!(" AND {RELEVANT}") };
         tx.execute_batch(&format!(
-            "CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_{name} {event} BEGIN
+            /* sqlite-large-value: allow-for-now lv-hd60ad92d9cd2 owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_{name} {event} BEGIN
              INSERT INTO local_subscription_request_dirty {selection}{filter}
              ON CONFLICT(subject,resource) DO NOTHING; END;"
         ))?;
@@ -62,13 +64,13 @@ CREATE TRIGGER IF NOT EXISTS subscription_request_frontier_insert AFTER INSERT O
 }
 
 pub fn rebuild(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch("DELETE FROM local_subscription_request_frontier;
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h009cec558b7a owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_subscription_request_frontier;
         DELETE FROM local_subscription_admission_frontier;
         DELETE FROM local_subscription_request_dirty;
         DELETE FROM local_subscription_request_pending;")?;
-    tx.execute(&format!("INSERT INTO local_subscription_request_pending SELECT id FROM claims WHERE {RELEVANT}"), [])?;
+    tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-hddf6d157d5fd owner=fractal_store::store::subscription_request_frontier TODO=prepare-body-and-predecessor-values */ "INSERT INTO local_subscription_request_pending SELECT id FROM claims WHERE {RELEVANT}"), [])?;
     flush(tx)?;
-    tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('subscription_request_frontier_v1','1')", [])?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hf45272ef36eb owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('subscription_request_frontier_v1','1')", [])?;
     Ok(())
 }
 
@@ -80,13 +82,13 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
         // A deleted or reordered historical request can own an admission frontier even when
         // another mission owns the pending frontier. Reconstruct both from authority only on
         // these exceptional corrections, never for normal append-only observation traffic.
-        tx.execute_batch("DELETE FROM local_subscription_admission_frontier;")?;
-        tx.execute(&format!("INSERT OR IGNORE INTO local_subscription_request_pending
+        tx.execute_batch(/* sqlite-large-value: allow-for-now lv-hc6af0db6037c owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_subscription_admission_frontier;")?;
+        tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-h016e1addd7ab owner=fractal_store::store::subscription_request_frontier TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_subscription_request_pending
             SELECT id FROM claims WHERE {RELEVANT}"), [])?;
     }
     for (subject, resource) in dirty {
-        tx.execute("DELETE FROM local_subscription_request_frontier WHERE subject=?1 AND resource=?2", params![subject,resource])?;
-        tx.execute(&format!("INSERT OR IGNORE INTO local_subscription_request_pending
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hc30e9e5c1703 owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_subscription_request_frontier WHERE subject=?1 AND resource=?2", params![subject,resource])?;
+        tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-h61b991397696 owner=fractal_store::store::subscription_request_frontier TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_subscription_request_pending
             SELECT id FROM claims WHERE subject=?1 AND json_extract(body,'$.fields.resource')=?2 AND {RELEVANT}"), params![subject,resource])?;
     }
     let pending = tx.prepare("SELECT claims.id,claims.subject,json_extract(claims.body,'$.fields.resource'),
@@ -98,15 +100,15 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     for (id, subject, resource, mission) in pending {
         let key = canonical::sortable_key(&canonical::claim_key(tx, &id)?);
         let scope = subject.rsplit('/').next().unwrap_or(&subject);
-        tx.execute("INSERT INTO local_subscription_request_frontier(subject,resource,claim_id,head_key)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h865b5bf5ef4b owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_subscription_request_frontier(subject,resource,claim_id,head_key)
             VALUES(?1,?2,?3,?4) ON CONFLICT(subject,resource) DO UPDATE SET
             claim_id=excluded.claim_id,head_key=excluded.head_key WHERE excluded.head_key>head_key",
             params![subject,resource,id,key])?;
-        tx.execute("INSERT INTO local_subscription_admission_frontier(mission,scope,resource,claim_id,head_key)
+        tx.execute(/* sqlite-large-value: allow-for-now lv-ha7ff53be6bca owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_subscription_admission_frontier(mission,scope,resource,claim_id,head_key)
             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(mission,scope,resource) DO UPDATE SET
             claim_id=excluded.claim_id,head_key=excluded.head_key WHERE excluded.head_key>head_key",
             params![mission,scope,resource,id,key])?;
     }
-    tx.execute_batch("DELETE FROM local_subscription_request_dirty; DELETE FROM local_subscription_request_pending;")?;
+    tx.execute_batch(/* sqlite-large-value: allow-for-now lv-h51e501849805 owner=fractal_store::store::subscription_request_frontier TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_subscription_request_dirty; DELETE FROM local_subscription_request_pending;")?;
     Ok(())
 }

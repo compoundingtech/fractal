@@ -57,8 +57,7 @@ fn finish_frontier_request(store: &Store, request: &str) {
 
 fn frontier_query_cost(store: &Store) -> (Vec<String>, i32) {
     let connection = store.readers.get();
-    let sql = canonical_sql(super::delivery::PENDING_SUBSCRIPTION_REQUESTS_SQL);
-    let mut query = connection.prepare(&sql).unwrap();
+    let mut query = super::delivery::prepare_pending_subscription_requests(&connection).unwrap();
     let ids = query.query_map(["subscription/reviews"], |row| row.get::<_, String>(0)).unwrap()
         .collect::<rusqlite::Result<Vec<_>>>().unwrap();
     (ids, query.get_status(rusqlite::StatementStatus::VmStep))
@@ -67,9 +66,13 @@ fn frontier_query_cost(store: &Store) -> (Vec<String>, i32) {
 #[test]
 fn relevant_request_hot_query_is_bounded_with_pending_and_finished_latest() {
     let store = Store::open_memory("node").unwrap();
-    let plan = query_plan(&store,
-        &canonical_sql(super::delivery::PENDING_SUBSCRIPTION_REQUESTS_SQL),
-        ["subscription/reviews"]);
+    let sql = {
+        let connection = store.readers.get();
+        let mut query = super::delivery::prepare_pending_subscription_requests(&connection).unwrap();
+        query.raw_bind_parameter(1, "subscription/reviews").unwrap();
+        query.expanded_sql().unwrap()
+    };
+    let plan = query_plan(&store, &sql, []);
     assert!(plan.iter().any(|detail|
         detail.contains("claims_subscription_request_closer (subject=? AND <expr>=?)")),
         "completion must seek the exact request, not scan subscription receipts: {plan:?}");
@@ -88,7 +91,7 @@ fn relevant_request_hot_query_is_bounded_with_pending_and_finished_latest() {
         let latest = frontier_request(&store, next, true);
         next += 1;
         let (pending, pending_cost) = frontier_query_cost(&store);
-        assert_eq!(pending, [latest.clone()]);
+        assert_eq!(pending.as_slice(), std::slice::from_ref(&latest));
         assert_eq!(store.pending_subscription_mission_requests("subscription/reviews").unwrap()[0].id, latest);
         finish_frontier_request(&store, &latest);
         let (pending, finished_cost) = frontier_query_cost(&store);
@@ -150,8 +153,8 @@ fn concurrent_relevant_frontiers_converge_on_canonical_winner_and_keep_finished_
     assert_eq!(winner.len(), 1);
     assert_eq!(right.pending_subscription_mission_requests("subscription/reviews").unwrap()[0].id, winner[0].id);
     let expected: String = left.readers.get().query_row(
-        &canonical_sql("SELECT claims.id FROM claims WHERE subject=?1 AND kind='subscription.mission-requested'
-            ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+        format!("SELECT claims.id FROM claims WHERE subject=?1 AND kind='subscription.mission-requested'
+            ORDER BY {} LIMIT 1", smallclaims::store::canonical::CANONICAL_ORDER_DESC).as_str(),
         ["subscription/reviews"], |row| row.get(0),
     ).unwrap();
     assert_eq!(winner[0].id, expected);
@@ -162,8 +165,8 @@ fn concurrent_relevant_frontiers_converge_on_canonical_winner_and_keep_finished_
             ["subscription/reviews"], |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         let sql_winner: String = connection.query_row(
-            &canonical_sql("SELECT claims.id FROM claims WHERE subject=?1 AND kind='subscription.mission-requested'
-                ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+            format!("SELECT claims.id FROM claims WHERE subject=?1 AND kind='subscription.mission-requested'
+                ORDER BY {} LIMIT 1", smallclaims::store::canonical::CANONICAL_ORDER_DESC).as_str(),
             ["subscription/reviews"], |row| row.get(0),
         ).unwrap();
         assert_eq!(projected, sql_winner, "incremental projection must match canonical SQL");
@@ -193,7 +196,7 @@ fn relevant_frontier_replays_corrected_canonical_metadata_and_bootstraps_existin
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         // A correction can promote an existing request, not merely admit a new request.
-        tx.execute("UPDATE claims SET accepted_at_unix_ms='99999999999999999999' WHERE id=?1", [&older]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h7bc11cd5e0db owner=fractal_delivery::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET accepted_at_unix_ms='99999999999999999999' WHERE id=?1", [&older]).unwrap();
         fractal_store::store::subscription_request_frontier::flush(&tx).unwrap();
         tx.commit().unwrap();
     }
@@ -203,7 +206,7 @@ fn relevant_frontier_replays_corrected_canonical_metadata_and_bootstraps_existin
         let connection = store.connection.write();
         // Simulate a store opening this projection for the first time: history and receipts
         // exist, but there is no derived frontier or initialization marker.
-        connection.execute_batch("DELETE FROM local_subscription_request_frontier;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h29c5c00ad271 owner=fractal_delivery::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_subscription_request_frontier;
             DELETE FROM meta WHERE key='subscription_request_frontier_v1';").unwrap();
     }
     drop(store);

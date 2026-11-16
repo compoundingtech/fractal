@@ -13431,11 +13431,11 @@ fn relevant_admission_frontier_lookup_is_bounded_across_history_and_subscription
             count += 1;
         }
         let connection = store.readers.get();
-        let mut query = connection.prepare(super::missions::LATEST_RELEVANT_DELIVERY_SQL).unwrap();
-        let found = query.query_row(
+        let mut query = super::missions::prepare_latest_relevant_delivery(&connection).unwrap();
+        let found = query.query_map(
             ["mission/review", "review-scope", "resource/repo/pull-request/1"],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ).unwrap();
+        ).unwrap().next().transpose().unwrap().unwrap();
         assert_eq!(found, (format!("delivery-{}", count - 1), format!("change-{}", count - 1)));
         costs.push(query.get_status(rusqlite::StatementStatus::VmStep));
     }
