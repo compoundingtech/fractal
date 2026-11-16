@@ -86,18 +86,11 @@ private struct SignalSparkline: View {
   let tint: Color
 
   var body: some View {
-    Canvas { context, size in
-      let buckets = history.buckets
-      guard !buckets.isEmpty else { return }
-      let step = size.width / CGFloat(buckets.count)
-      for (index, bucket) in buckets.enumerated() {
-        guard let remaining = bucket.remainingPercent else { continue }
-        let height = max(1, size.height * CGFloat(min(max(remaining, 0), 100)) / 100)
-        let bar = CGRect(
-          x: CGFloat(index) * step, y: size.height - height, width: max(1, step - 1), height: height)
-        context.fill(Path(bar), with: .color(tint))
-      }
-    }
+    HistoryBars(
+      buckets: history.buckets.map { bucket in
+        bucket.remainingPercent.map { [.init(value: min(max($0, 0), 100), color: tint)] } ?? []
+      },
+      maximum: 100)
     .frame(width: 36, height: 12)
     .accessibilityHidden(true)
   }

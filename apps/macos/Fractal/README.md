@@ -24,6 +24,13 @@ collection, but `FractalClient` has no typed attention or availability stream.
   on Back; with Reduce Motion it fades in. VoiceOver focus moves to the page title
   and back to the row or tile that opened it. Closing the panel returns it to the
   top level.
+- **Inbox activity** counts arrival and resolution claims in the generic Fractal
+  series response, grouped by ask/update type. Arrivals stack above the axis and
+  resolutions below, with asks in the stronger tone. The home label carries a
+  fixed-height 14-day strip; the full inbox adds a 14-day daily / 24-hour hourly
+  picker and per-bucket hover values. Missing activity data draws no chart; failed
+  reads retain the last chart with an offline notice. Gallery scenarios
+  `inbox-activity-{busy,quiet}-{home,page}` exercise both appearances at 360 pt.
 - **Asks** (all attention pages, classified as Fractal web's
   `data/attention.ts` does) are answered on their page: a decision's or
   choice's named answers (recommended first; request-changes takes words), a
